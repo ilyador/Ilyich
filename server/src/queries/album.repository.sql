@@ -69,6 +69,17 @@ select
       (
         select
           "asset".*,
+          coalesce(
+            (
+              select
+                "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+              from
+                "asset_job_status"
+              where
+                "assetId" = "asset"."id"
+            ),
+            false
+          ) as "isDeveloped",
           "asset_exif" as "exifInfo"
         from
           "asset"
@@ -404,6 +415,17 @@ select
       (
         select
           "asset".*,
+          coalesce(
+            (
+              select
+                "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+              from
+                "asset_job_status"
+              where
+                "assetId" = "asset"."id"
+            ),
+            false
+          ) as "isDeveloped",
           "asset_exif" as "exifInfo"
         from
           "asset"

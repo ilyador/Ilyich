@@ -11,7 +11,7 @@ import {
 import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
 import { omit } from 'lodash-es';
 import { InjectKysely } from 'nestjs-kysely';
-import { Album, columns } from 'src/database.js';
+import { Album, assetIsDeveloped, columns } from 'src/database.js';
 import { ChunkedArray, DummyValue, GenerateSql } from 'src/decorators.js';
 import { AlbumUserRole, SharedLinkType } from 'src/enum.js';
 import { DB } from 'src/schema/index.js';
@@ -33,6 +33,7 @@ const withSharedAssets = (eb: ExpressionBuilder<DB, 'shared_link'>) => {
     .innerJoin('asset', 'asset.id', 'shared_link_asset.assetId')
     .where('asset.deletedAt', 'is', null)
     .selectAll('asset')
+    .select(assetIsDeveloped)
     .orderBy('asset.fileCreatedAt', 'asc');
 };
 
@@ -90,6 +91,7 @@ export class SharedLinkRepository {
                 eb
                   .selectFrom('asset')
                   .selectAll('asset')
+                  .select(assetIsDeveloped)
                   .whereRef('album_asset.assetId', '=', 'asset.id')
                   .where('asset.deletedAt', 'is', null)
                   .innerJoinLateral(withExifInfo, (join) => join.onTrue())
@@ -239,6 +241,7 @@ export class SharedLinkRepository {
             .selectFrom('asset')
             .whereRef('asset.id', '=', 'shared_link_asset.assetId')
             .selectAll('asset')
+            .select(assetIsDeveloped)
             .innerJoinLateral(withExifInfo, (join) => join.onTrue())
             .as('assets'),
         (join) => join.onTrue(),
