@@ -7,6 +7,10 @@ export function updateGeometry(timelineManager: TimelineManager, month: Timeline
   if (invalidateHeight) {
     month.isHeightActual = false;
   }
+  // The viewer hides the timeline. Retain its last layout until dimensions return.
+  if (timelineManager.hasEmptyViewport) {
+    return;
+  }
   if (!month.isLoaded) {
     const viewportWidth = timelineManager.viewportWidth;
     if (!month.isHeightActual) {
