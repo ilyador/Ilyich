@@ -93,6 +93,48 @@ describe('TimelineManager', () => {
     it('calculates timeline height', () => {
       expect(timelineManager.totalViewerHeight).toBe(8337);
     });
+
+    it('preserves month geometry when the viewer hides the timeline during a refresh', async () => {
+      const geometry = timelineManager.months.map(({ top, height }) => ({ top, height }));
+      timelineManager.viewportWidth = 0;
+      timelineManager.viewportHeight = 0;
+      timelineManager.refreshLayout();
+
+      expect(timelineManager.months.map(({ top, height }) => ({ top, height }))).toEqual(geometry);
+      expect(timelineManager.months.every((month) => !month.isHeightActual)).toBe(true);
+
+      timelineManager.viewportHeight = 1000;
+      timelineManager.viewportWidth = 1588;
+      await tick();
+
+      expect(timelineManager.months.map(({ top, height }) => ({ top, height }))).toEqual(geometry);
+      expect(timelineManager.totalViewerHeight).toBe(8337);
+    });
+
+    it('defers geometry for a month loaded while the viewer hides the timeline', async () => {
+      const month = getTimelineMonthByDate(timelineManager, { year: 2024, month: 1 })!;
+      expect(month.isLoaded).toBe(false);
+      const geometry = timelineManager.months.map(({ top, height }) => ({ top, height }));
+      timelineManager.viewportWidth = 0;
+      timelineManager.viewportHeight = 0;
+
+      await timelineManager.loadTimelineMonth(month.yearMonth);
+      expect(month.isLoaded).toBe(true);
+      expect(month.getAssets()).toHaveLength(3);
+      expect(timelineManager.months.map(({ top, height }) => ({ top, height }))).toEqual(geometry);
+
+      timelineManager.viewportHeight = 1000;
+      timelineManager.viewportWidth = 1588;
+      await tick();
+
+      let top = timelineManager.topSectionHeight;
+      for (const current of timelineManager.months) {
+        expect(current.top).toBe(top);
+        expect(Number.isFinite(current.height)).toBe(true);
+        top += current.height;
+      }
+      expect(month.isHeightActual).toBe(true);
+    });
   });
 
   describe('loadTimelineMonth', () => {
