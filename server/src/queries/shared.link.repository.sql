@@ -10,6 +10,17 @@ select
       (
         select
           "asset".*,
+          coalesce(
+            (
+              select
+                "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+              from
+                "asset_job_status"
+              where
+                "assetId" = "asset"."id"
+            ),
+            false
+          ) as "isDeveloped",
           to_json("exifInfo") as "exifInfo"
         from
           "shared_link_asset"
@@ -186,7 +197,18 @@ select
     from
       (
         select
-          "asset".*
+          "asset".*,
+          coalesce(
+            (
+              select
+                "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+              from
+                "asset_job_status"
+              where
+                "assetId" = "asset"."id"
+            ),
+            false
+          ) as "isDeveloped"
         from
           "shared_link_asset"
           inner join "asset" on "asset"."id" = "shared_link_asset"."assetId"
@@ -348,7 +370,18 @@ from
   left join "shared_link_asset" on "shared_link_asset"."sharedLinkId" = "shared_link"."id"
   left join lateral (
     select
-      "asset".*
+      "asset".*,
+      coalesce(
+        (
+          select
+            "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+          from
+            "asset_job_status"
+          where
+            "assetId" = "asset"."id"
+        ),
+        false
+      ) as "isDeveloped"
     from
       "asset"
       inner join lateral (

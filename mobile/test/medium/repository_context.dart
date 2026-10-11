@@ -120,6 +120,8 @@ class MediumRepositoryContext {
     String? livePhotoVideoId,
     String? stackId,
     String? thumbHash,
+    String? mediaRevision,
+    bool? isDeveloped,
     String? libraryId,
     DateTime? localDateTime,
   }) async {
@@ -147,6 +149,8 @@ class MediumRepositoryContext {
             stackId: .new(stackId),
             localDateTime: .new(localDateTime ?? createdAt.toLocal()),
             thumbHash: .new(TestUtils.uuid(thumbHash)),
+            mediaRevision: .new(mediaRevision),
+            isDeveloped: .new(isDeveloped ?? false),
             libraryId: .new(TestUtils.uuid(libraryId)),
           ),
         );

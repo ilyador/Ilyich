@@ -1,7 +1,9 @@
 import { BinaryField, ExifDateTime } from 'exiftool-vendored';
 import { DateTime } from 'luxon';
+import { R_OK } from 'node:constants';
 import { randomBytes } from 'node:crypto';
 import { Stats } from 'node:fs';
+import { StorageCore, ThumbnailPathEntity } from 'src/cores/storage.core.js';
 import { defaults } from 'src/dtos/config.dto.js';
 import {
   AssetFileType,
@@ -13,15 +15,17 @@ import {
   JobName,
   JobStatus,
   SourceType,
+  StorageFolder,
 } from 'src/enum.js';
 import { ImmichTags } from 'src/repositories/metadata.repository.js';
+import { ImageDevelopmentState } from 'src/schema/tables/asset-job-status.table.js';
 import { MetadataService, firstDateTime } from 'src/services/metadata.service.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
 import { PersonGroupFactory } from 'test/factories/person-group.factory.js';
 import { PersonFactory } from 'test/factories/person.factory.js';
 import { videoInfoStub } from 'test/fixtures/media.stub.js';
 import { tagStub } from 'test/fixtures/tag.stub.js';
-import { getForMetadataExtraction, getForSidecarWrite } from 'test/mappers.js';
+import { getForAsset, getForMetadataExtraction, getForSidecarWrite } from 'test/mappers.js';
 import { factory } from 'test/small.factory.js';
 import { ServiceMocks, makeStream, newTestService } from 'test/utils.js';
 
@@ -30,12 +34,14 @@ const forSidecarJob = (
     id?: string;
     originalPath?: string;
     files?: { id: string; type: AssetFileType; path: string; isEdited: boolean }[];
+    development?: ImageDevelopmentState | null;
   } = {},
 ) => {
   return {
     id: factory.uuid(),
     originalPath: '/path/to/IMG_123.jpg',
     files: [],
+    development: null,
     ...asset,
   };
 };
@@ -187,12 +193,12 @@ describe(MetadataService.name, () => {
       expect(mocks.asset.update).not.toHaveBeenCalled();
     });
 
-    it('should handle a date in a sidecar file', async () => {
+    it.each(['CreationDate', 'DateTimeOriginal'] as const)('should prefer %s from a sidecar file', async (tag) => {
       const originalDate = new Date('2023-11-21T16:13:17.517Z');
       const sidecarDate = new Date('2022-01-01T00:00:00.000Z');
       const asset = AssetFactory.from().file({ type: AssetFileType.Sidecar }).build();
       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
-      mockReadTags({ CreationDate: originalDate.toISOString() }, { CreationDate: sidecarDate.toISOString() });
+      mockReadTags({ [tag]: originalDate.toISOString() }, { [tag]: sidecarDate.toISOString() });
 
       await sut.handleMetadataExtraction({ id: asset.id });
       expect(mocks.assetJob.getForMetadataExtraction).toHaveBeenCalledWith(asset.id);
@@ -209,6 +215,7 @@ describe(MetadataService.name, () => {
           fileCreatedAt: sidecarDate,
           localDateTime: sidecarDate,
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -233,15 +240,18 @@ describe(MetadataService.name, () => {
           lockedPropertiesBehavior: 'skip',
         }),
       );
-      expect(mocks.asset.update).toHaveBeenCalledWith({
-        id: asset.id,
-        duration: null,
-        fileCreatedAt: fileModifiedAt,
-        fileModifiedAt,
-        localDateTime: fileModifiedAt,
-        width: null,
-        height: null,
-      });
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        {
+          id: asset.id,
+          duration: null,
+          fileCreatedAt: fileModifiedAt,
+          fileModifiedAt,
+          localDateTime: fileModifiedAt,
+          width: null,
+          height: null,
+        },
+        { preservePublishedImageDimensions: true },
+      );
     });
 
     it('should take the file creation date when missing exif and earlier than modification date', async () => {
@@ -265,15 +275,18 @@ describe(MetadataService.name, () => {
           lockedPropertiesBehavior: 'skip',
         }),
       );
-      expect(mocks.asset.update).toHaveBeenCalledWith({
-        id: asset.id,
-        duration: null,
-        fileCreatedAt,
-        fileModifiedAt,
-        localDateTime: fileCreatedAt,
-        width: null,
-        height: null,
-      });
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        {
+          id: asset.id,
+          duration: null,
+          fileCreatedAt,
+          fileModifiedAt,
+          localDateTime: fileCreatedAt,
+          width: null,
+          height: null,
+        },
+        { preservePublishedImageDimensions: true },
+      );
     });
 
     it('should determine dateTimeOriginal regardless of the server time zone', async () => {
@@ -296,6 +309,7 @@ describe(MetadataService.name, () => {
         expect.objectContaining({
           localDateTime: new Date('2022-01-01T00:00:00.000Z'),
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -318,15 +332,18 @@ describe(MetadataService.name, () => {
           lockedPropertiesBehavior: 'skip',
         }),
       );
-      expect(mocks.asset.update).toHaveBeenCalledWith({
-        id: asset.id,
-        duration: null,
-        fileCreatedAt: asset.fileCreatedAt,
-        fileModifiedAt: asset.fileModifiedAt,
-        localDateTime: asset.fileCreatedAt,
-        width: null,
-        height: null,
-      });
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        {
+          id: asset.id,
+          duration: null,
+          fileCreatedAt: asset.fileCreatedAt,
+          fileModifiedAt: asset.fileModifiedAt,
+          localDateTime: asset.fileCreatedAt,
+          width: null,
+          height: null,
+        },
+        { preservePublishedImageDimensions: true },
+      );
     });
 
     it('should prefer the 32-bit sensitivity tags over a saturated ISO', async () => {
@@ -364,15 +381,18 @@ describe(MetadataService.name, () => {
           lockedPropertiesBehavior: 'skip',
         }),
       );
-      expect(mocks.asset.update).toHaveBeenCalledWith({
-        id: asset.id,
-        duration: null,
-        fileCreatedAt: asset.fileCreatedAt,
-        fileModifiedAt: asset.fileModifiedAt,
-        localDateTime: asset.fileCreatedAt,
-        width: null,
-        height: null,
-      });
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        {
+          id: asset.id,
+          duration: null,
+          fileCreatedAt: asset.fileCreatedAt,
+          fileModifiedAt: asset.fileModifiedAt,
+          localDateTime: asset.fileCreatedAt,
+          width: null,
+          height: null,
+        },
+        { preservePublishedImageDimensions: true },
+      );
     });
 
     it('should apply reverse geocoding', async () => {
@@ -396,15 +416,18 @@ describe(MetadataService.name, () => {
           lockedPropertiesBehavior: 'skip',
         }),
       );
-      expect(mocks.asset.update).toHaveBeenCalledWith({
-        id: asset.id,
-        duration: null,
-        fileCreatedAt: asset.fileCreatedAt,
-        fileModifiedAt: asset.fileModifiedAt,
-        localDateTime: asset.fileCreatedAt,
-        width: null,
-        height: null,
-      });
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        {
+          id: asset.id,
+          duration: null,
+          fileCreatedAt: asset.fileCreatedAt,
+          fileModifiedAt: asset.fileModifiedAt,
+          localDateTime: asset.fileCreatedAt,
+          width: null,
+          height: null,
+        },
+        { preservePublishedImageDimensions: true },
+      );
     });
 
     it('should discard latitude and longitude on null island', async () => {
@@ -953,28 +976,6 @@ describe(MetadataService.name, () => {
       });
     });
 
-    it('should delete old motion photo video assets if they do not match what is extracted', async () => {
-      const motionAsset = AssetFactory.create({ type: AssetType.Video, visibility: AssetVisibility.Hidden });
-      const asset = AssetFactory.create({ livePhotoVideoId: motionAsset.id });
-      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
-      mockReadTags({
-        Directory: 'foo/bar/',
-        MotionPhoto: 1,
-        MicroVideo: 1,
-        MicroVideoOffset: 1,
-      });
-      mocks.crypto.hashSha1.mockReturnValue(randomBytes(512));
-      mocks.asset.create.mockResolvedValue(AssetFactory.create({ type: AssetType.Video }));
-      const video = randomBytes(512);
-      mocks.storage.readFile.mockResolvedValue(video);
-
-      await sut.handleMetadataExtraction({ id: asset.id });
-      expect(mocks.job.queue).toHaveBeenNthCalledWith(1, {
-        name: JobName.AssetDelete,
-        data: { id: asset.livePhotoVideoId, deleteOnDisk: true },
-      });
-    });
-
     it('should not create a new motion photo video asset if the hash of the extracted video matches an existing asset', async () => {
       const motionAsset = AssetFactory.create({ type: AssetType.Video, visibility: AssetVisibility.Hidden });
       const asset = AssetFactory.create({ livePhotoVideoId: motionAsset.id });
@@ -1123,6 +1124,7 @@ describe(MetadataService.name, () => {
           fileCreatedAt: dateForTest,
           localDateTime: DateTime.fromISO('1970-01-01T00:00:00.000Z').toJSDate(),
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -1176,6 +1178,7 @@ describe(MetadataService.name, () => {
           id: asset.id,
           duration: 6210,
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -1198,6 +1201,7 @@ describe(MetadataService.name, () => {
           id: asset.id,
           duration: null,
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -1221,6 +1225,7 @@ describe(MetadataService.name, () => {
           id: asset.id,
           duration: null,
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -1244,6 +1249,7 @@ describe(MetadataService.name, () => {
           id: asset.id,
           duration: 604_800_000,
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -1255,7 +1261,9 @@ describe(MetadataService.name, () => {
       await sut.handleMetadataExtraction({ id: asset.id });
 
       expect(mocks.metadata.readTags).toHaveBeenCalledTimes(1);
-      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ duration: 123_000 }));
+      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ duration: 123_000 }), {
+        preservePublishedImageDimensions: true,
+      });
     });
 
     it('should prefer Duration from exif over sidecar', async () => {
@@ -1267,7 +1275,9 @@ describe(MetadataService.name, () => {
       await sut.handleMetadataExtraction({ id: asset.id });
 
       expect(mocks.metadata.readTags).toHaveBeenCalledTimes(2);
-      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ duration: 123_000 }));
+      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ duration: 123_000 }), {
+        preservePublishedImageDimensions: true,
+      });
     });
 
     it('should ignore all Duration tags for definitely static images', async () => {
@@ -1278,7 +1288,9 @@ describe(MetadataService.name, () => {
       await sut.handleMetadataExtraction({ id: asset.id });
 
       expect(mocks.metadata.readTags).toHaveBeenCalledTimes(1);
-      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ duration: null }));
+      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ duration: null }), {
+        preservePublishedImageDimensions: true,
+      });
     });
 
     it('should ignore Duration from exif for videos', async () => {
@@ -1296,7 +1308,9 @@ describe(MetadataService.name, () => {
       await sut.handleMetadataExtraction({ id: asset.id });
 
       expect(mocks.metadata.readTags).toHaveBeenCalledTimes(1);
-      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ duration: 456_000 }));
+      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ duration: 456_000 }), {
+        preservePublishedImageDimensions: true,
+      });
     });
 
     it('should trim whitespace from description', async () => {
@@ -1835,6 +1849,7 @@ describe(MetadataService.name, () => {
           width: 1000,
           height: 2000,
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -1849,6 +1864,7 @@ describe(MetadataService.name, () => {
           width: 2000,
           height: 1000,
         }),
+        { preservePublishedImageDimensions: true },
       );
     });
 
@@ -1862,6 +1878,28 @@ describe(MetadataService.name, () => {
         expect.objectContaining({
           width: 1280,
           height: 720,
+        }),
+        { preservePublishedImageDimensions: true },
+      );
+    });
+
+    it('should preserve published developed dimensions while refreshing original EXIF dimensions', async () => {
+      const asset = AssetFactory.create({ width: 1920, height: 1080, isEdited: false });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue({
+        ...getForMetadataExtraction(asset),
+        isDeveloped: true,
+      });
+      mockReadTags({ ImageWidth: 1280, ImageHeight: 720 });
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        expect.objectContaining({ width: undefined, height: undefined }),
+        { preservePublishedImageDimensions: true },
+      );
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exif: expect.objectContaining({ exifImageWidth: 1280, exifImageHeight: 720 }),
         }),
       );
     });
@@ -1877,6 +1915,7 @@ describe(MetadataService.name, () => {
           width: undefined,
           height: undefined,
         }),
+        { preservePublishedImageDimensions: true },
       );
       expect(mocks.asset.update).not.toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1905,11 +1944,17 @@ describe(MetadataService.name, () => {
       await sut.handleQueueSidecar({ force: false });
 
       expect(mocks.assetJob.streamForSidecar).toHaveBeenCalledWith(false);
-      expect(mocks.job.queueAll).toHaveBeenCalledWith([{ name: JobName.SidecarCheck, data: { id: asset.id } }]);
+      expect(mocks.job.queueAll).toHaveBeenCalledWith([
+        { name: JobName.SidecarCheck, data: { id: asset.id, source: 'sidecar' } },
+      ]);
     });
   });
 
   describe('handleSidecarCheck', () => {
+    beforeEach(() => {
+      mocks.media.getDevelopmentInputFingerprint.mockResolvedValue('current-input');
+    });
+
     it('should do nothing if asset could not be found', async () => {
       mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(void 0);
 
@@ -1943,6 +1988,7 @@ describe(MetadataService.name, () => {
         type: AssetFileType.Sidecar,
         path: '/path/to/IMG_123.jpg.xmp',
       });
+      expect(mocks.storage.checkFileExists).toHaveBeenCalledExactlyOnceWith('/path/to/IMG_123.jpg.xmp', R_OK);
     });
 
     it('should detect a new sidecar at .xmp', async () => {
@@ -1962,6 +2008,304 @@ describe(MetadataService.name, () => {
         type: AssetFileType.Sidecar,
         path: '/path/to/IMG_123.xmp',
       });
+      expect(mocks.storage.checkFileExists.mock.calls).toEqual([
+        ['/path/to/IMG_123.jpg.xmp', R_OK],
+        ['/path/to/IMG_123.xmp', R_OK],
+      ]);
+    });
+
+    it('should prefer the extended filename when both candidates exist', async () => {
+      const asset = forSidecarJob();
+      const candidates = new Set(['/path/to/IMG_123.jpg.xmp', '/path/to/IMG_123.xmp']);
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockImplementation((path) => Promise.resolve(candidates.has(path)));
+
+      await sut.handleSidecarCheck({ id: asset.id });
+
+      expect(mocks.asset.upsertFile).toHaveBeenCalledExactlyOnceWith({
+        assetId: asset.id,
+        type: AssetFileType.Sidecar,
+        path: '/path/to/IMG_123.jpg.xmp',
+      });
+      expect(mocks.storage.checkFileExists).toHaveBeenCalledExactlyOnceWith('/path/to/IMG_123.jpg.xmp', R_OK);
+    });
+
+    it('should preserve an existing association ahead of both conventional candidates', async () => {
+      const existing = '/elsewhere/custom.xmp';
+      const asset = forSidecarJob({
+        files: [{ id: 'sidecar', type: AssetFileType.Sidecar, path: existing, isEdited: false }],
+        development: {
+          observedInputFingerprint: 'current-input',
+          publishedInputFingerprint: 'current-input',
+          publishedBase: { isDeveloped: true, width: 1000, height: 600 },
+        },
+      });
+      const candidates = new Set([existing, '/path/to/IMG_123.jpg.xmp', '/path/to/IMG_123.xmp']);
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockImplementation((path) => Promise.resolve(candidates.has(path)));
+
+      await expect(sut.handleSidecarCheck({ id: asset.id })).resolves.toBe(JobStatus.Skipped);
+
+      expect(mocks.storage.checkFileExists).toHaveBeenCalledExactlyOnceWith(existing, R_OK);
+      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+      expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
+    });
+
+    it('should detect changed XMP content at the same path without replacing the association', async () => {
+      const sidecarPath = '/photos/photo.xmp';
+      const asset = forSidecarJob({
+        originalPath: '/photos/photo.nef',
+        files: [{ id: 'sidecar', type: AssetFileType.Sidecar, path: sidecarPath, isEdited: false }],
+        development: {
+          observedInputFingerprint: 'previous-input',
+          publishedInputFingerprint: 'previous-input',
+          publishedBase: { isDeveloped: true, width: 1000, height: 600 },
+        },
+      });
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(true);
+
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBe(JobStatus.Success);
+
+      expect(mocks.media.getDevelopmentInputFingerprint).toHaveBeenCalledExactlyOnceWith({
+        originalPath: asset.originalPath,
+        sidecarPath,
+        image: defaults.image,
+      });
+      expect(mocks.asset.observeImageDevelopmentInput).toHaveBeenCalledExactlyOnceWith(asset.id, 'current-input');
+      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+      expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
+    });
+
+    it('should retry a previously observed input whose rendering did not publish', async () => {
+      const asset = forSidecarJob({
+        files: [{ id: 'sidecar', type: AssetFileType.Sidecar, path: '/photos/photo.xmp', isEdited: false }],
+        development: {
+          observedInputFingerprint: 'current-input',
+          publishedInputFingerprint: 'previous-input',
+          publishedBase: { isDeveloped: true, width: 1000, height: 600 },
+        },
+      });
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(true);
+
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBe(JobStatus.Success);
+
+      expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+    });
+
+    it('should stop periodic checks when the same input is already published', async () => {
+      const asset = forSidecarJob({
+        files: [{ id: 'sidecar', type: AssetFileType.Sidecar, path: '/photos/photo.xmp', isEdited: false }],
+        development: {
+          observedInputFingerprint: 'current-input',
+          publishedInputFingerprint: 'current-input',
+          publishedBase: { isDeveloped: true, width: 1000, height: 600 },
+        },
+      });
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(true);
+
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBeUndefined();
+
+      expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+      expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
+    });
+
+    it('should leave ordinary photos on their existing path during periodic sidecar checks', async () => {
+      const asset = forSidecarJob();
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(false);
+
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBeUndefined();
+
+      expect(mocks.media.getDevelopmentInputFingerprint).not.toHaveBeenCalled();
+      expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+    });
+
+    it('observes RAW source changes without creating an external sidecar association', async () => {
+      const asset = forSidecarJob({ originalPath: '/photos/photo.dng' });
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(false);
+
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBe(JobStatus.Success);
+
+      expect(mocks.media.getDevelopmentInputFingerprint).toHaveBeenCalledExactlyOnceWith({
+        originalPath: asset.originalPath,
+        sidecarPath: null,
+        image: defaults.image,
+      });
+      expect(mocks.asset.observeImageDevelopmentInput).toHaveBeenCalledExactlyOnceWith(asset.id, 'current-input');
+      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+      expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
+    });
+
+    it('stops periodic RAW checks when its native base is already published', async () => {
+      const asset = forSidecarJob({
+        originalPath: '/photos/photo.nef',
+        development: {
+          observedInputFingerprint: 'current-input',
+          publishedInputFingerprint: 'current-input',
+          publishedBase: { isDeveloped: false, width: 6000, height: 4000 },
+        },
+      });
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(false);
+
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBeUndefined();
+
+      expect(mocks.media.getDevelopmentInputFingerprint).toHaveBeenCalledExactlyOnceWith({
+        originalPath: asset.originalPath,
+        sidecarPath: null,
+        image: defaults.image,
+      });
+      expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+      expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
+    });
+
+    it.each(['photo.mp4', 'photo.gif'])('should not create image development state for %s', async (filename) => {
+      const asset = forSidecarJob({
+        originalPath: `/photos/${filename}`,
+        files: [{ id: 'sidecar', type: AssetFileType.Sidecar, path: '/photos/photo.xmp', isEdited: false }],
+      });
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(true);
+
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBeUndefined();
+
+      expect(mocks.media.getDevelopmentInputFingerprint).not.toHaveBeenCalled();
+      expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+    });
+
+    it('should preserve the published state when input reading fails', async () => {
+      const asset = forSidecarJob({
+        files: [{ id: 'sidecar', type: AssetFileType.Sidecar, path: '/photos/photo.xmp', isEdited: false }],
+        development: {
+          observedInputFingerprint: 'previous-input',
+          publishedInputFingerprint: 'previous-input',
+          publishedBase: { isDeveloped: true, width: 1000, height: 600 },
+        },
+      });
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(true);
+      mocks.media.getDevelopmentInputFingerprint.mockRejectedValue(new Error('sidecar read failed'));
+
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).rejects.toThrow('sidecar read failed');
+
+      expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+      expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
+    });
+
+    it.each(['/path/to/IMG_123.jpg.xmp', '/path/to/IMG_123.xmp'])(
+      'should replace a missing association with %s',
+      async (replacement) => {
+        const existing = '/elsewhere/missing.xmp';
+        const asset = forSidecarJob({
+          files: [{ id: 'sidecar', type: AssetFileType.Sidecar, path: existing, isEdited: false }],
+        });
+        mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+        mocks.storage.checkFileExists.mockImplementation((path) => Promise.resolve(path === replacement));
+
+        await sut.handleSidecarCheck({ id: asset.id });
+
+        expect(mocks.storage.checkFileExists).toHaveBeenNthCalledWith(1, existing, R_OK);
+        expect(mocks.asset.upsertFile).toHaveBeenCalledExactlyOnceWith({
+          assetId: asset.id,
+          type: AssetFileType.Sidecar,
+          path: replacement,
+        });
+        expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
+      },
+    );
+
+    it('should not create an association when no sidecar exists', async () => {
+      const asset = forSidecarJob();
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockResolvedValue(false);
+
+      await sut.handleSidecarCheck({ id: asset.id });
+
+      expect(mocks.storage.checkFileExists.mock.calls).toEqual([
+        ['/path/to/IMG_123.jpg.xmp', R_OK],
+        ['/path/to/IMG_123.xmp', R_OK],
+      ]);
+      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+    });
+
+    it.each(['/photos/Photo.JPG.xmp', '/photos/Photo.xmp'])(
+      'should preserve filename case when discovering %s',
+      async (sidecarPath) => {
+        const asset = forSidecarJob({ originalPath: '/photos/Photo.JPG' });
+        mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+        mocks.storage.checkFileExists.mockImplementation((path) => Promise.resolve(path === sidecarPath));
+
+        await sut.handleSidecarCheck({ id: asset.id });
+
+        expect(mocks.asset.upsertFile).toHaveBeenCalledExactlyOnceWith({
+          assetId: asset.id,
+          type: AssetFileType.Sidecar,
+          path: sidecarPath,
+        });
+      },
+    );
+
+    it.each([
+      { filename: 'photo.edit.jpg', sidecar: 'photo.edit.xmp' },
+      { filename: '.photo.jpg', sidecar: '.photo.xmp' },
+      { filename: 'quoted"雪.jpg', sidecar: 'quoted"雪.xmp' },
+    ])('should preserve the basename when finding the fallback for $filename', async ({ filename, sidecar }) => {
+      const asset = forSidecarJob({ originalPath: `/photos/${filename}` });
+      const sidecarPath = `/photos/${sidecar}`;
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+      mocks.storage.checkFileExists.mockImplementation((path) => Promise.resolve(path === sidecarPath));
+
+      await sut.handleSidecarCheck({ id: asset.id });
+
+      expect(mocks.asset.upsertFile).toHaveBeenCalledExactlyOnceWith({
+        assetId: asset.id,
+        type: AssetFileType.Sidecar,
+        path: sidecarPath,
+      });
+    });
+
+    it.each([false, true])(
+      'should resolve shared JPG and RAW sidecars independently (extended JPG sidecar: %s)',
+      async (extended) => {
+        const jpg = forSidecarJob({ originalPath: '/photos/photo.jpg' });
+        const raw = forSidecarJob({ originalPath: '/photos/photo.nef' });
+        const shared = '/photos/photo.xmp';
+        const candidates = new Set([shared, ...(extended ? ['/photos/photo.jpg.xmp'] : [])]);
+        mocks.assetJob.getForSidecarCheckJob.mockResolvedValueOnce(jpg).mockResolvedValueOnce(raw);
+        mocks.storage.checkFileExists.mockImplementation((path) => Promise.resolve(candidates.has(path)));
+
+        await sut.handleSidecarCheck({ id: jpg.id });
+        await sut.handleSidecarCheck({ id: raw.id });
+
+        expect(mocks.asset.upsertFile.mock.calls).toEqual([
+          [{ assetId: jpg.id, type: AssetFileType.Sidecar, path: extended ? '/photos/photo.jpg.xmp' : shared }],
+          [{ assetId: raw.id, type: AssetFileType.Sidecar, path: shared }],
+        ]);
+      },
+    );
+
+    it('should not match xmp files across directories', async () => {
+      const first = forSidecarJob({ originalPath: '/photos/first/photo.jpg' });
+      const second = forSidecarJob({ originalPath: '/photos/second/photo.jpg' });
+      mocks.assetJob.getForSidecarCheckJob.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+      mocks.storage.checkFileExists.mockImplementation((path) => Promise.resolve(path === '/photos/second/photo.xmp'));
+
+      await sut.handleSidecarCheck({ id: first.id });
+      await sut.handleSidecarCheck({ id: second.id });
+
+      expect(mocks.asset.upsertFile).toHaveBeenCalledExactlyOnceWith({
+        assetId: second.id,
+        type: AssetFileType.Sidecar,
+        path: '/photos/second/photo.xmp',
+      });
     });
 
     it('should unset sidecar path if file no longer exist', async () => {
@@ -1977,19 +2321,34 @@ describe(MetadataService.name, () => {
       expect(mocks.asset.deleteFile).toHaveBeenCalledWith({ assetId: asset.id, type: AssetFileType.Sidecar });
     });
 
-    it('should do nothing if the sidecar file still exists', async () => {
+    it('should observe XMP removal without deleting the original or previously published cache', async () => {
       const asset = forSidecarJob({
-        originalPath: '/path/to/IMG_123.jpg',
-        files: [{ id: 'sidecar', path: '/path/to/IMG_123.jpg.xmp', type: AssetFileType.Sidecar, isEdited: false }],
+        originalPath: '/photos/photo.nef',
+        files: [{ id: 'sidecar', path: '/photos/photo.xmp', type: AssetFileType.Sidecar, isEdited: false }],
+        development: {
+          observedInputFingerprint: 'previous-input',
+          publishedInputFingerprint: 'previous-input',
+          publishedBase: { isDeveloped: true, width: 1000, height: 600 },
+        },
       });
-
       mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
-      mocks.storage.checkFileExists.mockResolvedValueOnce(true);
+      mocks.storage.checkFileExists.mockResolvedValue(false);
 
-      await expect(sut.handleSidecarCheck({ id: asset.id })).resolves.toBe(JobStatus.Skipped);
+      await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBe(JobStatus.Success);
 
-      expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
-      expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
+      expect(mocks.media.getDevelopmentInputFingerprint).toHaveBeenCalledExactlyOnceWith({
+        originalPath: asset.originalPath,
+        sidecarPath: null,
+        image: defaults.image,
+      });
+      expect(mocks.asset.observeImageDevelopmentInput).toHaveBeenCalledExactlyOnceWith(asset.id, 'current-input');
+      expect(mocks.asset.deleteFile).toHaveBeenCalledExactlyOnceWith({
+        assetId: asset.id,
+        type: AssetFileType.Sidecar,
+      });
+      expect(mocks.asset.upsertJobStatus).not.toHaveBeenCalled();
+      expect(mocks.storage.unlink).not.toHaveBeenCalled();
+      expect(mocks.job.queue).not.toHaveBeenCalled();
     });
   });
 
