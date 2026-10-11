@@ -3,6 +3,17 @@
 -- SearchRepository.searchMetadata
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -63,6 +74,17 @@ where
 -- SearchRepository.searchRandom
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -107,6 +129,17 @@ limit
 -- SearchRepository.searchLargeAssets
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -198,6 +231,17 @@ set
   local vchordrq.probes = 1
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -362,6 +406,17 @@ with recursive
   )
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -465,6 +520,17 @@ where
 -- SearchRepository.searchMetadataV3 (baseline)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -513,6 +579,17 @@ offset
 -- SearchRepository.searchMetadataV3 (or-mixed-scope)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -573,6 +650,17 @@ offset
 -- SearchRepository.searchMetadataV3 (or-exif-only)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -621,6 +709,17 @@ offset
 -- SearchRepository.searchMetadataV3 (string-eq-null)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -669,6 +768,17 @@ offset
 -- SearchRepository.searchMetadataV3 (string-pattern-like)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -717,6 +827,17 @@ offset
 -- SearchRepository.searchMetadataV3 (string-pattern-notLike)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -765,6 +886,17 @@ offset
 -- SearchRepository.searchMetadataV3 (string-pattern-startsWith)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -813,6 +945,17 @@ offset
 -- SearchRepository.searchMetadataV3 (string-similarity-ocr)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -868,6 +1011,17 @@ offset
 -- SearchRepository.searchMetadataV3 (ids-any)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -922,6 +1076,17 @@ offset
 -- SearchRepository.searchMetadataV3 (ids-all)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -984,6 +1149,17 @@ offset
 -- SearchRepository.searchMetadataV3 (ids-all-single)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1038,6 +1214,17 @@ offset
 -- SearchRepository.searchMetadataV3 (ids-none)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1094,6 +1281,17 @@ offset
 -- SearchRepository.searchMetadataV3 (ids-tags-all)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1155,6 +1353,17 @@ offset
 -- SearchRepository.searchMetadataV3 (has-albums-false)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1209,6 +1418,17 @@ offset
 -- SearchRepository.searchMetadataV3 (is-encoded)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1264,6 +1484,17 @@ offset
 -- SearchRepository.searchMetadataV3 (number-range)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1315,6 +1546,17 @@ offset
 -- SearchRepository.searchMetadataV3 (date-eq)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1363,6 +1605,17 @@ offset
 -- SearchRepository.searchMetadataV3 (date-range)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1414,6 +1667,17 @@ offset
 -- SearchRepository.searchMetadataV3 (order-fileSize-noExif)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1504,6 +1768,17 @@ select
       ) as obj
   ) as "exifInfo",
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1552,6 +1827,17 @@ offset
 -- SearchRepository.searchMetadataV3 (or-branches)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1612,6 +1898,17 @@ offset
 -- SearchRepository.searchMetadataV3 (or-with-top-level)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1676,6 +1973,17 @@ offset
 -- SearchRepository.searchMetadataV3 (cursor-offset)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1724,6 +2032,17 @@ offset
 -- SearchRepository.searchRandomV3 (baseline)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1769,6 +2088,17 @@ limit
 -- SearchRepository.searchRandomV3 (with-filter)
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1817,6 +2147,17 @@ set
   local vchordrq.probes = 1
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1870,6 +2211,17 @@ set
   local vchordrq.probes = 1
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1926,6 +2278,17 @@ set
   local vchordrq.probes = 1
 select
   "asset"."id",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",

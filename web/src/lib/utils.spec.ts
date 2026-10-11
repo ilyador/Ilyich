@@ -1,5 +1,5 @@
 import en from '#i18n/en.json';
-import { getAssetUrl, memoryLaneTitle, semverToName } from '#lib/utils.ts';
+import { getAssetUrls, getAssetUrl, memoryLaneTitle, semverToName } from '#lib/utils.ts';
 import { validThumbhash } from '#test/common/factories.ts';
 import { factory } from '#test/unit/factories.ts';
 import { AssetTypeEnum, MemoryType, type MemoryResponseDto } from '@immich/sdk';
@@ -20,6 +20,24 @@ describe('utils', () => {
     const video = { originalPath: 'video.mp4', originalMimeType: 'video/mp4', type: AssetTypeEnum.Video };
     const preview = (id: string) => `/api/assets/${id}/thumbnail?size=preview&c=${validThumbhash}&edited=true`;
     const original = (id: string) => `/api/assets/${id}/original?c=${validThumbhash}&edited=true`;
+    it('uses the media revision when a changed preview has the same thumbhash', () => {
+      const asset = factory.asset({ thumbhash: 'same-thumbhash', mediaRevision: 'first-render' });
+      const before = getAssetUrls(asset);
+      const after = getAssetUrls({ ...asset, mediaRevision: 'second-render' });
+
+      for (const quality of ['thumbnail', 'preview', 'original'] as const) {
+        expect(before[quality]).toContain('c=first-render');
+        expect(after[quality]).toContain('c=second-render');
+        expect(after[quality]).not.toBe(before[quality]);
+      }
+    });
+
+    it('requests fullsize viewing for static web-compatible photos', () => {
+      const asset = factory.asset({ type: AssetTypeEnum.Image, originalMimeType: 'image/jpeg', duration: null });
+
+      expect(getAssetUrl({ asset, forceOriginal: true })).toContain('/thumbnail?size=fullsize');
+    });
+
 
     it.each([
       { name: 'a static image', overrides: image, expected: preview },

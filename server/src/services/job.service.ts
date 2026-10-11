@@ -102,7 +102,10 @@ export class JobService extends BaseService {
   private async onDone(item: JobItem) {
     switch (item.name) {
       case JobName.SidecarCheck: {
-        await this.jobRepository.queue({ name: JobName.AssetExtractMetadata, data: item.data });
+        await this.jobRepository.queue({
+          name: JobName.AssetExtractMetadata,
+          data: { ...item.data, source: item.data.source ?? 'sidecar' },
+        });
         break;
       }
 
@@ -115,7 +118,7 @@ export class JobService extends BaseService {
       }
 
       case JobName.StorageTemplateMigrationSingle: {
-        if (item.data.source === 'upload' || item.data.source === 'copy') {
+        if (['upload', 'copy', 'sidecar', 'sidecar-write'].includes(item.data.source ?? '')) {
           await this.jobRepository.queue({ name: JobName.AssetGenerateThumbnails, data: item.data });
         }
         break;
@@ -138,6 +141,8 @@ export class JobService extends BaseService {
               ownerId: asset.ownerId,
               originalFileName: asset.originalFileName,
               thumbhash: asset.thumbhash ? hexOrBufferToBase64(asset.thumbhash) : null,
+              mediaRevision: asset.updateId,
+              isDeveloped: asset.isDeveloped,
               checksum: hexOrBufferToBase64(asset.checksum),
               fileCreatedAt: asset.fileCreatedAt,
               fileModifiedAt: asset.fileModifiedAt,
@@ -195,6 +200,8 @@ export class JobService extends BaseService {
                 ownerId: asset.ownerId,
                 originalFileName: asset.originalFileName,
                 thumbhash: asset.thumbhash ? hexOrBufferToBase64(asset.thumbhash) : null,
+                mediaRevision: asset.updateId,
+                isDeveloped: asset.isDeveloped,
                 checksum: hexOrBufferToBase64(asset.checksum),
                 fileCreatedAt: asset.fileCreatedAt,
                 fileModifiedAt: asset.fileModifiedAt,

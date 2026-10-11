@@ -1,4 +1,4 @@
-import { Selectable, ShallowDehydrateObject } from 'kysely';
+import { Selectable, ShallowDehydrateObject, sql } from 'kysely';
 import { MapAsset } from 'src/dtos/asset-response.dto.js';
 import { PersonUserRole } from 'src/dtos/person.dto.js';
 import {
@@ -305,6 +305,11 @@ const user2Columns = [
   'user2.profileChangedAt',
 ] as const;
 
+export const assetIsDeveloped = sql<boolean>`coalesce((
+  select "development"->'publishedBase'->>'isDeveloped' = 'true'
+  from "asset_job_status" where "assetId" = "asset"."id"
+), false)`.as('isDeveloped');
+
 export const columns = {
   asset: [
     'asset.id',
@@ -327,6 +332,7 @@ export const columns = {
   ],
   searchAsset: [
     'asset.id',
+    assetIsDeveloped,
     'asset.updateId',
     'asset.createdAt',
     'asset.updatedAt',
@@ -434,6 +440,8 @@ export const columns = {
   ],
   syncAsset: [
     'asset.id',
+    assetIsDeveloped,
+    'asset.updateId as mediaRevision',
     'asset.ownerId',
     'asset.originalFileName',
     'asset.thumbhash',
@@ -456,6 +464,8 @@ export const columns = {
   ],
   syncAlbumAsset: [
     'asset.id',
+    assetIsDeveloped,
+    'asset.updateId as mediaRevision',
     'asset.ownerId',
     'asset.originalFileName',
     'asset.thumbhash',
@@ -477,6 +487,8 @@ export const columns = {
   ],
   syncPartnerAsset: [
     'asset.id',
+    assetIsDeveloped,
+    'asset.updateId as mediaRevision',
     'asset.ownerId',
     'asset.originalFileName',
     'asset.thumbhash',
