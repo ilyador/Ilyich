@@ -656,13 +656,22 @@ export class PersonRepository {
 
   @GenerateSql({ params: [DummyValue.UUID, { withHidden: true }] })
   getDistinctNames(userId: string, { withHidden }: PersonNameSearchOptions): Promise<PersonNameResponse[]> {
+    return this.getNamesQuery(userId, { withHidden })
+      .distinctOn((eb) => eb.fn('lower', ['person.name']))
+      .execute();
+  }
+
+  @GenerateSql({ params: [DummyValue.UUID, { withHidden: false }] })
+  getNames(userId: string, options: PersonNameSearchOptions): Promise<PersonNameResponse[]> {
+    return this.getNamesQuery(userId, options).execute();
+  }
+
+  private getNamesQuery(userId: string, { withHidden }: PersonNameSearchOptions) {
     return this.db
       .selectFrom('person')
       .select(['person.personGroupId', 'person.name'])
-      .distinctOn((eb) => eb.fn('lower', ['person.name']))
       .where((eb) => eb.and([eb('person.ownerId', '=', userId), eb('person.name', '!=', '')]))
-      .$if(!withHidden, (qb) => qb.where('person.isHidden', '=', false))
-      .execute();
+      .$if(!withHidden, (qb) => qb.where('person.isHidden', '=', false));
   }
 
   @GenerateSql({ params: [DummyValue.UUID, { ownerId: DummyValue.UUID, partnerIds: [DummyValue.UUID] }] })
