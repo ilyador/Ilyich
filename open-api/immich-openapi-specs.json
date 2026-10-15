@@ -27587,6 +27587,35 @@
           },
           "assets": {
             "$ref": "#/components/schemas/SearchAssetResponseDto"
+          },
+          "verification": {
+            "description": "Visual verification status; unavailable means regular search results were returned",
+            "properties": {
+              "checked": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rejected": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "status": {
+                "enum": [
+                  "complete",
+                  "unavailable",
+                  "not-needed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "checked",
+              "rejected"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -27872,6 +27901,10 @@
           },
           "search": {
             "description": "Whether search is enabled",
+            "type": "boolean"
+          },
+          "searchVerification": {
+            "description": "Whether local visual search verification is configured",
             "type": "boolean"
           },
           "sidecar": {
@@ -28685,6 +28718,17 @@
             ],
             "x-immich-state": "Deprecated"
           },
+          "cursor": {
+            "description": "Cursor for the next page of results",
+            "minLength": 1,
+            "type": "string",
+            "x-immich-history": [
+              {
+                "version": "v3.2.0",
+                "state": "Added"
+              }
+            ]
+          },
           "filter": {
             "$ref": "#/components/schemas/SearchFilter",
             "x-immich-history": [
@@ -29204,6 +29248,10 @@
               }
             ],
             "x-immich-state": "Deprecated"
+          },
+          "verify": {
+            "description": "Verify visual matches locally; checks at most 20 candidates per page",
+            "type": "boolean"
           },
           "visibility": {
             "$ref": "#/components/schemas/AssetVisibility",

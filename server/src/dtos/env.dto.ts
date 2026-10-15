@@ -59,6 +59,8 @@ export const EnvSchema = z
     IMMICH_SOURCE_REF: z.string().optional(),
     IMMICH_SOURCE_COMMIT: z.string().optional(),
     IMMICH_SOURCE_URL: z.string().optional(),
+    IMMICH_SEARCH_VERIFY_URL: z.url().optional(),
+    IMMICH_SEARCH_VERIFY_MODEL: z.string().min(1).optional(),
     IMMICH_TELEMETRY_INCLUDE: z.string().optional(),
     IMMICH_TELEMETRY_EXCLUDE: z.string().optional(),
     IMMICH_THIRD_PARTY_SOURCE_URL: z.string().optional(),

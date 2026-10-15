@@ -35,6 +35,7 @@ import { applyLockedVisibilityPolicy, collectFilterIds } from 'src/utils/search-
 @Injectable()
 export class SearchService extends BaseService {
   private embeddingCache = new LRUMap<string, string>(100);
+  private verifying = false;
 
   async searchPerson(auth: AuthDto, dto: SearchPeopleDto): Promise<PersonResponseDto[]> {
     const people = await this.personRepository.getByName(auth.user.id, dto.name, { withHidden: dto.withHidden });
@@ -166,10 +167,10 @@ export class SearchService extends BaseService {
     return items.map((item) => mapAsset(item, { auth }));
   }
 
-  async searchSmart(auth: AuthDto, dto: SmartSearchDto): Promise<SearchResponseDto> {
+  async searchSmart(auth: AuthDto, dto: SmartSearchDto, signal?: AbortSignal): Promise<SearchResponseDto> {
     const plan = await this.planQuery(auth, dto);
     if (isNewShapeRequest(dto)) {
-      return this.searchSmartV3(auth, dto, plan);
+      return this.searchSmartV3(auth, dto, plan, signal);
     }
 
     if (dto.visibility === AssetVisibility.Locked) {
@@ -183,7 +184,7 @@ export class SearchService extends BaseService {
 
     const userIds = this.getUserIdsToSearch(auth, dto.visibility);
     const page = dto.page ?? 1;
-    const size = dto.size;
+    const size = dto.verify ? Math.min(dto.size, 20) : dto.size;
     const resolvedUserIds = await userIds;
     if (plan.filter && !plan.query) {
       const { hasNextPage, items } = await this.searchRepository.searchMetadata(
@@ -196,7 +197,14 @@ export class SearchService extends BaseService {
           visibility: dto.visibility ?? (auth.session?.hasElevatedPermission ? undefined : 'not-locked'),
         },
       );
-      return this.mapResponse(items, { auth }, { nextPage: hasNextPage ? (page + 1).toString() : null });
+      return this.mapSmartResponse(
+        auth,
+        dto,
+        plan,
+        items,
+        { nextPage: hasNextPage ? (page + 1).toString() : null },
+        signal,
+      );
     }
     const embedding = await this.resolveEmbedding(auth, { ...dto, query: plan.query }, machineLearning);
     const { hasNextPage, items } = await this.searchRepository.searchSmart(
@@ -211,7 +219,14 @@ export class SearchService extends BaseService {
       },
     );
 
-    return this.mapResponse(items, { auth }, { nextPage: hasNextPage ? (page + 1).toString() : null });
+    return this.mapSmartResponse(
+      auth,
+      dto,
+      plan,
+      items,
+      { nextPage: hasNextPage ? (page + 1).toString() : null },
+      signal,
+    );
   }
 
   async getAssetsByCity(auth: AuthDto): Promise<AssetResponseDto[]> {
@@ -295,16 +310,23 @@ export class SearchService extends BaseService {
     return items.map((item) => mapAsset(item, { auth }));
   }
 
-  private async searchSmartV3(auth: AuthDto, dto: SmartSearchDto, plan: NaturalSearchPlan): Promise<SearchResponseDto> {
+  private async searchSmartV3(
+    auth: AuthDto,
+    dto: SmartSearchDto,
+    plan: NaturalSearchPlan,
+    signal?: AbortSignal,
+  ): Promise<SearchResponseDto> {
     const { machineLearning } = await this.getConfig({ withCache: false });
     if (!isSmartSearchEnabled(machineLearning)) {
       throw new BadRequestException('Smart search is not enabled');
     }
 
     const { filter, scope } = await this.resolveSearchScopeV3(auth, dto);
+    const { offset } = decodeSearchCursor(dto.cursor);
+    const size = dto.verify ? Math.min(dto.size, 20) : dto.size;
     if (plan.filter && !plan.query) {
-      const { items } = await this.searchRepository.searchMetadataV3(
-        { take: dto.size },
+      const { items, hasNextPage } = await this.searchRepository.searchMetadataV3(
+        { take: size, skip: offset },
         {
           filter,
           queryFilter: plan.filter,
@@ -312,18 +334,88 @@ export class SearchService extends BaseService {
         },
         scope,
       );
-      return this.mapResponse(items, { auth });
+      return this.mapSmartResponse(
+        auth,
+        dto,
+        plan,
+        items,
+        {
+          nextCursor: hasNextPage ? encodeSearchCursor(offset + size) : null,
+        },
+        signal,
+      );
     }
     const embedding = await this.resolveEmbedding(auth, { ...dto, query: plan.query }, machineLearning);
 
-    // no cursor until a rank-aware pagination strategy for smart search is decided
-    const { items } = await this.searchRepository.searchSmartV3(
-      { take: dto.size },
+    const { items, hasNextPage } = await this.searchRepository.searchSmartV3(
+      { take: size, skip: offset },
       { filter, queryFilter: plan.filter, withExif: dto.withExif, embedding },
       scope,
     );
 
-    return this.mapResponse(items, { auth });
+    return this.mapSmartResponse(
+      auth,
+      dto,
+      plan,
+      items,
+      {
+        nextCursor: hasNextPage ? encodeSearchCursor(offset + size) : null,
+      },
+      signal,
+    );
+  }
+
+  private async mapSmartResponse(
+    auth: AuthDto,
+    dto: SmartSearchDto,
+    plan: NaturalSearchPlan,
+    items: MapAsset[],
+    page: { nextPage?: string | null; nextCursor?: string | null },
+    signal?: AbortSignal,
+  ): Promise<SearchResponseDto> {
+    const response = this.mapResponse(items, { auth }, page);
+    if (!dto.verify) return response;
+    if (!dto.query || !plan.query) {
+      response.verification = { status: 'not-needed', checked: 0, rejected: 0 };
+      return response;
+    }
+    if (items.length === 0) {
+      response.verification = { status: 'complete', checked: 0, rejected: 0 };
+      return response;
+    }
+    const options = this.configRepository.getEnv().searchVerification;
+    if (!options || auth.sharedLink || this.verifying) {
+      response.verification = { status: 'unavailable', checked: 0, rejected: 0 };
+      return response;
+    }
+    this.verifying = true;
+    try {
+      const accepted: MapAsset[] = [];
+      const deadline = Date.now() + 60_000;
+      for (const item of items) {
+        signal?.throwIfAborted();
+        if (Date.now() > deadline) throw new Error('Search verification time budget exceeded');
+        // `items` already passed all ownership, album, and visibility checks.
+        const asset = await this.assetJobRepository.getForClipEncoding(item.id);
+        const preview = asset?.files.find((file) => file.isEdited) ?? asset?.files[0];
+        if (!preview) throw new Error('Search candidate has no preview');
+        if (
+          await this.machineLearningRepository.verifySearchCandidate(preview.path, plan.query, { ...options, signal })
+        )
+          accepted.push(item);
+      }
+      return {
+        ...this.mapResponse(accepted, { auth }, page),
+        verification: { status: 'complete', checked: items.length, rejected: items.length - accepted.length },
+      };
+    } catch {
+      if (!signal?.aborted)
+        this.logger.warn('Visual search verification unavailable; returning regular search results.');
+      response.verification = { status: 'unavailable', checked: 0, rejected: 0 };
+      return response;
+    } finally {
+      this.verifying = false;
+    }
   }
 
   private async planQuery(auth: AuthDto, dto: SmartSearchDto): Promise<NaturalSearchPlan> {

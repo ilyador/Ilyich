@@ -88,10 +88,11 @@ export class ServerService extends BaseService {
   async getFeatures(): Promise<ServerFeaturesDto> {
     const { reverseGeocoding, metadata, map, machineLearning, trash, oauth, passwordLogin, notifications, ffmpeg } =
       await this.getConfig({ withCache: false });
-    const { configFile } = this.configRepository.getEnv();
+    const { configFile, searchVerification } = this.configRepository.getEnv();
 
     return {
       smartSearch: isSmartSearchEnabled(machineLearning),
+      searchVerification: !!searchVerification && isSmartSearchEnabled(machineLearning),
       facialRecognition: isFacialRecognitionEnabled(machineLearning),
       duplicateDetection: isDuplicateDetectionEnabled(machineLearning),
       map: map.enabled,
