@@ -211,6 +211,18 @@ describe(SmartInfoService.name, () => {
       expect(mocks.search.upsert).toHaveBeenCalledWith(asset.id, '[0.01, 0.02, 0.03]');
     });
 
+    it('indexes the edited preview when both preview versions exist', async () => {
+      const asset = AssetFactory.from()
+        .file({ type: AssetFileType.Preview, path: 'original.jpg', isEdited: false })
+        .file({ type: AssetFileType.Preview, path: 'edited.jpg', isEdited: true })
+        .build();
+      mocks.assetJob.getForClipEncoding.mockResolvedValue(asset);
+      mocks.machineLearning.encodeImage.mockResolvedValue('[0.01, 0.02, 0.03]');
+      expect(await sut.handleEncodeClip({ id: asset.id })).toBe(JobStatus.Success);
+      expect(mocks.machineLearning.encodeImage).toHaveBeenCalledWith('edited.jpg', expect.anything());
+      expect(mocks.search.upsert).toHaveBeenCalledWith(asset.id, '[0.01, 0.02, 0.03]');
+    });
+
     it('should skip invisible assets', async () => {
       const asset = AssetFactory.from({ visibility: AssetVisibility.Hidden })
         .file({ type: AssetFileType.Preview })
