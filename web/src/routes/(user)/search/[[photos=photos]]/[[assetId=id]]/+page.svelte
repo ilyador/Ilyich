@@ -15,6 +15,7 @@
   import SetVisibilityAction from '#lib/components/timeline/actions/SetVisibilityAction.svelte';
   import { QueryParameter } from '#lib/constants.ts';
   import { assetMultiSelectManager } from '#lib/managers/asset-multi-select-manager.svelte.ts';
+  import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
   import { searchManager } from '#lib/managers/search-manager.svelte.ts';
   import type { TimelineAsset, Viewport } from '#lib/managers/timeline-manager/types.ts';
   import { createPreloadedQuery } from '#lib/queries/client.ts';
@@ -37,10 +38,11 @@
     type AssetResponseDto,
     type MetadataSearchDto,
     type SmartSearchDto,
+    type SearchResponseDto,
   } from '@immich/sdk';
-  import { ActionButton, CommandPaletteDefaultProvider, Icon, IconButton, LoadingSpinner } from '@immich/ui';
+  import { ActionButton, Button, CommandPaletteDefaultProvider, Icon, IconButton, LoadingSpinner } from '@immich/ui';
   import { mdiArrowLeft, mdiClose, mdiDotsVertical, mdiImageOffOutline, mdiSelectAll } from '@mdi/js';
-  import { onMount, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { afterNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -60,13 +62,15 @@
   let searchResultAlbums: AlbumResponseDto[] = $state([]);
   let searchResultAssets: AssetResponseDto[] = $state([]);
   let isLoading = $state(true);
+  let verification = $state<SearchResponseDto['verification']>();
+  let requestController: AbortController | undefined;
   let scrollY = $state(0);
   let scrollYHistory = 0;
 
-  type SearchTerms = MetadataSearchDto & Pick<SmartSearchDto, 'query' | 'queryAssetId'>;
+  type SearchTerms = MetadataSearchDto & Pick<SmartSearchDto, 'query' | 'queryAssetId' | 'verify'>;
   let searchQuery = $derived(page.url.searchParams.get(QueryParameter.QUERY));
   let terms = $derived<SearchTerms>(searchQuery ? JSON.parse(searchQuery) : {});
-  let searchTermKeys = $derived(getObjectKeys(terms));
+  let searchTermKeys = $derived(getObjectKeys(terms).filter((key) => key !== 'verify'));
 
   $effect(() => {
     // we want this to *only* be reactive on `terms`
@@ -122,6 +126,8 @@
   };
 
   async function onSearchQueryUpdate() {
+    requestController?.abort();
+    verification = undefined;
     nextPage = 1;
     searchResultAssets = [];
     searchResultAlbums = [];
@@ -134,6 +140,8 @@
       return;
     }
     isLoading = true;
+    const controller = new AbortController();
+    requestController = controller;
 
     const searchDto: SearchTerms = {
       page: nextPage,
@@ -142,21 +150,39 @@
     };
 
     try {
-      const { albums, assets } =
+      const response =
         ('query' in searchDto || 'queryAssetId' in searchDto) && config.machineLearning.clip.enabled
-          ? await searchSmart({
-              smartSearchDto: { visibility: AssetVisibility.Timeline, ...searchDto, language: $lang },
-            })
-          : await searchAssets({ metadataSearchDto: { visibility: AssetVisibility.Timeline, ...searchDto } });
+          ? await searchSmart(
+              {
+                smartSearchDto: { visibility: AssetVisibility.Timeline, ...searchDto, language: $lang },
+              },
+              { signal: controller.signal },
+            )
+          : await searchAssets(
+              { metadataSearchDto: { visibility: AssetVisibility.Timeline, ...searchDto } },
+              { signal: controller.signal },
+            );
+
+      if (controller.signal.aborted) return;
+      const { albums, assets } = response;
+      verification =
+        response.verification?.status === 'complete' && verification?.status === 'complete'
+          ? {
+              ...response.verification,
+              checked: verification.checked + response.verification.checked,
+              rejected: verification.rejected + response.verification.rejected,
+            }
+          : response.verification;
 
       searchResultAlbums.push(...albums.items);
       searchResultAssets.push(...assets.items);
 
       nextPage = Number(assets.nextPage) || 0;
     } catch (error) {
+      if (controller.signal.aborted) return;
       handleError(error, $t('loading_search_results_failed'));
     } finally {
-      isLoading = false;
+      if (requestController === controller) isLoading = false;
     }
   };
 
@@ -259,12 +285,18 @@
 
   function removeFilter(key: keyof SearchTerms) {
     delete terms[key];
+    if (key === 'query') delete terms.verify;
     assetMultiSelectManager.clear();
     void goto(Route.search(terms));
     searchManager.setQuery(terms);
   }
 
+  async function toggleVerification() {
+    await goto(Route.search({ ...terms, verify: !terms.verify || undefined }));
+  }
+
   onMount(() => searchManager.setQuery(terms));
+  onDestroy(() => requestController?.abort());
 </script>
 
 <svelte:window bind:scrollY />
@@ -318,6 +350,37 @@
         </div>
       {/each}
     </div>
+    {#if terms.query && config.machineLearning.clip.enabled && featureFlagsManager.value.searchVerification}
+      <div
+        class="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-center text-sm text-immich-fg dark:text-immich-dark-fg"
+      >
+        <Button
+          size="small"
+          shape="round"
+          color="secondary"
+          variant={terms.verify ? 'filled' : 'ghost'}
+          aria-pressed={!!terms.verify}
+          title={$t('search_verify_hint')}
+          disabled={isLoading && !terms.verify}
+          onclick={toggleVerification}>{$t('search_verify_matches')}</Button
+        >
+        <span role="status" aria-live="polite">
+          {#if isLoading && terms.verify}
+            {$t('search_verifying')}
+          {:else if verification?.status === 'complete'}
+            {$t('search_verification_complete', {
+              values: { count: verification.checked, rejected: verification.rejected },
+            })}
+          {:else if verification?.status === 'unavailable'}
+            {$t('search_verification_unavailable')}
+          {:else if verification?.status === 'not-needed'}
+            {$t('search_verification_not_needed')}
+          {:else}
+            {$t('search_verify_hint')}
+          {/if}
+        </span>
+      </div>
+    {/if}
   </section>
 {/if}
 
@@ -332,18 +395,36 @@
       <GalleryViewer
         assets={searchResultAssets}
         assetInteraction={assetMultiSelectManager}
-        onEndReached={loadNextPage}
+        onEndReached={() => {
+          if (!terms.verify) return loadNextPage();
+        }}
         showArchiveIcon={true}
         {viewport}
         onReload={onSearchQueryUpdate}
         slidingWindowOffset={searchResultsElement.offsetTop}
       />
+      {#if terms.verify && nextPage && !isLoading}
+        <div class="flex justify-center py-6">
+          <Button shape="round" onclick={() => loadNextPage()}>{$t('search_verify_more')}</Button>
+        </div>
+      {/if}
     {:else if !isLoading}
       <div class="flex min-h-[calc(66vh-11rem)] w-full place-content-center items-center dark:text-white">
         <div class="flex flex-col content-center items-center text-center">
           <Icon icon={mdiImageOffOutline} size="3.5em" />
-          <p class="mt-5 text-3xl font-medium">{$t('no_results')}</p>
-          <p class="text-base font-normal">{$t('no_results_description')}</p>
+          <p class="mt-5 text-3xl font-medium">
+            {$t(verification?.status === 'complete' && nextPage ? 'search_verified_empty' : 'no_results')}
+          </p>
+          <p class="text-base font-normal">
+            {$t(
+              verification?.status === 'complete' && nextPage
+                ? 'search_verified_empty_description'
+                : 'no_results_description',
+            )}
+          </p>
+          {#if terms.verify && nextPage}
+            <Button class="mt-4" shape="round" onclick={() => loadNextPage()}>{$t('search_verify_more')}</Button>
+          {/if}
         </div>
       </div>
     {/if}

@@ -63,6 +63,7 @@ export type SearchLocationFilter = {
 
 export type SearchFilter = {
   query: string;
+  verify?: boolean;
   ocr?: string;
   queryType: 'smart' | 'metadata' | 'description' | 'fullPath' | 'ocr';
   personIds: SvelteSet<string>;

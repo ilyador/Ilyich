@@ -3,6 +3,7 @@ import { Duration } from 'luxon';
 import { readFile } from 'node:fs/promises';
 import { MachineLearningConfig } from 'src/dtos/config.dto.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import { SearchVerifier, SearchVerifierOptions } from 'src/utils/search-verifier.js';
 
 export interface BoundingBox {
   x1: number;
@@ -77,6 +78,7 @@ export type TextEncodingOptions = ModelOptions & { language?: string };
 
 @Injectable()
 export class MachineLearningRepository {
+  private searchVerifier = new SearchVerifier();
   private healthyMap: Record<string, boolean> = {};
   private interval?: ReturnType<typeof setInterval>;
   private _config?: MachineLearningConfig;
@@ -212,6 +214,10 @@ export class MachineLearningRepository {
     const request = { [ModelTask.SEARCH]: { [ModelType.TEXTUAL]: { modelName, options: { language } } } };
     const response = await this.predict<ClipTextualResponse>({ text }, request);
     return response[ModelTask.SEARCH];
+  }
+
+  verifySearchCandidate(path: string, query: string, options: SearchVerifierOptions) {
+    return this.searchVerifier.verify(path, query, options);
   }
 
   async ocr(imagePath: string, { modelName, minDetectionScore, minRecognitionScore, maxResolution }: OcrOptions) {

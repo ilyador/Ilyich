@@ -59,6 +59,7 @@ class SearchManager {
 
     return {
       query,
+      verify: 'verify' in searchQuery ? searchQuery.verify : undefined,
       ocr: searchQuery.ocr,
       queryType,
       queryAssetId: 'queryAssetId' in searchQuery ? searchQuery.queryAssetId : undefined,
@@ -110,6 +111,7 @@ class SearchManager {
 
     return {
       query: this.filter.queryType === 'smart' ? query : undefined,
+      verify: this.filter.queryType === 'smart' && query ? this.filter.verify : undefined,
       queryAssetId: this.filter.queryAssetId || undefined,
       ocr: this.filter.queryType === 'ocr' ? query : undefined,
       originalFileName: this.filter.queryType === 'metadata' ? query : undefined,
