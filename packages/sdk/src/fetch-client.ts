@@ -2675,7 +2675,7 @@ export type SmartSearchDto = {
     updatedAfter?: string;
     /** Filter by update date (before) */
     updatedBefore?: string;
-    /** Verify visual matches locally; checks at most 20 candidates per page */
+    /** Verify visual matches locally; checks at most 10 candidates per page */
     verify?: boolean;
     visibility?: AssetVisibility;
     /** Include deleted assets */

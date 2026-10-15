@@ -391,7 +391,7 @@ const SmartSearchSchema = withShapeExclusivity(
   BaseSearchWithResultsSchema.extend({
     size: z.int().min(1).max(1000).default(100).describe('Number of results to return'),
     query: z.string().trim().optional().describe('Natural language search query'),
-    verify: z.boolean().optional().describe('Verify visual matches locally; checks at most 20 candidates per page'),
+    verify: z.boolean().optional().describe('Verify visual matches locally; checks at most 10 candidates per page'),
     queryAssetId: z.uuidv4().optional().describe('Asset ID to use as search reference'),
     language: z.string().optional().describe('Search language code'),
     page: z.int().min(1).optional().describe('Page number').meta(DEPRECATED_FLAT_FIELD),
