@@ -28,6 +28,7 @@ import { BaseService } from 'src/services/base.service.js';
 import { requireElevatedPermission } from 'src/utils/access.js';
 import { getMyPartnerIds } from 'src/utils/asset.util.js';
 import { isSmartSearchEnabled } from 'src/utils/misc.js';
+import { NaturalSearchPlan, planNaturalSearch } from 'src/utils/natural-search.js';
 import { decodeSearchCursor, encodeSearchCursor } from 'src/utils/search-cursor.js';
 import { applyLockedVisibilityPolicy, collectFilterIds } from 'src/utils/search-filter.js';
 
@@ -166,8 +167,9 @@ export class SearchService extends BaseService {
   }
 
   async searchSmart(auth: AuthDto, dto: SmartSearchDto): Promise<SearchResponseDto> {
+    const plan = await this.planQuery(auth, dto);
     if (isNewShapeRequest(dto)) {
-      return this.searchSmartV3(auth, dto);
+      return this.searchSmartV3(auth, dto, plan);
     }
 
     if (dto.visibility === AssetVisibility.Locked) {
@@ -180,14 +182,29 @@ export class SearchService extends BaseService {
     }
 
     const userIds = this.getUserIdsToSearch(auth, dto.visibility);
-    const embedding = await this.resolveEmbedding(auth, dto, machineLearning);
     const page = dto.page ?? 1;
     const size = dto.size;
+    const resolvedUserIds = await userIds;
+    if (plan.filter && !plan.query) {
+      const { hasNextPage, items } = await this.searchRepository.searchMetadata(
+        { page, size },
+        {
+          ...dto,
+          queryFilter: plan.filter,
+          userIds: resolvedUserIds,
+          viewingUserId: auth.user.id,
+          visibility: dto.visibility ?? (auth.session?.hasElevatedPermission ? undefined : 'not-locked'),
+        },
+      );
+      return this.mapResponse(items, { auth }, { nextPage: hasNextPage ? (page + 1).toString() : null });
+    }
+    const embedding = await this.resolveEmbedding(auth, { ...dto, query: plan.query }, machineLearning);
     const { hasNextPage, items } = await this.searchRepository.searchSmart(
       { page, size },
       {
         ...dto,
-        userIds: await userIds,
+        queryFilter: plan.filter,
+        userIds: resolvedUserIds,
         viewingUserId: auth.user.id,
         embedding,
         visibility: dto.visibility ?? (auth.session?.hasElevatedPermission ? undefined : 'not-locked'),
@@ -278,25 +295,46 @@ export class SearchService extends BaseService {
     return items.map((item) => mapAsset(item, { auth }));
   }
 
-  private async searchSmartV3(auth: AuthDto, dto: SmartSearchDto): Promise<SearchResponseDto> {
+  private async searchSmartV3(auth: AuthDto, dto: SmartSearchDto, plan: NaturalSearchPlan): Promise<SearchResponseDto> {
     const { machineLearning } = await this.getConfig({ withCache: false });
     if (!isSmartSearchEnabled(machineLearning)) {
       throw new BadRequestException('Smart search is not enabled');
     }
 
-    const [{ filter, scope }, embedding] = await Promise.all([
-      this.resolveSearchScopeV3(auth, dto),
-      this.resolveEmbedding(auth, dto, machineLearning),
-    ]);
+    const { filter, scope } = await this.resolveSearchScopeV3(auth, dto);
+    if (plan.filter && !plan.query) {
+      const { items } = await this.searchRepository.searchMetadataV3(
+        { take: dto.size },
+        {
+          filter,
+          queryFilter: plan.filter,
+          withExif: dto.withExif,
+        },
+        scope,
+      );
+      return this.mapResponse(items, { auth });
+    }
+    const embedding = await this.resolveEmbedding(auth, { ...dto, query: plan.query }, machineLearning);
 
     // no cursor until a rank-aware pagination strategy for smart search is decided
     const { items } = await this.searchRepository.searchSmartV3(
       { take: dto.size },
-      { filter, withExif: dto.withExif, embedding },
+      { filter, queryFilter: plan.filter, withExif: dto.withExif, embedding },
       scope,
     );
 
     return this.mapResponse(items, { auth });
+  }
+
+  private async planQuery(auth: AuthDto, dto: SmartSearchDto): Promise<NaturalSearchPlan> {
+    if (!dto.query || auth.sharedLink) return { query: dto.query ?? '' };
+    const userIds = await this.getUserIdsToSearch(auth, dto.visibility);
+    const [people, cities, countries] = await Promise.all([
+      this.personRepository.getDistinctNames(auth.user.id, { withHidden: false }),
+      this.searchRepository.getCities(userIds, {}),
+      this.searchRepository.getCountries(userIds),
+    ]);
+    return planNaturalSearch(dto.query, { people, cities, countries, userName: auth.user.name });
   }
 
   private async resolveSearchScopeV3(
