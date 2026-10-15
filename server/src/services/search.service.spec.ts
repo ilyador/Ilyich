@@ -20,6 +20,9 @@ describe(SearchService.name, () => {
   beforeEach(() => {
     ({ sut, mocks } = newTestService(SearchService));
     mocks.partner.getAll.mockResolvedValue([]);
+    mocks.person.getDistinctNames.mockResolvedValue([]);
+    mocks.search.getCities.mockResolvedValue([]);
+    mocks.search.getCountries.mockResolvedValue([]);
   });
 
   it('should work', () => {
