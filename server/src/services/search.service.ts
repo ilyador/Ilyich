@@ -33,6 +33,10 @@ import { decodeSearchCursor, encodeSearchCursor } from 'src/utils/search-cursor.
 import { applyLockedVisibilityPolicy, collectFilterIds } from 'src/utils/search-filter.js';
 
 const verificationPageSize = 10;
+const verificationScanPages = 3;
+
+type SearchPagination = { nextPage?: string | null; nextCursor?: string | null };
+type SearchCandidatePage = { items: MapAsset[]; page: SearchPagination };
 
 @Injectable()
 export class SearchService extends BaseService {
@@ -170,6 +174,14 @@ export class SearchService extends BaseService {
   }
 
   async searchSmart(auth: AuthDto, dto: SmartSearchDto, signal?: AbortSignal): Promise<SearchResponseDto> {
+    if (
+      dto.verify === undefined &&
+      dto.query &&
+      !auth.sharedLink &&
+      this.configRepository.getEnv().searchVerification
+    ) {
+      dto = { ...dto, verify: true };
+    }
     const plan = await this.planQuery(auth, dto);
     if (isNewShapeRequest(dto)) {
       return this.searchSmartV3(auth, dto, plan, signal);
@@ -203,31 +215,28 @@ export class SearchService extends BaseService {
         auth,
         dto,
         plan,
-        items,
-        { nextPage: hasNextPage ? (page + 1).toString() : null },
+        { items, page: { nextPage: hasNextPage ? (page + 1).toString() : null } },
         signal,
       );
     }
     const embedding = await this.resolveEmbedding(auth, { ...dto, query: plan.query }, machineLearning);
-    const { hasNextPage, items } = await this.searchRepository.searchSmart(
-      { page, size },
-      {
-        ...dto,
-        queryFilter: plan.filter,
-        userIds: resolvedUserIds,
-        viewingUserId: auth.user.id,
-        embedding,
-        visibility: dto.visibility ?? (auth.session?.hasElevatedPermission ? undefined : 'not-locked'),
-      },
-    );
+    const loadPage = async (page: number): Promise<SearchCandidatePage> => {
+      const { hasNextPage, items } = await this.searchRepository.searchSmart(
+        { page, size },
+        {
+          ...dto,
+          queryFilter: plan.filter,
+          userIds: resolvedUserIds,
+          viewingUserId: auth.user.id,
+          embedding,
+          visibility: dto.visibility ?? (auth.session?.hasElevatedPermission ? undefined : 'not-locked'),
+        },
+      );
+      return { items, page: { nextPage: hasNextPage ? (page + 1).toString() : null } };
+    };
 
-    return this.mapSmartResponse(
-      auth,
-      dto,
-      plan,
-      items,
-      { nextPage: hasNextPage ? (page + 1).toString() : null },
-      signal,
+    return this.mapSmartResponse(auth, dto, plan, await loadPage(page), signal, (page) =>
+      loadPage(Number(page.nextPage)),
     );
   }
 
@@ -340,30 +349,26 @@ export class SearchService extends BaseService {
         auth,
         dto,
         plan,
-        items,
         {
-          nextCursor: hasNextPage ? encodeSearchCursor(offset + size) : null,
+          items,
+          page: { nextCursor: hasNextPage ? encodeSearchCursor(offset + size) : null },
         },
         signal,
       );
     }
     const embedding = await this.resolveEmbedding(auth, { ...dto, query: plan.query }, machineLearning);
 
-    const { items, hasNextPage } = await this.searchRepository.searchSmartV3(
-      { take: size, skip: offset },
-      { filter, queryFilter: plan.filter, withExif: dto.withExif, embedding },
-      scope,
-    );
+    const loadPage = async (offset: number): Promise<SearchCandidatePage> => {
+      const { items, hasNextPage } = await this.searchRepository.searchSmartV3(
+        { take: size, skip: offset },
+        { filter, queryFilter: plan.filter, withExif: dto.withExif, embedding },
+        scope,
+      );
+      return { items, page: { nextCursor: hasNextPage ? encodeSearchCursor(offset + size) : null } };
+    };
 
-    return this.mapSmartResponse(
-      auth,
-      dto,
-      plan,
-      items,
-      {
-        nextCursor: hasNextPage ? encodeSearchCursor(offset + size) : null,
-      },
-      signal,
+    return this.mapSmartResponse(auth, dto, plan, await loadPage(offset), signal, (page) =>
+      loadPage(decodeSearchCursor(page.nextCursor ?? undefined).offset),
     );
   }
 
@@ -371,17 +376,17 @@ export class SearchService extends BaseService {
     auth: AuthDto,
     dto: SmartSearchDto,
     plan: NaturalSearchPlan,
-    items: MapAsset[],
-    page: { nextPage?: string | null; nextCursor?: string | null },
+    batch: SearchCandidatePage,
     signal?: AbortSignal,
+    loadNext?: (page: SearchPagination) => Promise<SearchCandidatePage>,
   ): Promise<SearchResponseDto> {
-    const response = this.mapResponse(items, { auth }, page);
+    const response = this.mapResponse(batch.items, { auth }, batch.page);
     if (!dto.verify) return response;
     if (!dto.query || !plan.query) {
       response.verification = { status: 'not-needed', checked: 0, rejected: 0 };
       return response;
     }
-    if (items.length === 0) {
+    if (batch.items.length === 0) {
       response.verification = { status: 'complete', checked: 0, rejected: 0 };
       return response;
     }
@@ -392,24 +397,37 @@ export class SearchService extends BaseService {
     }
     this.verifying = true;
     try {
-      const accepted: MapAsset[] = [];
-      const deadline = Date.now() + 60_000;
-      for (const item of items) {
-        signal?.throwIfAborted();
-        if (Date.now() > deadline) throw new Error('Search verification time budget exceeded');
-        // `items` already passed all ownership, album, and visibility checks.
-        const asset = await this.assetJobRepository.getForClipEncoding(item.id);
-        const preview = asset?.files.find((file) => file.isEdited) ?? asset?.files[0];
-        if (!preview) throw new Error('Search candidate has no preview');
-        if (
-          await this.machineLearningRepository.verifySearchCandidate(preview.path, plan.query, { ...options, signal })
-        )
-          accepted.push(item);
+      const timeout = AbortSignal.timeout(60_000);
+      const verificationSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      let checked = 0;
+      for (let pageIndex = 0; ; pageIndex++) {
+        const accepted: MapAsset[] = [];
+        for (const item of batch.items) {
+          verificationSignal.throwIfAborted();
+          // Each batch passed all ownership, album, and visibility checks.
+          const asset = await this.assetJobRepository.getForClipEncoding(item.id);
+          const preview = asset?.files.find((file) => file.isEdited) ?? asset?.files[0];
+          if (!preview) throw new Error('Search candidate has no preview');
+          if (
+            await this.machineLearningRepository.verifySearchCandidate(preview.path, plan.query, {
+              ...options,
+              signal: verificationSignal,
+            })
+          )
+            accepted.push(item);
+          checked++;
+        }
+        const more = batch.page.nextPage || batch.page.nextCursor;
+        if (accepted.length > 0 || !more || !loadNext || pageIndex + 1 >= verificationScanPages) {
+          return {
+            ...this.mapResponse(accepted, { auth }, batch.page),
+            verification: { status: 'complete', checked, rejected: checked - accepted.length },
+          };
+        }
+        // Older phone clients cannot advance an empty results grid themselves.
+        verificationSignal.throwIfAborted();
+        batch = await loadNext(batch.page);
       }
-      return {
-        ...this.mapResponse(accepted, { auth }, page),
-        verification: { status: 'complete', checked: items.length, rejected: items.length - accepted.length },
-      };
     } catch {
       if (!signal?.aborted)
         this.logger.warn('Visual search verification unavailable; returning regular search results.');

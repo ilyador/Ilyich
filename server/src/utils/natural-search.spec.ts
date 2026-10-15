@@ -33,6 +33,16 @@ describe(planNaturalSearch.name, () => {
       filter: { personIds: { all: ['maya'] }, city: { in: ['Amsterdam'] } },
     });
   });
+  it('splits a mixed face, clothing and location query', () => {
+    expect(plan('me wearing a red hat in Amsterdam')).toEqual({
+      query: 'wearing a red hat',
+      filter: { personIds: { all: ['self'] }, city: { in: ['Amsterdam'] } },
+    });
+    expect(plan('me wearing an Amsterdam shirt')).toEqual({
+      query: 'wearing an Amsterdam shirt',
+      filter: { personIds: { all: ['self'] } },
+    });
+  });
   it('does not confuse an indirect object with a face constraint', () => {
     expect(plan('show me photos of Maya in Amsterdam').filter?.personIds).toEqual({ all: ['maya'] });
     expect(plan('show me in Amsterdam').filter?.personIds).toEqual({ all: ['self'] });
