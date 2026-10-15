@@ -1059,6 +1059,19 @@ where
     and "person"."name" != $2
   )
 
+-- PersonRepository.getNames
+select
+  "person"."personGroupId",
+  "person"."name"
+from
+  "person"
+where
+  (
+    "person"."ownerId" = $1
+    and "person"."name" != $2
+  )
+  and "person"."isHidden" = $3
+
 -- PersonRepository.getStatistics
 select
   count(distinct "visible"."assetId") as "assets"

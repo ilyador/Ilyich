@@ -418,11 +418,17 @@ export class SearchService extends BaseService {
           checked++;
         }
         const more = batch.page.nextPage || batch.page.nextCursor;
-        if (accepted.length > 0 || !more || !loadNext || pageIndex + 1 >= verificationScanPages) {
+        if (accepted.length > 0 || !more || !loadNext) {
           return {
             ...this.mapResponse(accepted, { auth }, batch.page),
             verification: { status: 'complete', checked, rejected: checked - accepted.length },
           };
+        }
+        if (pageIndex + 1 >= verificationScanPages) {
+          // An empty nonterminal page ends pagination in older phone clients.
+          // Keep the bounded-work fallback traversable instead of hiding later matches.
+          response.verification = { status: 'unavailable', checked: 0, rejected: 0 };
+          return response;
         }
         // Older phone clients cannot advance an empty results grid themselves.
         verificationSignal.throwIfAborted();
@@ -443,8 +449,8 @@ export class SearchService extends BaseService {
     const userIds = await this.getUserIdsToSearch(auth, dto.visibility);
     const [people, cities, countries] = await Promise.all([
       this.personRepository.getNames(auth.user.id, { withHidden: false }),
-      this.searchRepository.getCities(userIds, {}),
-      this.searchRepository.getCountries(userIds),
+      this.searchRepository.getCities(userIds, { includeArchived: true }),
+      this.searchRepository.getCountries(userIds, { includeArchived: true }),
     ]);
     return planNaturalSearch(dto.query, { people, cities, countries, userName: auth.user.name });
   }

@@ -47,14 +47,17 @@ const filler = new Set([
 export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, now = new Date()): NaturalSearchPlan {
   const tokens = query
     .matchAll(wordPattern)
-    .map((match) => ({
+    .map((match, position) => ({
       text: match[0],
       normalized: normalize(match[0]),
+      start: match.index,
+      end: match.index + match[0].length,
+      position,
     }))
     .toArray();
   const used = new Set<number>();
   const filter: SearchFilter = {};
-  const positive: { id: string; start: number }[] = [];
+  const positive: { id: string; start: number; end: number }[] = [];
   const negative: string[] = [];
   const aliases = new Map<string, Set<string>>();
   const addAlias = (name: string, id: string) => {
@@ -78,6 +81,7 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
   const consume = (start: number, length: number) => {
     for (let offset = 0; offset < length; offset++) used.add(start + offset);
   };
+  const places = [...vocabulary.cities, ...vocabulary.countries].map((value) => words(value));
   for (const [alias, ids] of [...aliases].sort(([a], [b]) => b.length - a.length)) {
     if (ids.size !== 1) continue; // Ambiguous first names must not silently pick a person.
     const parts = alias.split(' ');
@@ -85,6 +89,11 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
       if (!matches(index, parts)) continue;
       const previous = tokens[index - 1]?.normalized;
       const next = tokens[index + 1]?.normalized;
+      if (
+        ['in', 'at', 'from', 'near', 'around', 'outside'].includes(previous) &&
+        places.some((place) => matches(index, place))
+      )
+        continue;
       if (
         alias === 'me' &&
         ['show', 'find', 'give'].includes(previous) &&
@@ -100,16 +109,17 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
       if (excluded) {
         negative.push(id);
         consume(index - (previous === 'with' ? 2 : 1), previous === 'with' ? 2 : 1);
-      } else positive.push({ id, start: index });
+      } else positive.push({ id, start: index, end: index + parts.length });
       consume(index, parts.length);
     }
   }
   if (positive.length > 0 || negative.length > 0) {
     positive.sort((a, b) => a.start - b.start);
-    const starts = positive.map((person) => person.start);
-    const disjunction = tokens.some(
-      (token, index) => token.normalized === 'or' && index > Math.min(...starts) && index < Math.max(...starts),
+    const orConnections = positive.map(
+      (person, index) =>
+        index > 0 && person.start === positive[index - 1].end + 1 && tokens[person.start - 1].normalized === 'or',
     );
+    const disjunction = orConnections.some(Boolean);
     filter.personIds = {
       ...(positive.length > 0 && { [disjunction ? 'any' : 'all']: [...new Set(positive.map((person) => person.id))] }),
       ...(negative.length > 0 && { none: [...new Set(negative)] }),
@@ -117,11 +127,7 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
     if (disjunction && positive.length > 2) {
       const groups: string[][] = [[]];
       for (const [index, person] of positive.entries()) {
-        if (
-          index > 0 &&
-          tokens.slice(positive[index - 1].start, person.start).some((token) => token.normalized === 'or')
-        )
-          groups.push([]);
+        if (orConnections[index]) groups.push([]);
         groups.at(-1)!.push(person.id);
       }
       if (groups.some((group) => group.length > 1)) {
@@ -168,6 +174,7 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
     if (used.has(index)) continue;
     const token = tokens[index].normalized;
     const previous = tokens[index - 1]?.normalized;
+    if (previous === 'not' || tokens[index - 2]?.normalized === 'not') continue;
     let year: number | undefined;
     if (['this', 'last'].includes(token) && tokens[index + 1]?.normalized === 'year') {
       year = now.getUTCFullYear() - (token === 'last' ? 1 : 0);
@@ -179,13 +186,31 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
     if (year === undefined) continue;
     const start = new Date(Date.UTC(year, 0, 1));
     const end = new Date(Date.UTC(year + 1, 0, 1));
-    filter.takenAt =
-      previous === 'before' ? { lt: start } : previous === 'after' ? { gte: end } : { gte: start, lt: end };
+    const lower = previous === 'before' ? undefined : previous === 'after' ? end : start;
+    const upper = previous === 'after' ? undefined : previous === 'before' ? start : end;
+    filter.takenAt = {
+      ...filter.takenAt,
+      ...(lower && { gte: filter.takenAt?.gte && filter.takenAt.gte > lower ? filter.takenAt.gte : lower }),
+      ...(upper && { lt: filter.takenAt?.lt && filter.takenAt.lt < upper ? filter.takenAt.lt : upper }),
+    };
     if (['before', 'after'].includes(previous)) consume(index - 1, 1);
   }
   if (Object.keys(filter).length === 0) return { query };
   const remaining = tokens.filter((_, index) => !used.has(index));
   while (remaining.length > 0 && filler.has(remaining[0].normalized)) remaining.shift();
   while (remaining.length > 0 && filler.has(remaining.at(-1)!.normalized)) remaining.pop();
-  return { query: remaining.map((token) => token.text).join(' '), filter };
+  if (remaining.length === 0) return { query: '', filter };
+  const first = remaining[0];
+  const last = remaining.at(-1)!;
+  const prefix = query.slice(tokens[first.position - 1]?.end ?? 0, first.start).match(/\S+$/u)?.[0] ?? '';
+  const suffix = query.slice(last.end, tokens[last.position + 1]?.start ?? query.length).match(/^\S*/u)?.[0] ?? '';
+  const description = remaining
+    .map((token, index) => {
+      const previous = remaining[index - 1];
+      return previous?.position === token.position - 1
+        ? query.slice(previous.end, token.end)
+        : `${index === 0 ? prefix : ' '}${token.text}`;
+    })
+    .join('');
+  return { query: description + suffix, filter };
 }

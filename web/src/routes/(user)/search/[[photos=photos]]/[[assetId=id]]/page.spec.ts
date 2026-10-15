@@ -1,3 +1,5 @@
+import { featureFlagsManager } from '#lib/managers/feature-flags-manager.svelte.ts';
+import { page } from 'vitest/browser';
 import { searchManager } from '#lib/managers/search-manager.svelte.ts';
 import { Route } from '#lib/route.ts';
 import { factory } from '#test/unit/factories.ts';
@@ -43,4 +45,21 @@ test('untagged replaces the tags and toggling it off restores none', async ({ ro
 
   await app.search.tags.untaggedButton().click();
   expect([...(searchManager.filter.tagIds ?? [])]).toEqual([]);
+});
+
+
+test.for([undefined, false])('preserves verification while refining a query (%s)', async (verify, { data, router, render, settle }) => {
+  data.serverFeatures.searchVerification = true;
+  data.userConfig.machineLearning.clip.enabled = true;
+  await featureFlagsManager.init();
+  await router.goto(Route.search({ query: 'a red hat', ...(verify !== undefined && { verify }) }));
+  await render(Page, load);
+  await settle();
+  await page.getByRole('button', { name: 'search_verify_matches' }).click();
+  const selected = verify === false;
+  expect(JSON.parse(router.url.searchParams.get('query')!)).toMatchObject({ verify: selected });
+  searchManager.filter.query = 'a Binance hat';
+  searchManager.filter.location.city = 'Amsterdam';
+  await searchManager.submit();
+  expect(JSON.parse(router.url.searchParams.get('query')!)).toMatchObject({ query: 'a Binance hat', city: 'Amsterdam', verify: selected });
 });
