@@ -29250,7 +29250,7 @@
             "x-immich-state": "Deprecated"
           },
           "verify": {
-            "description": "Verify visual matches locally; checks at most 20 candidates per page",
+            "description": "Verify visual matches locally; checks at most 10 candidates per page",
             "type": "boolean"
           },
           "visibility": {

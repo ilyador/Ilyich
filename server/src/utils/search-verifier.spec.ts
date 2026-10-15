@@ -50,6 +50,8 @@ describe(SearchVerifier.name, () => {
     expect(body.think).toBe(false);
     expect(body.messages[1].content).toContain('a dog running');
     expect(body.messages[1].images).toHaveLength(1);
+    const prepared = await sharp(Buffer.from(body.messages[1].images[0], 'base64')).metadata();
+    expect([prepared.width, prepared.height]).toEqual([768, 768]);
     expect(request.signal).toBeInstanceOf(AbortSignal);
   });
   it('accepts complete JSON when the Ollama renderer labels it as thinking', async () => {
