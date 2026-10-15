@@ -90,6 +90,46 @@ describe(SearchService.name, () => {
     }
   });
   describe('natural-language search', () => {
+    it.each([false, true])('resolves archived-only places without changing suggestions (v3=%s)', async (v3) => {
+      const { sut, ctx } = setup();
+      const { user } = await ctx.newUser();
+      const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Maya', isHidden: false });
+      let archivedId = '';
+      for (const visibility of [
+        AssetVisibility.Timeline,
+        AssetVisibility.Archive,
+        AssetVisibility.Hidden,
+        AssetVisibility.Locked,
+      ]) {
+        const { asset } = await ctx.newAsset({ ownerId: user.id, visibility });
+        await ctx.newExif({ assetId: asset.id, city: `${visibility} City`, country: `${visibility} Country` });
+        await ctx.newAssetFace({ assetId: asset.id, personGroupId: person.personGroupId });
+        if (visibility === AssetVisibility.Archive) archivedId = asset.id;
+      }
+
+      const repository = ctx.get(SearchRepository);
+      expect(await repository.getCities([user.id], {})).toEqual(['timeline City']);
+      expect(await repository.getCountries([user.id])).toEqual(['timeline Country']);
+      expect(await repository.getCities([user.id], { includeArchived: true })).toEqual([
+        'archive City',
+        'timeline City',
+      ]);
+      expect(await repository.getCountries([user.id], { includeArchived: true })).toEqual([
+        'archive Country',
+        'timeline Country',
+      ]);
+
+      const response = await sut.searchSmart(factory.auth({ user: { id: user.id } }), {
+        query: 'Maya in archive City in archive Country',
+        size: 100,
+        ...(v3 && { filter: {} }),
+      });
+
+      expect(response.assets.items.map(({ id }) => id)).toEqual([archivedId]);
+      expect(ctx.getMock(MachineLearningRepository).encodeText).not.toHaveBeenCalled();
+      expect(ctx.getMock(MachineLearningRepository).verifySearchCandidate).not.toHaveBeenCalled();
+    });
+
     it.each([false, true])(
       'intersects people and city without weakening visibility or ownership (v3=%s)',
       async (v3) => {
@@ -536,7 +576,8 @@ describe(SearchService.name, () => {
       const assetIds: string[] = [];
       for (let i = 0; i < 3; i++) {
         const { asset } = await ctx.newAsset({ ownerId: user.id });
-        await searchRepository.upsert(asset.id, unitVector(i));
+        const current = await ctx.get(AssetJobRepository).getForClipEncoding(asset.id);
+        await searchRepository.upsert(asset.id, unitVector(i), current!.mediaRevision);
         assetIds.push(asset.id);
       }
 

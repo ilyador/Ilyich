@@ -81,7 +81,7 @@ describe(JobService.name, () => {
     });
 
     it.each([JobStatus.Success, JobStatus.Skipped, JobStatus.Failed])(
-      'does not reanalyse or upload-notify a %s sidecar preview',
+      'refreshes search only for a successfully published sidecar preview (%s)',
       async (status) => {
         mocks.job.run.mockResolvedValue(status);
 
@@ -92,6 +92,39 @@ describe(JobService.name, () => {
 
         expect(mocks.job.queueAll).not.toHaveBeenCalled();
         expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+        if (status === JobStatus.Success) {
+          expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
+            name: JobName.SmartSearch,
+            data: { id: 'asset-1', source: 'sidecar' },
+          });
+        } else {
+          expect(mocks.job.queue).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each([JobStatus.Success, JobStatus.Skipped, JobStatus.Failed])(
+      'refreshes search only for a successfully published native edit (%s)',
+      async (status) => {
+        const asset = AssetFactory.create();
+        mocks.job.run.mockResolvedValue(status);
+        mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+        mocks.assetEdit.getWithSyncInfo.mockResolvedValue([]);
+
+        await sut.onJobRun(QueueName.Editor, {
+          name: JobName.AssetEditThumbnailGeneration,
+          data: { id: asset.id, source: 'edit' },
+        });
+
+        expect(mocks.job.queueAll).not.toHaveBeenCalled();
+        if (status === JobStatus.Success) {
+          expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
+            name: JobName.SmartSearch,
+            data: { id: asset.id, source: 'edit' },
+          });
+        } else {
+          expect(mocks.job.queue).not.toHaveBeenCalled();
+        }
       },
     );
 
@@ -118,6 +151,7 @@ describe(JobService.name, () => {
 
       expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
       expect(mocks.asset.getById).not.toHaveBeenCalled();
+      expect(mocks.job.queue).not.toHaveBeenCalled();
 
       await sut.onJobRun(QueueName.Editor, job);
 
@@ -125,6 +159,7 @@ describe(JobService.name, () => {
         asset: expect.objectContaining({ id: asset.id, mediaRevision: asset.mediaRevision }),
         edit: [],
       });
+      expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({ name: JobName.SmartSearch, data: job.data });
     });
 
     it('should include the published media revision and development marker in edit-ready updates', async () => {
@@ -193,22 +228,22 @@ describe(JobService.name, () => {
       },
       {
         item: { name: JobName.AssetGenerateThumbnails, data: { id: 'asset-1' } },
-        jobs: [],
+        jobs: [JobName.SmartSearch],
         stub: [AssetFactory.create({ id: 'asset-1' })],
       },
       {
         item: { name: JobName.AssetGenerateThumbnails, data: { id: 'asset-1', source: 'sidecar' } },
-        jobs: [],
+        jobs: [JobName.SmartSearch],
         stub: [AssetFactory.create({ id: 'asset-1' })],
       },
       {
         item: { name: JobName.AssetGenerateThumbnails, data: { id: 'asset-1', source: 'sidecar-write' } },
-        jobs: [],
+        jobs: [JobName.SmartSearch],
         stub: [AssetFactory.create({ id: 'asset-1' })],
       },
       {
         item: { name: JobName.AssetGenerateThumbnails, data: { id: 'asset-1' } },
-        jobs: [],
+        jobs: [JobName.SmartSearch],
         stub: [AssetFactory.create({ id: 'asset-1', type: AssetType.Video })],
       },
       {
@@ -220,6 +255,11 @@ describe(JobService.name, () => {
         item: { name: JobName.AssetGenerateThumbnails, data: { id: 'asset-1', source: 'upload' } },
         jobs: [JobName.SmartSearch, JobName.AssetDetectFaces, JobName.Ocr, JobName.AssetEncodeVideo],
         stub: [AssetFactory.create({ id: 'asset-1', type: AssetType.Video })],
+      },
+      {
+        item: { name: JobName.AssetGenerateThumbnails, data: { id: 'asset-1', notify: true } },
+        jobs: [JobName.SmartSearch, JobName.AssetDetectFaces, JobName.Ocr],
+        stub: [AssetFactory.create({ id: 'asset-1' })],
       },
       {
         item: { name: JobName.SmartSearch, data: { id: 'asset-1' } },
@@ -247,6 +287,7 @@ describe(JobService.name, () => {
         await sut.onJobRun(QueueName.BackgroundTask, item);
 
         if (jobs.length > 1) {
+          expect(mocks.job.queue).not.toHaveBeenCalled();
           expect(mocks.job.queueAll).toHaveBeenCalledWith(
             jobs.map((jobName) => ({ name: jobName, data: expect.anything() })),
           );
@@ -264,6 +305,7 @@ describe(JobService.name, () => {
         await sut.onJobRun(QueueName.BackgroundTask, item);
 
         expect(mocks.job.queueAll).not.toHaveBeenCalled();
+        expect(mocks.job.queue).not.toHaveBeenCalled();
       });
     }
   });

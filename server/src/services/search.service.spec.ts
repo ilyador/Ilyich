@@ -420,23 +420,67 @@ describe(SearchService.name, () => {
       },
     );
 
-    it.each([false, true])('bounds a rejected-only search to three batches (v3=%s)', async (v3) => {
-      const item = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+    it.each([false, true])(
+      'falls back after three rejected-only batches without ending pagination (v3=%s)',
+      async (v3) => {
+        const item = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+        mocks.config.getEnv.mockReturnValue(
+          mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }),
+        );
+        const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
+        repository.mockResolvedValue({ hasNextPage: true, items: [item] });
+        mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
+        mocks.machineLearning.verifySearchCandidate.mockResolvedValue(false);
+        const result = await sut.searchSmart(authStub.user1, {
+          query: 'a red hat',
+          size: 1,
+          ...(v3 && { filter: {} }),
+        });
+        expect(result.assets.items.map(({ id }) => id)).toEqual([item.id]);
+        expect(result.verification).toEqual({ status: 'unavailable', checked: 0, rejected: 0 });
+        expect(repository).toHaveBeenCalledTimes(3);
+        if (v3) expect(decodeSearchCursor(result.assets.nextCursor ?? undefined).offset).toBe(1);
+        else expect(result.assets.nextPage).toBe('2');
+      },
+    );
+
+    it.each([false, true])('can reach a match beyond three rejected-only batches (v3=%s)', async (v3) => {
+      const items = Array.from({ length: 4 }, () => ({
+        ...AssetFactory.create(),
+        isDeveloped: false,
+        exifInfo: undefined,
+        faces: undefined,
+      }));
       mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
-      const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
-      repository.mockResolvedValue({ hasNextPage: true, items: [item] });
-      mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
-      mocks.machineLearning.verifySearchCandidate.mockResolvedValue(false);
-      const result = await sut.searchSmart(authStub.user1, {
-        query: 'a red hat',
-        size: 1,
-        ...(v3 && { filter: {} }),
+      if (v3) {
+        mocks.search.searchSmartV3.mockImplementation(({ skip = 0 }) =>
+          Promise.resolve({ hasNextPage: skip < 3, items: [items[skip]] }),
+        );
+      } else {
+        mocks.search.searchSmart.mockImplementation(({ page }) =>
+          Promise.resolve({ hasNextPage: page < 4, items: [items[page - 1]] }),
+        );
+      }
+      mocks.assetJob.getForClipEncoding.mockImplementation((id) =>
+        Promise.resolve({ files: [{ path: `/preview/${id}.jpg` }] } as never),
+      );
+      mocks.machineLearning.verifySearchCandidate.mockImplementation((path) =>
+        Promise.resolve(path === `/preview/${items[3].id}.jpg`),
+      );
+      const query = { query: 'a red hat', size: 1, ...(v3 && { filter: {} }) };
+      const first = await sut.searchSmart(authStub.user1, query);
+      expect(first.assets.items).toHaveLength(1);
+      expect(first.verification?.status).toBe('unavailable');
+
+      const next = await sut.searchSmart(authStub.user1, {
+        ...query,
+        ...(v3 ? { cursor: first.assets.nextCursor! } : { page: Number(first.assets.nextPage) }),
       });
-      expect(result.assets.items).toEqual([]);
-      expect(result.verification).toEqual({ status: 'complete', checked: 3, rejected: 3 });
-      expect(repository).toHaveBeenCalledTimes(3);
-      if (v3) expect(decodeSearchCursor(result.assets.nextCursor ?? undefined).offset).toBe(3);
-      else expect(result.assets.nextPage).toBe('4');
+
+      expect(next.assets.items.map(({ id }) => id)).toEqual([items[3].id]);
+      expect(next.verification).toEqual({ status: 'complete', checked: 3, rejected: 2 });
+      expect(next.assets.nextPage).toBeNull();
+      expect(next.assets.nextCursor).toBeNull();
     });
 
     it('cancels continuation and releases the inference slot', async () => {
