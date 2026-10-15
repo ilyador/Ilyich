@@ -13,14 +13,19 @@ export interface NaturalSearchPlan {
 }
 
 const normalize = (value: string) => value.normalize('NFKD').replaceAll(/\p{M}/gu, '').toLowerCase();
-const words = (value: string) => normalize(value).match(/[\p{L}\p{N}]+/gu) ?? [];
+const wordPattern = /[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu;
+const words = (value: string) => normalize(value).match(wordPattern) ?? [];
 const filler = new Set([
   'a',
   'an',
+  'all',
+  'some',
   'and',
   'or',
   'in',
   'at',
+  'near',
+  'around',
   'from',
   'of',
   'with',
@@ -32,6 +37,7 @@ const filler = new Set([
   'images',
   'show',
   'find',
+  'give',
   'please',
   'taken',
   'year',
@@ -40,7 +46,7 @@ const filler = new Set([
 /** Resolve only entities present in this user's library; never invent a face or location. */
 export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, now = new Date()): NaturalSearchPlan {
   const tokens = query
-    .matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu)
+    .matchAll(wordPattern)
     .map((match) => ({
       text: match[0],
       normalized: normalize(match[0]),
@@ -82,7 +88,7 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
       if (
         alias === 'me' &&
         ['show', 'find', 'give'].includes(previous) &&
-        (['photos', 'pictures', 'images', 'a', 'an', 'the', 'some'].includes(next) || aliases.has(next))
+        (['photos', 'pictures', 'images', 'a', 'an', 'the', 'some', 'all'].includes(next) || aliases.has(next))
       ) {
         consume(index, 1); // "show me Maya" does not mean both people.
         continue;
@@ -139,15 +145,15 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
         const previous = tokens[index - 1]?.normalized;
         // Location names can also be ordinary words (Reading, Bath, Orange).
         if (
-          !['in', 'at', 'from', 'near', 'around', 'or'].includes(previous) &&
+          !['in', 'at', 'from', 'near', 'around', 'outside', 'or'].includes(previous) &&
           tokens.some(
             (token, i) => !used.has(i) && (i < index || i >= index + parts.length) && !filler.has(token.normalized),
           )
         )
           continue;
-        if (['not', 'outside'].includes(tokens[index - 2]?.normalized)) {
+        if (previous === 'outside' || tokens[index - 2]?.normalized === 'not') {
           excluded.add(value);
-          consume(index - 2, 1);
+          consume(index - (previous === 'outside' ? 1 : 2), 1);
         } else found.add(value);
         consume(index, parts.length);
       }

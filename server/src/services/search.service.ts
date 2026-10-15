@@ -330,7 +330,7 @@ export class SearchService extends BaseService {
     if (!dto.query || auth.sharedLink) return { query: dto.query ?? '' };
     const userIds = await this.getUserIdsToSearch(auth, dto.visibility);
     const [people, cities, countries] = await Promise.all([
-      this.personRepository.getDistinctNames(auth.user.id, { withHidden: false }),
+      this.personRepository.getNames(auth.user.id, { withHidden: false }),
       this.searchRepository.getCities(userIds, {}),
       this.searchRepository.getCountries(userIds),
     ]);

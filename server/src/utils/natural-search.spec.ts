@@ -36,6 +36,10 @@ describe(planNaturalSearch.name, () => {
   it('does not confuse an indirect object with a face constraint', () => {
     expect(plan('show me photos of Maya in Amsterdam').filter?.personIds).toEqual({ all: ['maya'] });
     expect(plan('show me in Amsterdam').filter?.personIds).toEqual({ all: ['self'] });
+    expect(plan('show me all photos of Maya in Amsterdam')).toEqual({
+      query: '',
+      filter: { personIds: { all: ['maya'] }, city: { in: ['Amsterdam'] } },
+    });
   });
   it('preserves conjunction groups inside a disjunction', () => {
     expect(plan('me and Maya or Hye Joo in Amsterdam').filter?.or).toEqual([
@@ -60,6 +64,22 @@ describe(planNaturalSearch.name, () => {
     expect(plan('some Mayan temples')).toEqual({ query: 'some Mayan temples' });
     expect(plan('Anna swimming')).toEqual({ query: 'Anna swimming' });
     expect(plan('Anna Smith swimming').filter?.personIds).toEqual({ all: ['anna1'] });
+  });
+  it('does not choose arbitrarily between people with the same full name', () => {
+    expect(
+      planNaturalSearch('Maya swimming', {
+        ...vocabulary,
+        people: [...vocabulary.people, { name: 'Maya', personGroupId: 'another-maya' }],
+      }),
+    ).toEqual({ query: 'Maya swimming' });
+  });
+  it('handles hyphenated names using the same word boundaries as the query', () => {
+    expect(
+      planNaturalSearch('Maya-Jane swimming', {
+        ...vocabulary,
+        people: [{ name: 'Maya-Jane', personGroupId: 'maya-jane' }],
+      }),
+    ).toEqual({ query: 'swimming', filter: { personIds: { all: ['maya-jane'] } } });
   });
   it('handles multiword names and accented places', () => {
     expect(plan('Hye Joo in Sao Paulo')).toEqual({
