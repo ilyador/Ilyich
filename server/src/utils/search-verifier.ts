@@ -27,7 +27,9 @@ export class SearchVerifier {
 
     const image = await sharp(path)
       .rotate()
-      .resize(768, 768, { fit: 'inside', withoutEnlargement: true })
+      // A fixed canvas reuses the GPU graph across portrait, landscape and video
+      // frames. Contain preserves the whole image and its aspect ratio.
+      .resize(768, 768, { fit: 'contain', background: '#000000' })
       .jpeg({ quality: 90 })
       .toBuffer();
     const response = await fetch(new URL('/api/chat', options.url), {

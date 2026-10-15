@@ -32,6 +32,8 @@ import { NaturalSearchPlan, planNaturalSearch } from 'src/utils/natural-search.j
 import { decodeSearchCursor, encodeSearchCursor } from 'src/utils/search-cursor.js';
 import { applyLockedVisibilityPolicy, collectFilterIds } from 'src/utils/search-filter.js';
 
+const verificationPageSize = 10;
+
 @Injectable()
 export class SearchService extends BaseService {
   private embeddingCache = new LRUMap<string, string>(100);
@@ -184,7 +186,7 @@ export class SearchService extends BaseService {
 
     const userIds = this.getUserIdsToSearch(auth, dto.visibility);
     const page = dto.page ?? 1;
-    const size = dto.verify ? Math.min(dto.size, 20) : dto.size;
+    const size = dto.verify && plan.query ? Math.min(dto.size, verificationPageSize) : dto.size;
     const resolvedUserIds = await userIds;
     if (plan.filter && !plan.query) {
       const { hasNextPage, items } = await this.searchRepository.searchMetadata(
@@ -323,7 +325,7 @@ export class SearchService extends BaseService {
 
     const { filter, scope } = await this.resolveSearchScopeV3(auth, dto);
     const { offset } = decodeSearchCursor(dto.cursor);
-    const size = dto.verify ? Math.min(dto.size, 20) : dto.size;
+    const size = dto.verify && plan.query ? Math.min(dto.size, verificationPageSize) : dto.size;
     if (plan.filter && !plan.query) {
       const { items, hasNextPage } = await this.searchRepository.searchMetadataV3(
         { take: size, skip: offset },

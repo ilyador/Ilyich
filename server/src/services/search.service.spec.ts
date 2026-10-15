@@ -339,10 +339,10 @@ describe(SearchService.name, () => {
       );
       if (v3) {
         expect(result.assets.nextCursor).toBeTruthy();
-        expect(mocks.search.searchSmartV3.mock.calls[0][0]).toEqual({ take: 20, skip: 0 });
+        expect(mocks.search.searchSmartV3.mock.calls[0][0]).toEqual({ take: 10, skip: 0 });
       } else {
         expect(result.assets.nextPage).toBe('2');
-        expect(mocks.search.searchSmart.mock.calls[0][0]).toEqual({ page: 1, size: 20 });
+        expect(mocks.search.searchSmart.mock.calls[0][0]).toEqual({ page: 1, size: 10 });
       }
     });
 
