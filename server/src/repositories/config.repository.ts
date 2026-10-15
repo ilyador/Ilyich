@@ -30,6 +30,7 @@ export interface EnvData {
   port: number;
   environment: ImmichEnvironment;
   configFile?: string;
+  searchVerification?: { url: string; model: string };
   logLevel?: LogLevel;
   logFormat?: LogFormat;
 
@@ -258,6 +259,9 @@ const getEnv = (): EnvData => {
     port: dto.IMMICH_PORT || 2283,
     environment,
     configFile: dto.IMMICH_CONFIG_FILE,
+    searchVerification: dto.IMMICH_SEARCH_VERIFY_URL
+      ? { url: dto.IMMICH_SEARCH_VERIFY_URL, model: dto.IMMICH_SEARCH_VERIFY_MODEL ?? 'qwen3-vl:4b' }
+      : undefined,
     logLevel: dto.IMMICH_LOG_LEVEL,
     logFormat: dto.IMMICH_LOG_FORMAT || LogFormat.Console,
 

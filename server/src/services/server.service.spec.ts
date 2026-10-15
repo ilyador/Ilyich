@@ -145,6 +145,7 @@ describe(ServerService.name, () => {
         ocr: true,
         passwordLogin: true,
         search: true,
+        searchVerification: false,
         sidecar: true,
         configFile: false,
         trash: true,

@@ -1,11 +1,13 @@
 import { Kysely } from 'kysely';
 import { SearchSuggestionType } from 'src/dtos/search.dto.js';
-import { AlbumUserRole, AssetOrder, AssetVisibility, SearchOrderField } from 'src/enum.js';
+import { AlbumUserRole, AssetFileType, AssetOrder, AssetVisibility, SearchOrderField } from 'src/enum.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
+import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import { MachineLearningRepository } from 'src/repositories/machine-learning.repository.js';
 import { PartnerRepository } from 'src/repositories/partner.repository.js';
 import { PersonRepository } from 'src/repositories/person.repository.js';
 import { SearchRepository } from 'src/repositories/search.repository.js';
@@ -26,6 +28,7 @@ const setup = (db?: Kysely<DB>) => {
     real: [
       AccessRepository,
       AssetRepository,
+      AssetJobRepository,
       DatabaseRepository,
       SearchRepository,
       PartnerRepository,
@@ -33,7 +36,7 @@ const setup = (db?: Kysely<DB>) => {
       ConfigRepository,
       SystemMetadataRepository,
     ],
-    mock: [LoggingRepository],
+    mock: [LoggingRepository, MachineLearningRepository],
   });
 };
 
@@ -42,6 +45,51 @@ beforeAll(async () => {
 });
 
 describe(SearchService.name, () => {
+  it.each([false, true])('applies face/place/access constraints before visual verification (v3=%s)', async (v3) => {
+    const { sut, ctx } = setup();
+    const { user } = await ctx.newUser();
+    const { user: stranger } = await ctx.newUser();
+    const { person } = await ctx.newPerson({ ownerId: user.id, name: 'Maya', isHidden: false });
+    const makeAsset = async (ownerId: string, visibility = AssetVisibility.Timeline) => {
+      const { asset } = await ctx.newAsset({ ownerId, visibility });
+      await ctx.newExif({ assetId: asset.id, country: 'Portugal' });
+      await ctx.newAssetFace({ assetId: asset.id, personGroupId: person.personGroupId });
+      await ctx.newAssetFile({ assetId: asset.id, type: AssetFileType.Preview, path: `/preview/${asset.id}.jpg` });
+      await ctx.database
+        .insertInto('smart_search')
+        .values({ assetId: asset.id, embedding: unitVector(0) })
+        .execute();
+      return asset;
+    };
+    const match = await makeAsset(user.id);
+    const nearMiss = await makeAsset(user.id);
+    await makeAsset(stranger.id);
+    await makeAsset(user.id, AssetVisibility.Locked);
+    const config = ctx.get(ConfigRepository);
+    const env = config.getEnv();
+    const spy = vi
+      .spyOn(config, 'getEnv')
+      .mockReturnValue({ ...env, searchVerification: { url: 'http://ollama', model: 'test' } });
+    const ml = ctx.getMock(MachineLearningRepository);
+    ml.encodeText.mockResolvedValue(unitVector(0));
+    ml.verifySearchCandidate.mockImplementation((path) => Promise.resolve(path === `/preview/${match.id}.jpg`));
+    try {
+      const result = await sut.searchSmart(factory.auth({ user: { id: user.id } }), {
+        query: 'Maya holding a phone in Portugal',
+        verify: true,
+        size: 100,
+        ...(v3 && { filter: {} }),
+      });
+      expect(result.assets.items.map((asset) => asset.id)).toEqual([match.id]);
+      expect(result.verification).toEqual({ status: 'complete', checked: 2, rejected: 1 });
+      expect(new Set(ml.verifySearchCandidate.mock.calls.map(([path]) => path))).toEqual(
+        new Set([`/preview/${match.id}.jpg`, `/preview/${nearMiss.id}.jpg`]),
+      );
+      expect(ml.encodeText).toHaveBeenCalledWith('holding a phone', expect.anything());
+    } finally {
+      spy.mockRestore();
+    }
+  });
   describe('natural-language search', () => {
     it.each([false, true])(
       'intersects people and city without weakening visibility or ownership (v3=%s)',

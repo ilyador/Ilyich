@@ -8,6 +8,7 @@ import { AssetFactory } from 'test/factories/asset.factory.js';
 import { AuthFactory } from 'test/factories/auth.factory.js';
 import { authStub } from 'test/fixtures/auth.stub.js';
 import { getForAsset } from 'test/mappers.js';
+import { mockEnvData } from 'test/repositories/config.repository.mock.js';
 import { newUuid } from 'test/small.factory.js';
 import { ServiceMocks, newTestService } from 'test/utils.js';
 
@@ -247,7 +248,7 @@ describe(SearchService.name, () => {
       mocks.machineLearning.encodeText.mockResolvedValue('[1, 2, 3]');
       await sut.searchSmart(auth, { size: 100, filter: {}, query: 'test' });
       expect(mocks.search.searchSmartV3).toHaveBeenCalledWith(
-        { take: 100 },
+        { take: 100, skip: 0 },
         expect.objectContaining({ embedding: '[1, 2, 3]' }),
         expect.objectContaining({ lockedOwnerId: expect.any(String) }),
       );
@@ -302,6 +303,63 @@ describe(SearchService.name, () => {
     beforeEach(() => {
       mocks.search.searchSmart.mockResolvedValue({ hasNextPage: false, items: [] });
       mocks.machineLearning.encodeText.mockResolvedValue('[1, 2, 3]');
+    });
+
+    it.each([false, true])('verifies only authorized candidates and preserves pagination (v3=%s)', async (v3) => {
+      const items = [AssetFactory.create(), AssetFactory.create()].map((asset) => ({
+        ...asset,
+        isDeveloped: false,
+        exifInfo: undefined,
+        faces: undefined,
+      }));
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.search.searchSmart.mockResolvedValue({ hasNextPage: true, items });
+      mocks.search.searchSmartV3.mockResolvedValue({ hasNextPage: true, items });
+      mocks.assetJob.getForClipEncoding.mockImplementation((id) =>
+        Promise.resolve({
+          id,
+          visibility: AssetVisibility.Timeline,
+          files: [{ path: `/preview/${id}.jpg`, isEdited: false }],
+        } as never),
+      );
+      mocks.machineLearning.verifySearchCandidate.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      const result = await sut.searchSmart(authStub.user1, {
+        query: 'a dog running',
+        verify: true,
+        size: 100,
+        ...(v3 && { filter: {} }),
+      });
+      expect(result.assets.items.map((item) => item.id)).toEqual([items[1].id]);
+      expect(result.verification).toEqual({ status: 'complete', checked: 2, rejected: 1 });
+      expect(mocks.assetJob.getForClipEncoding.mock.calls.map(([id]) => id)).toEqual(items.map((item) => item.id));
+      expect(mocks.machineLearning.verifySearchCandidate).toHaveBeenCalledWith(
+        `/preview/${items[0].id}.jpg`,
+        'a dog running',
+        { url: 'http://ollama', model: 'test' },
+      );
+      if (v3) {
+        expect(result.assets.nextCursor).toBeTruthy();
+        expect(mocks.search.searchSmartV3.mock.calls[0][0]).toEqual({ take: 20, skip: 0 });
+      } else {
+        expect(result.assets.nextPage).toBe('2');
+        expect(mocks.search.searchSmart.mock.calls[0][0]).toEqual({ page: 1, size: 20 });
+      }
+    });
+
+    it('returns regular results with an explicit status when inference fails', async () => {
+      const items = [AssetFactory.create()].map((asset) => ({
+        ...asset,
+        isDeveloped: false,
+        exifInfo: undefined,
+        faces: undefined,
+      }));
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.search.searchSmart.mockResolvedValue({ hasNextPage: false, items });
+      mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
+      mocks.machineLearning.verifySearchCandidate.mockRejectedValue(new Error('Timeout'));
+      const result = await sut.searchSmart(authStub.user1, { query: 'a dog running', verify: true, size: 100 });
+      expect(result.assets.items.map((item) => item.id)).toEqual([items[0].id]);
+      expect(result.verification?.status).toBe('unavailable');
     });
 
     it('should raise a BadRequestException if machine learning is disabled', async () => {

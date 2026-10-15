@@ -2526,6 +2526,12 @@ export type SearchAssetResponseDto = {
 export type SearchResponseDto = {
     albums: SearchAlbumResponseDto;
     assets: SearchAssetResponseDto;
+    /** Visual verification status; unavailable means regular search results were returned */
+    verification?: {
+        checked: number;
+        rejected: number;
+        status: Status;
+    };
 };
 export type PlacesResponseDto = {
     /** Administrative level 1 name (state/province) */
@@ -2615,6 +2621,8 @@ export type SmartSearchDto = {
     createdAfter?: string;
     /** Filter by creation date (before) */
     createdBefore?: string;
+    /** Cursor for the next page of results */
+    cursor?: string;
     filter?: SearchFilter;
     /** Filter by encoded status */
     isEncoded?: boolean;
@@ -2667,6 +2675,8 @@ export type SmartSearchDto = {
     updatedAfter?: string;
     /** Filter by update date (before) */
     updatedBefore?: string;
+    /** Verify visual matches locally; checks at most 20 candidates per page */
+    verify?: boolean;
     visibility?: AssetVisibility;
     /** Include deleted assets */
     withDeleted?: boolean;
@@ -2843,6 +2853,8 @@ export type ServerFeaturesDto = {
     reverseGeocoding: boolean;
     /** Whether search is enabled */
     search: boolean;
+    /** Whether local visual search verification is configured */
+    searchVerification?: boolean;
     /** Whether sidecar files are supported */
     sidecar: boolean;
     /** Whether smart search is enabled */
@@ -8514,6 +8526,11 @@ export enum SearchOrderField {
     LocalDateTime = "localDateTime",
     FileSizeInBytes = "fileSizeInBytes",
     Rating = "rating"
+}
+export enum Status {
+    Complete = "complete",
+    Unavailable = "unavailable",
+    NotNeeded = "not-needed"
 }
 export enum SearchSuggestionType {
     Country = "country",

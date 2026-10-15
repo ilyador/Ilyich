@@ -1,5 +1,6 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query, Res } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
 import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
 import { AssetResponseDto } from 'src/dtos/asset-response.dto.js';
@@ -87,8 +88,19 @@ export class SearchController {
     description: 'Perform a smart search for assets by using machine learning vectors to determine relevance.',
     history: new HistoryBuilder().added('v1').beta('v1').stable('v2'),
   })
-  searchSmart(@Auth() auth: AuthDto, @Body() dto: SmartSearchDto): Promise<SearchResponseDto> {
-    return this.service.searchSmart(auth, dto);
+  async searchSmart(
+    @Auth() auth: AuthDto,
+    @Body() dto: SmartSearchDto,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<SearchResponseDto> {
+    const controller = new AbortController();
+    const onClose = () => controller.abort();
+    response.on('close', onClose);
+    try {
+      return await this.service.searchSmart(auth, dto, controller.signal);
+    } finally {
+      response.off('close', onClose);
+    }
   }
 
   @Get('explore')
