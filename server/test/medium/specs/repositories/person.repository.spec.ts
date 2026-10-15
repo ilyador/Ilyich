@@ -60,6 +60,18 @@ beforeAll(async () => {
 });
 
 describe(PersonRepository.name, () => {
+  it('preserves duplicate names for disambiguation while excluding hidden and other users', async () => {
+    const { ctx, sut } = setup();
+    const { user } = await ctx.newUser();
+    const { user: stranger } = await ctx.newUser();
+    const { person: one } = await ctx.newPerson({ ownerId: user.id, name: 'Maya', isHidden: false });
+    const { person: two } = await ctx.newPerson({ ownerId: user.id, name: 'Maya', isHidden: false });
+    await ctx.newPerson({ ownerId: user.id, name: 'Hidden', isHidden: true });
+    await ctx.newPerson({ ownerId: stranger.id, name: 'Maya', isHidden: false });
+    const people = await sut.getNames(user.id, { withHidden: false });
+    expect(people.map((person) => person.personGroupId).sort()).toEqual([one.personGroupId, two.personGroupId].sort());
+    expect(await sut.getDistinctNames(user.id, { withHidden: false })).toHaveLength(1);
+  });
   describe('createAll', () => {
     it('should create people in the groups they were given', async () => {
       const { ctx, sut } = setup();
