@@ -360,6 +360,9 @@
             {$t('search_verify_hint')}
           {/if}
         </span>
+        {#if verification?.status === 'unavailable' && !isLoading}
+          <Button size="small" shape="round" variant="ghost" onclick={onSearchQueryUpdate}>{$t('retry')}</Button>
+        {/if}
       </div>
     {/if}
   </section>
