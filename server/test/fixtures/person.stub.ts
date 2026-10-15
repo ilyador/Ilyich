@@ -4,6 +4,7 @@ import { userStub } from 'test/fixtures/user.stub.js';
 
 export const personThumbnailStub = {
   newThumbnailStart: Object.freeze({
+    isDeveloped: false,
     ownerId: userStub.admin.id,
     x1: 5,
     y1: 5,
@@ -17,6 +18,7 @@ export const personThumbnailStub = {
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
   }),
   newThumbnailMiddle: Object.freeze({
+    isDeveloped: false,
     ownerId: userStub.admin.id,
     x1: 100,
     y1: 100,
@@ -30,6 +32,7 @@ export const personThumbnailStub = {
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
   }),
   newThumbnailEnd: Object.freeze({
+    isDeveloped: false,
     ownerId: userStub.admin.id,
     x1: 300,
     y1: 300,
@@ -43,6 +46,7 @@ export const personThumbnailStub = {
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
   }),
   rawEmbeddedThumbnail: Object.freeze({
+    isDeveloped: false,
     ownerId: userStub.admin.id,
     x1: 100,
     y1: 100,
@@ -56,6 +60,7 @@ export const personThumbnailStub = {
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
   }),
   negativeCoordinate: Object.freeze({
+    isDeveloped: false,
     ownerId: userStub.admin.id,
     x1: -176,
     y1: -230,
@@ -69,6 +74,7 @@ export const personThumbnailStub = {
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
   }),
   overflowingCoordinate: Object.freeze({
+    isDeveloped: false,
     ownerId: userStub.admin.id,
     x1: 2097,
     y1: 0,
@@ -82,6 +88,7 @@ export const personThumbnailStub = {
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
   }),
   videoThumbnail: Object.freeze({
+    isDeveloped: false,
     ownerId: userStub.admin.id,
     x1: 100,
     y1: 100,

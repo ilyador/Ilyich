@@ -29,8 +29,6 @@ struct Header {
     renderer_version: String,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    is_developed: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     width: Option<usize>,
@@ -47,7 +45,7 @@ struct Header {
 
 struct Args {
     original: PathBuf,
-    sidecar: Option<PathBuf>,
+    sidecar: PathBuf,
     size: Option<usize>,
     space: OutputSpace,
     colorspace: String,
@@ -70,8 +68,8 @@ fn arguments() -> Result<Args, String> {
                     .ok_or("Invalid size")?
                     .parse::<usize>()
                     .map_err(|_| "Invalid size")?;
-                if !(1..=8192).contains(&value) {
-                    return Err("Size must be 1..8192 pixels on the short edge".into());
+                if value == 0 {
+                    return Err("Size must be positive".into());
                 }
                 size = Some(value);
             }
@@ -79,7 +77,7 @@ fn arguments() -> Result<Args, String> {
                 colorspace = value.to_str().ok_or("Invalid colorspace")?.to_owned()
             }
             _ => return Err(
-                "Usage: --original PATH [--sidecar PATH] [--size SHORT_EDGE] [--colorspace srgb|p3]"
+                "Usage: --original PATH --sidecar PATH [--size SHORT_EDGE] [--colorspace srgb|p3]"
                     .into(),
             ),
         }
@@ -91,15 +89,36 @@ fn arguments() -> Result<Args, String> {
     };
     Ok(Args {
         original: original.ok_or("Missing --original")?,
-        sidecar,
+        sidecar: sidecar.ok_or("Missing --sidecar")?,
         size,
         space,
         colorspace,
     })
 }
 
-fn write_response(header: &Header, pixels: &[u8]) -> Result<(), String> {
-    let json = serde_json::to_vec(header).map_err(|e| e.to_string())?;
+fn bounded_diagnostics(names: Vec<String>) -> Vec<String> {
+    // Even six-byte JSON escapes leave room for the remaining 64 KiB header.
+    const MAX_NAMES: usize = 64;
+    const MAX_NAME_BYTES: usize = 128;
+    let mut bounded = Vec::new();
+    let mut omitted = false;
+    for name in names {
+        if name.len() > MAX_NAME_BYTES || bounded.len() == MAX_NAMES {
+            omitted = true;
+        } else {
+            bounded.push(name);
+        }
+    }
+    if omitted {
+        bounded.truncate(MAX_NAMES - 1);
+        bounded.push("AdditionalUnsupportedSettingsOmitted".into());
+    }
+    bounded
+}
+
+fn write_response(mut header: Header, pixels: &[u8]) -> Result<(), String> {
+    header.unmapped = bounded_diagnostics(header.unmapped);
+    let json = serde_json::to_vec(&header).map_err(|e| e.to_string())?;
     if json.len() > 64 * 1024 {
         return Err("Renderer response header exceeds 64 KiB".into());
     }
@@ -117,26 +136,17 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let args = arguments()?;
-    let packet = if let Some(sidecar) = &args.sidecar {
-        let mut xml = String::new();
-        std::fs::File::open(sidecar)
-            .map_err(|e| format!("Open sidecar: {e}"))?
-            .take(xmp::MAX_XMP_BYTES + 1)
-            .read_to_string(&mut xml)
-            .map_err(|e| format!("Read sidecar: {e}"))?;
-        xmp::parse(&xml)?
-    } else {
-        let bytes = std::fs::read(&args.original).map_err(|e| format!("Read embedded XMP: {e}"))?;
-        match lightcraft_meta::embedded(&bytes).xmp {
-            Some(xml) => xmp::parse(&xml)?,
-            None => Default::default(),
-        }
-    };
+    let mut xml = String::new();
+    std::fs::File::open(&args.sidecar)
+        .map_err(|e| format!("Open sidecar: {e}"))?
+        .take(xmp::MAX_XMP_BYTES + 1)
+        .read_to_string(&mut xml)
+        .map_err(|e| format!("Read sidecar: {e}"))?;
+    let packet = xmp::parse(&xml)?;
     let mut header = Header {
         version: 1,
         renderer_version: version(),
         status: "skipped",
-        is_developed: None,
         reason: Some("no-applicable-development"),
         width: None,
         height: None,
@@ -146,46 +156,34 @@ fn run() -> Result<(), String> {
         native_height: None,
         unmapped: vec![],
     };
-    if args.sidecar.is_some() && !xmp::has_applicable(&packet) {
-        header.unmapped = xmp::settings(
-            &packet,
-            lightcraft_engine::crs::Target::Any,
-            1.0,
-            lightcraft_geom::Orientation::Normal,
-        )
-        .1;
-        return write_response(&header, &[]);
-    }
-    if args.sidecar.is_some()
-        && packet.metadata.orientation.is_some()
-        && !xmp::has_development(&packet, decode::orientation(&args.original)?)
-    {
-        return write_response(&header, &[]);
+    match xmp::development(&packet) {
+        xmp::Development::Skipped => {
+            header.unmapped = xmp::settings(
+                &packet,
+                lightcraft_engine::crs::Target::Any,
+                1.0,
+                lightcraft_geom::Orientation::Normal,
+            )
+            .1;
+            return write_response(header, &[]);
+        }
+        xmp::Development::Orientation(orientation)
+            if orientation == decode::orientation(&args.original)? =>
+        {
+            return write_response(header, &[]);
+        }
+        _ => {}
     }
     let source = decode::load(&args.original)?;
-    if args.sidecar.is_none() && !source.info.raw {
-        return Err("Native decoding without a sidecar requires a RAW source".into());
-    }
-    let is_developed = xmp::has_development(&packet, source.orientation);
-    if args.sidecar.is_some() && !is_developed {
-        header.unmapped =
-            xmp::settings(&packet, xmp::target(&source.info), 1.0, source.orientation).1;
-        return write_response(&header, &[]);
-    }
-    let image = if is_developed {
-        render::develop(&source, &packet, args.size, args.space)?
-    } else {
-        render::develop(&source, &Default::default(), args.size, args.space)?
-    };
+    let image = render::develop(&source, &packet, args.size, args.space)?;
     header.status = "developed";
-    header.is_developed = Some(is_developed);
     header.reason = None;
     header.width = Some(image.pixels.width);
     header.height = Some(image.pixels.height);
     header.native_width = Some(image.native_width);
     header.native_height = Some(image.native_height);
     header.unmapped = image.unmapped;
-    write_response(&header, bytemuck::cast_slice(&image.pixels.data))
+    write_response(header, bytemuck::cast_slice(&image.pixels.data))
 }
 
 fn main() {
@@ -199,5 +197,19 @@ fn main() {
             eprintln!("Renderer panicked while processing the source");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn diagnostics_fit_the_header_even_with_maximum_json_escaping() {
+        let names = super::bounded_diagnostics(vec!["\0".repeat(128); 65]);
+        assert_eq!(names.len(), 64);
+        assert_eq!(
+            names.last().unwrap(),
+            "AdditionalUnsupportedSettingsOmitted"
+        );
+        assert!(serde_json::to_vec(&names).unwrap().len() < 63 * 1024);
     }
 }

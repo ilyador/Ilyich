@@ -1,6 +1,7 @@
 import { defaultLang, locales } from '#lib/constants.ts';
 import { authManager } from '#lib/managers/auth-manager.svelte.ts';
 import { alwaysLoadOriginalFile, lang, locale } from '#lib/stores/preferences.store.ts';
+import { isWebCompatibleImage } from '#lib/utils/asset-utils.ts';
 import { handleError } from '#lib/utils/handle-error.ts';
 import { convertBCP47, langs } from '#lib/utils/i18n.ts';
 import {
@@ -227,7 +228,9 @@ const forceUseOriginal = (asset: AssetResponseDto) => {
 
 export const targetImageSize = (asset: AssetResponseDto, forceOriginal: boolean) => {
   if (forceOriginal || get(alwaysLoadOriginalFile) || forceUseOriginal(asset)) {
-    return asset.type === AssetTypeEnum.Video || forceUseOriginal(asset)
+    return asset.type === AssetTypeEnum.Video ||
+      forceUseOriginal(asset) ||
+      (!asset.isDeveloped && isWebCompatibleImage(asset))
       ? AssetMediaSize.Original
       : AssetMediaSize.Fullsize;
   }

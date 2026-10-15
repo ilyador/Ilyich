@@ -137,7 +137,12 @@ export class StorageTemplateService extends BaseService {
 
   @OnEvent({ name: 'AssetMetadataExtracted' })
   async onAssetMetadataExtracted({ source, assetId }: ArgOf<'AssetMetadataExtracted'>) {
-    await this.jobRepository.queue({ name: JobName.StorageTemplateMigrationSingle, data: { source, id: assetId } });
+    // An editor retry has refreshed its sidecar association and metadata. Resume
+    // the editor directly so migration deduplication cannot discard its context.
+    await this.jobRepository.queue({
+      name: source === 'edit' ? JobName.AssetEditThumbnailGeneration : JobName.StorageTemplateMigrationSingle,
+      data: { source, id: assetId },
+    });
   }
 
   @OnJob({ name: JobName.StorageTemplateMigrationSingle, queue: QueueName.StorageTemplateMigration })

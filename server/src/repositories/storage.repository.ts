@@ -163,6 +163,18 @@ export class StorageRepository {
     }
   }
 
+  async checkFileExistsStrict(filepath: string, mode = constants.F_OK): Promise<boolean> {
+    try {
+      await fs.access(filepath, mode);
+      return true;
+    } catch (error) {
+      if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
   async unlink(file: string) {
     try {
       await fs.unlink(file);

@@ -32,11 +32,22 @@ describe('utils', () => {
       }
     });
 
-    it('requests fullsize viewing for static web-compatible photos', () => {
-      const asset = factory.asset({ type: AssetTypeEnum.Image, originalMimeType: 'image/jpeg', duration: null });
+    it.each(['image/jpeg', 'image/png'])(
+      'keeps ordinary %s original viewing and routes developed photos to fullsize caches',
+      (originalMimeType) => {
+        const asset = factory.asset({
+          type: AssetTypeEnum.Image,
+          originalMimeType,
+          duration: null,
+          isDeveloped: false,
+        });
 
-      expect(getAssetUrl({ asset, forceOriginal: true })).toContain('/thumbnail?size=fullsize');
-    });
+        expect(getAssetUrl({ asset, forceOriginal: true })).toContain('/original');
+        expect(getAssetUrl({ asset: { ...asset, isDeveloped: true }, forceOriginal: true })).toContain(
+          '/thumbnail?size=fullsize',
+        );
+      },
+    );
 
 
     it.each([

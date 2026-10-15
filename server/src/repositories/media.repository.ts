@@ -72,14 +72,13 @@ const rendererHeaderSchema = z.discriminatedUnion('status', [
     nativeHeight: z.int().positive(),
     channels: z.literal(4),
     colorspace: z.enum(['srgb', 'p3']),
-    isDeveloped: z.boolean().optional(),
     unmapped: z.array(z.string()),
   }),
 ]);
 
 export interface DevelopImageOptions {
   originalPath: string;
-  sidecarPath?: string;
+  sidecarPath: string;
   colorspace: Colorspace;
   size?: number;
 }
@@ -87,7 +86,6 @@ export interface DevelopImageOptions {
 export interface DevelopedImage extends Bitmap {
   colorspace: Colorspace;
   nativeDimensions: ImageDimensions;
-  isDeveloped: boolean;
 }
 
 type ProgressEvent = {
@@ -183,11 +181,14 @@ export class MediaRepository {
   }
 
   async developImage(options: DevelopImageOptions): Promise<DevelopedImage | null> {
-    const args = ['--original', options.originalPath];
-    if (options.sidecarPath !== undefined) {
-      args.push('--sidecar', options.sidecarPath);
-    }
-    args.push('--colorspace', options.colorspace);
+    const args = [
+      '--original',
+      options.originalPath,
+      '--sidecar',
+      options.sidecarPath,
+      '--colorspace',
+      options.colorspace,
+    ];
     if (options.size !== undefined) {
       args.push('--size', String(options.size));
     }
@@ -266,13 +267,7 @@ export class MediaRepository {
       this.logger.warn(`Sidecar settings not reproduced: ${result.header.unmapped.join(', ')}`);
     }
     if (result.header.status === 'skipped') {
-      if (options.sidecarPath === undefined) {
-        throw new Error('Native RAW renderer did not return a bitmap');
-      }
       return null;
-    }
-    if (options.sidecarPath === undefined && result.header.isDeveloped === undefined) {
-      throw new Error('Native RAW renderer did not report its development state');
     }
     if (result.header.colorspace !== options.colorspace) {
       throw new Error('Sidecar renderer returned the wrong output colorspace');
@@ -282,7 +277,6 @@ export class MediaRepository {
       info: { width: result.header.width, height: result.header.height, channels: 4 },
       colorspace: options.colorspace,
       nativeDimensions: { width: result.header.nativeWidth, height: result.header.nativeHeight },
-      isDeveloped: result.header.isDeveloped ?? true,
     };
   }
 

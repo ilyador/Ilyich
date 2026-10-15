@@ -45,7 +45,24 @@ select
                 "assetId" = "asset"."id"
             ),
             false
-          ) as "isDeveloped"
+          ) as "isDeveloped",
+          coalesce(
+            (
+              select
+                "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+              from
+                "asset_file"
+              where
+                "assetId" = "asset"."id"
+                and "type" = 'preview'
+              order by
+                "isEdited" desc
+              limit
+                1
+            ),
+            encode("asset"."thumbhash", 'base64'),
+            "asset"."id"::text
+          ) as "mediaRevision"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -97,7 +114,24 @@ select
                 "assetId" = "asset"."id"
             ),
             false
-          ) as "isDeveloped"
+          ) as "isDeveloped",
+          coalesce(
+            (
+              select
+                "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+              from
+                "asset_file"
+              where
+                "assetId" = "asset"."id"
+                and "type" = 'preview'
+              order by
+                "isEdited" desc
+              limit
+                1
+            ),
+            encode("asset"."thumbhash", 'base64'),
+            "asset"."id"::text
+          ) as "mediaRevision"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -157,7 +191,24 @@ select
                 "assetId" = "asset"."id"
             ),
             false
-          ) as "isDeveloped"
+          ) as "isDeveloped",
+          coalesce(
+            (
+              select
+                "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+              from
+                "asset_file"
+              where
+                "assetId" = "asset"."id"
+                and "type" = 'preview'
+              order by
+                "isEdited" desc
+              limit
+                1
+            ),
+            encode("asset"."thumbhash", 'base64'),
+            "asset"."id"::text
+          ) as "mediaRevision"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -210,7 +261,24 @@ select
                 "assetId" = "asset"."id"
             ),
             false
-          ) as "isDeveloped"
+          ) as "isDeveloped",
+          coalesce(
+            (
+              select
+                "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+              from
+                "asset_file"
+              where
+                "assetId" = "asset"."id"
+                and "type" = 'preview'
+              order by
+                "isEdited" desc
+              limit
+                1
+            ),
+            encode("asset"."thumbhash", 'base64'),
+            "asset"."id"::text
+          ) as "mediaRevision"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -343,7 +411,24 @@ select
                 "assetId" = "asset"."id"
             ),
             false
-          ) as "isDeveloped"
+          ) as "isDeveloped",
+          coalesce(
+            (
+              select
+                "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+              from
+                "asset_file"
+              where
+                "assetId" = "asset"."id"
+                and "type" = 'preview'
+              order by
+                "isEdited" desc
+              limit
+                1
+            ),
+            encode("asset"."thumbhash", 'base64'),
+            "asset"."id"::text
+          ) as "mediaRevision"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"
@@ -387,7 +472,24 @@ select
                 "assetId" = "asset"."id"
             ),
             false
-          ) as "isDeveloped"
+          ) as "isDeveloped",
+          coalesce(
+            (
+              select
+                "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+              from
+                "asset_file"
+              where
+                "assetId" = "asset"."id"
+                and "type" = 'preview'
+              order by
+                "isEdited" desc
+              limit
+                1
+            ),
+            encode("asset"."thumbhash", 'base64'),
+            "asset"."id"::text
+          ) as "mediaRevision"
         from
           "asset"
           inner join "memory_asset" on "asset"."id" = "memory_asset"."assetId"

@@ -49,11 +49,26 @@ pub fn parse(xml: &str) -> Result<XmpData, String> {
     lightcraft_meta::parse_xmp(xml).map_err(|e| format!("XMP parse: {e}"))
 }
 
-pub fn has_applicable(packet: &XmpData) -> bool {
+#[derive(Debug, PartialEq)]
+pub enum Development {
+    Skipped,
+    Orientation(Orientation),
+    Adjustments,
+}
+
+/// Decide once whether pixel decoding is needed. Only an orientation-only packet
+/// needs a separate source-header probe before decoding.
+pub fn development(packet: &XmpData) -> Development {
     if already_applied(packet) {
-        return false;
+        Development::Skipped
+    } else if has_crs_development(packet) {
+        Development::Adjustments
+    } else {
+        packet
+            .metadata
+            .orientation
+            .map_or(Development::Skipped, Development::Orientation)
     }
-    packet.metadata.orientation.is_some() || has_crs_development(packet)
 }
 
 fn already_applied(packet: &XmpData) -> bool {
@@ -115,15 +130,6 @@ fn has_crs_development(packet: &XmpData) -> bool {
         object.remove("version");
     }
     partial.as_object().is_some_and(|object| !object.is_empty())
-}
-
-pub fn has_development(packet: &XmpData, source_orientation: Orientation) -> bool {
-    !already_applied(packet)
-        && (has_crs_development(packet)
-            || packet
-                .metadata
-                .orientation
-                .is_some_and(|o| o != source_orientation))
 }
 
 pub fn target(info: &lightcraft_engine::pipeline::SourceInfo) -> crs::Target {
@@ -202,6 +208,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn development_only_probes_orientation_when_there_are_no_supported_controls() {
+        for (attrs, expected) in [
+            ("", Development::Skipped),
+            (
+                r#"tiff:Orientation="6""#,
+                Development::Orientation(Orientation::Rotate90),
+            ),
+            (
+                r#"tiff:Orientation="6" crs:Exposure2012="1""#,
+                Development::Adjustments,
+            ),
+            (
+                r#"tiff:Orientation="6" crs:Exposure2012="1" crs:AlreadyApplied="True""#,
+                Development::Skipped,
+            ),
+        ] {
+            let xml = format!(
+                r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:tiff="http://ns.adobe.com/tiff/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" {attrs}/>"#
+            );
+            assert_eq!(development(&parse(&xml).unwrap()), expected, "{attrs}");
+        }
+    }
+
+    #[test]
     fn supported_profile_controls_remain_applicable() {
         for (amount, parameters) in [
             ("1", r#"crs:LookTable="E96CB8AF6484F8402BB0E6ECFC8AD0FC""#),
@@ -214,12 +244,10 @@ mod tests {
                 r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:Look rdf:parseType="Resource" crs:Amount="{amount}"><crs:Parameters rdf:parseType="Resource" {parameters}/></crs:Look></rdf:Description>"#
             );
             let packet = parse(&xml).unwrap();
-            assert!(has_applicable(&packet), "{xml}");
-            assert!(has_development(&packet, Orientation::Normal), "{xml}");
+            assert_eq!(development(&packet), Development::Adjustments, "{xml}");
         }
         let curve = parse(r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:Look rdf:parseType="Resource"><crs:Parameters rdf:parseType="Resource"><crs:ToneCurvePV2012><rdf:Seq><rdf:li>0, 0</rdf:li><rdf:li>128, 180</rdf:li><rdf:li>255, 255</rdf:li></rdf:Seq></crs:ToneCurvePV2012></crs:Parameters></crs:Look></rdf:Description>"#).unwrap();
-        assert!(has_applicable(&curve));
-        assert!(has_development(&curve, Orientation::Normal));
+        assert_eq!(development(&curve), Development::Adjustments);
     }
 
     #[test]
@@ -261,8 +289,7 @@ mod tests {
     fn monochrome_look_is_development_and_preserves_gray_mixer() {
         let xml = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:GrayMixerBlue="-35"><crs:Look><rdf:Description><crs:Parameters><rdf:Description crs:ConvertToGrayscale="True" crs:Exposure2012="3"/></crs:Parameters></rdf:Description></crs:Look></rdf:Description>"#;
         let packet = parse(xml).unwrap();
-        assert!(has_applicable(&packet));
-        assert!(has_development(&packet, Orientation::Normal));
+        assert_eq!(development(&packet), Development::Adjustments);
         let (settings, unmapped) =
             settings(&packet, crs::Target::RawAbsolute, 1.5, Orientation::Normal);
         assert_eq!(
@@ -279,16 +306,14 @@ mod tests {
             "crs:AlreadyApplied=\"True\" crs:GrayMixerBlue=",
         ))
         .unwrap();
-        assert!(!has_applicable(&applied));
-        assert!(!has_development(&applied, Orientation::Normal));
+        assert_eq!(development(&applied), Development::Skipped);
     }
 
     #[test]
     fn monochrome_look_only_packet_renders_color_pixels_in_grayscale() {
         let xml = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:Look><rdf:Description><crs:Parameters><rdf:Description crs:ConvertToGrayscale="True"/></crs:Parameters></rdf:Description></crs:Look></rdf:Description>"#;
         let packet = parse(xml).unwrap();
-        assert!(has_applicable(&packet));
-        assert!(has_development(&packet, Orientation::Normal));
+        assert_eq!(development(&packet), Development::Adjustments);
         let mut pixels = lightcraft_raster::Rgb32f::new(48, 32);
         for (i, pixel) in pixels.data.iter_mut().enumerate() {
             *pixel = [[0.3, 0.04, 0.02], [0.02, 0.3, 0.04], [0.04, 0.02, 0.3]][i % 3];

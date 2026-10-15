@@ -141,49 +141,44 @@ fn raw_fixture(xml: Option<&str>) -> TempDir {
     dir
 }
 
-fn call_raw(dir: &TempDir, extra: &[&str]) -> Output {
+fn call_raw(dir: &TempDir, xml: &str, extra: &[&str]) -> Output {
+    let sidecar = dir.path().join("source.xmp");
+    std::fs::write(&sidecar, xml).unwrap();
     Command::new(env!("CARGO_BIN_EXE_immich-sidecar-renderer"))
         .arg("--original")
         .arg(dir.path().join("source.dng"))
+        .arg("--sidecar")
+        .arg(sidecar)
         .args(extra)
         .output()
         .unwrap()
 }
 
 #[test]
-fn raw_without_external_xmp_decodes_native_pixels_and_reports_the_logical_base() {
-    let dir = raw_fixture(None);
-    let output = call_raw(&dir, &["--size", "16"]);
-    let (header, pixels) = frame(&output);
-    assert_eq!(header["isDeveloped"], false);
-    assert_eq!(
-        (header["width"].as_u64(), header["height"].as_u64()),
-        (Some(24), Some(16))
-    );
-    assert_eq!(
-        (
-            header["nativeWidth"].as_u64(),
-            header["nativeHeight"].as_u64()
-        ),
-        (Some(48), Some(32))
-    );
-    assert!(
-        pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .any(|p| p[0].abs_diff(p[2]) > 10)
-    );
+fn original_without_a_sidecar_is_rejected_before_reading_the_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_immich-sidecar-renderer"))
+        .arg("--original")
+        .arg(dir.path().join("missing.dng"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Missing --sidecar"));
 }
 
 #[test]
-fn embedded_xmp_applies_black_and_white_and_crop_at_native_resolution() {
-    let dir = raw_fixture(Some(&packet(
-        r#"crs:ConvertToGrayscale="True" crs:HasCrop="True" crs:CropLeft="0.25" crs:CropRight="0.75" crs:CropTop="0" crs:CropBottom="1""#,
-    )));
-    let output = call_raw(&dir, &[]);
+fn sidecar_applies_black_and_white_and_crop_to_native_raw_pixels() {
+    let dir = raw_fixture(None);
+    let output = call_raw(
+        &dir,
+        &packet(
+            r#"crs:ConvertToGrayscale="True" crs:HasCrop="True" crs:CropLeft="0.25" crs:CropRight="0.75" crs:CropTop="0" crs:CropBottom="1""#,
+        ),
+        &[],
+    );
     let (header, pixels) = frame(&output);
-    assert_eq!(header["isDeveloped"], true);
+    assert_eq!(header["status"], "developed");
     assert_eq!(
         (
             header["nativeWidth"].as_u64(),
@@ -203,11 +198,9 @@ fn embedded_xmp_applies_black_and_white_and_crop_at_native_resolution() {
 #[test]
 fn external_xmp_takes_precedence_over_embedded_development() {
     let dir = raw_fixture(Some(&packet(r#"crs:ConvertToGrayscale="True""#)));
-    let sidecar = dir.path().join("override.xmp");
-    std::fs::write(&sidecar, packet(r#"crs:ConvertToGrayscale="False""#)).unwrap();
-    let output = call_raw(&dir, &["--sidecar", sidecar.to_str().unwrap()]);
+    let output = call_raw(&dir, &packet(r#"crs:ConvertToGrayscale="False""#), &[]);
     let (header, pixels) = frame(&output);
-    assert_eq!(header["isDeveloped"], true);
+    assert_eq!(header["status"], "developed");
     assert!(
         pixels
             .as_chunks::<4>()
@@ -215,18 +208,6 @@ fn external_xmp_takes_precedence_over_embedded_development() {
             .iter()
             .any(|p| p[0].abs_diff(p[2]) > 10)
     );
-}
-
-#[test]
-fn already_applied_embedded_settings_are_not_applied_again() {
-    let plain = raw_fixture(None);
-    let applied = raw_fixture(Some(&packet(
-        r#"crs:AlreadyApplied="True" crs:Exposure2012="2" crs:ConvertToGrayscale="True""#,
-    )));
-    let plain_output = call_raw(&plain, &[]);
-    let applied_output = call_raw(&applied, &[]);
-    assert_eq!(frame(&applied_output).0["isDeveloped"], false);
-    assert_eq!(frame(&plain_output).1, frame(&applied_output).1);
 }
 
 #[test]
@@ -239,7 +220,7 @@ fn missing_runtime_profile_table_is_reported_and_amount_zero_preserves_monochrom
     };
     let unresolved = call(&dir, &packet("1.2"), &[]);
     let (header, pixels) = frame(&unresolved);
-    assert_eq!(header["isDeveloped"], true);
+    assert_eq!(header["status"], "developed");
     assert!(header["unmapped"].as_array().unwrap().iter().any(|name| {
         name.as_str().is_some_and(|name| {
             name.starts_with("LookTable E96CB8AF6484F8402BB0E6ECFC8AD0FC")
@@ -270,11 +251,10 @@ fn missing_runtime_profile_table_is_reported_and_amount_zero_preserves_monochrom
 }
 
 #[test]
-fn malformed_embedded_xmp_fails_without_publishing_pixels() {
+fn external_sidecar_does_not_read_malformed_embedded_xmp() {
     let dir = raw_fixture(Some("<broken>"));
-    let output = call_raw(&dir, &[]);
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    let output = call_raw(&dir, &packet(r#"crs:Exposure2012="1""#), &[]);
+    assert_eq!(frame(&output).0["status"], "developed");
 }
 
 #[test]
@@ -341,9 +321,58 @@ fn unsupported_imported_profiles_do_not_decode_original() {
 }
 
 #[test]
+fn unsupported_only_packets_keep_the_skip_response_when_many_diagnostics_are_present() {
+    let dir = fixture(255);
+    let attributes = (0..1400)
+        .map(|i| format!("crs:Unknown{i:04}_{}=\"1\"", "x".repeat(40)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    std::fs::remove_file(dir.path().join("source.png")).unwrap();
+    let output = call(&dir, &packet(&attributes), &[]);
+    let (header, pixels) = frame(&output);
+    assert_eq!(header["status"], "skipped");
+    assert!(pixels.is_empty());
+    let names = header["unmapped"].as_array().unwrap();
+    assert!(names.len() <= 64);
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "AdditionalUnsupportedSettingsOmitted")
+    );
+    assert!(output.stdout.len() < 64 * 1024);
+}
+
+#[test]
+fn long_diagnostics_do_not_discard_developed_pixels() {
+    let dir = fixture(255);
+    let attributes = (0..256)
+        .map(|i| format!("crs:Unknown{i:04}_{}=\"1\"", "x".repeat(243)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let xml = packet(&format!("crs:Exposure2012=\"1\" {attributes}"));
+    let output = call(&dir, &xml, &[]);
+    let (header, _) = frame(&output);
+    assert_eq!(header["status"], "developed");
+    assert!(
+        header["unmapped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "AdditionalUnsupportedSettingsOmitted")
+    );
+    assert!(
+        output
+            .stdout
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .unwrap()
+            < 64 * 1024
+    );
+}
+
+#[test]
 fn external_supported_neutral_profiles_override_embedded_monochrome() {
     let dir = raw_fixture(Some(&packet(r#"crs:ConvertToGrayscale="True""#)));
-    let sidecar = dir.path().join("override.xmp");
     for definition in [
         r#"<crs:Look rdf:parseType="Resource"><crs:Parameters rdf:parseType="Resource" crs:ConvertToGrayscale="False"/></crs:Look>"#,
         r#"<crs:Look rdf:parseType="Resource"><crs:Parameters rdf:parseType="Resource" crs:Contrast2012="0"/></crs:Look>"#,
@@ -353,11 +382,9 @@ fn external_supported_neutral_profiles_override_embedded_monochrome() {
         let xml = format!(
             r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">{definition}</rdf:Description>"#
         );
-        std::fs::write(&sidecar, xml).unwrap();
-        let output = call_raw(&dir, &["--sidecar", sidecar.to_str().unwrap()]);
+        let output = call_raw(&dir, &xml, &[]);
         let (header, pixels) = frame(&output);
         assert_eq!(header["status"], "developed", "{definition}");
-        assert_eq!(header["isDeveloped"], true, "{definition}");
         assert!(
             pixels
                 .as_chunks::<4>()
@@ -404,12 +431,22 @@ fn exposure_changes_pixels_and_crop_preserves_short_edge_size() {
         ),
         (Some(80), Some(100))
     );
-    let clamped = call(&dir, &xml, &["--size", "200"]);
+    // Valid Immich preview settings above 8192 still clamp to native detail.
+    let clamped = call(&dir, &xml, &["--size", "8193"]);
     let (header, _) = frame(&clamped);
     assert_eq!(
         (header["width"].as_u64(), header["height"].as_u64()),
         (Some(80), Some(100))
     );
+}
+
+#[test]
+fn zero_output_size_is_rejected_without_publishing_pixels() {
+    let dir = fixture(255);
+    let output = call(&dir, &packet(r#"crs:Exposure2012="1""#), &["--size", "0"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Size must be positive"));
 }
 
 #[test]

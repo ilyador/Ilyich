@@ -815,15 +815,29 @@ select
   "asset"."type",
   "asset"."originalPath",
   "asset_exif"."orientation" as "exifOrientation",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
   (
     select
-      "asset_file"."path"
+      "path"
     from
       "asset_file"
     where
       "asset_file"."assetId" = "asset"."id"
-      and "asset_file"."type" = 'preview'
-      and "asset_file"."isEdited" = false
+      and "asset_file"."type" = $1
+    order by
+      "asset_file"."isEdited" desc
+    limit
+      $2
   ) as "previewPath"
 from
   "person"
@@ -831,8 +845,8 @@ from
   inner join "asset" on "asset_face"."assetId" = "asset"."id"
   left join "asset_exif" on "asset_exif"."assetId" = "asset"."id"
 where
-  "person"."ownerId" = $1
-  and "person"."personGroupId" = $2
+  "person"."ownerId" = $3
+  and "person"."personGroupId" = $4
   and "asset_face"."deletedAt" is null
 
 -- PersonRepository.reassignFace

@@ -84,22 +84,6 @@ fn as_shot(raw: &RawImage) -> Option<(f64, f64)> {
     (temp.is_finite() && tint.is_finite()).then_some((temp, tint))
 }
 
-fn header_as_shot(path: &Path) -> Option<(f64, f64)> {
-    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut raw = RawImage::default();
-    let mut error = [0 as c_char; 1024];
-    // SAFETY: all buffers remain live for the call; the shim bounds and terminates error writes.
-    let status = unsafe {
-        immich_raw_metadata(
-            path.as_ptr(),
-            &mut raw,
-            error.as_mut_ptr(),
-            error.len() as u32,
-        )
-    };
-    (status == 0).then(|| as_shot(&raw)).flatten()
-}
-
 pub fn orientation(path: &Path) -> Result<Orientation, String> {
     let path_c = CString::new(path.as_os_str().as_bytes()).map_err(|_| "Invalid source path")?;
     let mut raw = RawImage::default();
@@ -154,17 +138,7 @@ pub fn load(path: &Path) -> Result<Source, String> {
         // unsupported-RAW fallback is an embedded JPEG: accept only raw=true.
         let orientation = info.orientation;
         match lightcraft_engine::files::load_vec_builtin_profiles(bytes, native_edge) {
-            Ok((pixels, mut info)) if info.raw => {
-                // The pure-Rust camera look has already white-balanced the pixels. Replace only
-                // its daylight-relative metadata, so As Shot remains pixel-identical while saved
-                // absolute Temperature/Tint edits use a physical source white point.
-                if info.relative_wb
-                    && let Some((temp, tint)) = header_as_shot(path)
-                {
-                    info.as_shot_temp = temp;
-                    info.as_shot_tint = tint;
-                    info.relative_wb = false;
-                }
+            Ok((pixels, info)) if info.raw => {
                 if std::env::var_os("LIGHTCRAFT_PROFILE").is_some() {
                     eprintln!(
                         "[source] Lightcraft {}x{}, calibrated camera tone {}",

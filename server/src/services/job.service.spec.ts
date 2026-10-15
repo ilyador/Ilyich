@@ -94,6 +94,64 @@ describe(JobService.name, () => {
       expect(mocks.job.queueAll).not.toHaveBeenCalled();
     });
 
+    it('should keep a forced unchanged sidecar check on the metadata-only path', async () => {
+      mocks.job.run.mockResolvedValue(JobStatus.Skipped);
+
+      await sut.onJobRun(QueueName.Sidecar, { name: JobName.SidecarCheck, data: { id: 'asset-1' } });
+
+      expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
+        name: JobName.AssetExtractMetadata,
+        data: { id: 'asset-1', source: undefined },
+      });
+    });
+
+    it.each([JobStatus.Success, JobStatus.Skipped, JobStatus.Failed])(
+      'does not reanalyse or upload-notify a %s sidecar preview',
+      async (status) => {
+        mocks.job.run.mockResolvedValue(status);
+
+        await sut.onJobRun(QueueName.ThumbnailGeneration, {
+          name: JobName.AssetGenerateThumbnails,
+          data: { id: 'asset-1', source: 'sidecar' },
+        });
+
+        expect(mocks.job.queueAll).not.toHaveBeenCalled();
+        expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+      },
+    );
+
+    it('preserves the editor source through sidecar rediscovery', async () => {
+      mocks.job.run.mockResolvedValue(JobStatus.Success);
+      const data = { id: 'asset-1', source: 'edit' as const };
+
+      await sut.onJobRun(QueueName.Sidecar, { name: JobName.SidecarCheck, data });
+
+      expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
+        name: JobName.AssetExtractMetadata,
+        data,
+      });
+    });
+
+    it('only announces edit readiness after a rejected generation is retried successfully', async () => {
+      const asset = AssetFactory.create();
+      mocks.job.run.mockResolvedValueOnce(JobStatus.Skipped).mockResolvedValueOnce(JobStatus.Success);
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.assetEdit.getWithSyncInfo.mockResolvedValue([]);
+      const job: JobItem = { name: JobName.AssetEditThumbnailGeneration, data: { id: asset.id } };
+
+      await sut.onJobRun(QueueName.Editor, job);
+
+      expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+      expect(mocks.asset.getById).not.toHaveBeenCalled();
+
+      await sut.onJobRun(QueueName.Editor, job);
+
+      expect(mocks.websocket.clientSend).toHaveBeenCalledExactlyOnceWith('AssetEditReadyV2', asset.ownerId, {
+        asset: expect.objectContaining({ id: asset.id, mediaRevision: asset.mediaRevision }),
+        edit: [],
+      });
+    });
+
     it('should include the published media revision and development marker in edit-ready updates', async () => {
       const asset = AssetFactory.create();
       mocks.job.run.mockResolvedValue(JobStatus.Success);
@@ -106,7 +164,7 @@ describe(JobService.name, () => {
       });
 
       expect(mocks.websocket.clientSend).toHaveBeenCalledExactlyOnceWith('AssetEditReadyV2', asset.ownerId, {
-        asset: expect.objectContaining({ id: asset.id, mediaRevision: asset.updateId, isDeveloped: true }),
+        asset: expect.objectContaining({ id: asset.id, mediaRevision: asset.mediaRevision, isDeveloped: true }),
         edit: [],
       });
     });
@@ -124,7 +182,7 @@ describe(JobService.name, () => {
       });
 
       expect(mocks.websocket.clientSend).toHaveBeenCalledWith('AssetUploadReadyV2', asset.ownerId, {
-        asset: expect.objectContaining({ id: asset.id, mediaRevision: asset.updateId, isDeveloped: true }),
+        asset: expect.objectContaining({ id: asset.id, mediaRevision: asset.mediaRevision, isDeveloped: true }),
         exif: expect.any(Object),
       });
     });
@@ -157,6 +215,11 @@ describe(JobService.name, () => {
       },
       {
         item: { name: JobName.AssetGenerateThumbnails, data: { id: 'asset-1', source: 'sidecar' } },
+        jobs: [],
+        stub: [AssetFactory.create({ id: 'asset-1' })],
+      },
+      {
+        item: { name: JobName.AssetGenerateThumbnails, data: { id: 'asset-1', source: 'sidecar-write' } },
         jobs: [],
         stub: [AssetFactory.create({ id: 'asset-1' })],
       },

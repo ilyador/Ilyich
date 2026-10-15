@@ -443,7 +443,7 @@ export class MetadataService extends BaseService {
 
     let sidecarPath = null;
     for (const candidate of this.getSidecarCandidates(asset)) {
-      const isExists = await this.storageRepository.checkFileExists(candidate, constants.R_OK);
+      const isExists = await this.storageRepository.checkFileExistsStrict(candidate, constants.R_OK);
       if (!isExists) {
         continue;
       }
@@ -458,7 +458,7 @@ export class MetadataService extends BaseService {
     let needsGeneration = false;
 
     const canDevelop = mimeTypes.isImage(asset.originalPath) && !asset.originalPath.toLowerCase().endsWith('.gif');
-    if (canDevelop && (sidecarPath !== null || asset.development || mimeTypes.isRaw(asset.originalPath))) {
+    if (canDevelop && (sidecarPath !== null || asset.development)) {
       const { image } = await this.getConfig({ withCache: true });
       const fingerprint = await this.mediaRepository.getDevelopmentInputFingerprint({
         originalPath: asset.originalPath,
@@ -468,7 +468,8 @@ export class MetadataService extends BaseService {
       if (asset.development?.observedInputFingerprint !== fingerprint) {
         await this.assetRepository.observeImageDevelopmentInput(asset.id, fingerprint);
       }
-      needsGeneration = asset.development?.publishedInputFingerprint !== fingerprint;
+      // A normal preview publication clears retired sidecar or legacy RAW state.
+      needsGeneration = sidecarPath === null || asset.development?.publishedInputFingerprint !== fingerprint;
     }
 
     if (sidecarFile?.path || sidecarPath) {

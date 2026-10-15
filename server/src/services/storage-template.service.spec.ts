@@ -1,6 +1,6 @@
 import { Stats } from 'node:fs';
 import { SystemConfig, defaults } from 'src/dtos/config.dto.js';
-import { AssetPathType, AssetType, JobStatus } from 'src/enum.js';
+import { AssetPathType, AssetType, JobName, JobStatus } from 'src/enum.js';
 import { StorageTemplateService } from 'src/services/storage-template.service.js';
 import { AlbumFactory } from 'test/factories/album.factory.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
@@ -26,6 +26,29 @@ describe(StorageTemplateService.name, () => {
     mocks.systemMetadata.get.mockResolvedValue({ storageTemplate: { enabled: true } });
 
     sut.onConfigInit({ newConfig: defaults });
+  });
+
+  describe('onAssetMetadataExtracted', () => {
+    it('resumes an editor retry directly after sidecar metadata refresh', async () => {
+      await sut.onAssetMetadataExtracted({ assetId: 'asset-1', userId: 'user-1', source: 'edit' });
+
+      expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
+        name: JobName.AssetEditThumbnailGeneration,
+        data: { id: 'asset-1', source: 'edit' },
+      });
+    });
+
+    it.each(['upload', 'copy', 'sidecar', 'sidecar-write', undefined] as const)(
+      'keeps source %s on the normal storage migration path',
+      async (source) => {
+        await sut.onAssetMetadataExtracted({ assetId: 'asset-1', userId: 'user-1', source });
+
+        expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
+          name: JobName.StorageTemplateMigrationSingle,
+          data: { id: 'asset-1', source },
+        });
+      },
+    );
   });
 
   describe('onConfigValidate', () => {

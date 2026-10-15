@@ -1,8 +1,10 @@
 import { Kysely, sql } from 'kysely';
 import { Stats } from 'node:fs';
 import { StorageCore } from 'src/cores/storage.core.js';
+import { columns } from 'src/database.js';
+import { mapAsset } from 'src/dtos/asset-response.dto.js';
 import { AssetEditAction } from 'src/dtos/editing.dto.js';
-import { AssetFileType, ImageFormat, JobStatus } from 'src/enum.js';
+import { AssetFileType, AssetType, AssetVisibility, ImageFormat, JobStatus } from 'src/enum.js';
 import { AssetEditRepository } from 'src/repositories/asset-edit.repository.js';
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetRepository, PublishImageGeneration } from 'src/repositories/asset.repository.js';
@@ -12,7 +14,7 @@ import { DB } from 'src/schema/index.js';
 import { BaseService } from 'src/services/base.service.js';
 import { MediaService } from 'src/services/media.service.js';
 import { newMediumService } from 'test/medium.factory.js';
-import { newUuid } from 'test/small.factory.js';
+import { factory, newUuid } from 'test/small.factory.js';
 import { getKyselyDB, newTestService } from 'test/utils.js';
 
 let database: Kysely<DB>;
@@ -56,6 +58,91 @@ const setup = async () => {
 };
 
 describe('sidecar development publication', () => {
+  it.each([{ isFavorite: true }, { visibility: AssetVisibility.Archive }])(
+    'keeps image URLs stable after metadata changes: %j',
+    async (change) => {
+      const { asset, repository, input } = await setup();
+      await repository.publishImageGeneration(input);
+      const before = (await repository.getById(asset.id))!;
+
+      await repository.update({ id: asset.id, ...change });
+
+      const after = (await repository.getById(asset.id))!;
+      expect(after.updateId).not.toBe(before.updateId);
+      expect(after.mediaRevision).toBe(before.mediaRevision);
+    },
+  );
+
+  it('uses one published-preview revision in full/sanitized assets, sync and timeline responses', async () => {
+    const { ctx, asset, repository, input } = await setup();
+    await ctx.newExif({ assetId: asset.id, exifImageWidth: 1200, exifImageHeight: 800 });
+    await repository.update({ id: asset.id, localDateTime: new Date('2026-10-15T12:00:00Z') });
+    await repository.publishImageGeneration(input);
+    const published = (await repository.getById(asset.id))!;
+    const preview = await database
+      .selectFrom('asset_file')
+      .select('updateId')
+      .where('assetId', '=', asset.id)
+      .where('type', '=', AssetFileType.Preview)
+      .executeTakeFirstOrThrow();
+    expect(published.mediaRevision).toContain(preview.updateId);
+    expect(published.mediaRevision).toContain(input.thumbhash.toString('base64'));
+    expect(mapAsset(published).mediaRevision).toBe(published.mediaRevision);
+    expect(mapAsset(published, { stripMetadata: true }).mediaRevision).toBe(published.mediaRevision);
+    for (const selection of [columns.syncAsset, columns.syncAlbumAsset, columns.syncPartnerAsset]) {
+      const sync = await database
+        .selectFrom('asset')
+        .select(selection)
+        .where('asset.id', '=', asset.id)
+        .executeTakeFirstOrThrow();
+      expect(sync.mediaRevision).toBe(published.mediaRevision);
+    }
+    const bucket = await repository.getTimeBucket(
+      '2026-10-01',
+      { userIds: [asset.ownerId] },
+      factory.auth({ user: { id: asset.ownerId } }),
+    );
+    const rows = JSON.parse(bucket.assets);
+    expect(rows.mediaRevision[rows.id.indexOf(asset.id)]).toBe(published.mediaRevision);
+  });
+
+  it.each([
+    { originalFileName: 'video.mp4', type: AssetType.Video },
+    { originalFileName: 'image.gif', type: AssetType.Image },
+  ])('refreshes overwritten $originalFileName caches without changing preview pointers', async (source) => {
+    const { ctx } = newMediumService(BaseService, { database, real: [], mock: [LoggingRepository] });
+    const { user } = await ctx.newUser();
+    const { asset } = await ctx.newAsset({ ownerId: user.id, ...source });
+    const repository = ctx.get(AssetRepository);
+    await repository.upsertFile({ assetId: asset.id, type: AssetFileType.Preview, path: '/cache/fixed-preview.jpg' });
+    await repository.update({ id: asset.id, thumbhash: Buffer.from('before-frame') });
+    const before = (await repository.getById(asset.id))!;
+    const getPreview = () =>
+      database
+        .selectFrom('asset_file')
+        .select(['path', 'updateId'])
+        .where('assetId', '=', asset.id)
+        .where('type', '=', AssetFileType.Preview)
+        .executeTakeFirstOrThrow();
+    const previewBefore = await getPreview();
+
+    // Videos and GIFs overwrite the same cache files; only their new placeholder is saved.
+    await repository.update({ id: asset.id, thumbhash: Buffer.from('after-frame') });
+
+    const after = (await repository.getById(asset.id))!;
+    expect(await getPreview()).toEqual(previewBefore);
+    expect(after.mediaRevision).not.toBe(before.mediaRevision);
+    expect(after.mediaRevision).toContain(Buffer.from('after-frame').toString('base64'));
+  });
+
+  it('falls back to the placeholder and then asset ID before a preview exists', async () => {
+    const { asset, repository } = await setup();
+    await repository.deleteFile({ assetId: asset.id, type: AssetFileType.Preview });
+    expect((await repository.getById(asset.id))!.mediaRevision).toBe(asset.id);
+    await repository.update({ id: asset.id, thumbhash: Buffer.from('placeholder') });
+    expect((await repository.getById(asset.id))!.mediaRevision).toBe(Buffer.from('placeholder').toString('base64'));
+  });
+
   it.each(['observe', 'sidecar', 'remove-sidecar', 'edit'] as const)(
     'serializes %s changes with publication using the asset-first lock order',
     async (change) => {
@@ -189,6 +276,14 @@ describe('sidecar development publication', () => {
     await expect(repository.getForThumbnail(asset.id, AssetFileType.Preview, true)).resolves.toMatchObject({
       path: '/cache/edited-preview.jpg',
     });
+    const preferred = await database
+      .selectFrom('asset_file')
+      .select('updateId')
+      .where('assetId', '=', asset.id)
+      .where('type', '=', AssetFileType.Preview)
+      .where('isEdited', '=', true)
+      .executeTakeFirstOrThrow();
+    expect((await repository.getById(asset.id))!.mediaRevision).toContain(preferred.updateId);
     await ctx.get(AssetEditRepository).replaceAll(asset.id, []);
     await expect(
       repository.publishImageGeneration({
@@ -201,6 +296,14 @@ describe('sidecar development publication', () => {
     await expect(repository.getForThumbnail(asset.id, AssetFileType.Preview, false)).resolves.toMatchObject({
       path: '/cache/old-preview.jpg',
     });
+    const original = await database
+      .selectFrom('asset_file')
+      .select('updateId')
+      .where('assetId', '=', asset.id)
+      .where('type', '=', AssetFileType.Preview)
+      .where('isEdited', '=', false)
+      .executeTakeFirstOrThrow();
+    expect((await repository.getById(asset.id))!.mediaRevision).toContain(original.updateId);
   });
 
   it.each([false, true])(
@@ -395,6 +498,7 @@ describe('sidecar development publication', () => {
       isDeveloped: true,
     });
     expect(after!.updateId).not.toBe(before!.updateId);
+    expect(after!.mediaRevision).not.toBe(before!.mediaRevision);
     await expect(
       database.selectFrom('asset_file').select('path').where('assetId', '=', asset.id).orderBy('path').execute(),
     ).resolves.toEqual([
@@ -414,6 +518,7 @@ describe('sidecar development publication', () => {
     // Same placeholders still require fresh URLs after successful regeneration.
     await repository.publishImageGeneration(input);
     expect((await repository.getById(asset.id))!.updateId).not.toBe(after!.updateId);
+    expect((await repository.getById(asset.id))!.mediaRevision).not.toBe(after!.mediaRevision);
   });
 
   it('preserves publication and unrelated job state when observing changed inputs', async () => {
@@ -441,6 +546,7 @@ describe('sidecar development publication', () => {
     await repository.observeImageDevelopmentInput(asset.id, 'newer');
     await expect(repository.publishImageGeneration(input)).resolves.toBeNull();
     expect((await repository.getById(asset.id))!.updateId).toBe(before!.updateId);
+    expect((await repository.getById(asset.id))!.mediaRevision).toBe(before!.mediaRevision);
     await expect(
       database
         .selectFrom('asset_file')
@@ -472,6 +578,7 @@ describe('sidecar development publication', () => {
     input.dimensions.width = NaN;
     await expect(repository.publishImageGeneration(input)).rejects.toThrow();
     expect((await repository.getById(asset.id))!.updateId).toBe(before!.updateId);
+    expect((await repository.getById(asset.id))!.mediaRevision).toBe(before!.mediaRevision);
     await expect(
       database
         .selectFrom('asset_file')
@@ -491,13 +598,24 @@ describe('sidecar development publication', () => {
   it('returns to the original base after successful XMP removal', async () => {
     const { asset, repository, input } = await setup();
     await repository.publishImageGeneration(input);
+    const before = (await repository.getById(asset.id))!;
+    await repository.deleteFile({ assetId: asset.id, type: AssetFileType.Sidecar });
     await repository.observeImageDevelopmentInput(asset.id, 'removed');
     await repository.publishImageGeneration({
       ...input,
+      sidecarPath: null,
       fingerprint: 'removed',
       base: { ...input.base!, isDeveloped: false },
     });
-    expect((await repository.getById(asset.id))!.isDeveloped).toBe(false);
+    const reverted = (await repository.getById(asset.id))!;
+    expect(reverted.isDeveloped).toBe(false);
+    expect(reverted.mediaRevision).not.toBe(before.mediaRevision);
+    const state = await database
+      .selectFrom('asset_job_status')
+      .select('development')
+      .where('assetId', '=', asset.id)
+      .executeTakeFirstOrThrow();
+    expect(state.development).toBeNull();
   });
 
   it('keeps sidecars out of thumbnail cleanup and returns native edits in sequence', async () => {

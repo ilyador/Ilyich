@@ -155,6 +155,7 @@ export type MapAsset = {
   height: number | null;
   isEdited: boolean;
   isDeveloped?: boolean;
+  mediaRevision?: string;
 };
 
 export type AssetMapOptions = {
@@ -197,7 +198,7 @@ export function mapAsset(entity: MaybeDehydrated<MapAsset>, options: AssetMapOpt
     const sanitizedAssetResponse: SanitizedAssetResponseDto = {
       id: entity.id,
       type: entity.type,
-      mediaRevision: entity.updateId,
+      mediaRevision: entity.mediaRevision,
       isDeveloped: entity.isDeveloped ?? false,
       originalMimeType: mimeTypes.lookup(entity.originalFileName),
       thumbhash: entity.thumbhash ? hexOrBufferToBase64(entity.thumbhash) : null,
@@ -218,7 +219,7 @@ export function mapAsset(entity: MaybeDehydrated<MapAsset>, options: AssetMapOpt
     owner: entity.owner && !auth?.sharedLink ? mapUser(entity.owner) : undefined,
     libraryId: entity.libraryId,
     type: entity.type,
-    mediaRevision: entity.updateId,
+    mediaRevision: entity.mediaRevision,
     isDeveloped: entity.isDeveloped ?? false,
     originalPath: entity.originalPath,
     originalFileName: entity.originalFileName,
