@@ -4,6 +4,7 @@ import { mapAsset } from 'src/dtos/asset-response.dto.js';
 import { SearchSuggestionType } from 'src/dtos/search.dto.js';
 import { AssetVisibility } from 'src/enum.js';
 import { SearchService } from 'src/services/search.service.js';
+import { decodeSearchCursor, encodeSearchCursor } from 'src/utils/search-cursor.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
 import { AuthFactory } from 'test/factories/auth.factory.js';
 import { authStub } from 'test/fixtures/auth.stub.js';
@@ -305,7 +306,7 @@ describe(SearchService.name, () => {
       mocks.machineLearning.encodeText.mockResolvedValue('[1, 2, 3]');
     });
 
-    it.each([false, true])('verifies only authorized candidates and preserves pagination (v3=%s)', async (v3) => {
+    it.each([false, true])('automatically verifies and preserves pagination (v3=%s)', async (v3) => {
       const items = [AssetFactory.create(), AssetFactory.create()].map((asset) => ({
         ...asset,
         isDeveloped: false,
@@ -325,7 +326,6 @@ describe(SearchService.name, () => {
       mocks.machineLearning.verifySearchCandidate.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
       const result = await sut.searchSmart(authStub.user1, {
         query: 'a dog running',
-        verify: true,
         size: 100,
         ...(v3 && { filter: {} }),
       });
@@ -335,7 +335,7 @@ describe(SearchService.name, () => {
       expect(mocks.machineLearning.verifySearchCandidate).toHaveBeenCalledWith(
         `/preview/${items[0].id}.jpg`,
         'a dog running',
-        { url: 'http://ollama', model: 'test' },
+        { url: 'http://ollama', model: 'test', signal: expect.any(AbortSignal) },
       );
       if (v3) {
         expect(result.assets.nextCursor).toBeTruthy();
@@ -344,6 +344,117 @@ describe(SearchService.name, () => {
         expect(result.assets.nextPage).toBe('2');
         expect(mocks.search.searchSmart.mock.calls[0][0]).toEqual({ page: 1, size: 10 });
       }
+    });
+
+    it.each([false, true])('allows opting out of automatic verification (v3=%s)', async (v3) => {
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.search.searchSmartV3.mockResolvedValue({ hasNextPage: false, items: [] });
+      const result = await sut.searchSmart(authStub.user1, {
+        query: 'a red hat',
+        size: 100,
+        verify: false,
+        ...(v3 && { filter: {} }),
+      });
+      expect(result.verification).toBeUndefined();
+      expect(mocks.machineLearning.verifySearchCandidate).not.toHaveBeenCalled();
+      if (v3) expect(mocks.search.searchSmartV3.mock.calls[0][0]).toEqual({ take: 100, skip: 0 });
+      else expect(mocks.search.searchSmart.mock.calls[0][0]).toEqual({ page: 1, size: 100 });
+    });
+
+    it.each([false, true])('keeps names/place-only searches fast and at their requested size (v3=%s)', async (v3) => {
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.person.getNames.mockResolvedValue([{ name: 'Me', personGroupId: newUuid() }] as never);
+      mocks.search.getCities.mockResolvedValue(['Amsterdam']);
+      mocks.search.searchMetadata.mockResolvedValue({ hasNextPage: false, items: [] });
+      mocks.search.searchMetadataV3.mockResolvedValue({ hasNextPage: false, items: [] });
+      const result = await sut.searchSmart(authStub.user1, {
+        query: 'me in Amsterdam',
+        size: 100,
+        ...(v3 && { filter: {} }),
+      });
+      expect(result.verification).toEqual({ status: 'not-needed', checked: 0, rejected: 0 });
+      expect(mocks.machineLearning.encodeText).not.toHaveBeenCalled();
+      expect(mocks.machineLearning.verifySearchCandidate).not.toHaveBeenCalled();
+      if (v3) expect(mocks.search.searchMetadataV3.mock.calls[0][0]).toEqual({ take: 100, skip: 0 });
+      else expect(mocks.search.searchMetadata.mock.calls[0][0]).toEqual({ page: 1, size: 100 });
+    });
+
+    it.each([false, true])(
+      'skips rejected-only batches and advances past every checked candidate (v3=%s)',
+      async (v3) => {
+        const items = [AssetFactory.create(), AssetFactory.create()].map((asset) => ({
+          ...asset,
+          isDeveloped: false,
+          exifInfo: undefined,
+          faces: undefined,
+        }));
+        mocks.config.getEnv.mockReturnValue(
+          mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }),
+        );
+        const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
+        repository.mockResolvedValueOnce({ hasNextPage: true, items: [items[0]] });
+        repository.mockResolvedValueOnce({ hasNextPage: true, items: [items[1]] });
+        mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
+        mocks.machineLearning.verifySearchCandidate.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+        const result = await sut.searchSmart(authStub.user1, {
+          query: 'a red hat',
+          size: 1,
+          ...(v3 ? { filter: {}, cursor: encodeSearchCursor(5) } : { page: 6 }),
+        });
+        expect(result.assets.items.map((item) => item.id)).toEqual([items[1].id]);
+        expect(result.verification).toEqual({ status: 'complete', checked: 2, rejected: 1 });
+        expect(repository).toHaveBeenCalledTimes(2);
+        if (v3) {
+          expect(decodeSearchCursor(result.assets.nextCursor ?? undefined).offset).toBe(7);
+          expect(mocks.search.searchSmartV3.mock.calls.map(([page]) => page)).toEqual([
+            { take: 1, skip: 5 },
+            { take: 1, skip: 6 },
+          ]);
+        } else {
+          expect(result.assets.nextPage).toBe('8');
+          expect(mocks.search.searchSmart.mock.calls.map(([page]) => page)).toEqual([
+            { size: 1, page: 6 },
+            { size: 1, page: 7 },
+          ]);
+        }
+      },
+    );
+
+    it.each([false, true])('bounds a rejected-only search to three batches (v3=%s)', async (v3) => {
+      const item = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
+      repository.mockResolvedValue({ hasNextPage: true, items: [item] });
+      mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
+      mocks.machineLearning.verifySearchCandidate.mockResolvedValue(false);
+      const result = await sut.searchSmart(authStub.user1, {
+        query: 'a red hat',
+        size: 1,
+        ...(v3 && { filter: {} }),
+      });
+      expect(result.assets.items).toEqual([]);
+      expect(result.verification).toEqual({ status: 'complete', checked: 3, rejected: 3 });
+      expect(repository).toHaveBeenCalledTimes(3);
+      if (v3) expect(decodeSearchCursor(result.assets.nextCursor ?? undefined).offset).toBe(3);
+      else expect(result.assets.nextPage).toBe('4');
+    });
+
+    it('cancels continuation and releases the inference slot', async () => {
+      const item = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.search.searchSmart.mockResolvedValue({ hasNextPage: true, items: [item] });
+      mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
+      const controller = new AbortController();
+      mocks.machineLearning.verifySearchCandidate.mockImplementationOnce(() => {
+        controller.abort();
+        return Promise.resolve(false);
+      });
+      const result = await sut.searchSmart(authStub.user1, { query: 'a red hat', size: 1 }, controller.signal);
+      expect(result.verification?.status).toBe('unavailable');
+      expect(mocks.search.searchSmart).toHaveBeenCalledTimes(1);
+      mocks.machineLearning.verifySearchCandidate.mockResolvedValue(true);
+      const retry = await sut.searchSmart(authStub.user1, { query: 'a red hat', size: 1 });
+      expect(retry.verification?.status).toBe('complete');
     });
 
     it('returns regular results with an explicit status when inference fails', async () => {
