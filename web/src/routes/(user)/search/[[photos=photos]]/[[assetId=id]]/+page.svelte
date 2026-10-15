@@ -276,7 +276,9 @@
   }
 
   async function toggleVerification() {
-    await goto(Route.search({ ...terms, verify: !verificationEnabled }));
+    const query = { ...terms, verify: !verificationEnabled };
+    searchManager.setQuery(query);
+    await goto(Route.search(query));
   }
 
   onMount(() => searchManager.setQuery(terms));

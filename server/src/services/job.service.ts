@@ -136,6 +136,7 @@ export class JobService extends BaseService {
         if (response !== JobStatus.Success) {
           break;
         }
+        await this.jobRepository.queue({ name: JobName.SmartSearch, data: item.data });
         const asset = await this.assetRepository.getById(item.data.id);
         const edits = await this.assetEditRepository.getWithSyncInfo(item.data.id);
 
@@ -173,7 +174,12 @@ export class JobService extends BaseService {
       }
 
       case JobName.AssetGenerateThumbnails: {
-        if (response !== JobStatus.Success || (!item.data.notify && item.data.source !== 'upload')) {
+        if (response !== JobStatus.Success) {
+          break;
+        }
+
+        if (!item.data.notify && item.data.source !== 'upload') {
+          await this.jobRepository.queue({ name: JobName.SmartSearch, data: item.data });
           break;
         }
 

@@ -114,8 +114,7 @@ export class SmartInfoService extends BaseService {
       return JobStatus.Skipped;
     }
 
-    await this.searchRepository.upsert(asset.id, embedding);
-
-    return JobStatus.Success;
+    const published = await this.searchRepository.upsert(asset.id, embedding, asset.mediaRevision);
+    return published ? JobStatus.Success : JobStatus.Skipped;
   }
 }

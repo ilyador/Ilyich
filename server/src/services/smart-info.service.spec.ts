@@ -178,6 +178,10 @@ describe(SmartInfoService.name, () => {
   });
 
   describe('handleEncodeClip', () => {
+    beforeEach(() => {
+      mocks.search.upsert.mockResolvedValue(true);
+    });
+
     it('should do nothing if machine learning is disabled', async () => {
       mocks.systemMetadata.get.mockResolvedValue(systemConfigStub.machineLearningDisabled);
 
@@ -208,7 +212,7 @@ describe(SmartInfoService.name, () => {
         asset.files[0].path,
         expect.objectContaining({ modelName: 'ViT-B-32__openai' }),
       );
-      expect(mocks.search.upsert).toHaveBeenCalledWith(asset.id, '[0.01, 0.02, 0.03]');
+      expect(mocks.search.upsert).toHaveBeenCalledWith(asset.id, '[0.01, 0.02, 0.03]', asset.mediaRevision);
     });
 
     it('indexes the edited preview when both preview versions exist', async () => {
@@ -220,7 +224,17 @@ describe(SmartInfoService.name, () => {
       mocks.machineLearning.encodeImage.mockResolvedValue('[0.01, 0.02, 0.03]');
       expect(await sut.handleEncodeClip({ id: asset.id })).toBe(JobStatus.Success);
       expect(mocks.machineLearning.encodeImage).toHaveBeenCalledWith('edited.jpg', expect.anything());
-      expect(mocks.search.upsert).toHaveBeenCalledWith(asset.id, '[0.01, 0.02, 0.03]');
+      expect(mocks.search.upsert).toHaveBeenCalledWith(asset.id, '[0.01, 0.02, 0.03]', asset.mediaRevision);
+    });
+
+    it('skips an embedding when its preview was replaced during inference', async () => {
+      const asset = AssetFactory.from().file({ type: AssetFileType.Preview }).build();
+      mocks.assetJob.getForClipEncoding.mockResolvedValue(asset);
+      mocks.machineLearning.encodeImage.mockResolvedValue('[0.01, 0.02, 0.03]');
+      mocks.search.upsert.mockResolvedValue(false);
+
+      expect(await sut.handleEncodeClip({ id: asset.id })).toBe(JobStatus.Skipped);
+      expect(mocks.search.upsert).toHaveBeenCalledExactlyOnceWith(asset.id, '[0.01, 0.02, 0.03]', asset.mediaRevision);
     });
 
     it('should skip invisible assets', async () => {
@@ -257,7 +271,7 @@ describe(SmartInfoService.name, () => {
         asset.files[0].path,
         expect.objectContaining({ modelName: 'ViT-B-32__openai' }),
       );
-      expect(mocks.search.upsert).toHaveBeenCalledWith(asset.id, '[0.01, 0.02, 0.03]');
+      expect(mocks.search.upsert).toHaveBeenCalledWith(asset.id, '[0.01, 0.02, 0.03]', asset.mediaRevision);
     });
   });
 

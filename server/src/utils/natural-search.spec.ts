@@ -70,6 +70,32 @@ describe(planNaturalSearch.name, () => {
   it('supports either person', () => {
     expect(plan('Maya or me in Amsterdam').filter?.personIds).toEqual({ any: ['maya', 'self'] });
   });
+  it('does not treat a choice of clothing colors as a choice of faces', () => {
+    expect(plan('me wearing a red or blue hat with Maya in Amsterdam')).toEqual({
+      query: 'wearing a red or blue hat',
+      filter: { personIds: { all: ['self', 'maya'] }, city: { in: ['Amsterdam'] } },
+    });
+  });
+  it('uses explicit place context when a location collides with a person name', () => {
+    const withJordan = {
+      ...vocabulary,
+      people: [...vocabulary.people, { name: 'Jordan Smith', personGroupId: 'jordan' }],
+      countries: [...vocabulary.countries, 'Jordan'],
+    };
+    expect(planNaturalSearch('me in Jordan', withJordan)).toEqual({
+      query: '',
+      filter: { personIds: { all: ['self'] }, country: { in: ['Jordan'] } },
+    });
+    expect(planNaturalSearch('Jordan Smith in Amsterdam', withJordan).filter?.personIds).toEqual({ all: ['jordan'] });
+  });
+  it.each([
+    ['Maya wearing an H&M shirt in Amsterdam', 'wearing an H&M shirt'],
+    ['Maya holding a C++ book in Amsterdam', 'holding a C++ book'],
+    ['Maya wearing a red/blue hat in Amsterdam', 'wearing a red/blue hat'],
+    ['Maya watching Disney+', 'watching Disney+'],
+  ])('preserves visual brand and attribute punctuation: %s', (query, description) => {
+    expect(plan(query).query).toBe(description);
+  });
   it('does not consume a partial name or guess an ambiguous first name', () => {
     expect(plan('some Mayan temples')).toEqual({ query: 'some Mayan temples' });
     expect(plan('Anna swimming')).toEqual({ query: 'Anna swimming' });
@@ -114,6 +140,18 @@ describe(planNaturalSearch.name, () => {
   it('uses exclusive year boundaries correctly', () => {
     expect(plan('Maya before 2025').filter?.takenAt).toEqual({ lt: new Date('2025-01-01Z') });
     expect(plan('Maya after 2025').filter?.takenAt).toEqual({ gte: new Date('2026-01-01Z') });
+  });
+  it.each(['Maya after 2020 before 2025', 'Maya before 2025 after 2020'])(
+    'keeps both year range boundaries: %s',
+    (query) => {
+      expect(plan(query).filter?.takenAt).toEqual({
+        gte: new Date('2021-01-01Z'),
+        lt: new Date('2025-01-01Z'),
+      });
+    },
+  );
+  it('retains unsupported negated years instead of creating a positive date filter', () => {
+    expect(plan('me not in 2025')).toEqual({ query: 'not in 2025', filter: { personIds: { all: ['self'] } } });
   });
   it('does not mutate the vocabulary or input', () => {
     const before = structuredClone(vocabulary);

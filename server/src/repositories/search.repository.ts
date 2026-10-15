@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { type Kysely, type OrderByDirection, type Selectable, type ShallowDehydrateObject, sql } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
 import z from 'zod';
-import { columns } from 'src/database.js';
+import { assetMediaRevision, columns } from 'src/database.js';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { MapAsset } from 'src/dtos/asset-response.dto.js';
 import { SearchFilter, SearchOrder } from 'src/dtos/search.dto.js';
@@ -193,6 +193,7 @@ export interface GetStatesOptions {
 
 export interface GetCitiesOptions extends GetStatesOptions {
   state?: string;
+  includeArchived?: boolean;
 }
 
 export interface GetCameraModelsOptions {
@@ -479,16 +480,33 @@ export class SearchRepository {
       .execute();
   }
 
-  async upsert(assetId: string, embedding: string): Promise<void> {
-    await this.db
-      .insertInto('smart_search')
-      .values({ assetId, embedding })
-      .onConflict((oc) => oc.column('assetId').doUpdateSet((eb) => ({ embedding: eb.ref('excluded.embedding') })))
-      .execute();
+  async upsert(assetId: string, embedding: string, mediaRevision: string): Promise<boolean> {
+    return this.db.transaction().execute(async (tx) => {
+      // Preview publication takes the same lock. Read its revision in a fresh
+      // statement after acquiring it, so an in-flight publication has committed.
+      const asset = await tx.selectFrom('asset').select('id').where('id', '=', assetId).forUpdate().executeTakeFirst();
+      if (!asset) return false;
+      const current = await tx
+        .selectFrom('asset')
+        .select(assetMediaRevision)
+        .where('id', '=', assetId)
+        .executeTakeFirstOrThrow();
+      if (current.mediaRevision !== mediaRevision) return false;
+
+      await tx
+        .insertInto('smart_search')
+        .values({ assetId, embedding })
+        .onConflict((oc) => oc.column('assetId').doUpdateSet((eb) => ({ embedding: eb.ref('excluded.embedding') })))
+        .execute();
+      return true;
+    });
   }
 
-  async getCountries(userIds: string[]): Promise<string[]> {
-    const res = await this.getExifField('country', userIds).execute();
+  async getCountries(
+    userIds: string[],
+    { includeArchived = false }: { includeArchived?: boolean } = {},
+  ): Promise<string[]> {
+    const res = await this.getExifField('country', userIds, includeArchived).execute();
     return res.map((row) => row.country!);
   }
 
@@ -502,8 +520,8 @@ export class SearchRepository {
   }
 
   @GenerateSql({ params: [[DummyValue.UUID], DummyValue.STRING, DummyValue.STRING] })
-  async getCities(userIds: string[], { country, state }: GetCitiesOptions): Promise<string[]> {
-    const res = await this.getExifField('city', userIds)
+  async getCities(userIds: string[], { country, state, includeArchived = false }: GetCitiesOptions): Promise<string[]> {
+    const res = await this.getExifField('city', userIds, includeArchived)
       .$if(!!country, (qb) => qb.where('country', '=', country!))
       .$if(!!state, (qb) => qb.where('state', '=', state!))
       .execute();
@@ -595,14 +613,22 @@ export class SearchRepository {
       .executeTakeFirstOrThrow();
   }
 
-  private getExifField(field: 'city' | 'state' | 'country' | 'make' | 'model' | 'lensModel', userIds: string[]) {
+  private getExifField(
+    field: 'city' | 'state' | 'country' | 'make' | 'model' | 'lensModel',
+    userIds: string[],
+    includeArchived = false,
+  ) {
     return this.db
       .selectFrom('asset_exif')
       .select(field)
       .distinctOn(field)
       .innerJoin('asset', 'asset.id', 'asset_exif.assetId')
       .where('ownerId', '=', anyUuid(userIds))
-      .where('visibility', '=', AssetVisibility.Timeline)
+      .where(
+        'visibility',
+        'in',
+        includeArchived ? [AssetVisibility.Timeline, AssetVisibility.Archive] : [AssetVisibility.Timeline],
+      )
       .where('deletedAt', 'is', null)
       .where(field, 'is not', null)
       .where(field, '!=', '');
