@@ -68,6 +68,10 @@
   let smartSearchEnabled = $derived(featureFlagsManager.value.smartSearch);
   let terms = $derived<SearchTerms>(searchQuery ? JSON.parse(searchQuery) : {});
   let searchTermKeys = $derived(getObjectKeys(terms).filter((key) => key !== 'verify'));
+  let verificationEnabled = $derived(
+    !!terms.query && smartSearchEnabled && featureFlagsManager.value.searchVerification && terms.verify !== false,
+  );
+  let verificationActive = $derived(verificationEnabled && verification?.status !== 'not-needed');
 
   $effect(() => {
     // we want this to *only* be reactive on `terms`
@@ -272,7 +276,7 @@
   }
 
   async function toggleVerification() {
-    await goto(Route.search({ ...terms, verify: !terms.verify || undefined }));
+    await goto(Route.search({ ...terms, verify: !verificationEnabled }));
   }
 
   onMount(() => searchManager.setQuery(terms));
@@ -339,14 +343,14 @@
           size="small"
           shape="round"
           color="secondary"
-          variant={terms.verify ? 'filled' : 'ghost'}
-          aria-pressed={!!terms.verify}
+          variant={verificationEnabled ? 'filled' : 'ghost'}
+          aria-pressed={verificationEnabled}
           title={$t('search_verify_hint')}
-          disabled={isLoading && !terms.verify}
+          disabled={isLoading && !verificationEnabled}
           onclick={toggleVerification}>{$t('search_verify_matches')}</Button
         >
         <span role="status" aria-live="polite">
-          {#if isLoading && terms.verify}
+          {#if isLoading && verificationEnabled}
             {$t('search_verifying')}
           {:else if verification?.status === 'complete'}
             {$t('search_verification_complete', {
@@ -380,14 +384,14 @@
         assets={searchResultAssets}
         assetInteraction={assetMultiSelectManager}
         onEndReached={() => {
-          if (!terms.verify) return loadNextPage();
+          if (!verificationActive) return loadNextPage();
         }}
         showArchiveIcon={true}
         {viewport}
         onReload={onSearchQueryUpdate}
         slidingWindowOffset={searchResultsElement.offsetTop}
       />
-      {#if terms.verify && nextPage && !isLoading}
+      {#if verificationActive && nextPage && !isLoading}
         <div class="flex justify-center py-6">
           <Button shape="round" onclick={() => loadNextPage()}>{$t('search_verify_more')}</Button>
         </div>
@@ -406,7 +410,7 @@
                 : 'no_results_description',
             )}
           </p>
-          {#if terms.verify && nextPage}
+          {#if verificationActive && nextPage}
             <Button class="mt-4" shape="round" onclick={() => loadNextPage()}>{$t('search_verify_more')}</Button>
           {/if}
         </div>

@@ -45,7 +45,7 @@ beforeAll(async () => {
 });
 
 describe(SearchService.name, () => {
-  it.each([false, true])('applies face/place/access constraints before visual verification (v3=%s)', async (v3) => {
+  it.each([false, true])('automatically verifies authorized results (v3=%s)', async (v3) => {
     const { sut, ctx } = setup();
     const { user } = await ctx.newUser();
     const { user: stranger } = await ctx.newUser();
@@ -76,7 +76,6 @@ describe(SearchService.name, () => {
     try {
       const result = await sut.searchSmart(factory.auth({ user: { id: user.id } }), {
         query: 'Maya holding a phone in Portugal',
-        verify: true,
         size: 100,
         ...(v3 && { filter: {} }),
       });
