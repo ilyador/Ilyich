@@ -14,6 +14,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -85,6 +102,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -140,6 +174,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -201,6 +252,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -376,6 +444,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -490,6 +575,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -549,6 +651,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -620,6 +739,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -679,6 +815,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -738,6 +891,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -797,6 +967,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -856,6 +1043,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -915,6 +1119,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -981,6 +1202,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1046,6 +1284,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1119,6 +1374,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1184,6 +1456,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1251,6 +1540,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1323,6 +1629,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1388,6 +1711,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1454,6 +1794,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1516,6 +1873,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1575,6 +1949,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1637,6 +2028,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1697,6 +2105,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1756,6 +2181,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1827,6 +2269,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1902,6 +2361,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -1961,6 +2437,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -2017,6 +2510,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -2076,6 +2586,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -2140,6 +2667,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",
@@ -2207,6 +2751,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   "asset"."updateId",
   "asset"."createdAt",
   "asset"."updatedAt",

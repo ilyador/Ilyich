@@ -1,4 +1,8 @@
 import mockfs from 'mock-fs';
+import { R_OK } from 'node:constants';
+import fs, { mkdtempDisposable, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { vitest } from 'vitest';
 import { CrawlOptionsDto } from 'src/dtos/library.dto.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
@@ -229,6 +233,28 @@ describe(StorageRepository.name, () => {
         expect(actual.toSorted()).toEqual(expected.toSorted());
       });
     }
+  });
+
+  describe('checkFileExistsStrict', () => {
+    it('distinguishes readable files from missing paths and non-directory parents', async () => {
+      await using tempDir = await mkdtempDisposable(join(tmpdir(), 'immich-storage-sidecar-'));
+      const file = join(tempDir.path, 'photo.xmp');
+      await writeFile(file, 'test');
+
+      await expect(sut.checkFileExistsStrict(file, R_OK)).resolves.toBe(true);
+      await expect(sut.checkFileExistsStrict(join(tempDir.path, 'missing.xmp'), R_OK)).resolves.toBe(false);
+      await expect(sut.checkFileExistsStrict(join(file, 'photo.xmp'), R_OK)).resolves.toBe(false);
+    });
+
+    it.each(['EACCES', 'EIO'])('propagates %s instead of reporting a missing file', async (code) => {
+      const error = Object.assign(new Error('sidecar access failed'), { code });
+      const access = vitest.spyOn(fs, 'access').mockRejectedValueOnce(error);
+      try {
+        await expect(sut.checkFileExistsStrict('/photos/photo.xmp', R_OK)).rejects.toBe(error);
+      } finally {
+        access.mockRestore();
+      }
+    });
   });
 
   describe('watch', () => {

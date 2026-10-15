@@ -137,13 +137,18 @@ export class AssetFactory {
 
   build() {
     const exif = this.#assetExif?.build();
+    const files = this.#files.map((file) => file.build());
+    const preview =
+      files.find((file) => file.type === AssetFileType.Preview && file.isEdited) ??
+      files.find((file) => file.type === AssetFileType.Preview);
 
     return {
       ...this.value,
       isDeveloped: false,
+      mediaRevision: preview?.updateId ?? this.value.thumbhash?.toString('base64') ?? this.value.id,
       owner: this.#owner.build(),
       exifInfo: exif as NonNullable<typeof exif>,
-      files: this.#files.map((file) => file.build()),
+      files,
       edits: this.#edits.map((edit) => edit.build()),
       faces: this.#faces.map((face) => face.build()),
       stack: this.#stack ?? null,

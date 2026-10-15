@@ -156,6 +156,9 @@ jobs:
       - name: Install LibRaw development package
         run: apt-get update && apt-get install -y --no-install-recommends libraw-dev pkg-config
 
+      - name: Install Rust checks
+        run: rustup component add rustfmt clippy
+
       - name: Check formatting
         run: cargo fmt --check
 

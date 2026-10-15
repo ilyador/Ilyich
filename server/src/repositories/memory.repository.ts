@@ -11,7 +11,7 @@ import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { DateTime } from 'luxon';
 import { InjectKysely } from 'nestjs-kysely';
 import type { IBulkAsset } from 'src/types.js';
-import { assetIsDeveloped } from 'src/database.js';
+import { assetIsDeveloped, assetMediaRevision } from 'src/database.js';
 import { Chunked, ChunkedSet, DummyValue, GenerateSql } from 'src/decorators.js';
 import { MemorySearchDto } from 'src/dtos/memory.dto.js';
 import { AssetFileType, AssetOrderWithRandom, AssetVisibility } from 'src/enum.js';
@@ -85,7 +85,7 @@ export class MemoryRepository implements IBulkAsset {
           eb
             .selectFrom('asset')
             .selectAll('asset')
-            .select(assetIsDeveloped)
+            .select([assetIsDeveloped, assetMediaRevision])
             .innerJoin('memory_asset', 'asset.id', 'memory_asset.assetId')
             .whereRef('memory_asset.memoriesId', '=', 'memory.id')
             .where('asset.visibility', '=', sql.lit(AssetVisibility.Timeline))
@@ -263,7 +263,7 @@ export class MemoryRepository implements IBulkAsset {
           eb
             .selectFrom('asset')
             .selectAll('asset')
-            .select(assetIsDeveloped)
+            .select([assetIsDeveloped, assetMediaRevision])
             .innerJoin('memory_asset', 'asset.id', 'memory_asset.assetId')
             .whereRef('memory_asset.memoriesId', '=', 'memory.id')
             .orderBy('asset.fileCreatedAt', 'asc')

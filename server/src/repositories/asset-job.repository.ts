@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { type Kysely, sql } from 'kysely';
 import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
 import { InjectKysely } from 'nestjs-kysely';
-import { assetIsDeveloped, columns } from 'src/database.js';
+import { assetIsDeveloped, assetMediaRevision, columns } from 'src/database.js';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { AssetFileType, AssetStatus, AssetType, AssetVisibility } from 'src/enum.js';
 import { DB } from 'src/schema/index.js';
@@ -177,7 +177,7 @@ export class AssetJobRepository {
     return this.db
       .selectFrom('asset')
       .select(columns.asset)
-      .select(assetIsDeveloped)
+      .select([assetIsDeveloped, assetMediaRevision])
       .select(withFaces)
       .select((eb) => withFiles(eb, AssetFileType.Sidecar))
       .innerJoin('user', 'user.id', 'asset.ownerId')

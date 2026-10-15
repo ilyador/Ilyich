@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { InjectKysely } from 'nestjs-kysely';
 import type { ExpressionBuilder, Insertable, Kysely, Updateable } from 'kysely';
-import { assetIsDeveloped, columns } from 'src/database.js';
+import { assetIsDeveloped, assetMediaRevision, columns } from 'src/database.js';
 import { DummyValue, GenerateSql } from 'src/decorators.js';
 import { DB } from 'src/schema/index.js';
 import { StackTable } from 'src/schema/tables/stack.table.js';
@@ -18,7 +18,7 @@ const withAssets = (eb: ExpressionBuilder<DB, 'stack'>, withTags = false) => {
     eb
       .selectFrom('asset')
       .selectAll('asset')
-      .select(assetIsDeveloped)
+      .select([assetIsDeveloped, assetMediaRevision])
       .innerJoinLateral(
         (eb) =>
           eb
