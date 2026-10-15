@@ -3,11 +3,13 @@ import { SearchSuggestionType } from 'src/dtos/search.dto.js';
 import { AlbumUserRole, AssetOrder, AssetVisibility, SearchOrderField } from 'src/enum.js';
 import { AccessRepository } from 'src/repositories/access.repository.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
+import { ConfigRepository } from 'src/repositories/config.repository.js';
 import { DatabaseRepository } from 'src/repositories/database.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { PartnerRepository } from 'src/repositories/partner.repository.js';
 import { PersonRepository } from 'src/repositories/person.repository.js';
 import { SearchRepository } from 'src/repositories/search.repository.js';
+import { SystemMetadataRepository } from 'src/repositories/system-metadata.repository.js';
 import { DB } from 'src/schema/index.js';
 import { SearchService } from 'src/services/search.service.js';
 import { newMediumService } from 'test/medium.factory.js';
@@ -28,6 +30,8 @@ const setup = (db?: Kysely<DB>) => {
       SearchRepository,
       PartnerRepository,
       PersonRepository,
+      ConfigRepository,
+      SystemMetadataRepository,
     ],
     mock: [LoggingRepository],
   });
@@ -38,6 +42,42 @@ beforeAll(async () => {
 });
 
 describe(SearchService.name, () => {
+  describe('natural-language search', () => {
+    it.each([false, true])(
+      'intersects people and city without weakening visibility or ownership (v3=%s)',
+      async (v3) => {
+        const { sut, ctx } = setup();
+        const { user } = await ctx.newUser({ name: 'Ilya' });
+        const { user: stranger } = await ctx.newUser();
+        const { person: me } = await ctx.newPerson({ ownerId: user.id, name: 'Me', isHidden: false });
+        const { person: maya } = await ctx.newPerson({ ownerId: user.id, name: 'Maya', isHidden: false });
+        const makeAsset = async (
+          ownerId: string,
+          city: string,
+          both: boolean,
+          visibility = AssetVisibility.Timeline,
+        ) => {
+          const { asset } = await ctx.newAsset({ ownerId, visibility });
+          await ctx.newExif({ assetId: asset.id, city });
+          await ctx.newAssetFace({ assetId: asset.id, personGroupId: me.personGroupId });
+          if (both) await ctx.newAssetFace({ assetId: asset.id, personGroupId: maya.personGroupId });
+          return asset;
+        };
+        const match = await makeAsset(user.id, 'Amsterdam', true);
+        await makeAsset(user.id, 'Amsterdam', false);
+        await makeAsset(user.id, 'Lisbon', true);
+        await makeAsset(stranger.id, 'Amsterdam', true);
+        await makeAsset(user.id, 'Amsterdam', true, AssetVisibility.Locked);
+        const auth = factory.auth({ user: { id: user.id, name: user.name } });
+        const result = await sut.searchSmart(auth, {
+          query: 'me an maya in amsterdam',
+          size: 100,
+          ...(v3 && { filter: {} }),
+        });
+        expect(result.assets.items.map((asset) => asset.id)).toEqual([match.id]);
+      },
+    );
+  });
   it('should work', () => {
     const { sut } = setup();
     expect(sut).toBeDefined();

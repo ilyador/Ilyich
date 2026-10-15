@@ -432,6 +432,24 @@ export function searchAssetBuilderLegacy(kysely: Kysely<DB>, options: AssetSearc
   return kysely
     .withPlugin(joinDeduplicationPlugin)
     .selectFrom('asset')
+    .$if(!!options.queryFilter, (qb) =>
+      qb.where(
+        'asset.id',
+        'in',
+        searchAssetBuilder(
+          kysely,
+          {
+            filter: {
+              ...options.queryFilter,
+              ...(options.albumIds?.length && { albumIds: { any: options.albumIds } }),
+            },
+          },
+          { userIds: options.userIds ?? [], lockedOwnerId: options.viewingUserId ?? options.userIds?.[0] ?? '' },
+        )
+          .clearSelect()
+          .select('asset.id'),
+      ),
+    )
     .$if(!!options.visibility, (qb) =>
       options.visibility === 'not-locked'
         ? qb.where('asset.visibility', '!=', AssetVisibility.Locked)
@@ -823,6 +841,11 @@ export function searchAssetBuilder(kysely: Kysely<DB>, options: AssetSearchBuild
       .$if(options.withStacked === false, (qb) => qb.where('asset.stackId', 'is', null))
       .where((eb) => {
         const predicates = branchPredicates(eb, filter);
+        if (options.queryFilter) {
+          predicates.push(...branchPredicates(eb, options.queryFilter));
+          if (options.queryFilter.or)
+            predicates.push(eb.or(options.queryFilter.or.map((branch) => eb.and(branchPredicates(eb, branch)))));
+        }
         if (branches.length > 0) {
           predicates.push(
             eb.or(

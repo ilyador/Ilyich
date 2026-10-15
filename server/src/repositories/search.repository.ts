@@ -31,6 +31,7 @@ export interface SearchAssetIdOptions {
 export interface SearchUserIdOptions {
   libraryId?: string | null;
   userIds?: string[];
+  queryFilter?: SearchFilter;
 }
 
 export type SearchIdOptions = SearchAssetIdOptions & SearchUserIdOptions;
@@ -146,6 +147,7 @@ export interface AssetSearchScope {
 
 export interface AssetSearchBuilderV3Options {
   filter?: SearchFilter;
+  queryFilter?: SearchFilter;
   withExif?: boolean;
   withFaces?: boolean;
   withPeople?: boolean;
