@@ -11,7 +11,7 @@ import {
 } from 'kysely';
 import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
 import { InjectKysely } from 'nestjs-kysely';
-import { assetIsDeveloped, columns } from 'src/database.js';
+import { assetIsDeveloped, assetMediaRevision, columns } from 'src/database.js';
 import { Chunked, ChunkedArray, ChunkedSet, DummyValue, GenerateSql } from 'src/decorators.js';
 import { AlbumUserCreateDto, MapAlbumDto } from 'src/dtos/album.dto.js';
 import { AlbumUserRole } from 'src/enum.js';
@@ -58,7 +58,7 @@ const withAssets = (eb: ExpressionBuilder<DB, 'album'>) => {
       eb
         .selectFrom('asset')
         .selectAll('asset')
-        .select(assetIsDeveloped)
+        .select([assetIsDeveloped, assetMediaRevision])
         .leftJoin('asset_exif', 'asset.id', 'asset_exif.assetId')
         .select((eb) =>
           eb.table('asset_exif').$castTo<ShallowDehydrateObject<Selectable<AssetExifTable>>>().as('exifInfo'),

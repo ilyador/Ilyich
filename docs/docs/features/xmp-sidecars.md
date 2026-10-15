@@ -37,7 +37,8 @@ The same asset displays the developed result in the web and mobile apps.
 Downloading the unedited original returns the source bytes. Immich's own crop and
 rotation edits are applied after the Lightroom development settings.
 
-External sidecars take precedence over embedded XMP. Library scans and sidecar
+Development rendering requires an external sidecar. Images without one use
+Immich's normal image processing and embedded-preview settings. Library scans and sidecar
 synchronization detect changes; library watching also detects sidecar additions,
 changes and removals. Removing a sidecar refreshes the asset without deleting its
 original. If rendering fails, Immich retains the last successfully generated caches

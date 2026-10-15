@@ -178,7 +178,24 @@ select
         "assetId" = "asset"."id"
     ),
     false
-  ) as "isDeveloped"
+  ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision"
 from
   "asset"
 where
@@ -198,6 +215,23 @@ select
     ),
     false
   ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision",
   (
     select
       coalesce(json_agg(agg), '[]')
@@ -324,7 +358,24 @@ select
         "assetId" = "asset"."id"
     ),
     false
-  ) as "isDeveloped"
+  ) as "isDeveloped",
+  coalesce(
+    (
+      select
+        "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+      from
+        "asset_file"
+      where
+        "assetId" = "asset"."id"
+        and "type" = 'preview'
+      order by
+        "isEdited" desc
+      limit
+        1
+    ),
+    encode("asset"."thumbhash", 'base64'),
+    "asset"."id"::text
+  ) as "mediaRevision"
 from
   "asset"
 where
@@ -417,7 +468,23 @@ with
       "asset"."duration",
       "asset"."id",
       "asset"."visibility",
-      "asset"."updateId" as "mediaRevision",
+      coalesce(
+        (
+          select
+            "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
+          from
+            "asset_file"
+          where
+            "assetId" = "asset"."id"
+            and "type" = 'preview'
+          order by
+            "isEdited" desc
+          limit
+            1
+        ),
+        encode("asset"."thumbhash", 'base64'),
+        "asset"."id"::text
+      ) as "mediaRevision",
       asset."isFavorite"
       and asset."ownerId" = $1 as "isFavorite",
       asset.type = 'IMAGE' as "isImage",

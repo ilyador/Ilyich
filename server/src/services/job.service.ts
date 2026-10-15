@@ -89,7 +89,7 @@ export class JobService extends BaseService {
       const response = await this.jobRepository.run(job);
       await this.eventRepository.emit('JobSuccess', { job, response });
       if (response && typeof response === 'string' && [JobStatus.Success, JobStatus.Skipped].includes(response)) {
-        await this.onDone(job);
+        await this.onDone(job, response);
       }
     } catch (error: Error | any) {
       await this.eventRepository.emit('JobError', { job, error });
@@ -101,12 +101,12 @@ export class JobService extends BaseService {
   /**
    * Queue follow up jobs
    */
-  private async onDone(item: JobItem) {
+  private async onDone(item: JobItem, response: JobStatus) {
     switch (item.name) {
       case JobName.SidecarCheck: {
         await this.jobRepository.queue({
           name: JobName.AssetExtractMetadata,
-          data: { ...item.data, source: item.data.source ?? 'sidecar' },
+          data: { ...item.data, source: item.data.source ?? (response === JobStatus.Success ? 'sidecar' : undefined) },
         });
         break;
       }
@@ -133,6 +133,9 @@ export class JobService extends BaseService {
       }
 
       case JobName.AssetEditThumbnailGeneration: {
+        if (response !== JobStatus.Success) {
+          break;
+        }
         const asset = await this.assetRepository.getById(item.data.id);
         const edits = await this.assetEditRepository.getWithSyncInfo(item.data.id);
 
@@ -143,7 +146,7 @@ export class JobService extends BaseService {
               ownerId: asset.ownerId,
               originalFileName: asset.originalFileName,
               thumbhash: asset.thumbhash ? hexOrBufferToBase64(asset.thumbhash) : null,
-              mediaRevision: asset.updateId,
+              mediaRevision: asset.mediaRevision,
               isDeveloped: asset.isDeveloped,
               checksum: hexOrBufferToBase64(asset.checksum),
               fileCreatedAt: asset.fileCreatedAt,
@@ -170,7 +173,7 @@ export class JobService extends BaseService {
       }
 
       case JobName.AssetGenerateThumbnails: {
-        if (!item.data.notify && item.data.source !== 'upload') {
+        if (response !== JobStatus.Success || (!item.data.notify && item.data.source !== 'upload')) {
           break;
         }
 
@@ -202,7 +205,7 @@ export class JobService extends BaseService {
                 ownerId: asset.ownerId,
                 originalFileName: asset.originalFileName,
                 thumbhash: asset.thumbhash ? hexOrBufferToBase64(asset.thumbhash) : null,
-                mediaRevision: asset.updateId,
+                mediaRevision: asset.mediaRevision,
                 isDeveloped: asset.isDeveloped,
                 checksum: hexOrBufferToBase64(asset.checksum),
                 fileCreatedAt: asset.fileCreatedAt,

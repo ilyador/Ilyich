@@ -143,6 +143,7 @@ export const getForMetadataExtraction = (
   { clusterGroupId }: { clusterGroupId?: string } = {},
 ) => ({
   isDeveloped: asset.isDeveloped,
+  mediaRevision: asset.mediaRevision,
   id: asset.id,
   clusterGroupId: clusterGroupId ?? newUuid(),
   checksum: asset.checksum,

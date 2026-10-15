@@ -594,17 +594,9 @@ describe(MediaService.name, () => {
           .build();
         mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
         mocks.systemMetadata.get.mockResolvedValue({ image: { extractEmbedded: true, fullsize: { enabled } } });
-        const native = {
-          data: rawBuffer,
-          info: { width: 3840, height: 2160, channels: 4 as const },
-          nativeDimensions: { width: 3840, height: 2160 },
-          colorspace: Colorspace.P3,
-          isDeveloped: false,
-        };
-        mocks.media.developImage.mockResolvedValue(native);
-
         await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
 
+        expect(mocks.media.developImage).not.toHaveBeenCalled();
         const publication = mocks.asset.publishImageGeneration.mock.calls[0][0];
         const keys = publication.files.map((file) => `${file.type}/${file.isEdited ?? false}`);
         expect(new Set(keys).size).toBe(keys.length);
@@ -613,7 +605,7 @@ describe(MediaService.name, () => {
         );
         const fullsize = publication.files.find((file) => file.type === AssetFileType.FullSize && file.isEdited)!;
         expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
-          { data: native.data, info: native.info },
+          { data: rawBuffer, info: rawInfo },
           expect.objectContaining({ edits: asset.edits.map(({ action, parameters }) => ({ action, parameters })) }),
           fullsize.path,
         );
@@ -1055,71 +1047,90 @@ describe(MediaService.name, () => {
       });
     });
 
-    it.each([false, true])('uses native RAW pixels regardless of extractEmbedded being %s', async (extractEmbedded) => {
-      const asset = AssetFactory.from({ originalFileName: 'photo.dng' })
-        .exif({ exifImageWidth: 6016, exifImageHeight: 4016, profileDescription: 'Adobe RGB', bitsPerSample: 14 })
+    it.each([false, true])('honors extractEmbedded=%s for RAW without a sidecar', async (extractEmbedded) => {
+      const asset = AssetFactory.from({ originalFileName: 'photo.dng', originalPath: '/photos/photo.dng' })
+        .exif({ exifImageWidth: 6000, exifImageHeight: 4000 })
         .build();
-      const native = {
-        data: rawBuffer,
-        info: { width: 2160, height: 1440, channels: 4 as const },
-        nativeDimensions: { width: 6000, height: 4000 },
-        colorspace: Colorspace.P3,
-        isDeveloped: false,
-      };
-      mocks.media.developImage.mockResolvedValue(native);
+      mocks.media.extract.mockResolvedValue({ buffer: extractedBuffer, format: RawExtractedFormat.Jpeg });
+      mocks.media.getImageMetadata.mockResolvedValue({ width: 6000, height: 4000, isTransparent: false });
       mocks.systemMetadata.get.mockResolvedValue({ image: { extractEmbedded, fullsize: { enabled: false } } });
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
 
       await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
 
-      expect(mocks.media.developImage).toHaveBeenCalledExactlyOnceWith({
-        originalPath: asset.originalPath,
-        colorspace: Colorspace.P3,
-        size: 1440,
-      });
-      expect(mocks.media.extract).not.toHaveBeenCalled();
-      expect(mocks.media.decodeImage).not.toHaveBeenCalled();
-      expect(mocks.media.getImageMetadata).not.toHaveBeenCalled();
-      expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
-        { data: native.data, info: native.info },
-        expect.objectContaining({ colorspace: Colorspace.P3, size: 1440 }),
-        expect.any(String),
-      );
-      expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
-        expect.objectContaining({
-          base: { width: 6000, height: 4000, isDeveloped: false },
-          dimensions: { width: 6000, height: 4000 },
-        }),
+      expect(mocks.media.developImage).not.toHaveBeenCalled();
+      expect(mocks.media.getDevelopmentInputFingerprint).not.toHaveBeenCalled();
+      expect(mocks.media.extract).toHaveBeenCalledTimes(extractEmbedded ? 1 : 0);
+      expect(mocks.media.decodeImage).toHaveBeenCalledWith(
+        extractEmbedded ? extractedBuffer : asset.originalPath,
+        expect.objectContaining({ size: 1440 }),
       );
     });
 
-    it.each(Object.values(ImageFormat))('converts native RAW fullsize pixels to %s when enabled', async (format) => {
-      const asset = AssetFactory.from({ originalFileName: 'photo.dng' }).exif().build();
-      const native = {
-        data: rawBuffer,
-        info: { width: 6000, height: 4000, channels: 4 as const },
-        nativeDimensions: { width: 6000, height: 4000 },
-        colorspace: Colorspace.P3,
-        isDeveloped: false,
-      };
-      mocks.media.developImage.mockResolvedValue(native);
-      mocks.systemMetadata.get.mockResolvedValue({ image: { fullsize: { enabled: true, format } } });
+    it('keeps the normal embedded JPEG fullsize cache for RAW without a sidecar', async () => {
+      const asset = AssetFactory.from({ originalFileName: 'photo.nef', originalPath: '/photos/photo.nef' })
+        .exif()
+        .build();
+      mocks.media.extract.mockResolvedValue({ buffer: extractedBuffer, format: RawExtractedFormat.Jpeg });
+      mocks.media.getImageMetadata.mockResolvedValue({ width: 6000, height: 4000, isTransparent: false });
+      mocks.systemMetadata.get.mockResolvedValue({ image: { extractEmbedded: true, fullsize: { enabled: true } } });
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
 
       await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
 
-      expect(mocks.media.developImage).toHaveBeenCalledExactlyOnceWith({
-        originalPath: asset.originalPath,
-        colorspace: Colorspace.P3,
-        size: undefined,
+      expect(mocks.media.developImage).not.toHaveBeenCalled();
+      expect(mocks.media.generateThumbnail).toHaveBeenCalledTimes(2);
+      const publication = mocks.asset.publishImageGeneration.mock.calls[0][0];
+      const fullsize = publication.files.find((file) => file.type === AssetFileType.FullSize)!;
+      expect(mocks.storage.createOrOverwriteFile).toHaveBeenCalledWith(fullsize.path, extractedBuffer);
+      expect(mocks.media.writeExif).toHaveBeenCalledWith(expect.any(Object), fullsize.path);
+    });
+
+    it.each(['write', 'exif'])('waits for encoders before cleaning an embedded JPEG %s failure', async (failure) => {
+      const asset = AssetFactory.from({ originalFileName: 'photo.nef', originalPath: '/photos/photo.nef' })
+        .exif()
+        .build();
+      mocks.media.extract.mockResolvedValue({ buffer: extractedBuffer, format: RawExtractedFormat.Jpeg });
+      mocks.media.getImageMetadata.mockResolvedValue({ width: 6000, height: 4000, isTransparent: false });
+      mocks.systemMetadata.get.mockResolvedValue({ image: { extractEmbedded: true, fullsize: { enabled: true } } });
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+      let finishEncoder!: () => void;
+      const encoder = new Promise<void>((resolve) => (finishEncoder = resolve));
+      mocks.media.generateThumbnail.mockReturnValueOnce(encoder);
+      const failingWrite = failure === 'write' ? mocks.storage.createOrOverwriteFile : mocks.media.writeExif;
+      failingWrite.mockRejectedValueOnce(new Error('embedded cache failed'));
+
+      const result = sut.handleGenerateThumbnails({ id: asset.id });
+      const rejection = expect(result).rejects.toThrow('embedded cache failed');
+      await vi.waitFor(() => expect(failingWrite).toHaveBeenCalled());
+      expect(mocks.job.queue).not.toHaveBeenCalled();
+      finishEncoder();
+      await rejection;
+
+      expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
+      expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
+        name: JobName.FileDelete,
+        data: { files: expect.arrayContaining(mocks.media.generateThumbnail.mock.calls.map((call) => call[2])) },
       });
+    });
+
+    it.each(Object.values(ImageFormat))('converts ordinary RAW fullsize pixels to %s when enabled', async (format) => {
+      const asset = AssetFactory.from({ originalFileName: 'photo.dng' }).exif().build();
+      mocks.systemMetadata.get.mockResolvedValue({
+        image: { extractEmbedded: false, fullsize: { enabled: true, format } },
+      });
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+
+      await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
+
+      expect(mocks.media.developImage).not.toHaveBeenCalled();
       expect(mocks.media.generateThumbnail).toHaveBeenCalledTimes(3);
       const publication = mocks.asset.publishImageGeneration.mock.calls[0][0];
       const fullsize = publication.files.find((file) => file.type === AssetFileType.FullSize)!;
       expect(fullsize).toMatchObject({ isEdited: false, path: expect.stringMatching(new RegExp(`[.]${format}$`)) });
       expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
-        { data: native.data, info: native.info },
-        expect.objectContaining({ format, colorspace: Colorspace.P3, edits: [] }),
+        { data: rawBuffer, info: rawInfo },
+        expect.objectContaining({ format, colorspace: Colorspace.Srgb, edits: [] }),
         fullsize.path,
       );
       expect(mocks.media.extract).not.toHaveBeenCalled();
@@ -1305,7 +1316,6 @@ describe(MediaService.name, () => {
       info: { width: 600, height: 400, channels: 4 as const },
       colorspace: Colorspace.Srgb,
       nativeDimensions: { width: 3000, height: 2000 },
-      isDeveloped: true,
     };
 
     beforeEach(() => {
@@ -1321,81 +1331,45 @@ describe(MediaService.name, () => {
       });
     });
 
-    it.each([
-      { extension: 'dng', isDeveloped: false },
-      { extension: 'dng', isDeveloped: true },
-      { extension: 'nef', isDeveloped: false },
-      { extension: 'arw', isDeveloped: true },
-      { extension: 'cr3', isDeveloped: false },
-    ])(
-      'renders ordinary $extension RAW through the native helper (embedded edits: $isDeveloped)',
-      async ({ extension, isDeveloped }) => {
-        const asset = AssetFactory.from({
-          originalFileName: `photo.${extension}`,
-          originalPath: `/photos/photo.${extension}`,
-        })
-          .exif({
-            exifImageWidth: 6016,
-            exifImageHeight: 4016,
-            orientation: String(ExifOrientation.Rotate90CW),
-            profileDescription: 'Adobe RGB',
-          })
-          .build();
-        const rendered = {
-          ...developed,
-          info: { width: 1440, height: 2160, channels: 4 as const },
-          nativeDimensions: { width: 4000, height: 6000 },
-          isDeveloped,
-        };
-        mocks.media.developImage.mockResolvedValue(rendered);
-        mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+    it.each(['dng', 'nef', 'arw', 'cr3'])('leaves ordinary %s files on the existing image path', async (extension) => {
+      const asset = AssetFactory.from({
+        originalFileName: `photo.${extension}`,
+        originalPath: `/photos/photo.${extension}`,
+      })
+        .exif()
+        .build();
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
 
-        await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
+      await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
 
-        expect(mocks.media.developImage).toHaveBeenCalledExactlyOnceWith({
-          originalPath: asset.originalPath,
-          colorspace: Colorspace.Srgb,
-          size: 1440,
-        });
-        expect(mocks.media.extract).not.toHaveBeenCalled();
-        expect(mocks.media.decodeImage).not.toHaveBeenCalled();
-        expect(mocks.media.generateThumbnail).toHaveBeenCalledTimes(2);
-        for (const [bitmap, options] of mocks.media.generateThumbnail.mock.calls) {
-          expect(bitmap).toEqual({ data: rendered.data, info: rendered.info });
-          expect(options).toMatchObject({ colorspace: Colorspace.Srgb, edits: [] });
-        }
-        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledExactlyOnceWith(
-          expect.objectContaining({
-            fingerprint: 'development-input',
-            sidecarPath: null,
-            base: { width: 4000, height: 6000, isDeveloped },
-            dimensions: { width: 4000, height: 6000 },
-          }),
-        );
-      },
-    );
+      expect(mocks.media.developImage).not.toHaveBeenCalled();
+      expect(mocks.media.getDevelopmentInputFingerprint).not.toHaveBeenCalled();
+      expect(mocks.media.decodeImage).toHaveBeenCalled();
+    });
 
-    it.each([false, true])('shares one native RAW render with Immich edits (base fullsize: %s)', async (enabled) => {
+    it.each([false, true])('shares one sidecar render with Immich edits (base fullsize: %s)', async (enabled) => {
       const asset = AssetFactory.from({ originalFileName: 'photo.dng', originalPath: '/photos/photo.dng' })
         .exif({ exifImageWidth: 6016, exifImageHeight: 4016 })
+        .file({ type: AssetFileType.Sidecar, path: '/photos/photo.dng.xmp' })
         .edit({ action: AssetEditAction.Crop, parameters: { x: 100, y: 200, width: 2000, height: 1000 } })
         .build();
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
       mocks.systemMetadata.get.mockResolvedValue({ image: { colorspace: Colorspace.Srgb, fullsize: { enabled } } });
-      const native = { ...developed, info: { width: 3000, height: 2000, channels: 4 as const }, isDeveloped: false };
+      const native = { ...developed, info: { width: 3000, height: 2000, channels: 4 as const } };
       mocks.media.developImage.mockResolvedValue(native);
 
       await expect(sut.handleAssetEditThumbnailGeneration({ id: asset.id })).resolves.toBe(JobStatus.Success);
 
       expect(mocks.media.developImage).toHaveBeenCalledExactlyOnceWith({
         originalPath: asset.originalPath,
+        sidecarPath: '/photos/photo.dng.xmp',
         colorspace: Colorspace.Srgb,
         size: undefined,
       });
       expect(mocks.media.generateThumbnail).toHaveBeenCalledTimes(enabled ? 6 : 5);
       const publication = mocks.asset.publishImageGeneration.mock.calls[0][0];
       expect(publication).toMatchObject({
-        base: { width: 3000, height: 2000, isDeveloped: false },
+        base: { width: 3000, height: 2000, isDeveloped: true },
         dimensions: { width: 2000, height: 1000 },
       });
       const keys = publication.files.map((file) => `${file.type}/${file.isEdited ?? false}`);
@@ -1409,28 +1383,8 @@ describe(MediaService.name, () => {
       expect(publication.files.some((file) => file.type === AssetFileType.FullSize && !file.isEdited)).toBe(enabled);
     });
 
-    it('preserves the ordinary RAW cache when native rendering fails instead of using a small TIFF preview', async () => {
-      const asset = AssetFactory.from({ originalFileName: 'photo.dng', originalPath: '/photos/photo.dng' })
-        .exif()
-        .file({ type: AssetFileType.Preview, path: '/cache/last-valid-preview.jpeg' })
-        .build();
-      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
-      mocks.media.developImage.mockRejectedValue(new Error('Native RAW decode failed'));
-
-      await expect(sut.handleGenerateThumbnails({ id: asset.id })).rejects.toThrow('Native RAW decode failed');
-
-      expect(mocks.media.extract).not.toHaveBeenCalled();
-      expect(mocks.media.decodeImage).not.toHaveBeenCalled();
-      expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();
-      expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
-      expect(mocks.asset.deleteFiles).not.toHaveBeenCalled();
-      expect(mocks.job.queue).not.toHaveBeenCalled();
-    });
-
-    it('discards staged RAW output if embedded metadata changes while rendering', async () => {
-      const asset = AssetFactory.from({ originalFileName: 'photo.dng', originalPath: '/photos/photo.dng' })
-        .exif()
-        .build();
+    it('discards staged output if the original changes while rendering a sidecar', async () => {
+      const asset = makeSidecarAsset().build();
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
       mocks.media.getDevelopmentInputFingerprint.mockResolvedValueOnce('old').mockResolvedValueOnce('new');
 
@@ -1548,77 +1502,26 @@ describe(MediaService.name, () => {
       );
     });
 
-    it.each([false, true])(
-      'renders RAW natively when external sidecar edits are skipped (embedded edits: %s)',
-      async (isDeveloped) => {
-        const asset = makeSidecarAsset().build();
-        mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
-        mocks.media.developImage.mockResolvedValueOnce(null).mockResolvedValueOnce({ ...developed, isDeveloped });
-
-        await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
-
-        expect(mocks.media.developImage).toHaveBeenCalledTimes(2);
-        expect(mocks.media.developImage).toHaveBeenNthCalledWith(1, {
-          originalPath: asset.originalPath,
-          sidecarPath: '/library/image.nef.xmp',
-          colorspace: Colorspace.Srgb,
-          size: 1440,
-        });
-        expect(mocks.media.developImage).toHaveBeenNthCalledWith(2, {
-          originalPath: asset.originalPath,
-          colorspace: Colorspace.Srgb,
-          size: 1440,
-        });
-        expect(mocks.media.extract).not.toHaveBeenCalled();
-        expect(mocks.media.decodeImage).not.toHaveBeenCalled();
-        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
-          expect.objectContaining({
-            fingerprint: 'development-input',
-            sidecarPath: '/library/image.nef.xmp',
-            base: { width: 3000, height: 2000, isDeveloped },
-          }),
-        );
-      },
-    );
-
-    it.each([false, true])(
-      'preserves RAW caches if the native request returns no bitmap (external sidecar: %s)',
-      async (hasSidecar) => {
-        const asset = makeSidecarAsset().build();
-        mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue({
-          ...getForGenerateThumbnail(asset),
-          sidecarPath: hasSidecar ? '/library/image.nef.xmp' : null,
-        });
-        mocks.media.developImage.mockResolvedValue(null);
-
-        await expect(sut.handleGenerateThumbnails({ id: asset.id })).rejects.toThrow(
-          'Native RAW renderer did not return a bitmap',
-        );
-
-        expect(mocks.media.developImage).toHaveBeenCalledTimes(hasSidecar ? 2 : 1);
-        expect(mocks.media.extract).not.toHaveBeenCalled();
-        expect(mocks.media.decodeImage).not.toHaveBeenCalled();
-        expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();
-        expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
-        expect(mocks.asset.deleteFiles).not.toHaveBeenCalled();
-        expect(mocks.job.queue).not.toHaveBeenCalled();
-      },
-    );
-
-    it('preserves RAW caches if native rendering fails after skipping an external packet', async () => {
+    it('uses ordinary RAW extraction when an external packet has no applicable edits', async () => {
       const asset = makeSidecarAsset().build();
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
-      mocks.media.developImage.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('Native decode failed'));
+      mocks.media.developImage.mockResolvedValue(null);
 
-      await expect(sut.handleGenerateThumbnails({ id: asset.id })).rejects.toThrow('Native decode failed');
+      await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
 
-      expect(mocks.media.developImage).toHaveBeenCalledTimes(2);
-      expect(mocks.media.extract).not.toHaveBeenCalled();
-      expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
-      expect(mocks.job.queue).not.toHaveBeenCalled();
+      expect(mocks.media.developImage).toHaveBeenCalledExactlyOnceWith({
+        originalPath: asset.originalPath,
+        sidecarPath: '/library/image.nef.xmp',
+        colorspace: Colorspace.Srgb,
+        size: 1440,
+      });
+      expect(mocks.media.decodeImage).toHaveBeenCalled();
+      expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
+        expect.objectContaining({ base: { width: 6000, height: 4000, isDeveloped: false } }),
+      );
     });
 
-    it('replaces external-sidecar previews with the native RAW base when the sidecar has been removed', async () => {
+    it('replaces external-sidecar previews with ordinary RAW processing when the sidecar has been removed', async () => {
       const asset = makeSidecarAsset().build();
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue({
         ...getForGenerateThumbnail(asset),
@@ -1630,20 +1533,10 @@ describe(MediaService.name, () => {
         },
       });
       mocks.asset.publishImageGeneration.mockResolvedValue(['/cache/published-preview.jpeg']);
-      mocks.media.developImage.mockResolvedValue({
-        ...developed,
-        nativeDimensions: { width: 6000, height: 4000 },
-        isDeveloped: false,
-      });
-
       await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
 
-      expect(mocks.media.developImage).toHaveBeenCalledExactlyOnceWith({
-        originalPath: asset.originalPath,
-        colorspace: Colorspace.Srgb,
-        size: 1440,
-      });
-      expect(mocks.media.decodeImage).not.toHaveBeenCalled();
+      expect(mocks.media.developImage).not.toHaveBeenCalled();
+      expect(mocks.media.decodeImage).toHaveBeenCalled();
       expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
         expect.objectContaining({ base: { width: 6000, height: 4000, isDeveloped: false } }),
       );
@@ -1716,7 +1609,7 @@ describe(MediaService.name, () => {
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
       mocks.asset.publishImageGeneration.mockResolvedValue(null);
 
-      await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Skipped);
+      await expect(sut.handleGenerateThumbnails({ id: asset.id, source: 'sidecar' })).resolves.toBe(JobStatus.Skipped);
 
       expect(mocks.job.queue).toHaveBeenCalledWith({
         name: JobName.AssetGenerateThumbnails,
@@ -1732,6 +1625,104 @@ describe(MediaService.name, () => {
       expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
     });
 
+    it.each([false, true])('retries rejected editor generations on the editor queue (sidecar: %s)', async (sidecar) => {
+      const asset = (sidecar ? makeSidecarAsset() : AssetFactory.from().exif())
+        .edit({ action: AssetEditAction.Rotate, parameters: { angle: 90 } })
+        .build();
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+      mocks.asset.publishImageGeneration.mockResolvedValue(null);
+
+      await expect(sut.handleAssetEditThumbnailGeneration({ id: asset.id })).resolves.toBe(JobStatus.Skipped);
+
+      expect(mocks.job.queue).toHaveBeenCalledWith({
+        name: JobName.AssetEditThumbnailGeneration,
+        data: { id: asset.id },
+      });
+      expect(mocks.job.queue).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: JobName.AssetGenerateThumbnails }),
+      );
+      expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+    });
+
+    it('keeps the editor retry context when an XMP changes before publication', async () => {
+      const asset = makeSidecarAsset()
+        .edit({ action: AssetEditAction.Rotate, parameters: { angle: 90 } })
+        .build();
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+      mocks.media.getDevelopmentInputFingerprint.mockResolvedValueOnce('old').mockResolvedValueOnce('new');
+
+      await expect(sut.handleAssetEditThumbnailGeneration({ id: asset.id })).resolves.toBe(JobStatus.Skipped);
+
+      expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
+      expect(mocks.job.queue).toHaveBeenCalledWith({
+        name: JobName.SidecarCheck,
+        data: { id: asset.id, source: 'edit' },
+      });
+      expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      'rediscovers a removed editor sidecar before publication (rendered: %s)',
+      async (afterRender) => {
+        const asset = makeSidecarAsset()
+          .edit({ action: AssetEditAction.Rotate, parameters: { angle: 90 } })
+          .build();
+        mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+        if (afterRender) {
+          mocks.media.getDevelopmentInputFingerprint.mockResolvedValueOnce('old');
+        }
+        const error = Object.assign(new Error('sidecar removed'), { code: 'ENOENT', path: '/library/image.nef.xmp' });
+        mocks.media.getDevelopmentInputFingerprint.mockRejectedValueOnce(error);
+
+        await expect(sut.handleAssetEditThumbnailGeneration({ id: asset.id })).resolves.toBe(JobStatus.Skipped);
+
+        expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
+        expect(mocks.job.queue).toHaveBeenCalledWith({
+          name: JobName.SidecarCheck,
+          data: { id: asset.id, source: 'edit' },
+        });
+        expect(mocks.media.developImage).toHaveBeenCalledTimes(afterRender ? 1 : 0);
+        expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rediscovers an editor sidecar that disappears before the renderer opens it', async () => {
+      const asset = makeSidecarAsset()
+        .edit({ action: AssetEditAction.Rotate, parameters: { angle: 90 } })
+        .build();
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+      mocks.media.getDevelopmentInputFingerprint
+        .mockResolvedValueOnce('old')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('sidecar removed'), { code: 'ENOENT', path: '/library/image.nef.xmp' }),
+        );
+      mocks.media.developImage.mockRejectedValueOnce(new Error('renderer could not read the sidecar'));
+
+      await expect(sut.handleAssetEditThumbnailGeneration({ id: asset.id })).resolves.toBe(JobStatus.Skipped);
+
+      expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
+      expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
+        name: JobName.SidecarCheck,
+        data: { id: asset.id, source: 'edit' },
+      });
+      expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      'preserves upload analysis and notification context on CAS retry (sidecar: %s)',
+      async (sidecar) => {
+        const asset = (sidecar ? makeSidecarAsset() : AssetFactory.from().exif()).build();
+        mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+        mocks.asset.publishImageGeneration.mockResolvedValue(null);
+        const data = { id: asset.id, source: 'upload' as const, notify: true };
+
+        await expect(sut.handleGenerateThumbnails(data)).resolves.toBe(JobStatus.Skipped);
+
+        expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.AssetGenerateThumbnails, data });
+        expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+      },
+    );
+
     it('announces the accepted revision and cleans only the previous cache generation', async () => {
       const asset = makeSidecarAsset().build();
       const updated = { ...asset, updateId: newUuid(), isDeveloped: true, width: 3000, height: 2000 };
@@ -1745,7 +1736,7 @@ describe(MediaService.name, () => {
       expect(mocks.websocket.clientSend).toHaveBeenCalledExactlyOnceWith(
         'on_asset_update',
         asset.ownerId,
-        expect.objectContaining({ id: asset.id, mediaRevision: updated.updateId, isDeveloped: true }),
+        expect.objectContaining({ id: asset.id, mediaRevision: updated.mediaRevision, isDeveloped: true }),
       );
       expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
         name: JobName.FileDelete,
@@ -1912,6 +1903,58 @@ describe(MediaService.name, () => {
   });
 
   describe('handleGeneratePersonThumbnail', () => {
+    it.each(['photo.jpg', 'photo.NEF'])(
+      'crops the developed detection preview for %s without applying original orientation',
+      async (originalFileName) => {
+        const person = PersonFactory.create();
+        mocks.systemMetadata.get.mockResolvedValue({ image: { extractEmbedded: true } });
+        mocks.person.getDataForThumbnailGenerationJob.mockResolvedValue({
+          ...personThumbnailStub.newThumbnailMiddle,
+          originalPath: `/original/${originalFileName}`,
+          exifOrientation: '6',
+          isDeveloped: true,
+          previewPath: '/cache/developed-preview.jpg',
+        });
+        const data = Buffer.from('developed-preview');
+        const info = { width: 800, height: 1000, channels: 3 } as OutputInfo;
+        mocks.media.decodeImage.mockResolvedValue({ data, info });
+        mocks.media.generateThumbnail.mockResolvedValue();
+        mocks.person.update.mockResolvedValue(person);
+
+        await expect(sut.handleGeneratePersonThumbnail(person)).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.media.extract).not.toHaveBeenCalled();
+        expect(mocks.media.decodeImage).toHaveBeenCalledExactlyOnceWith('/cache/developed-preview.jpg', {
+          colorspace: Colorspace.P3,
+          orientation: undefined,
+          processInvalidImages: false,
+        });
+        expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
+          { data, info },
+          expect.objectContaining({
+            edits: [{ action: AssetEditAction.Crop, parameters: { x: 190, y: 190, width: 220, height: 220 } }],
+          }),
+          expect.any(String),
+        );
+      },
+    );
+
+    it('fails safely when a developed face has no preview', async () => {
+      mocks.person.getDataForThumbnailGenerationJob.mockResolvedValue({
+        ...personThumbnailStub.newThumbnailMiddle,
+        isDeveloped: true,
+        previewPath: null,
+      });
+
+      await expect(sut.handleGeneratePersonThumbnail({ ownerId: 'owner-1', personGroupId: 'person-1' })).resolves.toBe(
+        JobStatus.Failed,
+      );
+
+      expect(mocks.media.extract).not.toHaveBeenCalled();
+      expect(mocks.media.decodeImage).not.toHaveBeenCalled();
+      expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();
+    });
+
     it('should generate a thumbnail even if machine learning is disabled', async () => {
       mocks.systemMetadata.get.mockResolvedValue(systemConfigStub.machineLearningDisabled);
       mocks.person.getDataForThumbnailGenerationJob.mockResolvedValue(personThumbnailStub.newThumbnailMiddle);

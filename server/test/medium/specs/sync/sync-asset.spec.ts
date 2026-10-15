@@ -26,7 +26,7 @@ describe(SyncEntityType.AssetV2, () => {
     const date = new Date().toISOString();
 
     const { auth, ctx } = await setup();
-    const { asset, result } = await ctx.newAsset({
+    const { asset } = await ctx.newAsset({
       originalFileName,
       ownerId: auth.user.id,
       checksum: Buffer.from(checksum, 'base64'),
@@ -68,7 +68,7 @@ describe(SyncEntityType.AssetV2, () => {
           height: asset.height,
           isEdited: asset.isEdited,
           isDeveloped: false,
-          mediaRevision: result.updateId,
+          mediaRevision: Buffer.from(thumbhash, 'base64').toString('base64'),
         },
         type: 'AssetV2',
       },

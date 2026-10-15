@@ -287,7 +287,7 @@ describe(PersonRepository.name, () => {
   });
 
   describe('getDataForThumbnailGenerationJob', () => {
-    it('should not return the edited preview path', async () => {
+    it.each([false, true])('returns the face detector preview (native edits: %s)', async (hasNativeEdits) => {
       const { ctx, sut } = setup();
       const { user } = await ctx.newUser();
 
@@ -311,18 +311,33 @@ describe(PersonRepository.name, () => {
         .where('personGroupId', '=', person.personGroupId)
         .execute();
 
-      await ctx.newAssetFile({
-        assetId: asset.id,
-        type: AssetFileType.Preview,
-        path: 'preview_edited.jpg',
-        isEdited: true,
-      });
+      if (hasNativeEdits) {
+        await ctx.newAssetFile({
+          assetId: asset.id,
+          type: AssetFileType.Preview,
+          path: 'preview_edited.jpg',
+          isEdited: true,
+        });
+      }
       await ctx.newAssetFile({
         assetId: asset.id,
         type: AssetFileType.Preview,
         path: 'preview_unedited.jpg',
         isEdited: false,
       });
+
+      expect((await sut.getDataForThumbnailGenerationJob(person))!.isDeveloped).toBe(false);
+      await ctx.database
+        .insertInto('asset_job_status')
+        .values({
+          assetId: asset.id,
+          development: {
+            observedInputFingerprint: 'current',
+            publishedInputFingerprint: 'current',
+            publishedBase: { isDeveloped: true, width: 1200, height: 800 },
+          },
+        })
+        .execute();
 
       const result = await sut.getDataForThumbnailGenerationJob({
         ownerId: person.ownerId,
@@ -331,7 +346,8 @@ describe(PersonRepository.name, () => {
 
       expect(result).toEqual(
         expect.objectContaining({
-          previewPath: 'preview_unedited.jpg',
+          previewPath: hasNativeEdits ? 'preview_edited.jpg' : 'preview_unedited.jpg',
+          isDeveloped: true,
         }),
       );
     });

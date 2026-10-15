@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:drift/drift.dart' as drift;
 import 'package:drift/native.dart';
@@ -60,7 +61,7 @@ void main() {
     registerFallbackValue(const SemVer(major: 2, minor: 5, patch: 0));
 
     db = Drift(drift.DatabaseConnection(NativeDatabase.memory(), closeStreamsSynchronously: true));
-    await StoreService.init(storeRepository: StoreRepository(db));
+    await StoreService.init(storeRepository: StoreRepository(db), listenUpdates: false);
   });
 
   tearDownAll(() async {
@@ -563,6 +564,78 @@ void main() {
   });
 
   group('SyncStreamService - Sync Migration', () {
+    final mediaCheckpointTypes = [
+      SyncEntityType.assetV2,
+      SyncEntityType.partnerAssetV2,
+      SyncEntityType.albumAssetCreateV2,
+      SyncEntityType.albumAssetUpdateV2,
+      SyncEntityType.albumAssetBackfillV2,
+    ];
+
+    Future<void> markPreviousMigrationsComplete() => Store.put(
+      StoreKey.syncMigrationStatus,
+      jsonEncode(
+        SyncMigrationTask.values
+            .where((task) => task != SyncMigrationTask.v20261015_ResetAssetMediaV2)
+            .map((task) => task.name)
+            .toList(),
+      ),
+    );
+
+    test('refreshes media metadata once without resetting local or remote records', () async {
+      await markPreviousMigrationsComplete();
+      when(
+        () => mockServerApi.getServerVersion(),
+      ).thenAnswer((_) async => ServerVersionResponseDto(major: 3, minor: 3, patch_: 3, prerelease: null));
+
+      await sut.sync();
+
+      verify(() => mockSyncApiRepo.deleteSyncAck(mediaCheckpointTypes)).called(1);
+      expect(
+        jsonDecode((await StoreRepository(db).tryGet(StoreKey.syncMigrationStatus))!),
+        contains(SyncMigrationTask.v20261015_ResetAssetMediaV2.name),
+      );
+      verifyNever(() => mockSyncStreamRepo.reset());
+      verifyNever(() => mockSyncStreamRepo.deleteAssetsV1(any()));
+      verifyNever(() => mockAssetMediaRepo.deleteAll(any()));
+
+      await sut.sync();
+      verifyNever(() => mockSyncApiRepo.deleteSyncAck(mediaCheckpointTypes));
+    });
+
+    test('retries refreshing media metadata after a checkpoint request fails', () async {
+      await markPreviousMigrationsComplete();
+      when(
+        () => mockServerApi.getServerVersion(),
+      ).thenAnswer((_) async => ServerVersionResponseDto(major: 3, minor: 3, patch_: 3, prerelease: null));
+      when(() => mockSyncApiRepo.deleteSyncAck(mediaCheckpointTypes)).thenThrow(Exception('offline'));
+
+      await expectLater(sut.sync(), throwsException);
+      expect(
+        jsonDecode(Store.get(StoreKey.syncMigrationStatus, "[]")),
+        isNot(contains(SyncMigrationTask.v20261015_ResetAssetMediaV2.name)),
+      );
+
+      when(() => mockSyncApiRepo.deleteSyncAck(mediaCheckpointTypes)).thenAnswer((_) async {});
+      await sut.sync();
+      verify(() => mockSyncApiRepo.deleteSyncAck(mediaCheckpointTypes)).called(2);
+    });
+
+    test('leaves the media refresh pending on servers without sync V2', () async {
+      await markPreviousMigrationsComplete();
+      when(
+        () => mockServerApi.getServerVersion(),
+      ).thenAnswer((_) async => ServerVersionResponseDto(major: 2, minor: 5, patch_: 0, prerelease: null));
+
+      await sut.sync();
+
+      verifyNever(() => mockSyncApiRepo.deleteSyncAck(mediaCheckpointTypes));
+      expect(
+        jsonDecode(Store.get(StoreKey.syncMigrationStatus, "[]")),
+        isNot(contains(SyncMigrationTask.v20261015_ResetAssetMediaV2.name)),
+      );
+    });
+
     test('ensure that <2.5.0 migrations run', () async {
       await Store.put(StoreKey.syncMigrationStatus, "[]");
       when(

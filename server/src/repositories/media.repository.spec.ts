@@ -349,7 +349,7 @@ describe(MediaRepository.name, () => {
 describe('MediaRepository sidecar renderer', () => {
   let directory: string;
   let script: string;
-  let options: DevelopImageOptions & { sidecarPath: string };
+  let options: DevelopImageOptions;
   let sut: MediaRepository;
   let logger: Mocked<LoggingRepository>;
 
@@ -388,7 +388,6 @@ else {
         width: mode === 'oversized-image' ? 20000 : 2, height: mode === 'oversized-image' ? 20000 : 1,
         nativeWidth: 6000, nativeHeight: 4000, channels: 4,
         colorspace: mode === 'wrong-colorspace' ? 'p3' : 'srgb',
-        isDeveloped: mode === 'raw-default' ? false : mode === 'raw-developed' ? true : mode === 'bad-state' ? 'true' : undefined,
         unmapped: ['CameraProfile'] };
   const json = JSON.stringify(header) + '\n';
   process.stdout.write(json.slice(0, 11));
@@ -420,7 +419,6 @@ else {
       info: { width: 2, height: 1, channels: 4 },
       colorspace: Colorspace.Srgb,
       nativeDimensions: { width: 6000, height: 4000 },
-      isDeveloped: true,
     });
     const calls = await readFile(join(directory, 'calls.jsonl'), 'utf8');
     expect(JSON.parse(calls.trim())).toEqual([
@@ -440,36 +438,6 @@ else {
     await sut.developImage({ ...options, size: undefined });
     const calls = await readFile(join(directory, 'calls.jsonl'), 'utf8');
     expect(calls.includes('--size')).toBe(false);
-  });
-
-  it.each([
-    ['raw-default', false],
-    ['raw-developed', true],
-  ])('renders RAW without an external sidecar and reports %s state', async (mode, isDeveloped) => {
-    await fake(mode as string);
-
-    await expect(sut.developImage({ ...options, sidecarPath: undefined })).resolves.toMatchObject({
-      isDeveloped,
-      nativeDimensions: { width: 6000, height: 4000 },
-    });
-
-    const calls = await readFile(join(directory, 'calls.jsonl'), 'utf8');
-    expect(JSON.parse(calls.trim())).toEqual([
-      '--original',
-      options.originalPath,
-      '--colorspace',
-      'srgb',
-      '--size',
-      '1440',
-    ]);
-  });
-
-  it.each([
-    ['skipped', 'did not return a bitmap'],
-    ['developed', 'did not report its development state'],
-  ])('rejects incomplete ordinary RAW protocol responses (%s)', async (mode, error) => {
-    await fake(mode);
-    await expect(sut.developImage({ ...options, sidecarPath: undefined })).rejects.toThrow(error);
   });
 
   it('returns null for a metadata-only skipped packet', async () => {
@@ -498,7 +466,7 @@ else {
     await expect(sut.developImage(options)).rejects.toThrow(error);
   });
 
-  it.each(['bad-json', 'bad-version', 'bad-state'])('rejects invalid protocol metadata (%s)', async (mode) => {
+  it.each(['bad-json', 'bad-version'])('rejects invalid protocol metadata (%s)', async (mode) => {
     await fake(mode);
     await expect(sut.developImage(options)).rejects.toThrow();
   });
@@ -520,7 +488,7 @@ else {
     expect(await fingerprint()).not.toBe(before);
   });
 
-  it('invalidates native RAW inputs when embedded metadata changes the original modification time', async () => {
+  it('invalidates inputs when the original changes during sidecar removal', async () => {
     const input = { ...options, sidecarPath: null, image: defaults.image };
     const beforeDate = new Date('2026-01-01T00:00:00Z');
     const afterDate = new Date('2026-01-02T00:00:00Z');

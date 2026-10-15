@@ -30,6 +30,7 @@ import {
   JobName,
   JobStatus,
   QueueName,
+  RawExtractedFormat,
   StorageFolder,
   TranscodeHardwareAcceleration,
   TranscodePolicy,
@@ -58,7 +59,11 @@ interface UpsertFileOptions {
 }
 
 type ThumbnailAsset = NonNullable<Awaited<ReturnType<AssetJobRepository['getForGenerateThumbnailJob']>>>;
-type ImageGeneration = { id: string; files: UpsertFileOptions[] };
+type ImageGenerationJob = Extract<
+  JobItem,
+  { name: JobName.AssetGenerateThumbnails | JobName.AssetEditThumbnailGeneration }
+>;
+type ImageGeneration = { id: string; files: UpsertFileOptions[]; retry: ImageGenerationJob };
 
 @Injectable()
 export class MediaService extends BaseService {
@@ -156,7 +161,8 @@ export class MediaService extends BaseService {
   }
 
   @OnJob({ name: JobName.AssetEditThumbnailGeneration, queue: QueueName.Editor })
-  async handleAssetEditThumbnailGeneration({ id }: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
+  async handleAssetEditThumbnailGeneration(data: JobOf<JobName.AssetEditThumbnailGeneration>): Promise<JobStatus> {
+    const { id } = data;
     const asset = await this.assetJobRepository.getForGenerateThumbnailJob(id);
     const config = await this.getConfig({ withCache: true });
 
@@ -166,11 +172,11 @@ export class MediaService extends BaseService {
     }
 
     if (this.hasDevelopmentSource(asset)) {
-      return this.generateSidecarImageSet(asset, config);
+      return this.generateSidecarImageSet(asset, config, { name: JobName.AssetEditThumbnailGeneration, data });
     }
 
     if (asset.type === AssetType.Image && !asset.originalFileName.toLowerCase().endsWith('.gif')) {
-      return this.generateOriginalImageSet(asset, config, true);
+      return this.generateOriginalImageSet(asset, config, { name: JobName.AssetEditThumbnailGeneration, data });
     }
 
     const generated = await this.generateEditedThumbnails(asset, config);
@@ -201,7 +207,8 @@ export class MediaService extends BaseService {
   }
 
   @OnJob({ name: JobName.AssetGenerateThumbnails, queue: QueueName.ThumbnailGeneration })
-  async handleGenerateThumbnails({ id }: JobOf<JobName.AssetGenerateThumbnails>): Promise<JobStatus> {
+  async handleGenerateThumbnails(data: JobOf<JobName.AssetGenerateThumbnails>): Promise<JobStatus> {
+    const { id } = data;
     const asset = await this.assetJobRepository.getForGenerateThumbnailJob(id);
     const config = await this.getConfig({ withCache: true });
 
@@ -216,11 +223,11 @@ export class MediaService extends BaseService {
     }
 
     if (this.hasDevelopmentSource(asset)) {
-      return this.generateSidecarImageSet(asset, config);
+      return this.generateSidecarImageSet(asset, config, { name: JobName.AssetGenerateThumbnails, data });
     }
 
     if (asset.type === AssetType.Image && !asset.originalFileName.toLowerCase().endsWith('.gif')) {
-      return this.generateOriginalImageSet(asset, config);
+      return this.generateOriginalImageSet(asset, config, { name: JobName.AssetGenerateThumbnails, data });
     }
 
     let generated: Awaited<ReturnType<MediaService['generateImageThumbnails']>>;
@@ -254,16 +261,17 @@ export class MediaService extends BaseService {
     return (
       asset.type === AssetType.Image &&
       !asset.originalFileName.toLowerCase().endsWith('.gif') &&
-      !!(asset.sidecarPath || asset.development || mimeTypes.isRaw(asset.originalFileName))
+      !!(asset.sidecarPath || asset.development)
     );
   }
 
   private async generateOriginalImageSet(
     asset: ThumbnailAsset,
     config: SystemConfig,
-    editedOnly = false,
+    job: ImageGenerationJob,
   ): Promise<JobStatus> {
-    const generation: ImageGeneration = { id: randomUUID(), files: [] };
+    const editedOnly = job.name === JobName.AssetEditThumbnailGeneration;
+    const generation: ImageGeneration = { id: randomUUID(), files: [], retry: job };
     try {
       const base = editedOnly
         ? undefined
@@ -321,10 +329,7 @@ export class MediaService extends BaseService {
       },
     });
     if (obsolete === null) {
-      await this.jobRepository.queue({
-        name: JobName.AssetGenerateThumbnails,
-        data: { id: asset.id, source: 'sidecar' },
-      });
+      await this.jobRepository.queue(generation.retry);
       return JobStatus.Skipped;
     }
     generation.files = [];
@@ -338,11 +343,34 @@ export class MediaService extends BaseService {
     return JobStatus.Success;
   }
 
-  private async generateSidecarImageSet(asset: ThumbnailAsset, config: SystemConfig): Promise<JobStatus> {
+  private async generateSidecarImageSet(
+    asset: ThumbnailAsset,
+    config: SystemConfig,
+    job: ImageGenerationJob,
+  ): Promise<JobStatus> {
     const input = { originalPath: asset.originalPath, sidecarPath: asset.sidecarPath, image: config.image };
-    const fingerprint = await this.mediaRepository.getDevelopmentInputFingerprint(input);
+    const sidecarCheck: JobItem = {
+      name: JobName.SidecarCheck,
+      data: {
+        ...job.data,
+        source: job.name === JobName.AssetEditThumbnailGeneration ? 'edit' : (job.data.source ?? 'sidecar'),
+      },
+    };
+    const readFingerprint = () =>
+      this.mediaRepository.getDevelopmentInputFingerprint(input).catch((error: unknown) => {
+        const { code, path } = (error ?? {}) as NodeJS.ErrnoException;
+        if (input.sidecarPath && code === 'ENOENT' && path === input.sidecarPath) {
+          return null;
+        }
+        throw error;
+      });
+    const fingerprint = await readFingerprint();
+    if (fingerprint === null) {
+      await this.jobRepository.queue(sidecarCheck);
+      return JobStatus.Skipped;
+    }
     await this.assetRepository.observeImageDevelopmentInput(asset.id, fingerprint);
-    const generation: ImageGeneration = { id: randomUUID(), files: [] };
+    const generation: ImageGeneration = { id: randomUUID(), files: [], retry: job };
 
     try {
       const native =
@@ -352,15 +380,9 @@ export class MediaService extends BaseService {
         colorspace: config.image.colorspace,
         size: native ? undefined : config.image.preview.size,
       };
-      let developed = asset.sidecarPath
+      const developed = asset.sidecarPath
         ? await this.mediaRepository.developImage({ ...renderOptions, sidecarPath: asset.sidecarPath })
         : null;
-      if (mimeTypes.isRaw(asset.originalFileName) && !developed) {
-        developed = await this.mediaRepository.developImage(renderOptions);
-        if (!developed) {
-          throw new Error('Native RAW renderer did not return a bitmap');
-        }
-      }
       const original = developed
         ? undefined
         : await this.extractOriginalImage(asset, config.image, asset.edits.length > 0);
@@ -372,6 +394,8 @@ export class MediaService extends BaseService {
         ? {
             ...developed,
             convertFullsize: fullsize,
+            generateFullsize: fullsize,
+            extracted: null,
             isTransparent: false,
           }
         : {
@@ -393,17 +417,23 @@ export class MediaService extends BaseService {
           ? await this.generateImageThumbnails(asset, config, true, { ...source, convertFullsize: true }, generation)
           : undefined;
       const finalDimensions = getOutputDimensions(asset.edits, baseDimensions);
-      if ((await this.mediaRepository.getDevelopmentInputFingerprint(input)) !== fingerprint) {
-        await this.jobRepository.queue({ name: JobName.SidecarCheck, data: { id: asset.id, source: 'sidecar' } });
+      if ((await readFingerprint()) !== fingerprint) {
+        await this.jobRepository.queue(sidecarCheck);
         return JobStatus.Skipped;
       }
       return await this.publishGeneratedImageSet(asset, generation, {
         fingerprint,
         files: [...generated.files, ...(edited?.files ?? [])],
         thumbhash: edited?.thumbhash ?? generated.thumbhash,
-        base: { ...baseDimensions, isDeveloped: developed?.isDeveloped ?? false },
+        base: { ...baseDimensions, isDeveloped: !!developed },
         dimensions: finalDimensions,
       });
+    } catch (error) {
+      if ((await readFingerprint()) !== fingerprint) {
+        await this.jobRepository.queue(sidecarCheck);
+        return JobStatus.Skipped;
+      }
+      throw error;
     } finally {
       if (generation.files.length > 0) {
         await this.jobRepository.queue({
@@ -438,24 +468,31 @@ export class MediaService extends BaseService {
   }
 
   private async extractOriginalImage(asset: ThumbnailAsset, image: SystemConfig['image'], useEdits = false) {
-    const convertFullsize =
+    const extracted =
+      image.extractEmbedded && !useEdits && mimeTypes.isRaw(asset.originalFileName)
+        ? await this.extractImage(asset.originalPath, image.preview.size)
+        : null;
+    const generateFullsize =
       ((image.fullsize.enabled || asset.exifInfo.projectionType === 'EQUIRECTANGULAR') &&
         !mimeTypes.isWebSupportedImage(asset.originalPath)) ||
       useEdits;
+    const convertFullsize = generateFullsize && (!extracted || extracted.format !== RawExtractedFormat.Jpeg);
     const decoded = await this.decodeImage(
-      asset.originalPath,
-      // The original carries orientation; applying the EXIF value again would double rotate it.
-      { ...asset.exifInfo, orientation: null },
+      extracted ? extracted.buffer : asset.originalPath,
+      // Only extracted images need the original's orientation metadata.
+      extracted ? asset.exifInfo : { ...asset.exifInfo, orientation: null },
       convertFullsize ? undefined : image.preview.size,
     );
 
     let isTransparent = false;
-    if (mimeTypes.canBeTransparent(asset.originalPath)) {
+    if (!extracted && mimeTypes.canBeTransparent(asset.originalPath)) {
       ({ isTransparent } = await this.mediaRepository.getImageMetadata(asset.originalPath));
     }
 
     return {
       ...decoded,
+      extracted,
+      generateFullsize,
       convertFullsize,
       isTransparent,
     };
@@ -469,7 +506,7 @@ export class MediaService extends BaseService {
     generation?: ImageGeneration,
   ) {
     const extractedImage = preparedImage ?? (await this.extractOriginalImage(asset, image, useEdits));
-    const { info, data, colorspace, convertFullsize, isTransparent } = extractedImage;
+    const { info, data, colorspace, convertFullsize, generateFullsize, extracted, isTransparent } = extractedImage;
 
     const previewFormat = image.preview.format;
     this.warnOnTransparencyLoss(isTransparent, previewFormat, asset.id);
@@ -535,6 +572,29 @@ export class MediaService extends BaseService {
         progressive: image.fullsize.progressive,
       };
       promises.push(this.mediaRepository.generateThumbnail(decoded, fullsizeOptions, fullsizeFile.path));
+    } else if (generateFullsize && extracted?.format === RawExtractedFormat.Jpeg) {
+      fullsizeFile = this.getImageFile(
+        asset,
+        {
+          fileType: AssetFileType.FullSize,
+          format: extracted.format,
+          isEdited: false,
+          isProgressive: !!image.fullsize.progressive && image.fullsize.format !== ImageFormat.Webp,
+          isTransparent,
+        },
+        generation,
+      );
+      this.storageCore.ensureFolders(fullsizeFile.path);
+      const fullsizePath = fullsizeFile.path;
+      promises.push(
+        (async () => {
+          await this.storageRepository.createOrOverwriteFile(fullsizePath, extracted.buffer);
+          await this.mediaRepository.writeExif(
+            { orientation: asset.exifInfo.orientation, colorspace: asset.exifInfo.colorspace },
+            fullsizePath,
+          );
+        })(),
+      );
     }
 
     const outputs = await Promise.allSettled(promises);
@@ -583,9 +643,9 @@ export class MediaService extends BaseService {
 
     const { x1, y1, x2, y2, oldWidth, oldHeight, exifOrientation, previewPath, originalPath } = data;
     let inputImage: string | Buffer;
-    if (data.type === AssetType.Video) {
+    if (data.type === AssetType.Video || data.isDeveloped) {
       if (!previewPath) {
-        this.logger.error(`Could not generate person thumbnail for video ${personGroupId}: missing preview path`);
+        this.logger.error(`Could not generate person thumbnail for ${personGroupId}: missing preview path`);
         return JobStatus.Failed;
       }
       inputImage = previewPath;

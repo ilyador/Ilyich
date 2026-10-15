@@ -39,7 +39,7 @@ describe(SyncRequestType.AlbumAssetsV2, () => {
 
     const { auth, ctx } = await setup();
     const { user: user2 } = await ctx.newUser();
-    const { asset, result } = await ctx.newAsset({
+    const { asset } = await ctx.newAsset({
       originalFileName,
       ownerId: user2.id,
       checksum: Buffer.from(checksum, 'base64'),
@@ -87,7 +87,7 @@ describe(SyncRequestType.AlbumAssetsV2, () => {
           height: asset.height,
           isEdited: asset.isEdited,
           isDeveloped: false,
-          mediaRevision: result.updateId,
+          mediaRevision: Buffer.from(thumbhash, 'base64').toString('base64'),
         },
         type: SyncEntityType.AlbumAssetCreateV2,
       },

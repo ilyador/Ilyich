@@ -296,6 +296,13 @@ export const assetIsDeveloped = sql<boolean>`coalesce((
   from "asset_job_status" where "assetId" = "asset"."id"
 ), false)`.as('isDeveloped');
 
+// Metadata stays stable; generations and fixed-path thumbnail overwrites invalidate caches.
+export const assetMediaRevision = sql<string>`coalesce((
+  select "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '') from "asset_file"
+  where "assetId" = "asset"."id" and "type" = 'preview'
+  order by "isEdited" desc limit 1
+), encode("asset"."thumbhash", 'base64'), "asset"."id"::text)`.as('mediaRevision');
+
 export const columns = {
   asset: [
     'asset.id',
@@ -319,6 +326,7 @@ export const columns = {
   searchAsset: [
     'asset.id',
     assetIsDeveloped,
+    assetMediaRevision,
     'asset.updateId',
     'asset.createdAt',
     'asset.updatedAt',
@@ -426,7 +434,7 @@ export const columns = {
   syncAsset: [
     'asset.id',
     assetIsDeveloped,
-    'asset.updateId as mediaRevision',
+    assetMediaRevision,
     'asset.ownerId',
     'asset.originalFileName',
     'asset.thumbhash',
@@ -450,7 +458,7 @@ export const columns = {
   syncAlbumAsset: [
     'asset.id',
     assetIsDeveloped,
-    'asset.updateId as mediaRevision',
+    assetMediaRevision,
     'asset.ownerId',
     'asset.originalFileName',
     'asset.thumbhash',
@@ -473,7 +481,7 @@ export const columns = {
   syncPartnerAsset: [
     'asset.id',
     assetIsDeveloped,
-    'asset.updateId as mediaRevision',
+    assetMediaRevision,
     'asset.ownerId',
     'asset.originalFileName',
     'asset.thumbhash',

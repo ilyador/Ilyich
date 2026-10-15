@@ -15,7 +15,7 @@ import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { isEmpty, isUndefined, omitBy } from 'lodash-es';
 import { InjectKysely } from 'nestjs-kysely';
 import type { AuthDto } from 'src/dtos/auth.dto.js';
-import { LockableProperty, Stack, assetIsDeveloped } from 'src/database.js';
+import { LockableProperty, Stack, assetIsDeveloped, assetMediaRevision } from 'src/database.js';
 import { Chunked, ChunkedArray, DummyValue, GenerateSql } from 'src/decorators.js';
 import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import {
@@ -535,15 +535,21 @@ export class AssetRepository {
         .set({ text: visibleOcr.map((item) => item.text.trim()).join(' ') })
         .where('assetId', '=', asset.id)
         .execute();
-      if (input.fingerprint !== null && input.base) {
+      const development =
+        input.sidecarPath === null
+          ? null
+          : input.fingerprint !== null && input.base
+            ? {
+                observedInputFingerprint: input.fingerprint,
+                publishedInputFingerprint: input.fingerprint,
+                publishedBase: input.base,
+              }
+            : undefined;
+      if (development !== undefined) {
         await tx
           .updateTable('asset_job_status')
           .set({
-            development: {
-              observedInputFingerprint: input.fingerprint,
-              publishedInputFingerprint: input.fingerprint,
-              publishedBase: input.base,
-            },
+            development,
           })
           .where('assetId', '=', asset.id)
           .execute();
@@ -694,7 +700,7 @@ export class AssetRepository {
     return this.db
       .selectFrom('asset')
       .selectAll('asset')
-      .select(assetIsDeveloped)
+      .select([assetIsDeveloped, assetMediaRevision])
       .where('asset.id', '=', anyUuid(ids))
       .execute();
   }
@@ -705,7 +711,7 @@ export class AssetRepository {
     return this.db
       .selectFrom('asset')
       .selectAll('asset')
-      .select(assetIsDeveloped)
+      .select([assetIsDeveloped, assetMediaRevision])
       .select(withFacesAndPeople({ viewingUserId }))
       .select(withTags)
       .$call(withExif)
@@ -763,7 +769,7 @@ export class AssetRepository {
     return this.db
       .selectFrom('asset')
       .selectAll('asset')
-      .select(assetIsDeveloped)
+      .select([assetIsDeveloped, assetMediaRevision])
       .where('asset.id', '=', asUuid(id))
       .$if(!!exifInfo, withExif)
       .$if(!!faces, (qb) =>
@@ -851,7 +857,7 @@ export class AssetRepository {
           )
           .selectFrom('asset')
           .selectAll('asset')
-          .select(assetIsDeveloped)
+          .select([assetIsDeveloped, assetMediaRevision])
           .$call(withExif)
           .$call((qb) => qb.select(withFaces))
           .$call((qb) => qb.select(withEdits))
@@ -1036,7 +1042,7 @@ export class AssetRepository {
             'asset.duration',
             'asset.id',
             'asset.visibility',
-            'asset.updateId as mediaRevision',
+            assetMediaRevision,
             sql`asset."isFavorite" and asset."ownerId" = ${auth.user.id}`.as('isFavorite'),
             sql`asset.type = 'IMAGE'`.as('isImage'),
             sql`asset."deletedAt" is not null`.as('isTrashed'),
