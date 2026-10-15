@@ -150,6 +150,7 @@ describe(TimelineService.name, () => {
         livePhotoVideoId: [],
         fileCreatedAt: [],
         localOffsetHours: [],
+        mediaRevision: [],
         ownerId: [],
         projectionType: [],
         ratio: [],
