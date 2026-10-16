@@ -27,7 +27,7 @@ import { AssetSearchScope } from 'src/repositories/search.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { requireElevatedPermission } from 'src/utils/access.js';
 import { getMyPartnerIds } from 'src/utils/asset.util.js';
-import { isSmartSearchEnabled } from 'src/utils/misc.js';
+import { isFacialRecognitionEnabled, isSmartSearchEnabled } from 'src/utils/misc.js';
 import { NaturalSearchPlan, planNaturalSearch } from 'src/utils/natural-search.js';
 import { decodeSearchCursor, encodeSearchCursor } from 'src/utils/search-cursor.js';
 import { applyLockedVisibilityPolicy, collectFilterIds } from 'src/utils/search-filter.js';
@@ -396,25 +396,49 @@ export class SearchService extends BaseService {
       return response;
     }
     this.verifying = true;
+    const accepted: MapAsset[] = [];
+    let checked = 0;
     try {
+      const { machineLearning } = await this.getConfig({ withCache: true });
+      if (plan.verification && !isFacialRecognitionEnabled(machineLearning))
+        throw new Error('Subject binding requires face recognition');
       const timeout = AbortSignal.timeout(60_000);
       const verificationSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-      let checked = 0;
       for (let pageIndex = 0; ; pageIndex++) {
-        const accepted: MapAsset[] = [];
         for (const item of batch.items) {
           verificationSignal.throwIfAborted();
           // Each batch passed all ownership, album, and visibility checks.
           const asset = await this.assetJobRepository.getForClipEncoding(item.id);
           const preview = asset?.files.find((file) => file.isEdited) ?? asset?.files[0];
           if (!preview) throw new Error('Search candidate has no preview');
+          const subjects = plan.verification && {
+            people: plan.verification.subjects,
+            groups: plan.verification.groups,
+            references: await this.personRepository.getSearchFaceReferences(item.id, auth.user.id),
+            recognition: machineLearning.facialRecognition,
+          };
           if (
-            await this.machineLearningRepository.verifySearchCandidate(preview.path, plan.query, {
-              ...options,
-              signal: verificationSignal,
-            })
-          )
+            await this.machineLearningRepository.verifySearchCandidate(
+              preview.path,
+              plan.verification?.query ?? plan.query,
+              {
+                ...options,
+                signal: verificationSignal,
+                ...(subjects && { subjects }),
+              },
+            )
+          ) {
+            if (subjects) {
+              const currentReferences = await this.personRepository.getSearchFaceReferences(item.id, auth.user.id);
+              const current = await this.assetJobRepository.getForClipEncoding(item.id);
+              if (
+                current?.mediaRevision !== asset?.mediaRevision ||
+                JSON.stringify(currentReferences) !== JSON.stringify(subjects.references)
+              )
+                throw new Error('Search preview or face assignments changed during subject verification');
+            }
             accepted.push(item);
+          }
           checked++;
         }
         const more = batch.page.nextPage || batch.page.nextCursor;
@@ -427,7 +451,7 @@ export class SearchService extends BaseService {
         if (pageIndex + 1 >= verificationScanPages) {
           // An empty nonterminal page ends pagination in older phone clients.
           // Keep the bounded-work fallback traversable instead of hiding later matches.
-          response.verification = { status: 'unavailable', checked: 0, rejected: 0 };
+          response.verification = { status: 'unavailable', checked, rejected: checked };
           return response;
         }
         // Older phone clients cannot advance an empty results grid themselves.
@@ -435,9 +459,16 @@ export class SearchService extends BaseService {
         batch = await loadNext(batch.page);
       }
     } catch {
-      if (!signal?.aborted)
-        this.logger.warn('Visual search verification unavailable; returning regular search results.');
-      response.verification = { status: 'unavailable', checked: 0, rejected: 0 };
+      if (!signal?.aborted) this.logger.warn('Visual search verification incomplete.');
+      if (accepted.length > 0) {
+        // Preserve confirmed matches on timeout/failure. This batch is incomplete;
+        // retrying the search can revisit its unchecked tail using cached decisions.
+        return {
+          ...this.mapResponse(accepted, { auth }, batch.page),
+          verification: { status: 'partial', checked, rejected: checked - accepted.length },
+        };
+      }
+      response.verification = { status: 'unavailable', checked, rejected: checked };
       return response;
     } finally {
       this.verifying = false;

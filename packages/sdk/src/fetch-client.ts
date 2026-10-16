@@ -2526,7 +2526,7 @@ export type SearchAssetResponseDto = {
 export type SearchResponseDto = {
     albums: SearchAlbumResponseDto;
     assets: SearchAssetResponseDto;
-    /** Visual verification status; unavailable means regular search results were returned */
+    /** Visual verification status; partial preserves confirmed matches from an incomplete batch; unavailable means regular search results were returned. Retry the search to revisit unchecked candidates. */
     verification?: {
         checked: number;
         rejected: number;
@@ -8529,6 +8529,7 @@ export enum SearchOrderField {
 }
 export enum Status {
     Complete = "complete",
+    Partial = "partial",
     Unavailable = "unavailable",
     NotNeeded = "not-needed"
 }

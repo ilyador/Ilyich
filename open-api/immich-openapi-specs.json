@@ -27618,7 +27618,7 @@
             "$ref": "#/components/schemas/SearchAssetResponseDto"
           },
           "verification": {
-            "description": "Visual verification status; unavailable means regular search results were returned",
+            "description": "Visual verification status; partial preserves confirmed matches from an incomplete batch; unavailable means regular search results were returned. Retry the search to revisit unchecked candidates.",
             "properties": {
               "checked": {
                 "maximum": 9007199254740991,
@@ -27633,6 +27633,7 @@
               "status": {
                 "enum": [
                   "complete",
+                  "partial",
                   "unavailable",
                   "not-needed"
                 ],

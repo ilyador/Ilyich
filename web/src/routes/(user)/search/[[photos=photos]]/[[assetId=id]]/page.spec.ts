@@ -1,4 +1,4 @@
-import { searchSmart } from '@immich/sdk';
+import { Status, searchSmart } from '@immich/sdk';
 import { render, screen, waitFor } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { goto } from '$app/navigation';
@@ -60,4 +60,41 @@ describe('search verification control', () => {
       });
     },
   );
+
+  it('offers a retry after verification stops with confirmed matches', async () => {
+    Object.assign(page, { url: new URL('http://localhost/search?query=%7B%22query%22%3A%22a%20red%20hat%22%7D') });
+    vi.mocked(searchSmart).mockResolvedValue({
+      albums: { items: [], count: 0, total: 0, facets: [] },
+      assets: { items: [], count: 0, total: 0, facets: [], nextPage: null, nextCursor: null },
+      verification: { status: Status.Partial, checked: 3, rejected: 2 },
+    });
+    render(TestWrapper, { component: SearchPage, componentProps: {} });
+    await screen.findByText('search_verification_partial');
+    expect(screen.getByRole('button', { name: 'retry' })).toBeEnabled();
+  });
+
+  it('keeps the warning after an unverified page followed by a verified page', async () => {
+    const user = userEvent.setup();
+    Object.assign(page, { url: new URL('http://localhost/search?query=%7B%22query%22%3A%22a%20red%20hat%22%7D') });
+    const response = {
+      albums: { items: [], count: 0, total: 0, facets: [] },
+      assets: { items: [], count: 0, total: 0, facets: [], nextPage: '2', nextCursor: null },
+    };
+    vi.mocked(searchSmart)
+      .mockResolvedValueOnce({
+        ...response,
+        verification: { status: Status.Unavailable, checked: 0, rejected: 0 },
+      })
+      .mockResolvedValueOnce({
+        ...response,
+        assets: { ...response.assets, nextPage: null },
+        verification: { status: Status.Complete, checked: 2, rejected: 2 },
+      });
+    render(TestWrapper, { component: SearchPage, componentProps: {} });
+    await screen.findByText('search_verification_unavailable');
+    await user.click(screen.getByRole('button', { name: 'search_verify_more' }));
+    await waitFor(() => expect(searchSmart).toHaveBeenCalledTimes(2));
+    expect(screen.getByText('search_verification_unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('search_verification_complete')).not.toBeInTheDocument();
+  });
 });

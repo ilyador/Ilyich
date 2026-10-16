@@ -306,6 +306,84 @@ describe(SearchService.name, () => {
       mocks.machineLearning.encodeText.mockResolvedValue('[1, 2, 3]');
     });
 
+    it.each([false, true])('binds the requested actor when both named people are in one photo (v3=%s)', async (v3) => {
+      const photo = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+      mocks.person.getNames.mockResolvedValue([
+        { name: 'Me', personGroupId: 'self' },
+        { name: 'Maya', personGroupId: 'maya' },
+      ]);
+      mocks.person.getSearchFaceReferences.mockResolvedValue([
+        { personGroupId: 'self', embedding: '[1,0]' },
+        { personGroupId: 'maya', embedding: '[0,1]' },
+      ]);
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.search.searchSmart.mockResolvedValue({ hasNextPage: false, items: [photo] });
+      mocks.search.searchSmartV3.mockResolvedValue({ hasNextPage: false, items: [photo] });
+      mocks.assetJob.getForClipEncoding.mockResolvedValue({
+        mediaRevision: 'current-preview',
+        files: [{ path: '/group-edited.jpg', isEdited: true }, { path: '/original.jpg' }],
+      } as never);
+      // Only Maya holds the phone. The exact same photo is a candidate for both searches.
+      mocks.machineLearning.verifySearchCandidate.mockImplementation((_path, _query, options) =>
+        Promise.resolve(options.subjects?.people[0].personGroupId === 'maya'),
+      );
+      const results = await Array.fromAsync(['me holding a phone', 'Maya holding a phone'], (query) =>
+        sut.searchSmart(authStub.user1, { query, size: 100, ...(v3 && { filter: {} }) }),
+      );
+      expect(results[0].assets.items).toEqual([]);
+      expect(results[1].assets.items.map(({ id }) => id)).toEqual([photo.id]);
+      const calls = mocks.machineLearning.verifySearchCandidate.mock.calls;
+      expect(calls.map(([path, query, options]) => [path, query, options.subjects?.people])).toEqual([
+        ['/group-edited.jpg', 'Person 1 holding a phone', [{ personGroupId: 'self', marker: 1 }]],
+        ['/group-edited.jpg', 'Person 1 holding a phone', [{ personGroupId: 'maya', marker: 1 }]],
+      ]);
+      expect(mocks.person.getSearchFaceReferences).toHaveBeenCalledWith(photo.id, authStub.user1.user.id);
+      expect(mocks.machineLearning.encodeText).toHaveBeenCalledWith('holding a phone', expect.anything());
+      expect(results.every(({ verification }) => verification?.status === 'complete')).toBe(true);
+    });
+
+    it('does not mark a subject verification complete if its preview changed during inference', async () => {
+      const photo = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+      mocks.person.getNames.mockResolvedValue([{ name: 'Maya', personGroupId: 'maya' }]);
+      mocks.person.getSearchFaceReferences.mockResolvedValue([{ personGroupId: 'maya', embedding: '[1,0]' }]);
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.search.searchSmart.mockResolvedValue({ hasNextPage: false, items: [photo] });
+      mocks.assetJob.getForClipEncoding
+        .mockResolvedValueOnce({ mediaRevision: 'old', files: [{ path: '/old.jpg' }] } as never)
+        .mockResolvedValueOnce({ mediaRevision: 'new', files: [{ path: '/new.jpg' }] } as never);
+      mocks.machineLearning.verifySearchCandidate.mockResolvedValue(true);
+      const result = await sut.searchSmart(authStub.user1, { query: 'Maya holding a phone', size: 100 });
+      expect(result.verification?.status).toBe('unavailable');
+    });
+
+    it('does not start subject recognition when the administrator disabled face recognition', async () => {
+      const photo = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+      mocks.person.getNames.mockResolvedValue([{ name: 'Maya', personGroupId: 'maya' }]);
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.systemMetadata.get.mockResolvedValue({ machineLearning: { facialRecognition: { enabled: false } } });
+      mocks.search.searchSmart.mockResolvedValue({ hasNextPage: false, items: [photo] });
+      const result = await sut.searchSmart(authStub.user1, { query: 'Maya holding a phone', size: 100 });
+      expect(result.verification?.status).toBe('unavailable');
+      expect(mocks.person.getSearchFaceReferences).not.toHaveBeenCalled();
+      expect(mocks.machineLearning.verifySearchCandidate).not.toHaveBeenCalled();
+    });
+    it('does not mark a stale face assignment verified after it changes during inference', async () => {
+      const photo = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+      mocks.person.getNames.mockResolvedValue([{ name: 'Maya', personGroupId: 'maya' }]);
+      mocks.person.getSearchFaceReferences
+        .mockResolvedValueOnce([{ personGroupId: 'maya', embedding: '[1,0]' }])
+        .mockResolvedValue([{ personGroupId: 'someone-else', embedding: '[1,0]' }]);
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      mocks.search.searchSmart.mockResolvedValue({ hasNextPage: false, items: [photo] });
+      mocks.assetJob.getForClipEncoding.mockResolvedValue({
+        mediaRevision: 'unchanged',
+        files: [{ path: '/same.jpg' }],
+      } as never);
+      mocks.machineLearning.verifySearchCandidate.mockResolvedValue(true);
+      const result = await sut.searchSmart(authStub.user1, { query: 'Maya holding a phone', size: 100 });
+      expect(result.verification?.status).toBe('unavailable');
+    });
+
     it.each([false, true])('automatically verifies and preserves pagination (v3=%s)', async (v3) => {
       const items = [AssetFactory.create(), AssetFactory.create()].map((asset) => ({
         ...asset,
@@ -437,7 +515,7 @@ describe(SearchService.name, () => {
           ...(v3 && { filter: {} }),
         });
         expect(result.assets.items.map(({ id }) => id)).toEqual([item.id]);
-        expect(result.verification).toEqual({ status: 'unavailable', checked: 0, rejected: 0 });
+        expect(result.verification).toEqual({ status: 'unavailable', checked: 3, rejected: 3 });
         expect(repository).toHaveBeenCalledTimes(3);
         if (v3) expect(decodeSearchCursor(result.assets.nextCursor ?? undefined).offset).toBe(1);
         else expect(result.assets.nextPage).toBe('2');
@@ -515,6 +593,33 @@ describe(SearchService.name, () => {
       const result = await sut.searchSmart(authStub.user1, { query: 'a dog running', verify: true, size: 100 });
       expect(result.assets.items.map((item) => item.id)).toEqual([items[0].id]);
       expect(result.verification?.status).toBe('unavailable');
+    });
+
+    it.each([false, true])('preserves confirmed matches if the next candidate fails (v3=%s)', async (v3) => {
+      const items = Array.from({ length: 4 }, () => ({
+        ...AssetFactory.create(),
+        isDeveloped: false,
+        exifInfo: undefined,
+        faces: undefined,
+      }));
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
+      repository.mockResolvedValue({ hasNextPage: true, items });
+      mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
+      mocks.machineLearning.verifySearchCandidate
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true)
+        .mockRejectedValueOnce(new Error('Timeout'));
+      const result = await sut.searchSmart(authStub.user1, {
+        query: 'a dog running',
+        size: 100,
+        ...(v3 && { filter: {} }),
+      });
+      expect(result.assets.items.map(({ id }) => id)).toEqual([items[1].id]);
+      expect(result.verification).toEqual({ status: 'partial', checked: 2, rejected: 1 });
+      expect(mocks.machineLearning.verifySearchCandidate).toHaveBeenCalledTimes(3);
+      if (v3) expect(result.assets.nextCursor).toBeTruthy();
+      else expect(result.assets.nextPage).toBe('2');
     });
 
     it('should raise a BadRequestException if machine learning is disabled', async () => {

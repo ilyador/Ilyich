@@ -29,6 +29,7 @@
   import { handleError } from '$lib/utils/handle-error';
   import { isAlbumsRoute, isPeopleRoute } from '$lib/utils/navigation';
   import { toTimelineAsset } from '$lib/utils/timeline-util';
+  import { mergeSearchVerification } from '$lib/utils/search-verification';
   import {
     type AlbumResponseDto,
     type AssetResponseDto,
@@ -69,10 +70,7 @@
   let terms = $derived<SearchTerms>(searchQuery ? JSON.parse(searchQuery) : {});
   let searchTermKeys = $derived(getObjectKeys(terms).filter((key) => key !== 'verify'));
   let verificationEnabled = $derived(
-    !!terms.query &&
-      config.machineLearning.clip.enabled &&
-      featureFlagsManager.value.searchVerification &&
-      terms.verify !== false,
+    !!terms.query && smartSearchEnabled && featureFlagsManager.value.searchVerification && terms.verify !== false,
   );
   let verificationActive = $derived(verificationEnabled && verification?.status !== 'not-needed');
 
@@ -167,14 +165,7 @@
 
       if (controller.signal.aborted) return;
       const { albums, assets } = response;
-      verification =
-        response.verification?.status === 'complete' && verification?.status === 'complete'
-          ? {
-              ...response.verification,
-              checked: verification.checked + response.verification.checked,
-              rejected: verification.rejected + response.verification.rejected,
-            }
-          : response.verification;
+      verification = mergeSearchVerification(verification, response.verification);
 
       searchResultAlbums.push(...albums.items);
       searchResultAssets.push(...assets.items);
@@ -363,13 +354,15 @@
             })}
           {:else if verification?.status === 'unavailable'}
             {$t('search_verification_unavailable')}
+          {:else if verification?.status === 'partial'}
+            {$t('search_verification_partial')}
           {:else if verification?.status === 'not-needed'}
             {$t('search_verification_not_needed')}
           {:else}
             {$t('search_verify_hint')}
           {/if}
         </span>
-        {#if verification?.status === 'unavailable' && !isLoading}
+        {#if (verification?.status === 'unavailable' || verification?.status === 'partial') && !isLoading}
           <Button size="small" shape="round" variant="ghost" onclick={onSearchQueryUpdate}>{$t('retry')}</Button>
         {/if}
       </div>

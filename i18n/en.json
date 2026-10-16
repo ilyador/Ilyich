@@ -1939,6 +1939,7 @@
   "search_type_description": "Choose how Immich interprets your search: by visual content, file details, or embedded text.",
   "search_verification_complete": "Checked {count, plural, one {# photo} other {# photos}} and removed {rejected, plural, one {# near match} other {# near matches}}.",
   "search_verification_not_needed": "No photo content needed checking.",
+  "search_verification_partial": "Checking stopped early. Confirmed matches are shown; retry to check the remaining photos.",
   "search_verification_unavailable": "Couldn’t verify photo content. Showing regular search results.",
   "search_verified_empty": "No matches in the checked photos",
   "search_verified_empty_description": "Try checking more photos or refining your search.",
