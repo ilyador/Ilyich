@@ -11,6 +11,8 @@ import { getKyselyDB } from 'test/utils.js';
 
 let defaultDatabase: Kysely<DB>;
 
+const vector = (index: number) => JSON.stringify(Array.from({ length: 512 }, (_, i) => Number(i === index)));
+
 const setup = (db?: Kysely<DB>) => {
   const { ctx } = newMediumService(BaseService, {
     database: db || defaultDatabase,
@@ -60,6 +62,43 @@ beforeAll(async () => {
 });
 
 describe(PersonRepository.name, () => {
+  it('scopes subject references to the candidate and viewer while retaining anonymous competing faces', async () => {
+    const { ctx, sut } = setup();
+    const { user } = await ctx.newUser();
+    const { user: other } = await ctx.newUser();
+    const { asset } = await ctx.newAsset({ ownerId: user.id });
+    const { asset: elsewhere } = await ctx.newAsset({ ownerId: other.id });
+    const { person: visible } = await ctx.newPerson({ ownerId: user.id, name: 'Me', isHidden: false });
+    const { person: hidden } = await ctx.newPerson({ ownerId: user.id, name: 'Hidden', isHidden: true });
+    const { person: stranger } = await ctx.newPerson({ ownerId: other.id, name: 'Private', isHidden: false });
+    for (const [index, data] of [
+      { assetId: asset.id, personGroupId: visible.personGroupId },
+      { assetId: asset.id, personGroupId: hidden.personGroupId },
+      { assetId: asset.id, personGroupId: stranger.personGroupId },
+      { assetId: asset.id, personGroupId: null },
+      { assetId: asset.id, personGroupId: visible.personGroupId, isVisible: false },
+      { assetId: asset.id, personGroupId: visible.personGroupId, deletedAt: new Date() },
+      { assetId: elsewhere.id, personGroupId: stranger.personGroupId },
+    ].entries()) {
+      const { assetFace } = await ctx.newAssetFace(data);
+      await ctx.database
+        .insertInto('face_search')
+        .values({ faceId: assetFace.id, embedding: vector(index) })
+        .execute();
+    }
+    // A manually assigned face without an embedding cannot be used as a reference.
+    await ctx.newAssetFace({ assetId: asset.id, personGroupId: visible.personGroupId });
+    const rows = await sut.getSearchFaceReferences(asset.id, user.id);
+    expect(rows).toHaveLength(4);
+    expect(rows.filter(({ personGroupId }) => personGroupId !== null)).toEqual([
+      { personGroupId: visible.personGroupId, embedding: vector(0) },
+    ]);
+    expect(rows.filter(({ personGroupId }) => personGroupId === null)).toHaveLength(3);
+    expect(rows.some(({ embedding }) => [vector(4), vector(5), vector(6)].includes(embedding))).toBe(false);
+    const otherReferences = await sut.getSearchFaceReferences(elsewhere.id, user.id);
+    expect(otherReferences.map(({ personGroupId }) => personGroupId)).toEqual([null]);
+  });
+
   it('preserves duplicate names for disambiguation while excluding hidden and other users', async () => {
     const { ctx, sut } = setup();
     const { user } = await ctx.newUser();

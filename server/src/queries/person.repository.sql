@@ -422,6 +422,23 @@ where
 order by
   "asset_face"."boundingBoxX1" asc
 
+-- PersonRepository.getSearchFaceReferences
+select
+  "person"."personGroupId",
+  "face_search"."embedding"
+from
+  "asset_face"
+  inner join "face_search" on "face_search"."faceId" = "asset_face"."id"
+  left join "person" on "person"."personGroupId" = "asset_face"."personGroupId"
+  and "person"."ownerId" = $1
+  and "person"."isHidden" = $2
+where
+  "asset_face"."assetId" = $3
+  and "asset_face"."deletedAt" is null
+  and "asset_face"."isVisible" = $4
+order by
+  "asset_face"."id"
+
 -- PersonRepository.getFaceById
 select
   "asset_face".*,

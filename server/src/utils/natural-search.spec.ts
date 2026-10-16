@@ -15,6 +15,33 @@ const vocabulary: SearchVocabulary = {
 const plan = (query: string) => planNaturalSearch(query, vocabulary, new Date('2026-10-15T12:00:00Z'));
 
 describe(planNaturalSearch.name, () => {
+  it.each([
+    ['Priya Raman', 'Søren Lind', 'Utrecht'],
+    ['Lúcia Pereira', 'Aarav Shah', 'Oslo'],
+    ['Zoë Martin', 'Min Seo', 'Kyoto'],
+  ])('resolves supplied vocabulary rather than specific people: %s and %s', (first, second, city) => {
+    const result = planNaturalSearch(`${first} hugging ${second} in ${city}`, {
+      people: [
+        { name: first, personGroupId: 'arbitrary-first' },
+        { name: second, personGroupId: 'arbitrary-second' },
+      ],
+      cities: [city],
+      countries: [],
+      userName: 'An unrelated account name',
+    });
+    expect(result).toEqual({
+      query: 'hugging',
+      filter: { personIds: { all: ['arbitrary-first', 'arbitrary-second'] }, city: { in: [city] } },
+      verification: {
+        query: 'Person 1 hugging Person 2',
+        subjects: [
+          { personGroupId: 'arbitrary-first', marker: 1 },
+          { personGroupId: 'arbitrary-second', marker: 2 },
+        ],
+        groups: [[1, 2]],
+      },
+    });
+  });
   it.each(['me and maya in amsterdam', 'me an maya in amsterdam', 'Me & Maya in Amsterdam'])(
     'requires both faces: %s',
     (query) => {
@@ -31,16 +58,49 @@ describe(planNaturalSearch.name, () => {
     expect(plan('Maya holding a phone in Amsterdam')).toEqual({
       query: 'holding a phone',
       filter: { personIds: { all: ['maya'] }, city: { in: ['Amsterdam'] } },
+      verification: {
+        query: 'Person 1 holding a phone',
+        subjects: [{ personGroupId: 'maya', marker: 1 }],
+        groups: [[1]],
+      },
+    });
+  });
+  it.each([
+    ['me holding a phone', 'Person 1 holding a phone', ['self'], [[1]]],
+    ['Maya holding a phone', 'Person 1 holding a phone', ['maya'], [[1]]],
+    ['me holding a phone with Maya', 'Person 1 holding a phone with Person 2', ['self', 'maya'], [[1, 2]]],
+    ['Maya holding a phone with me', 'Person 1 holding a phone with Person 2', ['maya', 'self'], [[1, 2]]],
+    ['me and Maya wearing red hats', 'Person 1 and Person 2 wearing red hats', ['self', 'maya'], [[1, 2]]],
+    ['me or Maya wearing a red hat', 'Person 1 or Person 2 wearing a red hat', ['self', 'maya'], [[1], [2]]],
+    ['a phone held by Hye Joo in Lisbon', 'phone held by Person 1', ['hye'], [[1]]],
+    ['Maya in Amsterdam holding an H&M bag', 'Person 1 holding an H&M bag', ['maya'], [[1]]],
+    ['Maya watching Disney+', 'Person 1 watching Disney+', ['maya'], [[1]]],
+    ['show me photos of Maya holding a phone', 'Person 1 holding a phone', ['maya'], [[1]]],
+  ])('preserves anonymous actor relationships: %s', (query, expected, ids, groups) => {
+    expect(plan(query).verification).toEqual({
+      query: expected,
+      groups,
+      subjects: ids.map((personGroupId, index) => ({ personGroupId, marker: index + 1 })),
     });
   });
   it('splits a mixed face, clothing and location query', () => {
     expect(plan('me wearing a red hat in Amsterdam')).toEqual({
       query: 'wearing a red hat',
       filter: { personIds: { all: ['self'] }, city: { in: ['Amsterdam'] } },
+      verification: {
+        query: 'Person 1 wearing a red hat',
+        subjects: [{ personGroupId: 'self', marker: 1 }],
+        groups: [[1]],
+      },
     });
     expect(plan('me wearing an Amsterdam shirt')).toEqual({
       query: 'wearing an Amsterdam shirt',
       filter: { personIds: { all: ['self'] } },
+      verification: {
+        query: 'Person 1 wearing an Amsterdam shirt',
+        subjects: [{ personGroupId: 'self', marker: 1 }],
+        groups: [[1]],
+      },
     });
   });
   it('does not confuse an indirect object with a face constraint', () => {
@@ -74,6 +134,14 @@ describe(planNaturalSearch.name, () => {
     expect(plan('me wearing a red or blue hat with Maya in Amsterdam')).toEqual({
       query: 'wearing a red or blue hat',
       filter: { personIds: { all: ['self', 'maya'] }, city: { in: ['Amsterdam'] } },
+      verification: {
+        query: 'Person 1 wearing a red or blue hat with Person 2',
+        subjects: [
+          { personGroupId: 'self', marker: 1 },
+          { personGroupId: 'maya', marker: 2 },
+        ],
+        groups: [[1, 2]],
+      },
     });
   });
   it('uses explicit place context when a location collides with a person name', () => {
@@ -115,7 +183,15 @@ describe(planNaturalSearch.name, () => {
         ...vocabulary,
         people: [{ name: 'Maya-Jane', personGroupId: 'maya-jane' }],
       }),
-    ).toEqual({ query: 'swimming', filter: { personIds: { all: ['maya-jane'] } } });
+    ).toEqual({
+      query: 'swimming',
+      filter: { personIds: { all: ['maya-jane'] } },
+      verification: {
+        query: 'Person 1 swimming',
+        subjects: [{ personGroupId: 'maya-jane', marker: 1 }],
+        groups: [[1]],
+      },
+    });
   });
   it('handles multiword names and accented places', () => {
     expect(plan('Hye Joo in Sao Paulo')).toEqual({
@@ -124,7 +200,15 @@ describe(planNaturalSearch.name, () => {
     });
   });
   it('keeps ordinary words when they are not used as locations', () => {
-    expect(plan('Maya reading a book')).toEqual({ query: 'reading a book', filter: { personIds: { all: ['maya'] } } });
+    expect(plan('Maya reading a book')).toEqual({
+      query: 'reading a book',
+      filter: { personIds: { all: ['maya'] } },
+      verification: {
+        query: 'Person 1 reading a book',
+        subjects: [{ personGroupId: 'maya', marker: 1 }],
+        groups: [[1]],
+      },
+    });
   });
   it('handles a year without treating arbitrary numbers as dates', () => {
     expect(plan('Maya in Amsterdam in 2025').filter?.takenAt).toEqual({
@@ -151,7 +235,11 @@ describe(planNaturalSearch.name, () => {
     },
   );
   it('retains unsupported negated years instead of creating a positive date filter', () => {
-    expect(plan('me not in 2025')).toEqual({ query: 'not in 2025', filter: { personIds: { all: ['self'] } } });
+    expect(plan('me not in 2025')).toEqual({
+      query: 'not in 2025',
+      filter: { personIds: { all: ['self'] } },
+      verification: { query: 'Person 1 not in 2025', subjects: [{ personGroupId: 'self', marker: 1 }], groups: [[1]] },
+    });
   });
   it('does not mutate the vocabulary or input', () => {
     const before = structuredClone(vocabulary);

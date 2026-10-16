@@ -27,7 +27,7 @@ export enum ModelType {
   OCR = 'ocr',
 }
 
-export type ModelPayload = { imagePath: string } | { text: string };
+export type ModelPayload = { imagePath: string } | { image: Buffer } | { text: string };
 
 type ModelOptions = { modelName: string };
 
@@ -78,7 +78,7 @@ export type TextEncodingOptions = ModelOptions & { language?: string };
 
 @Injectable()
 export class MachineLearningRepository {
-  private searchVerifier = new SearchVerifier();
+  private searchVerifier = new SearchVerifier((image, options, signal) => this.detectFaces(image, options, signal));
   private healthyMap: Record<string, boolean> = {};
   private interval?: ReturnType<typeof setInterval>;
   private _config?: MachineLearningConfig;
@@ -161,7 +161,8 @@ export class MachineLearningRepository {
     return this.healthyMap[url];
   }
 
-  private async predict<T>(payload: ModelPayload, config: MachineLearningRequest): Promise<T> {
+  private async predict<T>(payload: ModelPayload, config: MachineLearningRequest, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
     const formData = await this.getFormData(payload, config);
 
     for (const url of [
@@ -170,7 +171,8 @@ export class MachineLearningRepository {
       ...this.config.urls.filter((url) => !this.isHealthy(url)),
     ]) {
       try {
-        const response = await fetch(new URL('predict', url), { method: 'POST', body: formData });
+        signal?.throwIfAborted();
+        const response = await fetch(new URL('predict', url), { method: 'POST', body: formData, signal });
         if (response.ok) {
           this.setHealthy(url, true);
           return response.json();
@@ -180,6 +182,7 @@ export class MachineLearningRepository {
           `Machine learning request to "${url}" failed with status ${response.status}: ${response.statusText}`,
         );
       } catch (error: Error | unknown) {
+        signal?.throwIfAborted();
         this.logger.warn(`Machine learning request to "${url}" failed`, error);
       }
 
@@ -189,14 +192,18 @@ export class MachineLearningRepository {
     throw new Error(`Machine learning request '${JSON.stringify(config)}' failed for all URLs`);
   }
 
-  async detectFaces(imagePath: string, { modelName, minScore }: FaceDetectionOptions) {
+  async detectFaces(image: string | Buffer, { modelName, minScore }: FaceDetectionOptions, signal?: AbortSignal) {
     const request = {
       [ModelTask.FACIAL_RECOGNITION]: {
         [ModelType.DETECTION]: { modelName, options: { minScore } },
         [ModelType.RECOGNITION]: { modelName },
       },
     };
-    const response = await this.predict<FacialRecognitionResponse>({ imagePath }, request);
+    const response = await this.predict<FacialRecognitionResponse>(
+      typeof image === 'string' ? { imagePath: image } : { image },
+      request,
+      signal,
+    );
     return {
       imageHeight: response.imageHeight,
       imageWidth: response.imageWidth,
@@ -235,8 +242,8 @@ export class MachineLearningRepository {
     const formData = new FormData();
     formData.append('entries', JSON.stringify(config));
 
-    if ('imagePath' in payload) {
-      const fileBuffer = await readFile(payload.imagePath);
+    if ('imagePath' in payload || 'image' in payload) {
+      const fileBuffer = 'image' in payload ? payload.image : await readFile(payload.imagePath);
       formData.append('image', new Blob([new Uint8Array(fileBuffer)]));
     } else if ('text' in payload) {
       formData.append('text', payload.text);

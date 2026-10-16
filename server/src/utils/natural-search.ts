@@ -1,4 +1,5 @@
 import type { SearchFilter } from 'src/dtos/search.dto.js';
+import { SearchSubject, searchSubjectLabel } from 'src/utils/search-subjects.js';
 
 export interface SearchVocabulary {
   people: { personGroupId: string; name: string }[];
@@ -10,6 +11,12 @@ export interface SearchVocabulary {
 export interface NaturalSearchPlan {
   query: string;
   filter?: SearchFilter;
+  verification?: {
+    query: string;
+    subjects: SearchSubject[];
+    // Any group may satisfy the query; every marker in that group is required.
+    groups: number[][];
+  };
 }
 
 const normalize = (value: string) => value.normalize('NFKD').replaceAll(/\p{M}/gu, '').toLowerCase();
@@ -99,7 +106,7 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
         ['show', 'find', 'give'].includes(previous) &&
         (['photos', 'pictures', 'images', 'a', 'an', 'the', 'some', 'all'].includes(next) || aliases.has(next))
       ) {
-        consume(index, 1); // "show me Maya" does not mean both people.
+        consume(index, 1); // "show me <person>" does not require the viewer to be present.
         continue;
       }
       const excluded =
@@ -113,28 +120,24 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
       consume(index, parts.length);
     }
   }
+  positive.sort((a, b) => a.start - b.start);
+  const subjectGroups: string[][] = [];
+  for (const [index, person] of positive.entries()) {
+    const startsAlternative =
+      index === 0 || (person.start === positive[index - 1].end + 1 && tokens[person.start - 1].normalized === 'or');
+    if (startsAlternative) subjectGroups.push([]);
+    if (!subjectGroups.at(-1)!.includes(person.id)) subjectGroups.at(-1)!.push(person.id);
+  }
   if (positive.length > 0 || negative.length > 0) {
-    positive.sort((a, b) => a.start - b.start);
-    const orConnections = positive.map(
-      (person, index) =>
-        index > 0 && person.start === positive[index - 1].end + 1 && tokens[person.start - 1].normalized === 'or',
-    );
-    const disjunction = orConnections.some(Boolean);
+    const disjunction = subjectGroups.length > 1;
     filter.personIds = {
       ...(positive.length > 0 && { [disjunction ? 'any' : 'all']: [...new Set(positive.map((person) => person.id))] }),
       ...(negative.length > 0 && { none: [...new Set(negative)] }),
     };
-    if (disjunction && positive.length > 2) {
-      const groups: string[][] = [[]];
-      for (const [index, person] of positive.entries()) {
-        if (orConnections[index]) groups.push([]);
-        groups.at(-1)!.push(person.id);
-      }
-      if (groups.some((group) => group.length > 1)) {
-        delete filter.personIds.any;
-        if (Object.keys(filter.personIds).length === 0) delete filter.personIds;
-        filter.or = groups.map((all) => ({ personIds: { all } }));
-      }
+    if (disjunction && subjectGroups.some((group) => group.length > 1)) {
+      delete filter.personIds.any;
+      if (Object.keys(filter.personIds).length === 0) delete filter.personIds;
+      filter.or = subjectGroups.map((all) => ({ personIds: { all } }));
     }
   }
   for (const [field, values] of [
@@ -162,6 +165,7 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
           consume(index - (previous === 'outside' ? 1 : 2), 1);
         } else found.add(value);
         consume(index, parts.length);
+        if (['in', 'at', 'from', 'near', 'around', 'or'].includes(previous)) consume(index - 1, 1);
       }
     }
     if (found.size > 0 || excluded.size > 0)
@@ -193,24 +197,66 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
       ...(lower && { gte: filter.takenAt?.gte && filter.takenAt.gte > lower ? filter.takenAt.gte : lower }),
       ...(upper && { lt: filter.takenAt?.lt && filter.takenAt.lt < upper ? filter.takenAt.lt : upper }),
     };
-    if (['before', 'after'].includes(previous)) consume(index - 1, 1);
+    if (['in', 'from', 'during', 'year', 'before', 'after'].includes(previous)) consume(index - 1, 1);
   }
   if (Object.keys(filter).length === 0) return { query };
   const remaining = tokens.filter((_, index) => !used.has(index));
   while (remaining.length > 0 && filler.has(remaining[0].normalized)) remaining.shift();
   while (remaining.length > 0 && filler.has(remaining.at(-1)!.normalized)) remaining.pop();
   if (remaining.length === 0) return { query: '', filter };
-  const first = remaining[0];
-  const last = remaining.at(-1)!;
-  const prefix = query.slice(tokens[first.position - 1]?.end ?? 0, first.start).match(/\S+$/u)?.[0] ?? '';
-  const suffix = query.slice(last.end, tokens[last.position + 1]?.start ?? query.length).match(/^\S*/u)?.[0] ?? '';
-  const description = remaining
-    .map((token, index) => {
-      const previous = remaining[index - 1];
-      return previous?.position === token.position - 1
-        ? query.slice(previous.end, token.end)
-        : `${index === 0 ? prefix : ' '}${token.text}`;
-    })
-    .join('');
-  return { query: description + suffix, filter };
+  const render = (selected: ((typeof tokens)[number] & { endPosition?: number })[]) => {
+    const first = selected[0];
+    const last = selected.at(-1)!;
+    const prefix = query.slice(tokens[first.position - 1]?.end ?? 0, first.start).match(/\S+$/u)?.[0] ?? '';
+    const suffix =
+      query
+        .slice(last.end, tokens[(last.endPosition ?? last.position) + 1]?.start ?? query.length)
+        .match(/^\S*/u)?.[0] ?? '';
+    return (
+      selected
+        .map((token, index) => {
+          const previous = selected[index - 1];
+          return previous && (previous.endPosition ?? previous.position) === token.position - 1
+            ? query.slice(previous.end, token.start) + token.text
+            : `${index === 0 ? prefix : ' '}${token.text}`;
+        })
+        .join('') + suffix
+    );
+  };
+  const description = render(remaining);
+  // Keep the original relationships for verification, replacing identities with
+  // anonymous labels. The embedding still uses only the visual description.
+  const subjects = [...new Set(positive.map(({ id }) => id))].map((personGroupId, index) => ({
+    personGroupId,
+    marker: index + 1,
+  }));
+  const verificationTokens = tokens.flatMap((token, index) => {
+    const person = positive.find(({ start }) => start === index);
+    if (person)
+      return [
+        {
+          ...token,
+          text: searchSubjectLabel(subjects.find(({ personGroupId }) => personGroupId === person.id)!.marker),
+          normalized: 'person',
+          end: tokens[person.end - 1].end,
+          endPosition: person.end - 1,
+        },
+      ];
+    return used.has(index) ? [] : [token];
+  });
+  while (verificationTokens.length > 0 && filler.has(verificationTokens[0].normalized)) verificationTokens.shift();
+  while (verificationTokens.length > 0 && filler.has(verificationTokens.at(-1)!.normalized)) verificationTokens.pop();
+  return {
+    query: description,
+    filter,
+    ...(subjects.length > 0 && {
+      verification: {
+        query: render(verificationTokens),
+        subjects,
+        groups: subjectGroups.map((group) =>
+          group.map((id) => subjects.find(({ personGroupId }) => personGroupId === id)!.marker),
+        ),
+      },
+    }),
+  };
 }
