@@ -469,12 +469,14 @@ const SearchResponseSchema = z
     assets: SearchAssetResponseSchema,
     verification: z
       .object({
-        status: z.enum(['complete', 'unavailable', 'not-needed']),
+        status: z.enum(['complete', 'partial', 'unavailable', 'not-needed']),
         checked: z.int().min(0),
         rejected: z.int().min(0),
       })
       .optional()
-      .describe('Visual verification status; unavailable means regular search results were returned'),
+      .describe(
+        'Visual verification status; partial preserves confirmed matches from an incomplete batch; unavailable means regular search results were returned. Retry the search to revisit unchecked candidates.',
+      ),
   })
   .meta({ id: 'SearchResponseDto' });
 

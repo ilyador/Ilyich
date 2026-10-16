@@ -521,6 +521,27 @@ export class PersonRepository {
       .execute();
   }
 
+  @GenerateSql({ params: [DummyValue.UUID, DummyValue.UUID] })
+  getSearchFaceReferences(assetId: string, viewingUserId: string) {
+    // The caller has already authorized the candidate asset. Include unassigned
+    // faces as competitors, but expose identities only from the viewer's people.
+    return this.db
+      .selectFrom('asset_face')
+      .innerJoin('face_search', 'face_search.faceId', 'asset_face.id')
+      .leftJoin('person', (join) =>
+        join
+          .onRef('person.personGroupId', '=', 'asset_face.personGroupId')
+          .on('person.ownerId', '=', viewingUserId)
+          .on('person.isHidden', '=', false),
+      )
+      .select(['person.personGroupId', 'face_search.embedding'])
+      .where('asset_face.assetId', '=', assetId)
+      .where('asset_face.deletedAt', 'is', null)
+      .where('asset_face.isVisible', '=', true)
+      .orderBy('asset_face.id')
+      .execute();
+  }
+
   @GenerateSql({ params: [DummyValue.UUID, { viewingUserId: DummyValue.UUID }] })
   getFaceById(id: string, { viewingUserId }: WithPersonOptions) {
     // TODO return null instead of find or fail
