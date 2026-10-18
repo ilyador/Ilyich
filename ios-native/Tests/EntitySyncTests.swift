@@ -216,6 +216,40 @@ private final class SyncTestURLProtocol: URLProtocol, @unchecked Sendable {
 }
 
 extension EntitySyncTests {
+    func testMetadataResetRequestsServerReplayAndRebuildsLocalEntities() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SyncTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let api = try APIClient(baseURL: URL(string: "https://sync-test.invalid")!, accessToken: "test-session", userID: "alice", session: session, networkConfiguration: .init())
+        let store = try EntityStore(scope: api.cacheScope, userID: "alice", directory: root)
+        let fingerprint = try api.syncSessionFingerprint()
+        let needsReset = try await store.prepare(sessionFingerprint: fingerprint)
+        XCTAssertTrue(needsReset)
+        let epoch = await store.epoch()
+        _ = try await store.apply([asset("old"), event("SyncCompleteV1", "{}", ack: "SyncCompleteV1|old")], epoch: epoch)
+        try await store.markResetRequested()
+        try await store.clear()
+
+        let replay = try JSONEncoder().encode(asset("fresh")) + Data("\n".utf8)
+            + JSONEncoder().encode(event("SyncCompleteV1", "{}", ack: "SyncCompleteV1|fresh")) + Data("\n".utf8)
+        SyncTestURLProtocol.fixture.reset()
+        SyncTestURLProtocol.fixture.set("/api/sync/stream", [.init(status: 200, body: replay)])
+        SyncTestURLProtocol.fixture.set("/api/sync/ack", [.init(status: 204, body: Data())])
+        let sync = NativeSync(api: api, store: store)
+        _ = try await sync.synchronize()
+
+        let requests = try SyncTestURLProtocol.fixture.bodies("/api/sync/stream").map { try JSONDecoder().decode([String: EntityJSON].self, from: $0) }
+        XCTAssertEqual(requests.map { $0["reset"] }, [.bool(true)])
+        let old = try await store.asset(id: "old"), fresh = try await store.asset(id: "fresh")
+        XCTAssertNil(old)
+        XCTAssertNotNil(fresh)
+        let complete = try await store.isComplete()
+        XCTAssertTrue(complete)
+    }
+
     func testInterruptedInitialStreamResumesWithoutAnotherServerReset() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
