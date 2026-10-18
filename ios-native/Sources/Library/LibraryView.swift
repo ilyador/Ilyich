@@ -49,7 +49,7 @@ struct LibraryView: View {
                 GlassEffectContainer(spacing: 14) {
                     VStack(spacing: 0) {
                         header.padding(.horizontal, 16).padding(.top, 8)
-                        if let error = store.error { errorBanner(error, retry: store.retrySearch) }
+                        if let error = store.error { errorBanner(error, retry: store.retryCurrent) }
                         if !store.bucketErrors.isEmpty {
                             errorBanner("Some photos couldn’t load.", retry: store.retryFailedBuckets)
                         }
@@ -91,7 +91,7 @@ struct LibraryView: View {
             }
             .fullScreenCover(item: $viewing) { asset in
                 AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
-                            onUpdated: store.update, onDeleted: { Task { await store.reload() } })
+                            onUpdated: store.update, onDeleted: { Task { await store.reload() } }, albumID: store.timelineFilter.albumID)
             }
             .alert("Couldn’t complete action", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
                 Button("OK", role: .cancel) { }
@@ -108,7 +108,21 @@ struct LibraryView: View {
             }
         }
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
-        .task { await store.reload(); await loadShelfData() }
+        .task { guard !store.started else { return }; store.started = true; await store.reload(); await loadShelfData() }
+        .task(id: session.pendingLink) {
+            guard let link = session.pendingLink else { return }
+            do {
+                switch link {
+                case .asset(let id): viewing = try await api.asset(id)
+                case .album(let id): store.setAlbum(try await api.album(id: id))
+                case .person(let id):
+                    let person: Person = try await api.request(.get, path: "people/\(id)")
+                    store.setPerson(person)
+                }
+            } catch is CancellationError {} catch { actionError = error.localizedDescription }
+            if session.pendingLink == link { session.pendingLink = nil }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in Task { await pipeline.trimMemory() } }
     }
 
     private var header: some View {
@@ -260,7 +274,7 @@ struct LibraryView: View {
         case .people: PeopleView(api: api, pipeline: pipeline) { store.setPerson($0); screen = nil; searchText = "" }
         case .albums: AlbumsView(api: api, pipeline: pipeline) { store.setAlbum($0); screen = nil; searchText = "" }
         case .places: PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace)
-        case .settings: SettingsView(api: api, onSignOut: { Task { await session.signOut() } })
+        case .settings: SettingsView(api: api, onSignOut: { store.stop(); Task { await session.signOut() } })
         case .more: MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { viewing = $0; screen = nil }, onFilter: { filter, title in
             store.setTimeline(filter, title: title); screen = nil
         })

@@ -114,4 +114,14 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(PhotoTransform(edits: [.mirror(.vertical), .rotate(90)]), PhotoTransform(a: 0, b: -1, c: -1, d: 0))
         XCTAssertEqual(PhotoTransform(edits: [.rotate(90), .rotate(90), .rotate(90), .rotate(90)]), PhotoTransform())
     }
+
+    func testVideoContentRangeRejectsMalformedOrUnsatisfiedRanges() throws {
+        let range = try XCTUnwrap(HTTPContentRange("bytes 4096-8191/200000"))
+        XCTAssertEqual(range.start, 4096)
+        XCTAssertEqual(range.end, 8191)
+        XCTAssertEqual(range.total, 200000)
+        for header in ["bytes */200000", "bytes 0-10/10", "bytes 10-0/20", "bytes -1-2/20", "items 0-1/2", "bytes 0-1/*", "bytes 0-1/2/3"] {
+            XCTAssertNil(HTTPContentRange(header))
+        }
+    }
 }

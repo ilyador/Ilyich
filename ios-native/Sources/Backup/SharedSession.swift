@@ -7,6 +7,7 @@ struct SavedSession: Codable, Sendable {
     let token: String
     let userID: String
     let name: String
+    var requiresPasswordChange: Bool? = nil
 
     var scope: String { SHA256.hash(data: Data((server.absoluteString + "|" + userID).utf8)).map { String(format: "%02x", $0) }.joined() }
 }

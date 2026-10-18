@@ -97,6 +97,9 @@ enum AssetVisibility: String, Codable, Sendable {
 struct Asset: Codable, Hashable, Identifiable, Sendable {
     let id: String
     var ownerId: String?
+    var owner: User?
+    var tags: [AssetTag]?
+    var stack: AssetStack?
     var type: AssetKind
     var originalFileName: String
     var fileCreatedAt: Date?
@@ -137,7 +140,7 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, ownerId, type, originalFileName, fileCreatedAt, localDateTime, createdAt, width, height, duration
+        case id, ownerId, owner, tags, stack, type, originalFileName, fileCreatedAt, localDateTime, createdAt, width, height, duration
         case isFavorite, isTrashed, isEdited, isDeveloped, visibility, mediaRevision, thumbhash, livePhotoVideoId, exifInfo, people, timelineRatio
     }
 
@@ -145,6 +148,9 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         ownerId = try c.decodeIfPresent(String.self, forKey: .ownerId)
+        owner = try c.decodeIfPresent(User.self, forKey: .owner)
+        tags = try c.decodeIfPresent([AssetTag].self, forKey: .tags)
+        stack = try c.decodeIfPresent(AssetStack.self, forKey: .stack)
         type = try c.decode(AssetKind.self, forKey: .type)
         originalFileName = try c.decodeIfPresent(String.self, forKey: .originalFileName) ?? ""
         fileCreatedAt = try c.decodeIfPresent(Date.self, forKey: .fileCreatedAt)
@@ -164,6 +170,22 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
         people = try c.decodeIfPresent([Person].self, forKey: .people)
         timelineRatio = try c.decodeIfPresent(Double.self, forKey: .timelineRatio)
     }
+}
+
+struct AssetTag: Codable, Hashable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let value: String
+}
+struct AssetStack: Codable, Hashable, Identifiable, Sendable {
+    let id: String
+    let primaryAssetId: String
+    let assetCount: Int
+}
+struct StackDetails: Decodable, Sendable {
+    let id: String
+    let primaryAssetId: String
+    let assets: [Asset]
 }
 
 struct ExifInfo: Codable, Hashable, Sendable {
@@ -200,6 +222,7 @@ struct Album: Codable, Hashable, Identifiable, Sendable {
     let startDate: Date?
     let endDate: Date?
     let updatedAt: Date?
+    let order: String?
 }
 
 struct AlbumUser: Codable, Hashable, Sendable {

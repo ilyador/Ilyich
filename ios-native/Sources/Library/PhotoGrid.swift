@@ -42,7 +42,13 @@ struct PhotoGrid: UIViewRepresentable {
         if coordinator.sections != sections || reset {
             coordinator.sections = sections; coordinator.resetID = store.resetID
             view.reloadData()
-            if reset { view.setContentOffset(CGPoint(x: 0, y: -topInset), animated: false) }
+            if reset {
+                view.layoutIfNeeded()
+                if let position = store.restorePosition, let section = sections.firstIndex(where: { $0.id == position.section }), position.item < sections[section].count,
+                   let attributes = view.collectionViewLayout.layoutAttributesForItem(at: IndexPath(item: position.item, section: section)) {
+                    view.setContentOffset(CGPoint(x: 0, y: attributes.frame.minY + position.offset), animated: false)
+                } else { view.setContentOffset(CGPoint(x: 0, y: -topInset), animated: false) }
+            }
         } else if coordinator.revision != store.revision || coordinator.selection != store.selected || coordinator.selecting != store.isSelecting {
             for cell in view.visibleCells {
                 guard let cell = cell as? PhotoCell, let index = view.indexPath(for: cell) else { continue }
@@ -95,6 +101,9 @@ struct PhotoGrid: UIViewRepresentable {
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             guard let collection, let first = collection.indexPathsForVisibleItems.min() else { return }
             parent.store.visibleSection(first.section)
+            if sections.indices.contains(first.section), let attributes = collection.layoutAttributesForItem(at: first) {
+                parent.store.position = GridPosition(section: sections[first.section].id, item: first.item, offset: collection.contentOffset.y - attributes.frame.minY)
+            }
         }
         @objc func refresh(_ sender: UIRefreshControl) {
             Task { await parent.store.reload(); sender.endRefreshing() }

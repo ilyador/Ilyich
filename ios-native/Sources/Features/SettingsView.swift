@@ -18,6 +18,8 @@ struct SettingsView: View {
             }
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }
+                NavigationLink("Photo and video viewer") { ViewerSettingsView() }
+                NavigationLink("Slideshow") { SlideshowSettingsView() }
                 Picker("Grid", selection: $columns) { ForEach(2...6, id: \.self) { Text("\($0) columns").tag($0) } }
             }
             Section {
@@ -36,6 +38,29 @@ struct SettingsView: View {
     }
 }
 
+private struct ViewerSettingsView: View {
+    @AppStorage("viewerAutoPlayVideo") private var autoplay = true
+    @AppStorage("viewerLoopVideo") private var loop = true
+    @AppStorage("viewerMuteVideo") private var mute = false
+    @AppStorage("viewerLoadOriginalVideo") private var originalVideo = false
+    @AppStorage("viewerTapToNavigate") private var tapNavigation = false
+    @AppStorage("imageLoadOriginal") private var originalImage = false
+    var body: some View {
+        Form {
+            Section("Photos") {
+                Toggle("Full-resolution photos", isOn: $originalImage)
+                Toggle("Tap edges to navigate", isOn: $tapNavigation)
+            } footer: { Text("Full-resolution photos use more data. Lightroom edits are preserved.") }
+            Section("Videos") {
+                Toggle("Play automatically", isOn: $autoplay)
+                Toggle("Repeat videos", isOn: $loop)
+                Toggle("Start muted", isOn: $mute)
+                Toggle("Play original videos", isOn: $originalVideo)
+            } footer: { Text("Original files can use more data and take longer to load. Video formats unsupported by this phone may need server playback.") }
+        }.navigationTitle("Photo and video viewer")
+    }
+}
+
 private struct AccountSettingsView: View {
     let api: APIClient
     @State private var name = ""
@@ -47,7 +72,10 @@ private struct AccountSettingsView: View {
     var body: some View {
         Form {
             Section("Profile") { TextField("Name", text: $name).textContentType(.name); LabeledContent("Email", value: email) }
-            Section { NavigationLink("Change password") { ChangePasswordView(api: api) } }
+            Section {
+                NavigationLink("Change password") { ChangePasswordView(api: api) }
+                NavigationLink("Locked folder PIN") { PINSettingsView(api: api) }
+            }
             if saved { Label("Profile saved", systemImage: "checkmark.circle").foregroundStyle(.secondary) }
         }.navigationTitle("Account").disabled(loading || saving)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(loading || saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) } }
@@ -65,8 +93,9 @@ private struct AccountSettingsView: View {
     }
 }
 
-private struct ChangePasswordView: View {
+struct ChangePasswordView: View {
     let api: APIClient
+    var onChanged: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var current = ""
     @State private var password = ""
@@ -91,7 +120,11 @@ private struct ChangePasswordView: View {
     private func save() async {
         struct Body: Encodable, Sendable { let password: String; let newPassword: String; let invalidateSessions: Bool }
         saving = true; defer { saving = false }
-        do { try await api.requestVoid(.post, path: "auth/change-password", body: Body(password: current, newPassword: password, invalidateSessions: invalidate)); current = ""; password = ""; confirmation = ""; dismiss() } catch { failure = .init(error) }
+        do {
+            try await api.requestVoid(.post, path: "auth/change-password", body: Body(password: current, newPassword: password, invalidateSessions: invalidate))
+            current = ""; password = ""; confirmation = ""
+            if let onChanged { onChanged() } else { dismiss() }
+        } catch { failure = .init(error) }
     }
 }
 

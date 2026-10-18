@@ -18,6 +18,7 @@ struct PreparedPhoto: Codable, Sendable {
     let fields: [String: String]
     let isVideo: Bool
     var livePhotoID: String?
+    var motionChecksum: String?
     var stageID = UUID().uuidString
 }
 
@@ -62,6 +63,18 @@ enum BackupError: LocalizedError {
         PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil).firstObject?.modificationDate
     }
 
+    static func canRemove(_ localID: String, revision: Date) -> Bool {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil).firstObject,
+              asset.modificationDate == revision else { return false }
+        // Keep adjusted, RAW+JPEG and auxiliary resources until all their variants
+        // have verified server receipts. A plain original receipt cannot prove that.
+        let resources = PHAssetResource.assetResources(for: asset)
+        let originals = resources.filter { $0.type == .photo || $0.type == .video }
+        return originals.count == 1 && resources.allSatisfy {
+            $0.type == .photo || $0.type == .video || $0.type == .pairedVideo
+        }
+    }
+
     static func prepare(_ localID: String, directory: URL, allowCloud: Bool,
                         progress: @escaping @Sendable (Double) -> Void) async throws -> PreparedPhoto {
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil).firstObject else {
@@ -101,12 +114,7 @@ enum BackupError: LocalizedError {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = allowCloud
         options.progressHandler = progress
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            PHAssetResourceManager.default().writeData(for: resource, toFile: destination, options: options) { error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume() }
-            }
-        }
+        try await PhotoResourceExport(destination: destination).write(resource, options: options)
         try Task.checkCancellation()
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: destination.path)
         return UploadFile(url: destination, filename: resource.originalFilename,
