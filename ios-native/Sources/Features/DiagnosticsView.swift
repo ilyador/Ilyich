@@ -3,10 +3,13 @@ import SwiftUI
 struct DiagnosticsView: View {
     let api: APIClient
     let pipeline: MediaPipeline?
+    var session: SessionStore? = nil
     @AppStorage(DiagnosticsStore.levelKey) private var level = DiagnosticLevel.errors.rawValue
     @State private var events: [DiagnosticEvent] = []
     @State private var media: MediaCacheUsage?
     @State private var timeline: CachedTimelineUsage?
+    @State private var syncStatistics: EntityStoreStatistics?
+    @State private var statisticsError: String?
     @State private var backup = BackupCoordinator.shared
     @State private var clearing = false
     @State private var confirmReset = false
@@ -25,6 +28,25 @@ struct DiagnosticsView: View {
                 LabeledContent("Confirmed", value: backup.confirmed.formatted())
                 LabeledContent("Failed", value: backup.failures.count.formatted())
                 NavigationLink("Backup details") { BackupSettingsView() }
+            }
+            Section {
+                if let session {
+                    LabeledContent("State", value: session.isSyncing ? "Syncing" : (session.syncError != nil ? "Needs attention" : (syncStatistics?.isComplete == true ? "Ready" : "Waiting for first sync")))
+                    if session.isSyncing { ProgressView().accessibilityLabel("Synchronizing library metadata") }
+                    if let message = session.syncError { Text(message).font(.footnote).foregroundStyle(.secondary) }
+                    Button("Sync now", systemImage: "arrow.triangle.2.circlepath") { session.startSync() }.disabled(session.isSyncing)
+                }
+                if let statistics = syncStatistics {
+                    if let date = statistics.lastSync { LabeledContent("Last completed sync") { Text(date, format: .dateTime.year().month().day().hour().minute()).multilineTextAlignment(.trailing) } }
+                    DisclosureGroup("Saved library metadata") {
+                        ForEach(entityLabels, id: \.key) { item in
+                            LabeledContent(item.name, value: (statistics.counts[item.key] ?? 0).formatted())
+                        }
+                    }
+                } else if let statisticsError { Text(statisticsError).font(.footnote).foregroundStyle(.secondary) }
+                else { Text("Metadata counts will appear after the local library connects.").foregroundStyle(.secondary) }
+            } header: { Text("Library sync") } footer: {
+                Text("Keeps library metadata on this phone for browsing and applies server changes. Counts exclude the locked folder. Downloaded photo previews have a separate cache; an indexed photo is not necessarily available offline.")
             }
             Section {
                 if let timeline {
@@ -64,6 +86,8 @@ struct DiagnosticsView: View {
             }
         }.navigationTitle("Diagnostics")
         .task { await refresh() }
+        .onChange(of: session?.lastSyncDate) { _, _ in Task { await refresh() } }
+        .onChange(of: session?.isSyncing) { _, syncing in if syncing == false { Task { await refresh() } } }
         .refreshable { await refresh() }
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }.disabled(clearing) } }
         .confirmationDialog("Clear this account’s browsing cache?", isPresented: $confirmReset, titleVisibility: .visible) {
@@ -71,6 +95,12 @@ struct DiagnosticsView: View {
         } message: { Text("Downloaded previews will be unavailable offline until you view them again. Your photos and backup records are kept.") }
     }
     private func bytes(_ count: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file) }
+    private var entityLabels: [(key: String, name: String)] {
+        [("asset", "Photos and videos"), ("exif", "EXIF records"), ("album", "Albums"), ("albumAsset", "Album items"),
+         ("albumUser", "Album memberships"), ("person", "People"), ("face", "Face associations"), ("ocr", "Text regions"),
+         ("memory", "Memories"), ("memoryAsset", "Memory items"), ("edit", "Photo edits"), ("stack", "Stacks"),
+         ("user", "Users"), ("partner", "Partner relationships")]
+    }
     private var report: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
@@ -80,6 +110,9 @@ struct DiagnosticsView: View {
         events = await DiagnosticsStore.shared.snapshot()
         if let pipeline { media = await pipeline.cacheUsage() }
         timeline = await TimelineCache.shared.cacheUsage(scope: api.cacheScope)
+        do { syncStatistics = try await api.syncStatistics(); statisticsError = nil }
+        catch is CancellationError { }
+        catch { statisticsError = "Saved metadata counts could not be read. Refresh to try again." }
     }
     private func clearCache() async {
         guard let pipeline, !clearing else { return }

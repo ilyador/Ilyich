@@ -123,6 +123,7 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
     var timelineRatio: Double?
 
     var isVideo: Bool { type == .video }
+    var isAnimatedImage: Bool { type == .image && livePhotoVideoId == nil && (duration ?? 0) > 0 }
     var aspectRatio: Double {
         if let width, let height, width > 0, height > 0 { return Double(width) / Double(height) }
         return timelineRatio.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 1

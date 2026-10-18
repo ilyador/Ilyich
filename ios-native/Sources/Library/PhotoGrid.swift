@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Observation
 
 struct PhotoGrid: UIViewRepresentable {
     let store: LibraryStore
@@ -8,6 +9,7 @@ struct PhotoGrid: UIViewRepresentable {
     let topInset: CGFloat
     let bottomInset: CGFloat
     var onDensityChange: ((Int) -> Void)? = nil
+    var onOpenLocal: ((LocalPhoto) -> Void)? = nil
     let onOpen: (Asset) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -55,8 +57,8 @@ struct PhotoGrid: UIViewRepresentable {
             view.reloadData()
             if reset {
                 view.layoutIfNeeded()
-                if let position = store.restorePosition, let section = sections.firstIndex(where: { $0.id == position.section }), position.item < sections[section].count,
-                   let attributes = view.collectionViewLayout.layoutAttributesForItem(at: IndexPath(item: position.item, section: section)) {
+                if let position = store.restorePosition, let index = store.restoredIndex(for: position),
+                   let attributes = view.collectionViewLayout.layoutAttributesForItem(at: IndexPath(item: index.item, section: index.section)) {
                     view.setContentOffset(CGPoint(x: 0, y: attributes.frame.minY + position.offset), animated: false)
                 } else { view.setContentOffset(CGPoint(x: 0, y: -topInset), animated: false) }
             }
@@ -92,29 +94,30 @@ struct PhotoGrid: UIViewRepresentable {
             return cell
         }
         func configure(_ cell: PhotoCell, at index: IndexPath) {
-            let asset = parent.store.asset(section: index.section, item: index.item)
-            cell.configure(asset: asset, pipeline: parent.pipeline,
-                           selected: asset.map { parent.store.selected.contains($0.id) } ?? false,
+            let entry = parent.store.entry(section: index.section, item: index.item)
+            cell.configure(entry: entry, pipeline: parent.pipeline,
+                           selected: entry.map { parent.store.selected.contains($0.id) } ?? false,
                            selecting: parent.store.isSelecting,
                            month: index.item == 0 && sections.indices.contains(index.section) ? sections[index.section].title : nil)
-            if asset == nil { parent.store.requestBucket(index.section) }
+            if entry == nil { parent.store.requestBucket(index.section) }
             if sections.indices.contains(index.section), sections[index.section].id == "results",
                index.item >= max(0, sections[index.section].count - 12) {
                 Task { [weak self] in self?.parent.store.loadMore() }
             }
         }
         func collectionView(_ view: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-            guard let asset = parent.store.asset(section: indexPath.section, item: indexPath.item) else { return }
+            guard let entry = parent.store.entry(section: indexPath.section, item: indexPath.item) else { return }
             if parent.store.isSelecting {
-                parent.store.toggleSelection(asset)
+                parent.store.toggleSelection(entry)
                 UISelectionFeedbackGenerator().selectionChanged()
-            } else { parent.onOpen(asset) }
+            } else if let asset = entry.remote { parent.onOpen(asset) }
+            else if let photo = entry.local { parent.onOpenLocal?(photo) }
         }
         @objc func selectByDragging(_ gesture: UILongPressGestureRecognizer) {
             guard let collection, let index = collection.indexPathForItem(at: gesture.location(in: collection)),
-                  let asset = parent.store.asset(section: index.section, item: index.item) else { return }
+                  let entry = parent.store.entry(section: index.section, item: index.item) else { return }
             if gesture.state == .began { parent.store.isSelecting = true; UISelectionFeedbackGenerator().selectionChanged() }
-            if gesture.state == .began || gesture.state == .changed { parent.store.select(asset) }
+            if gesture.state == .began || gesture.state == .changed { parent.store.select(entry) }
         }
         @objc func changeDensity(_ gesture: UIPinchGestureRecognizer) {
             guard gesture.state == .ended, gesture.scale < 0.85 || gesture.scale > 1.15 else { return }
@@ -129,7 +132,9 @@ struct PhotoGrid: UIViewRepresentable {
             parent.store.navigation.section = first.section
             parent.store.navigation.item = first.item
             if sections.indices.contains(first.section), let attributes = collection.layoutAttributesForItem(at: first) {
-                parent.store.position = GridPosition(section: sections[first.section].id, item: first.item, offset: collection.contentOffset.y - attributes.frame.minY)
+                parent.store.position = GridPosition(section: sections[first.section].id, item: first.item,
+                                                     offset: collection.contentOffset.y - attributes.frame.minY,
+                                                     assetID: parent.store.entry(section: first.section, item: first.item)?.id)
             }
         }
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { parent.store.navigation.isScrolling = true }
@@ -138,7 +143,7 @@ struct PhotoGrid: UIViewRepresentable {
         }
         func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { parent.store.navigation.isScrolling = false }
         @objc func refresh(_ sender: UIRefreshControl) {
-            Task { await parent.store.reload(); sender.endRefreshing() }
+            Task { await parent.store.refreshAfterMutation(); sender.endRefreshing() }
         }
     }
 }
@@ -194,6 +199,8 @@ struct PhotoGrid: UIViewRepresentable {
     private let badge = UILabel()
     private let month = UILabel()
     private let check = UIImageView()
+    private let storage = UIImageView()
+    private var localMedia: LocalPhotoMedia?
     private var task: Task<Void, Never>?
     private var identity: String?
     override init(frame: CGRect) {
@@ -209,24 +216,44 @@ struct PhotoGrid: UIViewRepresentable {
             label.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview(label)
         }
         check.tintColor = .systemCyan; check.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview(check)
+        storage.tintColor = .white; storage.layer.shadowOpacity = 0.7; storage.layer.shadowRadius = 2
+        storage.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview(storage)
         NSLayoutConstraint.activate([
             badge.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -4), badge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
             month.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4), month.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4), month.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -4),
-            check.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -5), check.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5), check.widthAnchor.constraint(equalToConstant: 24), check.heightAnchor.constraint(equalToConstant: 24)
+            check.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -5), check.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5), check.widthAnchor.constraint(equalToConstant: 24), check.heightAnchor.constraint(equalToConstant: 24),
+            storage.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 5), storage.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -5), storage.widthAnchor.constraint(equalToConstant: 18), storage.heightAnchor.constraint(equalToConstant: 16)
         ])
         isAccessibilityElement = true
     }
     required init?(coder: NSCoder) { fatalError("PhotoCell is created programmatically") }
-    override func prepareForReuse() { super.prepareForReuse(); task?.cancel(); task = nil; identity = nil; image.image = nil }
-    func configure(asset: Asset?, pipeline: MediaPipeline, selected: Bool, selecting: Bool, month: String?) {
+    override func prepareForReuse() { super.prepareForReuse(); task?.cancel(); task = nil; localMedia?.cancel(); localMedia = nil; identity = nil; image.image = nil }
+    func configure(entry: LibraryEntry?, pipeline: MediaPipeline, selected: Bool, selecting: Bool, month: String?) {
         check.isHidden = !selecting
         check.image = UIImage(systemName: selected ? "checkmark.circle.fill" : "circle")
         self.month.text = month.map { " \($0) " }; self.month.isHidden = month == nil
         accessibilityTraits = selected ? [.button, .selected] : [.button]
+        storage.isHidden = entry == nil
+        if case .local(let photo) = entry {
+            accessibilityLabel = photo.title + ", on this phone"
+            storage.image = UIImage(systemName: "iphone")
+            badge.isHidden = !photo.video && !photo.live
+            badge.text = photo.video ? " \(Self.duration(Int(photo.duration * 1000))) " : " LIVE "
+            let key = "local:\(photo.id)|\(photo.modified?.timeIntervalSince1970 ?? 0)"
+            guard key != identity else { return }
+            task?.cancel(); localMedia?.cancel(); identity = key; image.image = nil
+            let media = LocalPhotoMedia(); localMedia = media
+            media.load(photo, full: false, network: false)
+            observeLocal(media, key: key)
+            return
+        }
+        localMedia?.cancel(); localMedia = nil
+        let asset = entry?.remote
         guard let asset else {
             task?.cancel(); identity = nil; image.image = nil; badge.isHidden = true
             accessibilityLabel = "Loading photo"; return
         }
+        storage.image = UIImage(systemName: entry?.local == nil ? "icloud" : "checkmark.icloud")
         accessibilityLabel = asset.displayName + (asset.isVideo ? ", video" : "")
         badge.isHidden = !asset.isVideo && asset.livePhotoVideoId == nil
         badge.text = asset.isVideo ? " \(Self.duration(asset.duration ?? 0)) " : " LIVE "
@@ -246,6 +273,21 @@ struct PhotoGrid: UIViewRepresentable {
                 self?.accessibilityLabel = "Preview unavailable, \(asset.displayName)"
                 // Permit retry when the row is next configured after connectivity returns.
                 self?.identity = nil
+            }
+        }
+    }
+    private func observeLocal(_ media: LocalPhotoMedia, key: String) {
+        guard identity == key else { return }
+        withObservationTracking {
+            image.image = media.image
+            if media.image == nil && !media.loading {
+                image.image = UIImage(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark")
+                image.tintColor = .secondaryLabel
+            }
+        } onChange: { [weak self, weak media] in
+            Task { @MainActor in
+                guard let self, let media, self.identity == key else { return }
+                self.observeLocal(media, key: key)
             }
         }
     }

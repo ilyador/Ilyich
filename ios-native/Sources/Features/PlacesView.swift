@@ -160,7 +160,9 @@ struct PlacesView: View {
             let markers: [MapMarker] = try await api.request(.get, path: "map/markers", query: query)
             try Task.checkCancellation()
             guard generation == requestGeneration else { return }
-            places = PlaceCollection.group(markers)
+            let grouped = await Task.detached(priority: .userInitiated) { PlaceCollection.group(markers) }.value
+            try Task.checkCancellation(); guard generation == requestGeneration else { return }
+            places = grouped
             if let previous = selected { selected = places.first { $0.id == previous.id } }
         } catch is CancellationError { } catch {
             if generation == requestGeneration { places = []; selected = nil; failure = .init(error) }

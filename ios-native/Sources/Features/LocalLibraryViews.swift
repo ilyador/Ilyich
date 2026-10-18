@@ -2,6 +2,11 @@ import SwiftUI
 @preconcurrency import Photos
 
 struct LocalLibraryView: View {
+    var destinationAlbumID: String? = nil
+    var destinationAlbumName: String? = nil
+    var onBackupFinished: (() -> Void)? = nil
+    @State private var initialized = false
+    @State private var watchingUploads = false
     @State private var library = LocalPhotoLibrary()
     @State private var backup = BackupCoordinator.shared
     @State private var selection = Set<String>()
@@ -10,6 +15,8 @@ struct LocalLibraryView: View {
     @State private var accessPicker = false
     @State private var uploading = false
     @State private var showBackup = false
+    @State private var showActions = false
+    @State private var actionPhotos: [LocalPhoto] = []
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         Group {
@@ -23,7 +30,7 @@ struct LocalLibraryView: View {
                     else { Button("Open Settings") { openPhotoSettings() }.buttonStyle(.borderedProminent) }
                 }
             }
-        }.navigationTitle("On this phone")
+        }.navigationTitle(destinationAlbumID == nil ? "On this phone" : "Upload photos")
         .toolbar {
             if [.authorized, .limited].contains(library.permission) {
                 ToolbarItem(placement: .topBarTrailing) { Button(selecting ? "Done" : "Select") { selecting.toggle(); selection = [] } }
@@ -39,22 +46,34 @@ struct LocalLibraryView: View {
                 HStack {
                     Text("\(selection.count.formatted()) selected").font(.subheadline)
                     Spacer()
-                    Button("Back up selected", systemImage: "icloud.and.arrow.up") { Task { await upload() } }
+                    Button(destinationAlbumID == nil ? "Back up selected" : "Upload to album", systemImage: "icloud.and.arrow.up") { Task { await upload() } }
                         .disabled(selection.isEmpty || uploading || backup.isRunning).requiresWriteAccess()
+                    Button("Photo actions", systemImage: "ellipsis") { actionPhotos = library.photos.filter { selection.contains($0.id) }; showActions = true }.labelStyle(.iconOnly).disabled(selection.isEmpty)
                 }.padding().glassEffect().padding(.horizontal, 12)
             }
         }
-        .task { library.begin() }
+        .task { library.begin(); if !initialized { initialized = true; selecting = destinationAlbumID != nil } }
+        .onChange(of: backup.isRunning) { _, running in
+            if watchingUploads && !running { onBackupFinished?(); watchingUploads = false }
+        }
+        .onChange(of: showBackup) { _, shown in if !shown { onBackupFinished?() } }
         .onDisappear { library.stop() }
         .onChange(of: scenePhase) { _, phase in if phase == .active { library.begin() } }
         .onChange(of: library.albumID) { _, _ in selection = []; library.selectAlbum() }
         .onChange(of: library.photos) { _, values in selection.formIntersection(Set(values.map(\.id))) }
-        .fullScreenCover(item: $viewing) { LocalPhotoViewer(photo: $0) }
+        .fullScreenCover(item: $viewing) { LocalPhotoViewer(photo: $0, onChanged: { library.refresh() }) }
+        .sheet(isPresented: $showActions) { NavigationStack { LocalPhotoActionsView(photos: actionPhotos) { selection = []; selecting = false; library.refresh() } } }
         .sheet(isPresented: $accessPicker, onDismiss: { library.refresh() }) { LimitedPhotoAccessPicker { accessPicker = false; library.refresh() } }
         .sheet(isPresented: $showBackup) { NavigationStack { BackupSettingsView().toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showBackup = false } } } } }
     }
     private var photoGrid: some View {
         ScrollView {
+            if let destinationAlbumName {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Upload to \(destinationAlbumName)").font(.headline)
+                    Text("Selected items upload to your server and are added to this album as each upload completes. You can follow progress or pause in Backup.").font(.footnote).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding()
+            }
             if library.permission == .limited {
                 HStack { Text("Showing your selected photos").font(.footnote).foregroundStyle(.secondary); Spacer(); Button("Manage") { accessPicker = true }.font(.footnote) }.padding(.horizontal).padding(.top, 8)
             }
@@ -82,7 +101,8 @@ struct LocalLibraryView: View {
     }
     private func upload() async {
         uploading = true; defer { uploading = false }
-        await backup.enqueue(localIDs: Array(selection))
+        watchingUploads = true
+        await backup.enqueue(localIDs: Array(selection), albumID: destinationAlbumID)
         if backup.error == nil { selection = []; selecting = false }
         showBackup = true
     }

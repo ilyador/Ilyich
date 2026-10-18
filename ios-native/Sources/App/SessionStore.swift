@@ -6,9 +6,18 @@ import WidgetKit
     var pipeline: MediaPipeline?
     var name = ""
     var isRestoring = true
+    private(set) var isSigningOut = false
     var error: String?
     var requiresPasswordChange = false
     var pendingLink: AppLink?
+    private(set) var libraryAPI: (any LibraryAPI)?
+    private(set) var entities: EntityStore?
+    private(set) var syncError: String?
+    private(set) var lastSyncDate: Date?
+    private(set) var isSyncing = false
+    @ObservationIgnored private var sync: NativeSync?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var syncShutdown: Task<Void, Never>?
     @ObservationIgnored private var validationTask: Task<Void, Never>?
     let isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
 
@@ -38,6 +47,7 @@ import WidgetKit
     }
 
     func acceptLogin(_ result: LoginResponse, server: URL) throws {
+        guard !isSigningOut else { throw APIError.invalidResponse("Sign-out is still finishing. Try signing in again in a moment.") }
         let saved = SavedSession(server: server, token: result.accessToken, userID: result.userId, name: result.name,
                                  requiresPasswordChange: result.shouldChangePassword)
         if !isUITesting { try SessionKeychain.save(saved) }
@@ -52,7 +62,90 @@ import WidgetKit
         pipeline = MediaPipeline(client: client)
         name = saved.name
         requiresPasswordChange = saved.requiresPasswordChange == true
+        if !isUITesting, !requiresPasswordChange {
+            do {
+                let entities = try EntityStore(scope: client.cacheScope, userID: saved.userID)
+                self.entities = entities
+                let sync = NativeSync(api: client, store: entities)
+                self.sync = sync
+                libraryAPI = NativeLibraryAPI(client: client, entities: entities, sync: sync)
+                startSync()
+            } catch { syncError = error.localizedDescription }
+        }
         validateSession()
+    }
+
+    func sceneChanged(_ phase: ScenePhase) {
+        if phase == .active { validateSession(); startSync() }
+        else if phase == .background {
+            syncTask?.cancel(); syncTask = nil; isSyncing = false
+            if let sync { syncShutdown = Task { await sync.stop() } }
+        }
+    }
+
+    func startSync() {
+        guard syncTask == nil, let sync, let client = api, let entities else { return }
+        isSyncing = true; syncError = nil
+        syncTask = Task { [weak self] in
+            await self?.syncShutdown?.value
+            guard !Task.isCancelled else { return }
+            await client.attachEntityStore(entities)
+            do {
+                let summary = try await sync.synchronize()
+                guard !Task.isCancelled, let self, self.api === client else { return }
+                await self.didSync(summary, client: client)
+            } catch is CancellationError { return }
+            catch {
+                guard !Task.isCancelled, let self, self.api === client else { return }
+                await self.syncFailed(error, client: client)
+            }
+            guard !Task.isCancelled, let self, self.api === client else { return }
+            self.isSyncing = false; self.syncTask = nil
+            await sync.startEvents(onChange: { [weak self] summary in
+                await self?.didSync(summary, client: client)
+            }, onError: { [weak self] error in
+                await self?.syncFailed(error, client: client)
+            })
+        }
+    }
+
+    private func didSync(_ summary: SyncChangeSummary, client: APIClient) async {
+        guard api === client, let entities else { return }
+        let previousPipeline = pipeline
+        let date = try? await entities.lastSyncDate()
+        guard api === client else { return }
+        lastSyncDate = date; syncError = nil
+        guard summary.changed || summary.completed || !summary.assetIDs.isEmpty else { return }
+        let accessChanged = (try? await entities.takeAccessInvalidation()) == true
+        guard api === client else { return }
+        if accessChanged || summary.accessChanged || !summary.deletedAssetIDs.isEmpty || summary.reset {
+            await previousPipeline?.removeAll()
+        }
+        guard api === client else { return }
+        await TimelineCache.shared.removeAll(scope: client.cacheScope)
+        guard api === client else { return }
+        NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
+                                        userInfo: ["scope": client.cacheScope, "collections": summary.collectionsChanged,
+                                                   "accessChanged": accessChanged || summary.accessChanged])
+        WidgetCenter.shared.reloadAllTimelines()
+        if summary.configurationChanged { validateSession() }
+    }
+
+    private func syncFailed(_ error: any Error, client: APIClient) async {
+        guard api === client, let entities else { return }
+        let previousPipeline = pipeline
+        let accessChanged = (try? await entities.takeAccessInvalidation()) == true
+        guard api === client else { return }
+        if accessChanged {
+            await previousPipeline?.removeAll()
+            guard api === client else { return }
+            await TimelineCache.shared.removeAll(scope: client.cacheScope)
+            guard api === client else { return }
+            NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
+                                            userInfo: ["scope": client.cacheScope, "collections": true, "accessChanged": true])
+        }
+        if case APIError.unauthorized = error { await signOut() }
+        else { syncError = error.localizedDescription }
     }
 
     func validateSession() {
@@ -63,7 +156,7 @@ import WidgetKit
             catch APIError.unauthorized {
                 guard !Task.isCancelled, let self, self.api === client else { return }
                 await self.signOut()
-                self.error = APIError.unauthorized.localizedDescription
+                if self.api == nil { self.error = APIError.unauthorized.localizedDescription }
             } catch { /* A temporary network failure must not discard an offline session. */ }
         }
     }
@@ -73,21 +166,37 @@ import WidgetKit
     }
 
     func signOut() async {
+        guard !isSigningOut else { return }
+        isSigningOut = true
+        let previous = api, previousPipeline = pipeline, previousSync = sync, previousEntities = entities
+        api = nil; pipeline = nil; name = ""; requiresPasswordChange = false; pendingLink = nil; error = nil
+        sync = nil; entities = nil; libraryAPI = nil; syncError = nil; lastSyncDate = nil; isSyncing = false
         validationTask?.cancel()
+        syncTask?.cancel(); syncTask = nil
+        // Remove shared credentials before suspending; widgets and uploads must
+        // observe sign-out even if subsequent local cleanup cannot finish.
+        var cleanupError: String?
+        if !isUITesting {
+            do { try SessionKeychain.remove() } catch { cleanupError = error.localizedDescription }
+            WidgetCenter.shared.reloadAllTimelines()
+        }
         CastController.shared.signOut()
-        do {
-            await BackupCoordinator.shared.disconnect()
-            if !isUITesting { try SessionKeychain.remove() }
-            if !isUITesting { WidgetCenter.shared.reloadAllTimelines() }
-            let previous = api
-            if let previous { LockedPINStore.remove(for: previous) }
-            if let previous, !isUITesting { try NetworkConfigurationStore.remove(server: previous.baseURL) }
-            let previousPipeline = pipeline
-            api = nil; pipeline = nil; name = ""; requiresPasswordChange = false; pendingLink = nil
-            await previousPipeline?.removeAll()
-            await DiagnosticsStore.shared.clear()
-            if let previous { await TimelineCache.shared.removeAll(scope: previous.cacheScope) }
-            try? await previous?.logout()
-        } catch { self.error = error.localizedDescription }
+        await syncShutdown?.value
+        syncShutdown = nil
+        await previousSync?.stop()
+        try? await previousEntities?.clear()
+        await previous?.attachEntityStore(nil)
+        await BackupCoordinator.shared.disconnect()
+        if let previous { LockedPINStore.remove(for: previous) }
+        if let previous, !isUITesting {
+            do { try NetworkConfigurationStore.remove(server: previous.baseURL) }
+            catch { cleanupError = cleanupError ?? error.localizedDescription }
+        }
+        await previousPipeline?.removeAll()
+        await DiagnosticsStore.shared.clear()
+        if let previous { await TimelineCache.shared.removeAll(scope: previous.cacheScope) }
+        error = cleanupError
+        isSigningOut = false
+        try? await previous?.logout()
     }
 }
