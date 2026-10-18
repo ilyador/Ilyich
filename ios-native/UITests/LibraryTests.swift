@@ -77,6 +77,21 @@ final class LibraryTests: XCTestCase {
         app.buttons["Close globe"].tap()
         XCTAssertTrue(app.textFields["library.search"].isHittable)
     }
+    @MainActor func testPhotoInfoLocationOpensFocusedInteractiveEarth() {
+        let app = launch()
+        app.collectionViews["library.grid"].cells.element(boundBy: 0).tap()
+        let info = app.buttons["Info"]
+        requireHittable(info, in: app); info.tap()
+        let location = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Explore this location on the globe")).firstMatch
+        let details = app.scrollViews.firstMatch
+        for _ in 0..<4 where !location.isHittable {
+            if details.exists { details.swipeUp() } else { app.swipeUp() }
+        }
+        requireHittable(location, in: app); location.tap()
+        XCTAssertTrue(app.otherElements["Interactive Earth"].waitForExistence(timeout: 15))
+        capture(app, "Photo location — focused interactive Earth")
+    }
     @MainActor func testFloatingControlsStayAtTheirScreenEdges() {
         let app = launch()
         let screen = app.frame
