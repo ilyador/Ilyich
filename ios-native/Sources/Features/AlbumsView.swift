@@ -58,9 +58,9 @@ struct AlbumsView: View {
             ToolbarItem(placement: .topBarTrailing) { Button("Create album", systemImage: "plus") { creating = true } }
         }
         .task { await load() }.refreshable { await load() }
-        .sheet(isPresented: $creating) { NavigationStack { AlbumEditor(api: api, album: nil) { album in albums.insert(album, at: 0) } } }
+        .sheet(isPresented: $creating) { NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in albums.insert(album, at: 0) } } }
         .sheet(item: $editing) { album in
-            NavigationStack { AlbumEditor(api: api, album: album, onSaved: { updated in
+            NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: album, onSaved: { updated in
                 if let index = albums.firstIndex(where: { $0.id == updated.id }) { albums[index] = updated }
             }, onDeleted: { albums.removeAll { $0.id == album.id } }) }
         }
@@ -77,24 +77,37 @@ struct AlbumsView: View {
 
 private struct AlbumEditor: View {
     let api: APIClient
+    let pipeline: MediaPipeline
     let album: Album?
     let onSaved: (Album) -> Void
     var onDeleted: () -> Void = { }
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var detail = ""
+    @State private var order = "desc"
+    @State private var latest: Album?
+    @State private var initialized = false
     @State private var busy = false
     @State private var failure: FeatureFailure?
     @State private var confirmDelete = false
-    private var canEdit: Bool { album == nil || album?.albumUsers?.contains { $0.user.id == api.userID && ["owner", "editor"].contains($0.role) } == true }
-    private var isOwner: Bool { album?.albumUsers?.contains { $0.user.id == api.userID && $0.role == "owner" } == true }
+    private var current: Album? { latest ?? album }
+    private var canEdit: Bool { album == nil || current?.albumUsers?.contains { $0.user.id == api.userID && ["owner", "editor"].contains($0.role) } == true }
+    private var isOwner: Bool { current?.albumUsers?.contains { $0.user.id == api.userID && $0.role == "owner" } == true }
     var body: some View {
         Form {
             Section("Album") {
                 TextField("Name", text: $name).disabled(!canEdit)
                 TextField("Description", text: $detail, axis: .vertical).lineLimit(3...8).disabled(!canEdit)
+                if album != nil { Picker("Photo order", selection: $order) { Text("Newest first").tag("desc"); Text("Oldest first").tag("asc") }.disabled(!canEdit) }
             }
-            if let album {
+            if let album = current {
+                if canEdit {
+                    Section("Photos") {
+                        NavigationLink("Add photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .add, onSaved: didUpdate) }
+                        NavigationLink("Remove photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .remove, onSaved: didUpdate) }.disabled(album.assetCount == 0)
+                        NavigationLink("Choose cover") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .cover, onSaved: didUpdate) }.disabled(album.assetCount == 0)
+                    }
+                }
                 Section {
                     LabeledContent("Photos and videos", value: album.assetCount.formatted())
                     NavigationLink("Members") { AlbumMembersView(api: api, album: album) }
@@ -116,7 +129,11 @@ private struct AlbumEditor: View {
             } }
         }
         .disabled(busy)
-        .task { name = album?.albumName ?? ""; detail = album?.description ?? "" }
+        .task {
+            guard !initialized else { return }
+            initialized = true; name = album?.albumName ?? ""; detail = album?.description ?? ""; order = album?.order ?? "desc"
+            if let album { do { latest = try await api.album(id: album.id) } catch { failure = .init(error) } }
+        }
         .confirmationDialog("Delete this album?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete album", role: .destructive) { Task { await delete() } }
         } message: { Text("The album will be removed for everyone. Its photos will stay in the library.") }
@@ -126,13 +143,14 @@ private struct AlbumEditor: View {
     }
     private func save() async {
         busy = true; defer { busy = false }
-        struct Body: Encodable, Sendable { let albumName: String; let description: String }
+        struct Body: Encodable, Sendable { let albumName: String; let description: String; let order: String? }
         do {
-            let body = Body(albumName: name.trimmingCharacters(in: .whitespacesAndNewlines), description: detail)
+            let body = Body(albumName: name.trimmingCharacters(in: .whitespacesAndNewlines), description: detail, order: album == nil ? nil : order)
             let updated: Album = try await api.request(album == nil ? .post : .patch, path: album.map { "albums/\($0.id)" } ?? "albums", body: body)
             onSaved(updated); dismiss()
         } catch { failure = .init(error) }
     }
+    private func didUpdate(_ updated: Album) { latest = updated; onSaved(updated) }
     private func delete() async {
         guard let album else { return }
         busy = true; defer { busy = false }

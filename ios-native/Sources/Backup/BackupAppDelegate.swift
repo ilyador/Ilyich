@@ -3,9 +3,14 @@ import UIKit
 @MainActor final class BackupAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         if !ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+            BackupLifecycle.shared.register()
             Task { await BackupCoordinator.shared.activate() }
         }
         return true
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        BackupLifecycle.shared.foregroundChanged()
     }
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {

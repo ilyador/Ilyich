@@ -4,42 +4,49 @@ import UIKit
 struct ViewerPhoto: View {
     let pipeline: MediaPipeline
     let asset: Asset
-    let onTap: () -> Void
+    let active: Bool
+    let onTap: (Double) -> Void
     let onDismiss: () -> Void
     @State private var image: UIImage?
     @State private var failure: String?
     @State private var reload = 0
+    @State private var zoomed = false
+    @AppStorage("imageLoadOriginal") private var fullResolution = false
     @Environment(\.displayScale) private var scale
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                if let image { ZoomablePhoto(image: image, onTap: onTap, onDismiss: onDismiss) }
+                if let image { ZoomablePhoto(image: image, resetZoom: !active, onTap: onTap, onDismiss: onDismiss, onZoom: { zoomed = true }) }
                 else if let failure {
                     ContentUnavailableView { Label("Photo couldn’t load", systemImage: "photo.badge.exclamationmark") }
                     description: { Text(failure) }
                     actions: { Button("Retry") { reload += 1 } }
                 } else { ProgressView().tint(.white) }
             }.frame(width: geometry.size.width, height: geometry.size.height)
-                .task(id: asset.id + asset.cacheRevision + String(reload)) {
+                .task(id: asset.id + asset.cacheRevision + String(reload) + String(zoomed) + String(fullResolution) + String(active)) {
                     failure = nil
                     do {
                         let pixels = Int(max(geometry.size.width, geometry.size.height) * scale)
                         let preview = try await pipeline.image(for: asset, size: .preview, pixelSize: pixels)
                         try Task.checkCancellation(); image = preview.uiImage
                         // A full-size source supports real pinch-to-zoom without decoding the entire RAW.
-                        let full = try await pipeline.image(for: asset, size: .fullsize, pixelSize: min(4096, pixels * 2))
-                        try Task.checkCancellation(); image = full.uiImage
+                        if active && (fullResolution || zoomed) {
+                            let full = try await pipeline.image(for: asset, size: .fullsize, pixelSize: fullResolution ? min(8192, max(asset.width ?? 4096, asset.height ?? 4096)) : min(4096, pixels * 2))
+                            try Task.checkCancellation(); image = full.uiImage
+                        }
                     } catch is CancellationError { } catch { if image == nil { failure = error.localizedDescription } }
                 }
-        }.accessibilityLabel(asset.displayName)
+        }.accessibilityLabel(asset.displayName).onChange(of: active) { _, value in if !value { zoomed = false } }
     }
 }
 
 struct ZoomablePhoto: UIViewRepresentable {
     let image: UIImage
-    let onTap: () -> Void
+    let resetZoom: Bool
+    let onTap: (Double) -> Void
     let onDismiss: () -> Void
-    func makeCoordinator() -> Coordinator { Coordinator(onTap: onTap, onDismiss: onDismiss) }
+    let onZoom: () -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(onTap: onTap, onDismiss: onDismiss, onZoom: onZoom) }
     func makeUIView(context: Context) -> ZoomPhotoScrollView {
         let view = ZoomPhotoScrollView()
         view.delegate = context.coordinator
@@ -47,7 +54,7 @@ struct ZoomablePhoto: UIViewRepresentable {
         context.coordinator.scroll = view
         let double = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleTap(_:)))
         double.numberOfTapsRequired = 2
-        let single = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.singleTap))
+        let single = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.singleTap(_:)))
         single.require(toFail: double)
         view.addGestureRecognizer(double); view.addGestureRecognizer(single)
         let swipe = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swipeDown))
@@ -59,15 +66,17 @@ struct ZoomablePhoto: UIViewRepresentable {
     }
     func updateUIView(_ view: ZoomPhotoScrollView, context: Context) {
         if view.imageView.image !== image { view.imageView.image = image; view.setNeedsLayout() }
+        if resetZoom && view.zoomScale != 1 { view.setZoomScale(1, animated: false) }
     }
     @MainActor final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         weak var scroll: ZoomPhotoScrollView?
-        let onTap: () -> Void
+        let onTap: (Double) -> Void
         let onDismiss: () -> Void
-        init(onTap: @escaping () -> Void, onDismiss: @escaping () -> Void) { self.onTap = onTap; self.onDismiss = onDismiss }
+        let onZoom: () -> Void
+        init(onTap: @escaping (Double) -> Void, onDismiss: @escaping () -> Void, onZoom: @escaping () -> Void) { self.onTap = onTap; self.onDismiss = onDismiss; self.onZoom = onZoom }
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { scroll?.imageView }
-        func scrollViewDidZoom(_ scrollView: UIScrollView) { scroll?.centerImage() }
-        @objc func singleTap() { onTap() }
+        func scrollViewDidZoom(_ scrollView: UIScrollView) { scroll?.centerImage(); if scrollView.zoomScale > 1.05 { onZoom() } }
+        @objc func singleTap(_ gesture: UITapGestureRecognizer) { guard let scroll else { return }; onTap(Double(gesture.location(in: scroll).x / max(1, scroll.bounds.width))) }
         @objc func swipeDown() { if (scroll?.zoomScale ?? 1) <= 1.01 { onDismiss() } }
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool { (scroll?.zoomScale ?? 1) <= 1.01 }
         @objc func doubleTap(_ gesture: UITapGestureRecognizer) {

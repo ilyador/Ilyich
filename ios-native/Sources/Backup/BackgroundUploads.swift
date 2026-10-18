@@ -70,6 +70,8 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
         return Double(task.countOfBytesSent) / Double(task.countOfBytesExpectedToSend)
     }
 
+    func hasActiveTransfer() async -> Bool { await session.allTasks.contains { $0.state == .running } }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.withLock {
             // Upload responses are tiny JSON. Never buffer an arbitrary server response.

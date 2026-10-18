@@ -210,6 +210,7 @@ actor APIClient {
     func assetEdits(id: String) async throws -> AssetEdits { try await request(.get, path: "assets/\(id)/edits") }
     func saveEdits(id: String, edits: [PhotoEdit]) async throws -> AssetEdits { try await request(.put, path: "assets/\(id)/edits", body: EditSubmission(edits: edits)) }
     func removeEdits(id: String) async throws { try await requestVoid(.delete, path: "assets/\(id)/edits") }
+    func updateRating(id: String, rating: Int?) async throws -> Asset { try await request(.put, path: "assets/\(id)", body: RatingUpdate(rating: rating)) }
 
     /// Download only on explicit export/share. Keep large originals out of memory.
     func download(asset: Asset, original: Bool = false) async throws -> URL {
@@ -227,6 +228,15 @@ actor APIClient {
         let destination = directory.appendingPathComponent(name.isEmpty || name == "." || name == ".." ? "photo" : name)
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
         return destination
+    }
+}
+
+struct RatingUpdate: Encodable, Sendable {
+    let rating: Int?
+    private enum CodingKeys: String, CodingKey { case rating }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(rating, forKey: .rating)
     }
 }
 

@@ -56,11 +56,14 @@ struct BackupSettingsView: View {
                     }
                 }
                 Section {
+                    Toggle("Automatic backup", isOn: $backup.preferences.automatic)
+                    Toggle("Only while charging", isOn: $backup.preferences.requireCharging)
+                    Stepper("Wait \(backup.preferences.triggerDelay) seconds", value: $backup.preferences.triggerDelay, in: 0...3600, step: 30)
                     Toggle("Use cellular for photos", isOn: $backup.preferences.cellularPhotos)
                     Toggle("Use cellular for videos", isOn: $backup.preferences.cellularVideos)
                     Toggle("Download iCloud originals", isOn: $backup.preferences.downloadCloudOriginals)
                 } header: { Text("Transfers") } footer: {
-                    Text("iCloud downloads follow your system Photos network settings. With downloads off, unavailable originals pause backup for you to review.")
+                    Text("iOS decides when background work can run. iCloud downloads follow your system Photos network settings. With downloads off, unavailable originals pause backup for you to review.")
                 }
                 .disabled(backup.isRunning)
             }

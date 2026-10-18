@@ -8,6 +8,26 @@ struct BackupPreferences: Codable, Equatable, Sendable {
     var cellularPhotos = false
     var cellularVideos = false
     var downloadCloudOriginals = false
+    var automatic = false
+    var requireCharging = false
+    var triggerDelay = 30
+
+    init() {}
+    private enum CodingKeys: String, CodingKey {
+        case includedAlbums, excludedAlbums, cellularPhotos, cellularVideos, downloadCloudOriginals
+        case automatic, requireCharging, triggerDelay
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        includedAlbums = try c.decodeIfPresent(Set<String>.self, forKey: .includedAlbums) ?? []
+        excludedAlbums = try c.decodeIfPresent(Set<String>.self, forKey: .excludedAlbums) ?? []
+        cellularPhotos = try c.decodeIfPresent(Bool.self, forKey: .cellularPhotos) ?? false
+        cellularVideos = try c.decodeIfPresent(Bool.self, forKey: .cellularVideos) ?? false
+        downloadCloudOriginals = try c.decodeIfPresent(Bool.self, forKey: .downloadCloudOriginals) ?? false
+        automatic = try c.decodeIfPresent(Bool.self, forKey: .automatic) ?? false
+        requireCharging = try c.decodeIfPresent(Bool.self, forKey: .requireCharging) ?? false
+        triggerDelay = min(3600, max(0, try c.decodeIfPresent(Int.self, forKey: .triggerDelay) ?? 30))
+    }
 }
 
 private struct BackupState: Codable {
@@ -15,6 +35,7 @@ private struct BackupState: Codable {
     var queue: [String] = []
     var current: PreparedPhoto?
     var confirmed: [String: Date] = [:]
+    var receipts: [String: BackupReceipt]?
     var paused = true
     var error: String?
 }
@@ -54,6 +75,7 @@ private struct BackupState: Codable {
             state = FileManager.default.fileExists(atPath: file.path) ? try JSONDecoder().decode(BackupState.self, from: Data(contentsOf: file)) : BackupState()
             saved = session; directory = folder; preferences = state.preferences
             error = state.error; refreshCounts(); refreshLibrary()
+            BackupLifecycle.shared.configure()
             if !state.paused, !state.queue.isEmpty { run() }
         } catch { self.error = error.localizedDescription }
     }
@@ -61,6 +83,7 @@ private struct BackupState: Codable {
     func requestAccess() async {
         permission = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         refreshLibrary()
+        BackupLifecycle.shared.configure()
     }
 
     func refreshLibrary() {
@@ -71,11 +94,16 @@ private struct BackupState: Codable {
     func savePreferences() {
         state.preferences = preferences
         do { try persist() } catch { self.error = error.localizedDescription }
+        BackupLifecycle.shared.configure()
     }
 
     func start() async {
         await activate()
         guard saved != nil, directory != nil, !isRunning else { return }
+        guard BackupLifecycle.shared.conditionsPermitBackup(requireCharging: preferences.requireCharging) else {
+            activity = preferences.requireCharging ? "Waiting for charging and a cool device" : "Waiting for the device to cool down"
+            return
+        }
         guard [.authorized, .limited].contains(permission) else { error = "Allow access to Photos before starting backup."; return }
         if state.queue.isEmpty {
             state.queue = DevicePhotos.candidates(included: preferences.includedAlbums, excluded: preferences.excludedAlbums)
@@ -96,12 +124,14 @@ private struct BackupState: Codable {
         do { try persist(); run() } catch { self.error = error.localizedDescription }
     }
 
-    func pause() async {
+    func pause(disableAutomatic: Bool = true) async {
         generation = UUID()
         worker?.cancel(); worker = nil
         state.paused = true; isRunning = false; progress = nil; activity = "Backup paused"
+        if disableAutomatic { preferences.automatic = false; state.preferences = preferences }
         await BackgroundUploads.shared.cancelAll()
         do { try persist() } catch { self.error = error.localizedDescription }
+        BackupLifecycle.shared.configure()
     }
 
     /// Stops outgoing requests before the caller deletes the shared credentials.
@@ -109,6 +139,44 @@ private struct BackupState: Codable {
         await pause()
         saved = nil; directory = nil; state = BackupState(); preferences = BackupPreferences()
         albums = []; error = nil; refreshCounts()
+    }
+
+    func startAutomatically() async {
+        await activate()
+        guard preferences.automatic, !isRunning, state.error == nil else { return }
+        await start()
+    }
+
+    func enqueue(localIDs: [String]) async {
+        await activate()
+        guard !isRunning else { error = "Pause backup before adding selected photos."; return }
+        let existing = Set(state.queue)
+        state.queue.append(contentsOf: Set(localIDs).subtracting(existing).sorted())
+        await start()
+    }
+
+    /// A past upload is not sufficient for deleting local data: recheck current
+    /// server ownership, checksum, trash state, pair and local revision now.
+    func verifiedLocalDeletionCandidates() async throws -> [String] {
+        await activate()
+        let runID = generation
+        let session = try currentSession(runID)
+        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
+        var ids: [String] = []
+        for (localID, receipt) in state.receipts ?? [:] {
+            _ = try currentSession(runID)
+            guard DevicePhotos.canRemove(localID, revision: receipt.modificationDate) else { continue }
+            let remote: BackupRemoteAsset = try await api.request(.get, path: "assets/\(receipt.original.id)")
+            guard receipt.original.matches(remote, ownerID: session.userID) else { continue }
+            if let motion = receipt.motion {
+                guard remote.livePhotoVideoId == motion.id else { continue }
+                let remoteMotion: BackupRemoteAsset = try await api.request(.get, path: "assets/\(motion.id)")
+                guard motion.matches(remoteMotion, ownerID: session.userID) else { continue }
+            }
+            _ = try currentSession(runID)
+            if DevicePhotos.canRemove(localID, revision: receipt.modificationDate) { ids.append(localID) }
+        }
+        return ids.sorted()
     }
 
     private func run() {
@@ -125,6 +193,7 @@ private struct BackupState: Codable {
         do {
             while let localID = state.queue.first {
                 let session = try currentSession(runID)
+                try requireTransferConditions()
                 guard let directory else { throw CancellationError() }
                 if state.current == nil {
                     activity = "Preparing original"
@@ -147,14 +216,22 @@ private struct BackupState: Codable {
                     fields["visibility"] = "hidden"
                     let result = try await transfer(file: motion, sidecar: nil, fields: fields, prepared: prepared, session: session, runID: runID)
                     _ = try currentSession(runID)
-                    prepared.livePhotoID = result.id; prepared.stageID = UUID().uuidString
+                    prepared.livePhotoID = result.id; prepared.motionChecksum = result.checksum; prepared.stageID = UUID().uuidString
                     state.current = prepared
                     try persist()
                 }
                 var fields = prepared.fields
                 if let id = prepared.livePhotoID { fields["livePhotoVideoId"] = id }
-                _ = try await transfer(file: prepared.original, sidecar: prepared.sidecar, fields: fields, prepared: prepared, session: session, runID: runID)
+                let original = try await transfer(file: prepared.original, sidecar: prepared.sidecar, fields: fields, prepared: prepared, session: session, runID: runID)
                 _ = try currentSession(runID)
+                var motion: BackupRemoteFile?
+                if let id = prepared.livePhotoID, let checksum = prepared.motionChecksum { motion = BackupRemoteFile(id: id, checksum: checksum) }
+                // An older partially uploaded Live Photo has no durable video hash.
+                // It remains backed up, but is not eligible for local removal.
+                if prepared.motion == nil || motion != nil {
+                    if state.receipts == nil { state.receipts = [:] }
+                    state.receipts?[localID] = BackupReceipt(modificationDate: prepared.modificationDate, original: original, motion: motion)
+                }
                 state.confirmed[localID] = prepared.modificationDate
                 state.queue.removeFirst(); state.current = nil
                 try persist()
@@ -163,6 +240,11 @@ private struct BackupState: Codable {
             }
             state.paused = true; activity = "Selected photos backed up"; try persist()
         } catch is CancellationError { }
+        catch let deferred as BackupDeferral {
+            guard generation == runID else { return }
+            activity = deferred.localizedDescription; state.paused = true
+            try? persist()
+        }
         catch {
             guard generation == runID else { return }
             self.error = error.localizedDescription; state.error = self.error; state.paused = true
@@ -172,7 +254,8 @@ private struct BackupState: Codable {
     }
 
     private func transfer(file: UploadFile, sidecar: UploadFile?, fields: [String: String], prepared: PreparedPhoto,
-                          session: SavedSession, runID: UUID) async throws -> UploadReceipt {
+                          session: SavedSession, runID: UUID) async throws -> BackupRemoteFile {
+        try requireTransferConditions()
         activity = "Checking \(file.filename)"; progress = nil
         let checksum = try await Task.detached(priority: .utility) { try UploadBody.checksum(file.url) }.value
         _ = try currentSession(runID)
@@ -187,7 +270,18 @@ private struct BackupState: Codable {
             guard result.reason == "duplicate", let id = result.assetId, result.isTrashed != true else {
                 throw BackupError.message(result.isTrashed == true ? "This photo is in your server’s trash. Restore it there or empty the trash before retrying backup." : "The server rejected \(file.filename). Check its supported file formats.")
             }
-            return UploadReceipt(id: id, status: "duplicate")
+            if let motionID = fields["livePhotoVideoId"] {
+                let existing = try await api.asset(id: id)
+                _ = try currentSession(runID)
+                if let paired = existing.livePhotoVideoId, paired != motionID {
+                    throw BackupError.message("This photo is already paired with a different Live Photo video on the server. Its existing pairing was kept; review it before retrying.")
+                }
+                if existing.livePhotoVideoId == nil {
+                    struct Pairing: Encodable, Sendable { let livePhotoVideoId: String }
+                    try await api.requestVoid(.put, path: "assets/\(id)", body: Pairing(livePhotoVideoId: motionID))
+                }
+            }
+            return BackupRemoteFile(id: id, checksum: checksum)
         }
         guard result.action == "accept" else { throw BackupError.message("The server returned an unknown upload decision.") }
         let boundary = "Ilyich-" + prepared.stageID
@@ -207,18 +301,29 @@ private struct BackupState: Codable {
         let receipt = try await BackgroundUploads.shared.upload(request, body: body, id: prepared.stageID,
                                                                receipt: folder.appendingPathComponent(prepared.stageID + ".receipt"))
         try? FileManager.default.removeItem(at: body)
-        return receipt
+        return BackupRemoteFile(id: receipt.id, checksum: checksum)
     }
 
     func refreshProgress() async {
         if isRunning, let value = await BackgroundUploads.shared.currentProgress() { progress = value }
     }
 
+    func reportSchedulingError(_ error: Error) {
+        self.error = "iOS could not schedule automatic backup: \(error.localizedDescription). You can still use Back up now."
+    }
+
     private func currentSession(_ runID: UUID) throws -> SavedSession {
         try Task.checkCancellation()
         guard generation == runID, let saved, let current = try SessionKeychain.read(),
               saved.scope == current.scope, saved.token == current.token else { throw CancellationError() }
+        guard current.requiresPasswordChange != true else { throw BackupError.message("Change your account password before starting backup.") }
         return current
+    }
+
+    private func requireTransferConditions() throws {
+        guard BackupLifecycle.shared.conditionsPermitBackup(requireCharging: preferences.requireCharging) else {
+            throw BackupDeferral.waitingForDevice
+        }
     }
 
     private func persist() throws {

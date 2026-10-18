@@ -85,6 +85,7 @@ struct MemoriesView: View {
     let onOpenAsset: (Asset) -> Void
     @State private var memories: [Memory] = []
     @State private var savedOnly = false
+    @State private var playingMemory: Memory?
     @State private var loading = true
     @State private var failure: FeatureFailure?
     var body: some View {
@@ -96,6 +97,7 @@ struct MemoriesView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text(memoryTitle(memory)).font(.title2.bold()); Spacer()
+                            Button("Play memory", systemImage: "play.fill") { playingMemory = memory }.labelStyle(.iconOnly).disabled(memory.assets.isEmpty)
                             Button { Task { await toggleSaved(memory) } } label: { Image(systemName: memory.isSaved ? "bookmark.fill" : "bookmark") }
                                 .accessibilityLabel(memory.isSaved ? "Unsave memory" : "Save memory")
                         }.padding(.horizontal, 20)
@@ -106,6 +108,7 @@ struct MemoriesView: View {
         }.navigationTitle(savedOnly ? "Saved memories" : "On this day")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Toggle("Saved memories", isOn: $savedOnly).toggleStyle(.button) } }
         .task(id: savedOnly) { await load() }.refreshable { await load() }
+        .fullScreenCover(item: $playingMemory) { memory in SlideshowView(api: api, pipeline: pipeline, assets: memory.assets) }
         .alert("Couldn’t update memories", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
