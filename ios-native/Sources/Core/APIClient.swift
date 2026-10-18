@@ -301,22 +301,30 @@ actor APIClient {
     }
 
     /// Download only on explicit export/share. Keep large originals out of memory.
-    func download(asset: Asset, original: Bool = false) async throws -> URL {
+    func download(asset: Asset, original: Bool = false, progress: (@Sendable (Double?) -> Void)? = nil) async throws -> URL {
         let useOriginal = original || asset.isVideo
         let path = "assets/\(asset.id)/" + (useOriginal ? "original" : "thumbnail")
         var query = [URLQueryItem(name: "edited", value: useOriginal ? "false" : "true"), .init(name: "c", value: asset.cacheRevision)]
         if !useOriginal { query.append(.init(name: "size", value: "fullsize")) }
         let downloadRequest = try await authorizedRequest(path: path, query: query)
-        let (temporaryURL, response) = try await session.download(for: downloadRequest)
-        try Self.validate(response)
-        try Task.checkCancellation()
+        let delegate = DownloadProgressDelegate(origin: baseURL) { progress?($0) }
+        defer { delegate.stopObserving() }
+        let (temporaryURL, response) = try await streamingSession.download(for: downloadRequest, delegate: delegate)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let rawName = response.suggestedFilename ?? (useOriginal ? asset.originalFileName : "photo.jpg")
-        let name = (rawName as NSString).lastPathComponent.replacingOccurrences(of: "\\", with: "_")
-        let destination = directory.appendingPathComponent(name.isEmpty || name == "." || name == ".." ? "photo" : name)
-        try FileManager.default.moveItem(at: temporaryURL, to: destination)
-        return destination
+        do {
+            try Self.validate(response)
+            try Task.checkCancellation()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let rawName = response.suggestedFilename ?? (useOriginal ? asset.originalFileName : "photo.jpg")
+            let name = (rawName as NSString).lastPathComponent.replacingOccurrences(of: "\\", with: "_")
+            let destination = directory.appendingPathComponent(name.isEmpty || name == "." || name == ".." ? "photo" : name)
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
     }
 }
 

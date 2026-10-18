@@ -30,14 +30,16 @@ struct MemoryLane: View {
     let onOpen: (Memory) -> Void
 
     var body: some View {
-        ScrollView(.horizontal) {
-            LazyHStack(spacing: 12) {
-                ForEach(memories) { memory in
-                    MemoryLaneCard(pipeline: pipeline, memory: memory) { onOpen(memory) }
-                }
-            }.padding(.horizontal, 16).padding(.vertical, 10)
+        GeometryReader { geometry in
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 12) {
+                    ForEach(memories) { memory in
+                        MemoryLaneCard(pipeline: pipeline, memory: memory, maxWidth: max(0, geometry.size.width - 32)) { onOpen(memory) }
+                    }
+                }.padding(.horizontal, 16).padding(.vertical, 10)
+            }
+            .scrollIndicators(.hidden)
         }
-        .scrollIndicators(.hidden)
         .accessibilityIdentifier("library.memories")
     }
 }
@@ -45,7 +47,9 @@ struct MemoryLane: View {
 private struct MemoryLaneCard: View {
     let pipeline: MediaPipeline
     let memory: Memory
+    let maxWidth: CGFloat
     let onOpen: () -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .subheadline) private var cardWidth = 152.0
     private var title: String {
         if let person = memory.data.personName, !person.isEmpty { return person }
@@ -59,9 +63,9 @@ private struct MemoryLaneCard: View {
                 if let asset = memory.assets.first { FeatureAssetImage(pipeline: pipeline, asset: asset) }
                 LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .center, endPoint: .bottom)
                 Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                    .lineLimit(2).padding(12)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 2).padding(12)
             }
-            .frame(width: min(cardWidth, 220)).frame(maxHeight: .infinity)
+            .frame(width: min(cardWidth, maxWidth)).frame(maxHeight: .infinity)
             .clipShape(.rect(cornerRadius: 18))
         }.buttonStyle(.plain)
         .accessibilityLabel("\(title), \(memory.assets.count) photos")

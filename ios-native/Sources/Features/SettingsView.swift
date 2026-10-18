@@ -65,12 +65,16 @@ private struct ViewerSettingsView: View {
     @AppStorage("viewerLoadOriginalVideo") private var originalVideo = false
     @AppStorage("viewerTapToNavigate") private var tapNavigation = false
     @AppStorage("imageLoadOriginal") private var originalImage = false
+    @AppStorage("shareFileType") private var shareFileType = "original"
     var body: some View {
         Form {
             Section {
                 Toggle("Full-resolution photos", isOn: $originalImage)
                 Toggle("Tap edges to navigate", isOn: $tapNavigation)
             } header: { Text("Photos") } footer: { Text("Full-resolution photos use more data. Lightroom edits are preserved.") }
+            Section {
+                Picker("Share photos as", selection: $shareFileType) { Text("Original").tag("original"); Text("Displayed").tag("preview") }
+            } footer: { Text("Displayed keeps the edits you see in the viewer. Videos are always shared as originals.") }
             Section {
                 Toggle("Play automatically", isOn: $autoplay)
                 Toggle("Repeat videos", isOn: $loop)
