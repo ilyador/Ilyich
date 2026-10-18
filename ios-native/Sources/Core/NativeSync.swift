@@ -88,6 +88,7 @@ actor NativeSync {
                         summary.changed = summary.changed || !event.assetIDs.isEmpty
                         summary.configurationChanged = event.configurationChanged
                         summary.collectionsChanged = summary.collectionsChanged || event.configurationChanged
+                        try Task.checkCancellation()
                         await onChange(summary)
                         retry = 1
                     }
@@ -103,11 +104,17 @@ actor NativeSync {
             if current == generation { eventTask = nil }
         }
     }
-    func stop() {
+    func stop() async {
         generation = UUID()
-        eventTask?.cancel(); eventTask = nil
-        synchronization?.cancel(); synchronization = nil
+        let events = eventTask, sync = synchronization
+        eventTask = nil
+        synchronization = nil
         resyncRequested = false
+        events?.cancel()
+        sync?.cancel()
+        // An event callback can call signOut(), which calls stop() again; joining
+        // the event task here would make that callback wait for itself.
+        if let sync { _ = try? await sync.value }
     }
     private func run(epoch: UUID) async throws -> SyncChangeSummary {
         let fingerprint = try await api.syncSessionFingerprint()

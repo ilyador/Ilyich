@@ -14,6 +14,8 @@ struct DiagnosticsView: View {
     @State private var clearing = false
     @State private var confirmReset = false
     @State private var resetMessage: String?
+    @State private var confirmMetadataReset = false
+    @State private var metadataResetMessage: String?
     var body: some View {
         Form {
             Section("App") {
@@ -35,6 +37,8 @@ struct DiagnosticsView: View {
                     if session.isSyncing { ProgressView().accessibilityLabel("Synchronizing library metadata") }
                     if let message = session.syncError { Text(message).font(.footnote).foregroundStyle(.secondary) }
                     Button("Sync now", systemImage: "arrow.triangle.2.circlepath") { session.startSync() }.disabled(session.isSyncing)
+                    Button("Reset local library metadata", systemImage: "arrow.counterclockwise", role: .destructive) { confirmMetadataReset = true }.disabled(session.isSyncing)
+                    if let metadataResetMessage { Text(metadataResetMessage).font(.footnote).foregroundStyle(.secondary) }
                 }
                 if let statistics = syncStatistics {
                     if let date = statistics.lastSync { LabeledContent("Last completed sync") { Text(date, format: .dateTime.year().month().day().hour().minute()).multilineTextAlignment(.trailing) } }
@@ -93,6 +97,9 @@ struct DiagnosticsView: View {
         .confirmationDialog("Clear this account’s browsing cache?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Clear browsing cache", role: .destructive) { Task { await clearCache() } }
         } message: { Text("Downloaded previews will be unavailable offline until you view them again. Your photos and backup records are kept.") }
+        .confirmationDialog("Reset local library metadata?", isPresented: $confirmMetadataReset, titleVisibility: .visible) {
+            Button("Reset metadata", role: .destructive) { Task { await resetLibraryMetadata() } }
+        } message: { Text("Library metadata will be recreated from your server.") }
     }
     private func bytes(_ count: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file) }
     private var entityLabels: [(key: String, name: String)] {
@@ -121,6 +128,13 @@ struct DiagnosticsView: View {
         await TimelineCache.shared.removeAll(scope: api.cacheScope)
         NotificationCenter.default.post(name: .ilyichCachesReset, object: nil, userInfo: ["scope": api.cacheScope])
         resetMessage = "Browsing cache cleared. Visible photos may download again immediately."
+        await refresh()
+    }
+    private func resetLibraryMetadata() async {
+        guard let session else { return }
+        metadataResetMessage = nil
+        let resetRequested = await session.resetLibraryMetadata()
+        if resetRequested { metadataResetMessage = "Rebuilding library metadata from the server." }
         await refresh()
     }
 }
