@@ -84,4 +84,34 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(asset.aspectRatio, 1.5)
         XCTAssertEqual(asset.cacheRevision, "xmp-7")
     }
+
+    func testEditorUsesPublishedDevelopedDimensionsAndClampsRoundedEdges() throws {
+        let edits = try APIJSON.decoder().decode(AssetEdits.self, from: Data(#"{"assetId":"photo","edits":[],"baseDimensions":{"width":4103,"height":2701}}"#.utf8))
+        let base = try XCTUnwrap(edits.baseDimensions)
+        let crop = try PixelCrop.normalized(x: 0.3333333, y: 0.2, width: 0.6666667, height: 0.8, in: base)
+        XCTAssertEqual(crop.x + crop.width, base.width)
+        XCTAssertEqual(crop.y + crop.height, base.height)
+        XCTAssertEqual(crop.x, 1367)
+        XCTAssertThrowsError(try PixelCrop.normalized(x: .nan, y: 0, width: 1, height: 1, in: base))
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: APIJSON.encoder().encode(EditSubmission(edits: [.crop(crop), .rotate(90)]))) as? [String: Any])
+        let items = try XCTUnwrap(encoded["edits"] as? [[String: Any]])
+        XCTAssertEqual(items.first?["action"] as? String, "crop")
+        XCTAssertEqual((items.first?["parameters"] as? [String: Int])?["width"], 2736)
+    }
+
+    func testEditTransformPreservesExistingOrderAndHasNoDuplicateActions() throws {
+        for angle in [0, 90, 180, 270] {
+            for axis in [MirrorAxis.horizontal, .vertical] {
+                for edits: [PhotoEdit] in [[.mirror(axis), .rotate(angle)], [.rotate(angle), .mirror(axis)]] {
+                    let transform = PhotoTransform(edits: edits)
+                    XCTAssertEqual(PhotoTransform(edits: transform.edits), transform)
+                    let decoded = try APIJSON.decoder().decode([PhotoEdit].self, from: APIJSON.encoder().encode(transform.edits))
+                    XCTAssertEqual(PhotoTransform(edits: decoded), transform)
+                    XCTAssertTrue(decoded.count <= 2)
+                }
+            }
+        }
+        XCTAssertEqual(PhotoTransform(edits: [.mirror(.vertical), .rotate(90)]), PhotoTransform(a: 0, b: -1, c: -1, d: 0))
+        XCTAssertEqual(PhotoTransform(edits: [.rotate(90), .rotate(90), .rotate(90), .rotate(90)]), PhotoTransform())
+    }
 }

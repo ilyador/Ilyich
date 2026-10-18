@@ -27,6 +27,9 @@ struct AuthenticatedVideo: View {
                 try Task.checkCancellation()
                 let newTransport = try AuthenticatedVideoTransport(request: request)
                 transport?.close(); transport = newTransport
+                newTransport.onFailure = { message in
+                    self.error = message; transport?.close(); transport = nil
+                }
                 newTransport.player.play()
             } catch is CancellationError { } catch { self.error = error.localizedDescription }
         }
@@ -44,6 +47,8 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     let player: AVPlayer
     private let request: URLRequest
     private var session: URLSession!
+    private var observation: NSKeyValueObservation?
+    var onFailure: ((String) -> Void)?
     private struct Transfer {
         let loading: AVAssetResourceLoadingRequest
         var receivedOffset: Int64 = 0
@@ -57,15 +62,23 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
         guard let proxyURL = parts.url else { throw APIError.invalidServerURL }
         self.request = request
         let asset = AVURLAsset(url: proxyURL)
-        player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        player = AVPlayer()
         super.init()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 60
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
         asset.resourceLoader.setDelegate(self, queue: .main)
+        let item = AVPlayerItem(asset: asset)
+        observation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            let message = item.error?.localizedDescription ?? "This video could not be played."
+            Task { @MainActor [weak self] in self?.onFailure?(message) }
+        }
+        player.replaceCurrentItem(with: item)
     }
 
     func close() {
+        observation = nil
         player.pause(); player.replaceCurrentItem(with: nil)
         for transfer in transfers.values { transfer.loading.finishLoading(with: CancellationError()) }
         transfers.removeAll(); session.invalidateAndCancel()

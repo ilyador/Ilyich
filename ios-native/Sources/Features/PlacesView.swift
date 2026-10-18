@@ -52,7 +52,7 @@ struct PlacesView: View {
     var body: some View {
         GeometryReader { geometry in
             if compact {
-                PlacesGlobeView(places: places, focus: selected?.focus ?? focus, compact: true, onSelect: { selected = $0; onSelect($0) })
+                PlacesGlobeView(places: places, focus: selected?.focus ?? focus, compact: true, api: api, pipeline: pipeline, onSelect: { selected = $0; onSelect($0) })
                     .overlay(alignment: .bottom) {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 10) {
@@ -68,7 +68,7 @@ struct PlacesView: View {
                     .overlay { if loading { ProgressView() } }
             } else {
             ScrollView {
-                PlacesGlobeView(places: places, focus: selected?.focus ?? focus, onSelect: { selected = $0 })
+                PlacesGlobeView(places: places, focus: selected?.focus ?? focus, api: api, pipeline: pipeline, onSelect: { selected = $0 })
                     .frame(height: min(geometry.size.height * 0.55, 460)).clipped()
                 if let selected {
                     HStack(spacing: 14) {

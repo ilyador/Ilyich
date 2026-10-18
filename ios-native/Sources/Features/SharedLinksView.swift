@@ -72,12 +72,12 @@ struct SharedLinkEditor: View {
                 if link == nil || passwordChange { SecureField("Password (optional)", text: $password) }
                 Toggle("Expire link", isOn: $expiryEnabled)
                 if expiryEnabled { DatePicker("Expires", selection: $expiry, in: Date()...) }
-            }
+            }.disabled(result != nil)
             Section("Access") {
                 Toggle("Allow downloads", isOn: $download)
                 Toggle("Allow uploads", isOn: $upload)
                 Toggle("Show photo metadata", isOn: $metadata)
-            }
+            }.disabled(result != nil)
         }.navigationTitle(link == nil ? "Share album" : "Edit shared link")
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button(result == nil ? "Save" : "Done") {
             if result != nil { dismiss() } else { Task { await save() } }
