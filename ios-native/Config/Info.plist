@@ -10,6 +10,8 @@
     <array><string>processing</string></array>
     <key>CFBundleDisplayName</key>
     <string>Ilyich</string>
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
     <key>CFBundleName</key>
     <string>$(PRODUCT_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -47,6 +49,8 @@
     <string>Save photos and videos from Ilyich to your photo library.</string>
     <key>NSFaceIDUsageDescription</key>
     <string>Use Face ID to unlock your locked folder.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Use your location when you choose where a photo was taken.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

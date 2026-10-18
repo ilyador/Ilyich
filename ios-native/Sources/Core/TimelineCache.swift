@@ -7,6 +7,8 @@ struct TimelineSnapshot: Codable, Sendable {
 }
 
 /// A bounded cache of visited months. It contains neither authentication nor locked photos.
+struct CachedTimelineUsage: Sendable { let snapshotCount: Int; let diskBytes: Int }
+
 actor TimelineCache {
     static let shared = TimelineCache()
     private let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("IlyichTimelines", isDirectory: true)
@@ -43,6 +45,15 @@ actor TimelineCache {
                 if index >= 12 || size > 50 * 1024 * 1024 { try? FileManager.default.removeItem(at: entry.0) }
             }
         } catch { /* Cache writes never block a working library or become source data. */ }
+    }
+    func cacheUsage(scope: String) -> CachedTimelineUsage {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory(scope), includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])) ?? []
+        var count = 0, bytes = 0
+        for file in files where file.pathExtension == "json" {
+            guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), values.isRegularFile == true else { continue }
+            count += 1; bytes += max(0, values.fileSize ?? 0)
+        }
+        return .init(snapshotCount: count, diskBytes: bytes)
     }
     func removeAll(scope: String) {
         epochs[scope] = UUID()

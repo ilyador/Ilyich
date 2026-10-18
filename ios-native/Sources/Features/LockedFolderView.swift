@@ -86,7 +86,7 @@ struct LockedFolderView: View {
                             }
                             if biometricAvailable && !usePassword { Toggle("Enable biometric unlock", isOn: $remember) }
                             Button(settingUp ? "Set PIN and unlock" : "Unlock") { Task { await unlock() } }
-                                .disabled(busy || (usePassword ? password.isEmpty : !validPIN || (settingUp && pin != confirmation)))
+                                .disabled(busy || (usePassword ? password.isEmpty : !validPIN || (settingUp && pin != confirmation))).requiresWriteAccess(api, when: settingUp)
                         }
                         if !settingUp {
                             if biometricAvailable { Button("Unlock with biometrics", systemImage: "faceid") { Task { await unlockBiometrically() } }.disabled(busy) }
@@ -120,8 +120,8 @@ struct LockedFolderView: View {
     }
     private var filter: TimelineFilter { var filter = TimelineFilter(); filter.visibility = .locked; filter.withStacked = false; return filter }
     private func unlock() async {
-        busy = true; defer { busy = false }
         let requestGeneration = generation
+        busy = true; defer { if requestGeneration == generation { busy = false } }
         do {
             if settingUp { try await api.requestVoid(.post, path: "auth/pin-code", body: ["pinCode": pin]) }
             if usePassword { try await api.requestVoid(.post, path: "auth/session/unlock", body: ["password": password]) }
@@ -130,18 +130,18 @@ struct LockedFolderView: View {
             if remember && !usePassword { try LockedPINStore.save(pin, for: api) }
             pin = ""; confirmation = ""; password = ""
             try await loadUnlocked()
-        } catch { try? await api.lock(); status = try? await api.authStatus(); failure = .init(error) }
+        } catch { await relock(); status = try? await api.authStatus(); failure = .init(error) }
     }
     private func unlockBiometrically() async {
-        busy = true; defer { busy = false }
         let requestGeneration = generation
+        busy = true; defer { if requestGeneration == generation { busy = false } }
         do {
             let client = api
             let securedPIN = try await Task.detached(priority: .userInitiated) { try LockedPINStore.read(for: client) }.value
             try await api.unlock(pin: securedPIN)
             guard requestGeneration == generation else { try? await api.lock(); return }
             try await loadUnlocked()
-        } catch { try? await api.lock(); failure = .init(error) }
+        } catch { await relock(); failure = .init(error) }
     }
     private func loadUnlocked() async throws {
         let requestGeneration = generation
@@ -159,7 +159,7 @@ struct LockedFolderView: View {
     private func loadNext() async {
         guard !busy, unlocked, nextBucket < buckets.count else { return }
         let requestGeneration = generation
-        busy = true; defer { busy = false }
+        busy = true; defer { if requestGeneration == generation { busy = false } }
         do {
             let page = try await api.timeBucket(buckets[nextBucket].timeBucket, filter: filter)
             guard requestGeneration == generation else { return }
@@ -167,8 +167,10 @@ struct LockedFolderView: View {
         } catch { failure = .init(error) }
     }
     private func relock() async {
-        generation = UUID(); viewing = nil; unlocked = false; assets = []; buckets = []; pin = ""; confirmation = ""; password = ""
+        let token = UUID(); generation = token
+        busy = true; viewing = nil; unlocked = false; assets = []; buckets = []; pin = ""; confirmation = ""; password = ""
+        defer { if generation == token { busy = false } }
         try? await api.lock()
-        await pipeline.removeAll()
+        await pipeline.removePrivate()
     }
 }

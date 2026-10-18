@@ -7,6 +7,7 @@ struct PhotoGrid: UIViewRepresentable {
     let columns: Int
     let topInset: CGFloat
     let bottomInset: CGFloat
+    var onDensityChange: ((Int) -> Void)? = nil
     let onOpen: (Asset) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -27,6 +28,10 @@ struct PhotoGrid: UIViewRepresentable {
         refresh.addTarget(context.coordinator, action: #selector(Coordinator.refresh(_:)), for: .valueChanged)
         view.refreshControl = refresh
         context.coordinator.collection = view
+        let selection = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.selectByDragging(_:)))
+        selection.minimumPressDuration = 0.35
+        view.addGestureRecognizer(selection)
+        view.addGestureRecognizer(UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.changeDensity(_:))))
         return view
     }
 
@@ -36,7 +41,13 @@ struct PhotoGrid: UIViewRepresentable {
         let sections = store.sections
         let reset = coordinator.resetID != store.resetID
         if let layout = view.collectionViewLayout as? VirtualPhotoLayout {
-            if layout.columns != columns { layout.columns = columns; layout.invalidateLayout() }
+            if layout.columns != columns {
+                let anchor = view.indexPathsForVisibleItems.min()
+                layout.columns = columns; layout.invalidateLayout(); view.layoutIfNeeded()
+                if let anchor, let frame = layout.layoutAttributesForItem(at: anchor)?.frame {
+                    view.setContentOffset(CGPoint(x: 0, y: frame.minY - topInset), animated: false)
+                }
+            }
         }
         view.contentInset = UIEdgeInsets(top: topInset, left: 0, bottom: bottomInset, right: 0)
         if coordinator.sections != sections || reset {
@@ -95,9 +106,19 @@ struct PhotoGrid: UIViewRepresentable {
         func collectionView(_ view: UICollectionView, didSelectItemAt indexPath: IndexPath) {
             guard let asset = parent.store.asset(section: indexPath.section, item: indexPath.item) else { return }
             if parent.store.isSelecting {
-                if !parent.store.selected.insert(asset.id).inserted { parent.store.selected.remove(asset.id) }
+                parent.store.toggleSelection(asset)
                 UISelectionFeedbackGenerator().selectionChanged()
             } else { parent.onOpen(asset) }
+        }
+        @objc func selectByDragging(_ gesture: UILongPressGestureRecognizer) {
+            guard let collection, let index = collection.indexPathForItem(at: gesture.location(in: collection)),
+                  let asset = parent.store.asset(section: index.section, item: index.item) else { return }
+            if gesture.state == .began { parent.store.isSelecting = true; UISelectionFeedbackGenerator().selectionChanged() }
+            if gesture.state == .began || gesture.state == .changed { parent.store.select(asset) }
+        }
+        @objc func changeDensity(_ gesture: UIPinchGestureRecognizer) {
+            guard gesture.state == .ended, gesture.scale < 0.85 || gesture.scale > 1.15 else { return }
+            parent.onDensityChange?(min(6, max(2, parent.columns + (gesture.scale > 1 ? -1 : 1))))
         }
         func collectionView(_ view: UICollectionView, prefetchItemsAt paths: [IndexPath]) {
             for section in Set(paths.map(\.section)) { parent.store.requestBucket(section) }

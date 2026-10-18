@@ -31,7 +31,7 @@ struct NetworkSettingsView: View {
                     }.padding(.vertical, 4)
                 }
                 Button("Add header", systemImage: "plus") { headers.append(.init()) }
-            } header: { Text("Custom headers") } footer: { Text("For a reverse proxy or additional server authentication. Values are stored securely in the Keychain. Ilyich manages its own authorization header.") }
+            } header: { Text("Custom headers") } footer: { Text("For a reverse proxy or additional server authentication. Values are stored securely in the Keychain. Your Ilyich sign-in is sent separately from proxy authorization.") }
             Section {
                 Toggle("Switch addresses automatically", isOn: $switchEndpoints)
                 ForEach($endpoints) { $endpoint in

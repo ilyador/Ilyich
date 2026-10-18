@@ -25,7 +25,7 @@ struct PeopleView: View {
                             Text(person.name.isEmpty ? "Unnamed person" : person.name).font(.subheadline.weight(.medium)).lineLimit(2)
                         }
                     }.buttonStyle(.plain)
-                    .contextMenu { Button("Edit person", systemImage: "pencil") { editing = person } }
+                    .contextMenu { Button("Edit person", systemImage: "pencil") { editing = person }.requiresWriteAccess(api) }
                 }
             }.padding(20)
             if hasMore {
@@ -85,7 +85,7 @@ private struct PersonEditor: View {
         }.navigationTitle("Edit person")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-            ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving) }
+            ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving).requiresWriteAccess(api) }
         }
         .task {
             name = person.name

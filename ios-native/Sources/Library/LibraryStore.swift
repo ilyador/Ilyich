@@ -44,7 +44,8 @@ extension APIClient: LibraryAPI {}
     var resetID = UUID()
     var scrollTarget: String?
     var restorePosition: GridPosition?
-    var selected: Set<String> = []
+    var selected: Set<String> = [] { didSet { selectedRecords = selectedRecords.filter { selected.contains($0.key) } } }
+    private var selectedRecords: [String: Asset] = [:]
     var isSelecting = false
     let navigation = TimelinePosition()
     private(set) var timelineFilter = TimelineFilter()
@@ -75,6 +76,15 @@ extension APIClient: LibraryAPI {}
     }
     var totalCount: Int { showingResults ? results.count : buckets.reduce(0) { $0 + $1.count } }
     var isFiltered: Bool { filterTitle != nil || !query.isEmpty }
+    var selectedAssets: [Asset] {
+        var seen = Set<String>()
+        return (Array(selectedRecords.values) + results + loaded.values.flatMap { $0 }).filter { selected.contains($0.id) && seen.insert($0.id).inserted }
+    }
+    func toggleSelection(_ asset: Asset) {
+        if selected.contains(asset.id) { selected.remove(asset.id) }
+        else { selected.insert(asset.id); selectedRecords[asset.id] = asset }
+    }
+    func select(_ asset: Asset) { selected.insert(asset.id); selectedRecords[asset.id] = asset }
 
     func asset(section: Int, item: Int) -> Asset? {
         if showingResults { return results.indices.contains(item) ? results[item] : nil }
@@ -306,12 +316,15 @@ extension APIClient: LibraryAPI {}
     }
 
     func update(_ asset: Asset) {
+        originalTimeline = nil
+        if asset.visibility == .locked { Task { await reload() }; return }
         if let i = results.firstIndex(where: { $0.id == asset.id }) { results[i] = asset }
         for key in Array(loaded.keys) {
             if let i = loaded[key]?.firstIndex(where: { $0.id == asset.id }) { loaded[key]?[i] = asset }
         }
         revision += 1
     }
+    func refreshAfterMutation() async { originalTimeline = nil; await reload() }
 
     private func cancelRequests() { requests.values.forEach { $0.cancel() }; requests = [:] }
     func stop() { cancelRequests(); queryTask?.cancel(); generation = UUID(); searchGeneration = UUID() }

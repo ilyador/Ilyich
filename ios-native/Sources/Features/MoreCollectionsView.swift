@@ -12,6 +12,14 @@ struct MoreCollectionsView: View {
                 NavigationLink { FreeUpSpaceView() } label: { Label("Free up space", systemImage: "internaldrive") }
             }
             Section {
+                Button {
+                    var filter = TimelineFilter(); filter.userID = api.userID; filter.isTrashed = false; filter.orderBy = "takenAt"
+                    onFilter(filter, "Recently taken")
+                } label: { Label("Recently taken", systemImage: "camera") }
+                Button {
+                    var filter = TimelineFilter(); filter.userID = api.userID; filter.visibility = nil; filter.isTrashed = false; filter.orderBy = "createdAt"
+                    onFilter(filter, "Recently added")
+                } label: { Label("Recently added", systemImage: "clock.badge.checkmark") }
                 Button { var filter = TimelineFilter(); filter.isFavorite = true; onFilter(filter, "Favorites") } label: { Label("Favorites", systemImage: "heart") }
                 NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .videos, onOpenAsset: onOpenAsset) } label: { Label("Videos", systemImage: "video") }
                 NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .motion, onOpenAsset: onOpenAsset) } label: { Label("Motion", systemImage: "livephoto") }
@@ -87,6 +95,8 @@ struct MemoriesView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
+    var initialID: String? = nil
+    @State private var openedInitial = false
     @State private var memories: [Memory] = []
     @State private var savedOnly = false
     @State private var playingMemory: Memory?
@@ -103,7 +113,7 @@ struct MemoriesView: View {
                             Text(memoryTitle(memory)).font(.title2.bold()); Spacer()
                             Button("Play memory", systemImage: "play.fill") { playingMemory = memory }.labelStyle(.iconOnly).disabled(memory.assets.isEmpty)
                             Button { Task { await toggleSaved(memory) } } label: { Image(systemName: memory.isSaved ? "bookmark.fill" : "bookmark") }
-                                .accessibilityLabel(memory.isSaved ? "Unsave memory" : "Save memory")
+                                .accessibilityLabel(memory.isSaved ? "Unsave memory" : "Save memory").requiresWriteAccess(api)
                         }.padding(.horizontal, 20)
                         FeatureAssetGrid(pipeline: pipeline, assets: memory.assets, onOpenAsset: onOpenAsset)
                     }
@@ -125,7 +135,13 @@ struct MemoriesView: View {
         loading = true; defer { loading = false }
         let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd"; formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.calendar = Calendar(identifier: .gregorian)
         let query = savedOnly ? [URLQueryItem(name: "isSaved", value: "true")] : [.init(name: "for", value: formatter.string(from: Date()))]
-        do { memories = try await api.request(.get, path: "memories", query: query) } catch is CancellationError { } catch { failure = .init(error) }
+        do {
+            if let initialID, !openedInitial {
+                let memory: Memory = try await api.request(.get, path: "memories/\(initialID)")
+                try Task.checkCancellation()
+                memories = [memory]; playingMemory = memory; openedInitial = true
+            } else { memories = try await api.request(.get, path: "memories", query: query) }
+        } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func toggleSaved(_ memory: Memory) async {
         do { try await api.requestVoid(.put, path: "memories/\(memory.id)", body: ["isSaved": !memory.isSaved]); await load() } catch { failure = .init(error) }
@@ -149,26 +165,26 @@ struct PartnersView: View {
                 ForEach(incoming) { partner in
                     VStack(alignment: .leading, spacing: 10) {
                         Button(partner.name) { var filter = TimelineFilter(); filter.userID = partner.id; filter.visibility = nil; onFilter(filter, partner.name) }
-                        Toggle("Show in your timeline", isOn: Binding(get: { partner.inTimeline == true }, set: { value in Task { await setTimeline(partner, value: value) } })).font(.subheadline)
+                        Toggle("Show in your timeline", isOn: Binding(get: { partner.inTimeline == true }, set: { value in Task { await setTimeline(partner, value: value) } })).font(.subheadline).requiresWriteAccess(api)
                     }.padding(.vertical, 4)
                 }
                 if incoming.isEmpty && !loading { Text("No partner libraries yet").foregroundStyle(.secondary) }
             }
             Section("You’re sharing with") {
-                ForEach(outgoing) { partner in Text(partner.name).swipeActions { Button("Stop sharing", role: .destructive) { pendingRemoval = partner } } }
+                ForEach(outgoing) { partner in Text(partner.name).swipeActions { Button("Stop sharing", role: .destructive) { pendingRemoval = partner }.requiresWriteAccess(api) } }
                 if outgoing.isEmpty && !loading { Text("Your library is not shared with any partners.").foregroundStyle(.secondary) }
             }
             Section("Share your library") {
                 ForEach(candidates.filter { user in user.id != api.userID && !outgoing.contains { $0.id == user.id } }) { user in
-                    Button(user.name) { pendingShare = user }
+                    Button(user.name) { pendingShare = user }.requiresWriteAccess(api)
                 }
             }
         }.navigationTitle("Partners").task { await load() }.refreshable { await load() }
         .confirmationDialog("Share your library with \(pendingShare?.name ?? "this person")?", isPresented: Binding(get: { pendingShare != nil }, set: { if !$0 { pendingShare = nil } }), titleVisibility: .visible) {
-            Button("Share library") { if let user = pendingShare { Task { await share(user) } } }
+            Button("Share library") { if let user = pendingShare { Task { await share(user) } } }.requiresWriteAccess(api)
         } message: { Text("They will be able to browse your shared library. Locked photos stay private.") }
         .confirmationDialog("Stop sharing your library?", isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }), titleVisibility: .visible) {
-            Button("Stop sharing", role: .destructive) { if let partner = pendingRemoval { Task { await remove(partner) } } }
+            Button("Stop sharing", role: .destructive) { if let partner = pendingRemoval { Task { await remove(partner) } } }.requiresWriteAccess(api)
         }
         .alert("Couldn’t update partners", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }

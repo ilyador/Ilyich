@@ -9,6 +9,11 @@ struct UploadFile: Codable, Sendable {
 
 /// Builds a disk-backed multipart body; video bytes never accumulate in memory.
 enum UploadBody {
+    static func work<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
+        let task = Task.detached(priority: .utility, operation: operation)
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
     static func checksum(_ url: URL) throws -> String {
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }

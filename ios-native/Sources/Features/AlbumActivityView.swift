@@ -16,12 +16,12 @@ struct AlbumActivityView: View {
     private var ownLike: AlbumActivity? { activities.first { $0.type == "like" && $0.user.id == api.userID } }
     var body: some View {
         List {
-            if owner { Section { Toggle("Allow comments and likes", isOn: Binding(get: { enabled }, set: { value in Task { await setEnabled(value) } })).disabled(saving) } }
+            if owner { Section { Toggle("Allow comments and likes", isOn: Binding(get: { enabled }, set: { value in Task { await setEnabled(value) } })).disabled(saving).requiresWriteAccess(api) } }
             if enabled {
                 Section {
                     Button { Task { await toggleLike() } } label: {
                         Label("\(activities.filter { $0.type == "like" }.count) likes", systemImage: ownLike == nil ? "heart" : "heart.fill")
-                    }.disabled(saving)
+                    }.disabled(saving).requiresWriteAccess(api)
                 }
                 Section("Comments") {
                     if loading { ProgressView() }
@@ -30,7 +30,7 @@ struct AlbumActivityView: View {
                             HStack { Text(activity.user.name).font(.subheadline.bold()); Spacer(); Text(activity.createdAt, style: .relative).font(.caption).foregroundStyle(.secondary) }
                             Text(activity.comment ?? "")
                         }.padding(.vertical, 5)
-                        .swipeActions { if owner || activity.user.id == api.userID { Button("Delete", role: .destructive) { pendingDelete = activity } } }
+                        .swipeActions { if owner || activity.user.id == api.userID { Button("Delete", role: .destructive) { pendingDelete = activity }.requiresWriteAccess(api) } }
                     }
                     if !loading && !activities.contains(where: { $0.type == "comment" }) { Text("Be the first to leave a comment.").foregroundStyle(.secondary) }
                 }
@@ -41,13 +41,13 @@ struct AlbumActivityView: View {
                 HStack(alignment: .bottom, spacing: 12) {
                     TextField("Add a comment", text: $comment, axis: .vertical).lineLimit(1...5).textFieldStyle(.roundedBorder)
                     Button("Send", systemImage: "arrow.up") { Task { await postComment() } }.labelStyle(.iconOnly).buttonStyle(.glassProminent)
-                        .disabled(saving || comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(saving || comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).requiresWriteAccess(api)
                 }.padding().background(.bar)
             }
         }
         .task { await load() }.refreshable { await load() }
         .confirmationDialog("Delete this comment?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible) {
-            Button("Delete comment", role: .destructive) { if let activity = pendingDelete { Task { await remove(activity) } } }
+            Button("Delete comment", role: .destructive) { if let activity = pendingDelete { Task { await remove(activity) } } }.requiresWriteAccess(api)
         }
         .alert("Couldn’t update activity", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }

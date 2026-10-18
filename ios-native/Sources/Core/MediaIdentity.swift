@@ -12,7 +12,7 @@ struct MediaCacheIdentity: Hashable, Sendable {
     init(scope: String, asset: Asset, size: MediaSize, pixelSize: Int, edited: Bool = true) {
         self.scope = scope; self.resource = "assets/\(asset.id)"
         self.revision = asset.cacheRevision
-        self.size = size.rawValue + ":edited=\(edited)"
+        self.size = size.rawValue + ":edited=\(edited):locked=\(asset.visibility == .locked)"
         self.pixelSize = max(1, pixelSize)
     }
 

@@ -46,6 +46,9 @@ struct ZoomablePhoto: UIViewRepresentable {
     let onTap: (Double) -> Void
     let onDismiss: () -> Void
     let onZoom: () -> Void
+    var recognizedText: [RecognizedText] = []
+    var textSelection: Set<String> = []
+    var onTextSelection: ((String) -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(onTap: onTap, onDismiss: onDismiss, onZoom: onZoom) }
     func makeUIView(context: Context) -> ZoomPhotoScrollView {
         let view = ZoomPhotoScrollView()
@@ -67,6 +70,8 @@ struct ZoomablePhoto: UIViewRepresentable {
     func updateUIView(_ view: ZoomPhotoScrollView, context: Context) {
         if view.imageView.image !== image { view.imageView.image = image; view.setNeedsLayout() }
         if resetZoom && view.zoomScale != 1 { view.setZoomScale(1, animated: false) }
+        view.ocrOverlay.configure(recognizedText, selection: textSelection, onSelect: onTextSelection)
+        view.isAccessibilityElement = recognizedText.isEmpty
     }
     @MainActor final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         weak var scroll: ZoomPhotoScrollView?
@@ -76,7 +81,11 @@ struct ZoomablePhoto: UIViewRepresentable {
         init(onTap: @escaping (Double) -> Void, onDismiss: @escaping () -> Void, onZoom: @escaping () -> Void) { self.onTap = onTap; self.onDismiss = onDismiss; self.onZoom = onZoom }
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { scroll?.imageView }
         func scrollViewDidZoom(_ scrollView: UIScrollView) { scroll?.centerImage(); if scrollView.zoomScale > 1.05 { onZoom() } }
-        @objc func singleTap(_ gesture: UITapGestureRecognizer) { guard let scroll else { return }; onTap(Double(gesture.location(in: scroll).x / max(1, scroll.bounds.width))) }
+        @objc func singleTap(_ gesture: UITapGestureRecognizer) {
+            guard let scroll else { return }
+            let fraction = scroll.zoomScale > 1.01 ? 0.5 : Double((gesture.location(in: scroll).x - scroll.bounds.minX) / max(1, scroll.bounds.width))
+            onTap(fraction)
+        }
         @objc func swipeDown() { if (scroll?.zoomScale ?? 1) <= 1.01 { onDismiss() } }
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool { (scroll?.zoomScale ?? 1) <= 1.01 }
         @objc func doubleTap(_ gesture: UITapGestureRecognizer) {
@@ -93,6 +102,7 @@ struct ZoomablePhoto: UIViewRepresentable {
 
 @MainActor final class ZoomPhotoScrollView: UIScrollView {
     let imageView = UIImageView()
+    let ocrOverlay = OCRSelectionOverlay()
     private var lastSize = CGSize.zero
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -100,6 +110,8 @@ struct ZoomablePhoto: UIViewRepresentable {
         showsHorizontalScrollIndicator = false; showsVerticalScrollIndicator = false
         contentInsetAdjustmentBehavior = .never; bouncesZoom = true
         imageView.contentMode = .scaleAspectFit
+        imageView.isUserInteractionEnabled = true
+        imageView.addSubview(ocrOverlay)
         addSubview(imageView)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -113,6 +125,7 @@ struct ZoomablePhoto: UIViewRepresentable {
             contentSize = imageView.frame.size
         }
         centerImage()
+        ocrOverlay.frame = imageView.bounds
     }
     func centerImage() {
         imageView.center = CGPoint(x: max(contentSize.width, bounds.width) / 2, y: max(contentSize.height, bounds.height) / 2)

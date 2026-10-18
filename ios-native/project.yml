@@ -2,7 +2,7 @@ name: Ilyich
 options:
   minimumXcodeGenVersion: 2.46.0
   deploymentTarget:
-    iOS: '26.0'
+    iOS: '27.0'
   createIntermediateGroups: true
 configs:
   Debug: debug
@@ -46,9 +46,10 @@ targets:
       - path: Extensions/Share
         excludes: [Info.plist]
       - Sources/Backup/SharedSession.swift
-      - Sources/Core/NetworkConfiguration.swift
-      - Sources/Core/ServerConnection.swift
       - Sources/Backup/UploadBody.swift
+      - Sources/Backup/SharedInbox.swift
+      - Sources/Backup/PhotoResourceExport.swift
+      - Sources/Backup/BackupReceipt.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.alextran.immich.ShareExtension

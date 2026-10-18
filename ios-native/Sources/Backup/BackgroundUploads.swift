@@ -9,8 +9,10 @@ struct UploadProgressSnapshot: Sendable {
 /// URLSession owns transfer lifetime. Receipts survive a terminated app and are
 /// written before continuations are resumed, closing the completion/relaunch race.
 final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    static let shared = BackgroundUploads()
+    static let shared = BackgroundUploads(identifier: identifier)
+    static let sharing = BackgroundUploads(identifier: shareIdentifier)
     static var identifier: String { (Bundle.main.bundleIdentifier ?? "app.alextran.immich") + ".backup" }
+    static var shareIdentifier: String { (Bundle.main.bundleIdentifier ?? "app.alextran.immich") + ".share-upload" }
 
     private struct Descriptor: Codable, Equatable { let id: String; let receipt: URL }
     private struct Outcome: Codable { let receipt: UploadReceipt?; let error: String? }
@@ -21,9 +23,9 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     private var eventsCompletion: (@Sendable () -> Void)?
     private var session: URLSession!
 
-    private override init() {
+    private init(identifier: String) {
         super.init()
-        let configuration = URLSessionConfiguration.background(withIdentifier: Self.identifier)
+        let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
         configuration.sharedContainerIdentifier = try? SessionKeychain.appGroup
         configuration.sessionSendsLaunchEvents = true
         configuration.isDiscretionary = false
@@ -39,6 +41,9 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     }
 
     func upload(_ request: URLRequest, body: URL, id: String, receipt: URL) async throws -> UploadReceipt {
+        if let saved = try SessionKeychain.read(), ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID) {
+            throw ReadOnlyPolicy.ReadOnlyError()
+        }
         let descriptor = Descriptor(id: id, receipt: receipt)
         let description = String(decoding: try JSONEncoder().encode(descriptor), as: UTF8.self)
         let existing = await session.allTasks.first { task in
@@ -129,7 +134,8 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         guard let saved = try? SessionKeychain.read(), let url = task.originalRequest?.url,
-              task.originalRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer \(saved.token)",
+              (task.originalRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer \(saved.token)" ||
+               task.originalRequest?.value(forHTTPHeaderField: "x-immich-user-token") == saved.token),
               let configuration = try? NetworkConfigurationStore.load(server: saved.server),
               (configuration.alternateEndpoints + [saved.server]).contains(where: { SameOriginRedirectDelegate.sameOrigin($0, url) }) else {
             completionHandler(.performDefaultHandling, nil); return

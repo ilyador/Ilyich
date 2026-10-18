@@ -14,10 +14,15 @@ import UIKit
     }
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
-        guard identifier == BackgroundUploads.identifier else { completionHandler(); return }
+        let uploads: BackgroundUploads
+        switch identifier {
+        case BackgroundUploads.identifier: uploads = .shared
+        case BackgroundUploads.shareIdentifier: uploads = .sharing
+        default: completionHandler(); return
+        }
         let completion = MainActorCompletion(completionHandler)
-        BackgroundUploads.shared.handleEvents { Task { @MainActor in completion.call() } }
-        Task { await BackupCoordinator.shared.activate() }
+        uploads.handleEvents { Task { @MainActor in completion.call() } }
+        if identifier == BackgroundUploads.identifier { Task { await BackupCoordinator.shared.activate() } }
     }
 }
 

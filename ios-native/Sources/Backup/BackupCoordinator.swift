@@ -57,6 +57,9 @@ private struct BackupState: Codable {
     private(set) var totalTransferBytes: Int64 = 0
     private(set) var transferRate: Int64?
     var failures: [BackupFailure] { (state.failures ?? [:]).values.sorted { $0.date > $1.date } }
+    /// Display associations for the active server/user. These are historical
+    /// receipts; local deletion must use verifiedLocalDeletionCandidates().
+    var associations: [String: BackupReceipt] { state.receipts ?? [:] }
     private(set) var activity = "Choose albums to back up"
     private(set) var error: String?
     private var state = BackupState()
@@ -145,7 +148,9 @@ private struct BackupState: Codable {
 
     /// Stops outgoing requests before the caller deletes the shared credentials.
     func disconnect() async {
+        ShareInboxStore.shared.cancel()
         await pause()
+        await BackgroundUploads.sharing.cancelAll()
         saved = nil; directory = nil; state = BackupState(); preferences = BackupPreferences()
         albums = []; error = nil; refreshCounts()
     }
@@ -280,7 +285,7 @@ private struct BackupState: Codable {
                           session: SavedSession, runID: UUID) async throws -> BackupRemoteFile {
         try requireTransferConditions()
         activity = "Checking \(file.filename)"; progress = nil
-        let checksum = try await Task.detached(priority: .utility) { try UploadBody.checksum(file.url) }.value
+        let checksum = try await UploadBody.work { try UploadBody.checksum(file.url) }
         _ = try currentSession(runID)
         let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
         let check: UploadCheckResponse = try await api.request(.post, path: "assets/bulk-upload-check",
@@ -293,16 +298,9 @@ private struct BackupState: Codable {
             guard result.reason == "duplicate", let id = result.assetId, result.isTrashed != true else {
                 throw BackupError.message(result.isTrashed == true ? "This photo is in your server’s trash. Restore it there or empty the trash before retrying backup." : "The server rejected \(file.filename). Check its supported file formats.")
             }
+            if sidecar != nil { throw BackupError.message("This photo already exists. Its XMP cannot be updated by uploading a duplicate; your source files were kept.") }
             if let motionID = fields["livePhotoVideoId"] {
-                let existing = try await api.asset(id: id)
-                _ = try currentSession(runID)
-                if let paired = existing.livePhotoVideoId, paired != motionID {
-                    throw BackupError.message("This photo is already paired with a different Live Photo video on the server. Its existing pairing was kept; review it before retrying.")
-                }
-                if existing.livePhotoVideoId == nil {
-                    struct Pairing: Encodable, Sendable { let livePhotoVideoId: String }
-                    try await api.requestVoid(.put, path: "assets/\(id)", body: Pairing(livePhotoVideoId: motionID))
-                }
+                try await LivePhotoPairing.ensure(assetID: id, motionID: motionID, api: api)
             }
             return BackupRemoteFile(id: id, checksum: checksum)
         }
@@ -311,7 +309,7 @@ private struct BackupState: Codable {
         let folder = file.url.deletingLastPathComponent()
         let body = folder.appendingPathComponent(prepared.stageID + ".multipart")
         if !FileManager.default.fileExists(atPath: body.path) {
-            try await Task.detached(priority: .utility) { try UploadBody.write(to: body, boundary: boundary, fields: fields, asset: file, sidecar: sidecar) }.value
+            try await UploadBody.work { try UploadBody.write(to: body, boundary: boundary, fields: fields, asset: file, sidecar: sidecar) }
         }
         _ = try currentSession(runID)
         var request = try await api.authorizedRequest(path: "assets")
@@ -323,6 +321,11 @@ private struct BackupState: Codable {
         activity = "Uploading \(file.filename)"
         let receipt = try await BackgroundUploads.shared.upload(request, body: body, id: prepared.stageID,
                                                                receipt: folder.appendingPathComponent(prepared.stageID + ".receipt"))
+        _ = try currentSession(runID)
+        if receipt.status == "duplicate" {
+            if sidecar != nil { throw BackupError.message("This photo already exists. Its XMP needs review before this backup can be confirmed.") }
+            if let motionID = fields["livePhotoVideoId"] { try await LivePhotoPairing.ensure(assetID: receipt.id, motionID: motionID, api: api) }
+        }
         try? FileManager.default.removeItem(at: body)
         return BackupRemoteFile(id: receipt.id, checksum: checksum)
     }
@@ -351,6 +354,7 @@ private struct BackupState: Codable {
         guard generation == runID, let saved, let current = try SessionKeychain.read(),
               saved.scope == current.scope, saved.token == current.token else { throw CancellationError() }
         guard current.requiresPasswordChange != true else { throw BackupError.message("Change your account password before starting backup.") }
+        try ReadOnlyPolicy.check(enabled: ReadOnlyPolicy.isEnabled(server: current.server, userID: current.userID), method: "POST", path: "assets")
         return current
     }
 

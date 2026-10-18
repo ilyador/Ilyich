@@ -2,12 +2,15 @@ import SwiftUI
 
 struct SettingsView: View {
     let api: APIClient
+    var pipeline: MediaPipeline? = nil
     let onSignOut: () -> Void
     @AppStorage("gridColumns") private var columns = 4
     @AppStorage("appearance") private var appearance = "system"
     @State private var user: User?
     @State private var failure: FeatureFailure?
     @State private var confirmSignOut = false
+    @State private var readOnly = false
+    @State private var changingMode = false
     var body: some View {
         Form {
             Section {
@@ -16,6 +19,20 @@ struct SettingsView: View {
                 }
                 NavigationLink { BackupSettingsView() } label: { Label("Backup", systemImage: "icloud.and.arrow.up") }
             }
+            Section {
+                Toggle("Read-only mode", isOn: Binding(get: { readOnly }, set: { enabled in
+                    api.setReadOnly(enabled); readOnly = enabled
+                    if enabled {
+                        changingMode = true
+                        ShareInboxStore.shared.cancel()
+                        Task {
+                            await BackupCoordinator.shared.pause()
+                            await BackgroundUploads.sharing.cancelAll()
+                            changingMode = false
+                        }
+                    }
+                })).disabled(changingMode)
+            } footer: { Text("Browse and search without changing photos, albums or account details. Turning this on pauses uploads. Backup stays paused until you start it again.") }
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }
                 NavigationLink("Photo and video viewer") { ViewerSettingsView() }
@@ -25,11 +42,12 @@ struct SettingsView: View {
             Section {
                 NavigationLink { NetworkSettingsView(api: api, server: api.baseURL) } label: { Label("Network", systemImage: "network") }
                 NavigationLink { ServerSettingsView(api: api) } label: { Label("Server", systemImage: "externaldrive.connected.to.line.below") }
+                NavigationLink { DiagnosticsView(api: api, pipeline: pipeline) } label: { Label("Diagnostics", systemImage: "stethoscope") }
                 NavigationLink { AboutIlyichView() } label: { Label("About", systemImage: "info.circle") }
             }
             Section { Button("Sign out", role: .destructive) { confirmSignOut = true } }
         }.navigationTitle("Settings")
-        .task { do { user = try await api.currentUser() } catch { failure = .init(error) } }
+        .task { readOnly = api.isReadOnly; do { user = try await api.currentUser() } catch { failure = .init(error) } }
         .confirmationDialog("Sign out of Ilyich?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { onSignOut() }
         } message: { Text("Backup will stop on this phone. Photos already on your server are kept.") }
@@ -80,7 +98,7 @@ private struct AccountSettingsView: View {
             }
             if saved { Label("Profile saved", systemImage: "checkmark.circle").foregroundStyle(.secondary) }
         }.navigationTitle("Account").disabled(loading || saving)
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(loading || saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) } }
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(loading || saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).requiresWriteAccess(api) } }
         .task {
             do { let user = try await api.currentUser(); name = user.name; email = user.email ?? "" } catch { failure = .init(error) }
             loading = false
@@ -114,7 +132,7 @@ struct ChangePasswordView: View {
             } footer: { Text("Use at least 8 characters.") }
             Toggle("Sign out other devices", isOn: $invalidate)
         }.navigationTitle("Change password")
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving || current.isEmpty || password.count < 8 || password != confirmation) } }
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving || current.isEmpty || password.count < 8 || password != confirmation).requiresWriteAccess(api) } }
         .alert("Couldn’t change password", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }

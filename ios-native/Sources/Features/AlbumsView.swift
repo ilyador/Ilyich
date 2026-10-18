@@ -11,6 +11,7 @@ struct AlbumsView: View {
     @State private var creating = false
     @State private var editing: Album?
     @State private var sort = AlbumSort.updated
+    @AppStorage("albumLayout") private var layout = "grid"
 
     private enum AlbumSort: String, CaseIterable { case updated = "Recently updated", name = "Name", count = "Photo count" }
     private var visible: [Album] {
@@ -28,34 +29,49 @@ struct AlbumsView: View {
             else if visible.isEmpty {
                 FeatureEmpty(title: query.isEmpty ? "Your albums" : "No matching albums", symbol: "rectangle.stack", description: query.isEmpty ? "Create an album to keep a story together." : "Try another album name.")
             } else {
-                LazyVGrid(columns: [.init(.adaptive(minimum: 155), spacing: 16)], spacing: 24) {
-                    ForEach(visible) { album in
-                        Button { onSelect(album) } label: {
-                            VStack(alignment: .leading, spacing: 9) {
-                                FeatureThumbnail(api: api, pipeline: pipeline, assetID: album.albumThumbnailAssetId, revision: album.updatedAt?.description ?? "")
-                                    .aspectRatio(1, contentMode: .fit).clipShape(.rect(cornerRadius: 14))
-                                HStack(alignment: .firstTextBaseline) {
-                                    Text(album.albumName).font(.headline).lineLimit(2)
-                                    Spacer(minLength: 2)
-                                    if album.shared { Image(systemName: "person.2.fill").font(.caption).foregroundStyle(.secondary) }
-                                }
-                                Text("\(album.assetCount.formatted()) items").font(.caption).foregroundStyle(.secondary)
-                            }.contentShape(Rectangle())
-                        }.buttonStyle(.plain)
-                        .contextMenu { Button("Album details", systemImage: "slider.horizontal.3") { editing = album } }
-                        .accessibilityHint("Open album. More actions are available in the context menu.")
-                    }
-                }.padding(20)
+                if layout == "list" {
+                    LazyVStack(spacing: 12) {
+                        ForEach(visible) { album in
+                            Button { onSelect(album) } label: {
+                                HStack(spacing: 14) {
+                                    FeatureThumbnail(api: api, pipeline: pipeline, assetID: album.albumThumbnailAssetId, revision: album.updatedAt?.description ?? "")
+                                        .frame(width: 72, height: 72).clipShape(.rect(cornerRadius: 10))
+                                    albumLabels(album)
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                                }.contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                            .contextMenu { Button("Album details", systemImage: "slider.horizontal.3") { editing = album } }
+                        }
+                    }.padding(20)
+                } else {
+                    LazyVGrid(columns: [.init(.adaptive(minimum: 155), spacing: 16)], spacing: 24) {
+                        ForEach(visible) { album in
+                            Button { onSelect(album) } label: {
+                                VStack(alignment: .leading, spacing: 9) {
+                                    FeatureThumbnail(api: api, pipeline: pipeline, assetID: album.albumThumbnailAssetId, revision: album.updatedAt?.description ?? "")
+                                        .aspectRatio(1, contentMode: .fit).clipShape(.rect(cornerRadius: 14))
+                                    albumLabels(album)
+                                }.contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                            .contextMenu { Button("Album details", systemImage: "slider.horizontal.3") { editing = album } }
+                            .accessibilityHint("Open album. More actions are available in the context menu.")
+                        }
+                    }.padding(20)
+                }
             }
         }
         .navigationTitle("Albums")
         .searchable(text: $query, prompt: "Find an album")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu { Picker("Sort albums", selection: $sort) { ForEach(AlbumSort.allCases, id: \.self) { Text($0.rawValue).tag($0) } } }
+                Menu {
+                    Picker("Sort albums", selection: $sort) { ForEach(AlbumSort.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
+                    Picker("Layout", selection: $layout) { Text("Grid").tag("grid"); Text("List").tag("list") }
+                }
                 label: { Image(systemName: "arrow.up.arrow.down") }.accessibilityLabel("Sort albums")
             }
-            ToolbarItem(placement: .topBarTrailing) { Button("Create album", systemImage: "plus") { creating = true } }
+            ToolbarItem(placement: .topBarTrailing) { Button("Create album", systemImage: "plus") { creating = true }.requiresWriteAccess(api) }
         }
         .task { await load() }.refreshable { await load() }
         .sheet(isPresented: $creating) { NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in albums.insert(album, at: 0) } } }
@@ -67,6 +83,16 @@ struct AlbumsView: View {
         .alert("Couldn’t load albums", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
+    }
+    private func albumLabels(_ album: Album) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(album.albumName).font(.headline).lineLimit(2)
+                if album.shared { Image(systemName: "person.2.fill").font(.caption).foregroundStyle(.secondary) }
+            }
+            Text("\(album.assetCount.formatted()) items").font(.caption).foregroundStyle(.secondary)
+            if let dates = albumDateRange(album) { Text(dates).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private func load() async {
         loading = true
@@ -96,27 +122,28 @@ private struct AlbumEditor: View {
     var body: some View {
         Form {
             Section("Album") {
-                TextField("Name", text: $name).disabled(!canEdit)
-                TextField("Description", text: $detail, axis: .vertical).lineLimit(3...8).disabled(!canEdit)
-                if album != nil { Picker("Photo order", selection: $order) { Text("Newest first").tag("desc"); Text("Oldest first").tag("asc") }.disabled(!canEdit) }
+                TextField("Name", text: $name).disabled(!canEdit).requiresWriteAccess(api)
+                TextField("Description", text: $detail, axis: .vertical).lineLimit(3...8).disabled(!canEdit).requiresWriteAccess(api)
+                if album != nil { Picker("Photo order", selection: $order) { Text("Newest first").tag("desc"); Text("Oldest first").tag("asc") }.disabled(!canEdit).requiresWriteAccess(api) }
             }
             if let album = current {
                 if canEdit {
                     Section("Photos") {
-                        NavigationLink("Add photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .add, onSaved: didUpdate) }
-                        NavigationLink("Remove photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .remove, onSaved: didUpdate) }.disabled(album.assetCount == 0)
-                        NavigationLink("Choose cover") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .cover, onSaved: didUpdate) }.disabled(album.assetCount == 0)
+                        NavigationLink("Add photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .add, onSaved: didUpdate) }.requiresWriteAccess(api)
+                        NavigationLink("Remove photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .remove, onSaved: didUpdate) }.disabled(album.assetCount == 0).requiresWriteAccess(api)
+                        NavigationLink("Choose cover") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .cover, onSaved: didUpdate) }.disabled(album.assetCount == 0).requiresWriteAccess(api)
                     }
                 }
                 Section {
                     LabeledContent("Photos and videos", value: album.assetCount.formatted())
-                    NavigationLink("Members") { AlbumMembersView(api: api, album: album) }
+                    if let dates = albumDateRange(album) { LabeledContent("Dates", value: dates) }
+                    NavigationLink("Members") { AlbumMembersView(api: api, album: album, onLeft: { onDeleted(); dismiss() }) }
                     NavigationLink("Comments and likes") { AlbumActivityView(api: api, albumID: album.id) }
                 }
                 if isOwner {
                     Section {
-                        NavigationLink("Create a shared link") { SharedLinkEditor(api: api, album: album) }
-                        Button("Delete album", role: .destructive) { confirmDelete = true }
+                        NavigationLink("Create a shared link") { SharedLinkEditor(api: api, album: album) }.requiresWriteAccess(api)
+                        Button("Delete album", role: .destructive) { confirmDelete = true }.requiresWriteAccess(api)
                     } footer: { Text("Deleting an album keeps its photos and videos in your library.") }
                 }
             }
@@ -125,7 +152,7 @@ private struct AlbumEditor: View {
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             if canEdit { ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { Task { await save() } }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
+                Button("Save") { Task { await save() } }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy).requiresWriteAccess(api)
             } }
         }
         .disabled(busy)
@@ -135,7 +162,7 @@ private struct AlbumEditor: View {
             if let album { do { latest = try await api.album(id: album.id) } catch { failure = .init(error) } }
         }
         .confirmationDialog("Delete this album?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete album", role: .destructive) { Task { await delete() } }
+            Button("Delete album", role: .destructive) { Task { await delete() } }.requiresWriteAccess(api)
         } message: { Text("The album will be removed for everyone. Its photos will stay in the library.") }
         .alert("Couldn’t save changes", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
@@ -161,6 +188,8 @@ private struct AlbumEditor: View {
 private struct AlbumMembersView: View {
     let api: APIClient
     let album: Album
+    let onLeft: () -> Void
+    @State private var confirmLeave = false
     @State private var members: [AlbumUser] = []
     @State private var users: [User] = []
     @State private var failure: FeatureFailure?
@@ -177,7 +206,7 @@ private struct AlbumMembersView: View {
                                 Button("Viewer") { Task { await update(member, role: "viewer") } }
                                 Button("Editor") { Task { await update(member, role: "editor") } }
                                 Button("Remove member", role: .destructive) { Task { await remove(member) } }
-                            }
+                            }.requiresWriteAccess(api)
                         } else { Text(member.role.capitalized).foregroundStyle(.secondary) }
                     }
                 }
@@ -188,11 +217,19 @@ private struct AlbumMembersView: View {
                         Menu(user.name) {
                             Button("Add as viewer") { Task { await add(user, role: "viewer") } }
                             Button("Add as editor") { Task { await add(user, role: "editor") } }
-                        }
+                        }.requiresWriteAccess(api)
                     }
                 }
             }
+            if !owner, members.contains(where: { $0.user.id == api.userID }) {
+                Section {
+                    Button("Leave album", role: .destructive) { confirmLeave = true }.requiresWriteAccess(api)
+                } footer: { Text("You will lose access to this shared album. Photos you own remain in your library.") }
+            }
         }.navigationTitle("Members").disabled(busy)
+        .confirmationDialog("Leave this shared album?", isPresented: $confirmLeave, titleVisibility: .visible) {
+            Button("Leave album", role: .destructive) { Task { await leave() } }.requiresWriteAccess(api)
+        } message: { Text("An album owner will need to invite you again to restore access.") }
         .task {
             members = album.albumUsers ?? []
             if owner { do { users = try await api.request(.get, path: "users") } catch { failure = .init(error) } }
@@ -200,6 +237,12 @@ private struct AlbumMembersView: View {
         .alert("Couldn’t update members", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
+    }
+    private func leave() async {
+        guard let userID = api.userID, !owner else { return }
+        busy = true; defer { busy = false }
+        do { try await api.requestVoid(.delete, path: "albums/\(album.id)/user/\(userID)"); onLeft() }
+        catch { failure = .init(error) }
     }
     private func refresh() async throws { members = try await api.album(id: album.id).albumUsers ?? [] }
     private func update(_ member: AlbumUser, role: String) async {
@@ -216,4 +259,12 @@ private struct AlbumMembersView: View {
         busy = true; defer { busy = false }
         do { try await api.requestVoid(.put, path: "albums/\(album.id)/users", body: Body(albumUsers: [.init(userId: user.id, role: role)])); try await refresh() } catch { failure = .init(error) }
     }
+}
+
+private func albumDateRange(_ album: Album) -> String? {
+    guard let start = album.startDate else { return nil }
+    let style = Date.FormatStyle(date: .abbreviated, time: .omitted, timeZone: TimeZone(secondsFromGMT: 0)!)
+    let first = start.formatted(style)
+    guard let end = album.endDate, end.formatted(style) != first else { return first }
+    return first + " – " + end.formatted(style)
 }
