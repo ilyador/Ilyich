@@ -19,6 +19,8 @@ import WidgetKit
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var syncShutdown: Task<Void, Never>?
     @ObservationIgnored private var validationTask: Task<Void, Never>?
+    @ObservationIgnored private var isResettingLibraryMetadata = false
+    @ObservationIgnored private var isForeground = true
     let isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
 
     func restore() async {
@@ -76,15 +78,16 @@ import WidgetKit
     }
 
     func sceneChanged(_ phase: ScenePhase) {
-        if phase == .active { validateSession(); startSync() }
+        if phase == .active { isForeground = true; validateSession(); startSync() }
         else if phase == .background {
+            isForeground = false
             syncTask?.cancel(); syncTask = nil; isSyncing = false
             if let sync { syncShutdown = Task { await sync.stop() } }
         }
     }
 
     func startSync() {
-        guard syncTask == nil, let sync, let client = api, let entities else { return }
+        guard !isResettingLibraryMetadata, syncTask == nil, let sync, let client = api, let entities else { return }
         isSyncing = true; syncError = nil
         syncTask = Task { [weak self] in
             await self?.syncShutdown?.value
@@ -107,6 +110,39 @@ import WidgetKit
                 await self?.syncFailed(error, client: client)
             })
         }
+    }
+
+    func resetLibraryMetadata() async -> Bool {
+        guard !isResettingLibraryMetadata, !isSigningOut, !isSyncing, let client = api, let sync, let entities else { return false }
+        isResettingLibraryMetadata = true
+        var resetRequested = false
+        defer {
+            isResettingLibraryMetadata = false
+            if isForeground && !isSigningOut && (resetRequested || api !== client) { startSync() }
+        }
+        isSyncing = true
+        syncError = nil
+        let previousTask = syncTask
+        syncTask?.cancel()
+        syncTask = nil
+        await syncShutdown?.value
+        syncShutdown = nil
+        await sync.stop()
+        await previousTask?.value
+        guard api === client, self.sync === sync, self.entities === entities else { return false }
+        do {
+            try await entities.clear()
+            resetRequested = true
+            await TimelineCache.shared.removeAll(scope: client.cacheScope)
+            guard api === client else { return false }
+            NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
+                                            userInfo: ["scope": client.cacheScope, "collections": true, "accessChanged": false])
+        } catch {
+            guard api === client else { return false }
+            syncError = error.localizedDescription
+            isSyncing = false
+        }
+        return resetRequested && isForeground
     }
 
     private func didSync(_ summary: SyncChangeSummary, client: APIClient) async {
