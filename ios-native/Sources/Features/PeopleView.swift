@@ -11,6 +11,7 @@ struct PeopleView: View {
     @State private var loading = false
     @State private var failure: FeatureFailure?
     @State private var editing: Person?
+    @State private var generation = UUID()
     var body: some View {
         ScrollView {
             if people.isEmpty && !loading {
@@ -34,8 +35,10 @@ struct PeopleView: View {
             }
         }
         .navigationTitle("People").searchable(text: $query, prompt: "Find a person")
-        .task { if people.isEmpty { await loadMore() } }
-        .refreshable { page = 1; hasMore = true; await loadMore(replacing: true) }
+        .task(id: query) {
+            do { if !query.isEmpty { try await Task.sleep(for: .milliseconds(250)) }; await loadMore(replacing: true) } catch { }
+        }
+        .refreshable { await loadMore(replacing: true) }
         .sheet(item: $editing) { person in
             NavigationStack { PersonEditor(api: api, person: person) { updated in
                 if let index = people.firstIndex(where: { $0.id == updated.id }) { people[index] = updated }
@@ -46,16 +49,21 @@ struct PeopleView: View {
         } message: { Text(failure?.message ?? "") }
     }
     private func loadMore(replacing: Bool = false) async {
-        guard !loading else { return }
-        loading = true; defer { loading = false }
+        guard replacing || !loading else { return }
+        if replacing { generation = UUID() }
+        let requestGeneration = generation, requestedPage = replacing ? 1 : page
+        loading = true; defer { if requestGeneration == generation { loading = false } }
         do {
-            let result = try await api.people(page: page, size: 100)
+            var parameters = [URLQueryItem(name: "page", value: String(requestedPage)), .init(name: "size", value: "100")]
+            if !query.isEmpty { parameters.append(.init(name: "name", value: query)) }
+            let result: PeopleResponse = try await api.request(.get, path: "people", query: parameters)
+            guard requestGeneration == generation else { return }
             if replacing { people = [] }
             let known = Set(people.map(\.id))
             people += result.people.filter { !known.contains($0.id) }
             hasMore = result.hasNextPage ?? (result.people.count == 100)
-            page += 1
-        } catch is CancellationError { } catch { failure = .init(error) }
+            page = requestedPage + 1
+        } catch is CancellationError { } catch { if requestGeneration == generation { failure = .init(error) } }
     }
 }
 

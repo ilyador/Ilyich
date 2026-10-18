@@ -84,6 +84,7 @@ struct MemoriesView: View {
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
     @State private var memories: [Memory] = []
+    @State private var savedOnly = false
     @State private var loading = true
     @State private var failure: FeatureFailure?
     var body: some View {
@@ -102,7 +103,9 @@ struct MemoriesView: View {
                     }
                 }
             }.padding(.vertical, 16)
-        }.navigationTitle("On this day").task { await load() }.refreshable { await load() }
+        }.navigationTitle(savedOnly ? "Saved memories" : "On this day")
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { Toggle("Saved memories", isOn: $savedOnly).toggleStyle(.button) } }
+        .task(id: savedOnly) { await load() }.refreshable { await load() }
         .alert("Couldn’t update memories", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
@@ -111,7 +114,12 @@ struct MemoriesView: View {
         if let name = memory.data.personName { return name }
         return memory.memoryAt.formatted(.dateTime.month(.wide).day()) + " · " + String(memory.data.year)
     }
-    private func load() async { defer { loading = false }; do { memories = try await api.memories() } catch { failure = .init(error) } }
+    private func load() async {
+        loading = true; defer { loading = false }
+        let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd"; formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.calendar = Calendar(identifier: .gregorian)
+        let query = savedOnly ? [URLQueryItem(name: "isSaved", value: "true")] : [.init(name: "for", value: formatter.string(from: Date()))]
+        do { memories = try await api.request(.get, path: "memories", query: query) } catch is CancellationError { } catch { failure = .init(error) }
+    }
     private func toggleSaved(_ memory: Memory) async {
         do { try await api.requestVoid(.put, path: "memories/\(memory.id)", body: ["isSaved": !memory.isSaved]); await load() } catch { failure = .init(error) }
     }

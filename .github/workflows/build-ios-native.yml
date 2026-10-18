@@ -28,8 +28,6 @@ jobs:
     timeout-minutes: 60
     env:
       APP_VERSION: ${{ inputs.version || '3.3.3' }}
-      DERIVED_DATA: ${{ runner.temp }}/ilyich-native-derived-data
-      TEST_RESULTS: ${{ runner.temp }}/Ilyich-native.xcresult
       ARTIFACT_DIR: ${{ github.workspace }}/ios-native/build/artifacts
     defaults:
       run:
@@ -43,6 +41,8 @@ jobs:
 
       - name: Select Xcode 26.2
         run: |
+          echo "DERIVED_DATA=$RUNNER_TEMP/ilyich-native-derived-data" >> "$GITHUB_ENV"
+          echo "TEST_RESULTS=$RUNNER_TEMP/Ilyich-native.xcresult" >> "$GITHUB_ENV"
           sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version

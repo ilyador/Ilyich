@@ -102,7 +102,7 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
                 case .failure(let error): outcome = Outcome(receipt: nil, error: error.localizedDescription)
                 }
                 // Failure to persist is surfaced rather than claiming a resumable success.
-                do { try JSONEncoder().encode(outcome).write(to: descriptor.receipt, options: .atomic) }
+                do { try JSONEncoder().encode(outcome).write(to: descriptor.receipt, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }
                 catch {
                     waiting.removeValue(forKey: task.taskIdentifier)?.resume(throwing: error)
                     return
