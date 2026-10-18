@@ -14,6 +14,17 @@ final class BackupReceiptTests: XCTestCase {
         XCTAssertFalse(receipt.matches(asset(trashed: true), ownerID: "user"))
     }
 
+    func testOldReceiptsDecodeAndMalformedSizeDoesNotAffectVerification() throws {
+        let old = #"{"modificationDate":0,"original":{"id":"asset","checksum":"sha1"}}"#
+        let receipt = try JSONDecoder().decode(BackupReceipt.self, from: Data(old.utf8))
+        XCTAssertNil(receipt.original.byteCount)
+
+        let remote = #"{"id":"asset","ownerId":"user","checksum":"sha1","isTrashed":false,"exifInfo":{"fileSizeInByte":"oops"}}"#
+        let asset = try JSONDecoder().decode(BackupRemoteAsset.self, from: Data(remote.utf8))
+        XCTAssertTrue(receipt.original.matches(asset, ownerID: "user"))
+        XCTAssertNil(asset.knownByteCount)
+    }
+
     func testSavedPreferencesKeepAutomaticAndCellularOffWhenMissing() throws {
         let preferences = try JSONDecoder().decode(BackupPreferences.self, from: Data("{}".utf8))
         XCTAssertFalse(preferences.automatic)

@@ -173,7 +173,12 @@ struct FreeUpSpaceView: View {
             else if checked && photos.isEmpty { FeatureEmpty(title: "Nothing ready to remove", symbol: "checkmark.shield", description: "No verified originals match your removal settings. Your phone’s photos have not been changed.") }
             else if checked {
                 HStack {
-                    Text("\(photos.count.formatted()) verified items").font(.subheadline)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(photos.count.formatted()) verified items").font(.subheadline)
+                        let ids = selection.isEmpty ? Set(photos.map(\.id)) : selection
+                        Text("Originals size: \(BackupCoordinator.shared.verifiedOriginalByteCount(for: ids).map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "Unavailable")")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button(selection.count == photos.count ? "Deselect all" : "Select all") { selection = selection.count == photos.count ? [] : Set(photos.map(\.id)) }
                 }.padding(.horizontal, 20).padding(.vertical, 8)
