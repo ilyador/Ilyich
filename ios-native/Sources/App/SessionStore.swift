@@ -1,5 +1,6 @@
 import SwiftUI
 import WidgetKit
+import UIKit
 
 @MainActor @Observable final class SessionStore {
     var api: APIClient?
@@ -18,12 +19,24 @@ import WidgetKit
     @ObservationIgnored private var sync: NativeSync?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var syncShutdown: Task<Void, Never>?
+    @ObservationIgnored private var restoreTask: Task<Void, Never>?
+    @ObservationIgnored private var backgroundSyncOwner: UUID?
+    @ObservationIgnored private var backgroundSyncPromoted = false
     @ObservationIgnored private var validationTask: Task<Void, Never>?
     @ObservationIgnored private var isResettingLibraryMetadata = false
-    @ObservationIgnored private var isForeground = true
+    @ObservationIgnored private var isForeground = UIApplication.shared.applicationState == .active
     let isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
 
     func restore() async {
+        if let restoreTask { await restoreTask.value; return }
+        guard isRestoring else { return }
+        let task = Task { @MainActor in await restoreSession() }
+        restoreTask = task
+        await task.value
+        restoreTask = nil
+    }
+
+    private func restoreSession() async {
         defer { isRestoring = false }
         guard !isUITesting else {
             #if DEBUG
@@ -78,16 +91,22 @@ import WidgetKit
     }
 
     func sceneChanged(_ phase: ScenePhase) {
-        if phase == .active { isForeground = true; validateSession(); startSync() }
+        if phase == .active {
+            isForeground = true
+            if backgroundSyncOwner != nil { backgroundSyncPromoted = true }
+            validateSession(); startSync()
+        }
         else if phase == .background {
             isForeground = false
+            backgroundSyncPromoted = false
             syncTask?.cancel(); syncTask = nil; isSyncing = false
-            if let sync { syncShutdown = Task { await sync.stop() } }
+            if backgroundSyncOwner == nil, let sync { syncShutdown = Task { await sync.stop() } }
         }
     }
 
     func startSync() {
-        guard !isResettingLibraryMetadata, syncTask == nil, let sync, let client = api, let entities else { return }
+        guard isForeground, (backgroundSyncOwner == nil || backgroundSyncPromoted),
+              !isResettingLibraryMetadata, syncTask == nil, let sync, let client = api, let entities else { return }
         isSyncing = true; syncError = nil
         syncTask = Task { [weak self] in
             await self?.syncShutdown?.value
@@ -109,6 +128,62 @@ import WidgetKit
             }, onError: { [weak self] error in
                 await self?.syncFailed(error, client: client)
             })
+        }
+    }
+
+    func prepareForBackgroundBackup() async -> Bool {
+        guard backgroundSyncOwner == nil, !isSigningOut, !isResettingLibraryMetadata else { return false }
+        let owner = UUID()
+        backgroundSyncOwner = owner
+        backgroundSyncPromoted = isForeground
+        isSyncing = true
+        defer {
+            if backgroundSyncOwner == owner {
+                backgroundSyncOwner = nil
+                backgroundSyncPromoted = false
+                if !isForeground || isSigningOut { isSyncing = false }
+                else { startSync() }
+            }
+        }
+
+        await restore()
+        guard !Task.isCancelled, backgroundSyncOwner == owner, !isSigningOut,
+              !isResettingLibraryMetadata, !requiresPasswordChange,
+              let client = api, let sync, let entities else { return false }
+        await syncShutdown?.value
+        syncShutdown = nil
+        guard !Task.isCancelled, backgroundSyncOwner == owner, api === client,
+              self.sync === sync, self.entities === entities,
+              !isSigningOut, !isResettingLibraryMetadata, !requiresPasswordChange else { return false }
+
+        await client.attachEntityStore(entities)
+        guard !Task.isCancelled else { return false }
+        do {
+            let summary = try await withTaskCancellationHandler {
+                try await sync.synchronize()
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    guard let self, self.backgroundSyncOwner == owner,
+                          self.api === client, self.sync === sync,
+                          !self.isForeground, !self.backgroundSyncPromoted else { return }
+                    await sync.stop()
+                }
+            }
+            try Task.checkCancellation()
+            guard backgroundSyncOwner == owner, api === client, self.sync === sync,
+                  self.entities === entities, !isSigningOut, !isResettingLibraryMetadata,
+                  !requiresPasswordChange else { return false }
+            if !backgroundSyncPromoted { await didSync(summary, client: client) }
+            return true
+        } catch is CancellationError {
+            if backgroundSyncOwner == owner, api === client, self.sync === sync,
+               !isForeground, !backgroundSyncPromoted { await sync.stop() }
+            return false
+        } catch {
+            guard backgroundSyncOwner == owner, api === client, !isSigningOut,
+                  !isResettingLibraryMetadata, !requiresPasswordChange else { return false }
+            await syncFailed(error, client: client)
+            return false
         }
     }
 

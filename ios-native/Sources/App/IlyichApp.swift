@@ -2,9 +2,14 @@ import SwiftUI
 
 @main struct IlyichApp: App {
     @UIApplicationDelegateAdaptor(BackupAppDelegate.self) private var appDelegate
-    @State private var session = SessionStore()
+    @State private var session: SessionStore
     @Environment(\.scenePhase) private var scenePhase
-    init() { _ = CastController.shared }
+    init() {
+        let session = SessionStore()
+        _session = State(initialValue: session)
+        BackupLifecycle.shared.setBackgroundPreparation { await session.prepareForBackgroundBackup() }
+        _ = CastController.shared
+    }
     var body: some Scene {
         WindowGroup {
             Group {
@@ -30,7 +35,7 @@ import SwiftUI
             .tint(.primary)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }
-            .onChange(of: scenePhase) { _, phase in session.sceneChanged(phase) }
+            .onChange(of: scenePhase, initial: true) { _, phase in session.sceneChanged(phase) }
         }
     }
 }
