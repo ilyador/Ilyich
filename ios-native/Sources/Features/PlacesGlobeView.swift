@@ -227,11 +227,11 @@ private struct GlobeSurface: UIViewRepresentable {
                 let distance = hypot(point.x - projected.x, point.y - projected.y)
                 if distance < 32, nearest == nil || distance < nearest!.0 { nearest = (distance, place) }
             }
-            if let place = nearest?.1 { stop(); selection?(place); UISelectionFeedbackGenerator().selectionChanged() }
+            if let place = nearest?.1 { stop(); selection?(place); Haptics.selectionChanged() }
         }
         @objc private func photoMarkerTapped(_ sender: GlobePhotoMarker) {
             guard let place = sender.place else { return }
-            stop(); selection?(place); UISelectionFeedbackGenerator().selectionChanged()
+            stop(); selection?(place); Haptics.selectionChanged()
         }
         func updatePhotoMarkers() {
             guard let view, let api, let pipeline, active, view.bounds.width > 0 else {
