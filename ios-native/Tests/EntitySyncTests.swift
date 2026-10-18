@@ -338,7 +338,7 @@ extension EntitySyncTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try makeStore(root), epoch = await store.epoch()
         func located(_ id: String, owner: String = "alice", visibility: String = "timeline", favorite: Bool = true, deleted: Bool = false) throws -> [EntitySyncEvent] {
-            [try asset(id, owner: owner, visibility: visibility, favorite: favorite, deleted: deleted),
+            [try asset(id, owner: owner, visibility: visibility, deleted: deleted, favorite: favorite),
              try event("AssetExifV1", #"{"assetId":"\#(id)","latitude":38.7,"longitude":-9.1,"city":"Lisbon","state":"Lisbon","country":"Portugal"}"#)]
         }
         var events = try located("owned")
