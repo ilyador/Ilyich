@@ -7,6 +7,8 @@ struct SettingsView: View {
     let onSignOut: () -> Void
     @AppStorage("gridColumns") private var columns = 4
     @AppStorage("appearance") private var appearance = "system"
+    @AppStorage("hapticFeedback") private var haptics = true
+    @AppStorage("timelineStorageIndicator") private var storageIndicator = true
     @State private var user: User?
     @State private var failure: FeatureFailure?
     @State private var confirmSignOut = false
@@ -39,6 +41,8 @@ struct SettingsView: View {
                 NavigationLink("Photo and video viewer") { ViewerSettingsView() }
                 NavigationLink("Slideshow") { SlideshowSettingsView() }
                 Picker("Grid", selection: $columns) { ForEach(2...6, id: \.self) { Text("\($0) columns").tag($0) } }
+                Toggle("Storage indicators", isOn: $storageIndicator)
+                Toggle("Haptic feedback", isOn: $haptics)
             }
             Section {
                 NavigationLink { NetworkSettingsView(api: api, server: api.baseURL) } label: { Label("Network", systemImage: "network") }

@@ -6,6 +6,7 @@ struct PhotoGrid: UIViewRepresentable {
     let store: LibraryStore
     let pipeline: MediaPipeline
     let columns: Int
+    var showsStorageIndicator = true
     let topInset: CGFloat
     let bottomInset: CGFloat
     var onDensityChange: ((Int) -> Void)? = nil
@@ -62,13 +63,14 @@ struct PhotoGrid: UIViewRepresentable {
                     view.setContentOffset(CGPoint(x: 0, y: attributes.frame.minY + position.offset), animated: false)
                 } else { view.setContentOffset(CGPoint(x: 0, y: -topInset), animated: false) }
             }
-        } else if coordinator.revision != store.revision || coordinator.selection != store.selected || coordinator.selecting != store.isSelecting {
+        } else if coordinator.revision != store.revision || coordinator.selection != store.selected || coordinator.selecting != store.isSelecting || coordinator.showsStorage != showsStorageIndicator {
             for cell in view.visibleCells {
                 guard let cell = cell as? PhotoCell, let index = view.indexPath(for: cell) else { continue }
                 coordinator.configure(cell, at: index)
             }
         }
         coordinator.revision = store.revision; coordinator.selection = store.selected; coordinator.selecting = store.isSelecting
+        coordinator.showsStorage = showsStorageIndicator
         if let request = store.scrollRequest, request.id != coordinator.lastScrollRequest,
            let index = store.restoredIndex(for: request.position) {
             coordinator.lastScrollRequest = request.id
@@ -86,6 +88,7 @@ struct PhotoGrid: UIViewRepresentable {
         var revision = -1
         var selection: Set<String> = []
         var selecting = false
+        var showsStorage = true
         var lastScrollRequest: UUID?
         init(_ parent: PhotoGrid) { self.parent = parent }
         func numberOfSections(in collectionView: UICollectionView) -> Int { sections.count }
@@ -99,7 +102,7 @@ struct PhotoGrid: UIViewRepresentable {
             let entry = parent.store.entry(section: index.section, item: index.item)
             cell.configure(entry: entry, pipeline: parent.pipeline,
                            selected: entry.map { parent.store.selected.contains($0.id) } ?? false,
-                           selecting: parent.store.isSelecting,
+                           selecting: parent.store.isSelecting, showsStorage: parent.showsStorageIndicator,
                            month: index.item == 0 && sections.indices.contains(index.section) ? sections[index.section].title : nil)
             if entry == nil { parent.store.requestBucket(index.section) }
             if sections.indices.contains(index.section), sections[index.section].id == "results",
@@ -111,14 +114,14 @@ struct PhotoGrid: UIViewRepresentable {
             guard let entry = parent.store.entry(section: indexPath.section, item: indexPath.item) else { return }
             if parent.store.isSelecting {
                 parent.store.toggleSelection(entry)
-                UISelectionFeedbackGenerator().selectionChanged()
+                Haptics.selectionChanged()
             } else if let asset = entry.remote { parent.onOpen(asset) }
             else if let photo = entry.local { parent.onOpenLocal?(photo) }
         }
         @objc func selectByDragging(_ gesture: UILongPressGestureRecognizer) {
             guard let collection, let index = collection.indexPathForItem(at: gesture.location(in: collection)),
                   let entry = parent.store.entry(section: index.section, item: index.item) else { return }
-            if gesture.state == .began { parent.store.isSelecting = true; UISelectionFeedbackGenerator().selectionChanged() }
+            if gesture.state == .began { parent.store.isSelecting = true; Haptics.selectionChanged() }
             if gesture.state == .began || gesture.state == .changed { parent.store.select(entry) }
         }
         @objc func changeDensity(_ gesture: UIPinchGestureRecognizer) {
@@ -255,12 +258,12 @@ struct PhotoGrid: UIViewRepresentable {
     }
     required init?(coder: NSCoder) { fatalError("PhotoCell is created programmatically") }
     override func prepareForReuse() { super.prepareForReuse(); task?.cancel(); task = nil; localMedia?.cancel(); localMedia = nil; identity = nil; image.image = nil }
-    func configure(entry: LibraryEntry?, pipeline: MediaPipeline, selected: Bool, selecting: Bool, month: String?) {
+    func configure(entry: LibraryEntry?, pipeline: MediaPipeline, selected: Bool, selecting: Bool, showsStorage: Bool = true, month: String?) {
         check.isHidden = !selecting
         check.image = UIImage(systemName: selected ? "checkmark.circle.fill" : "circle")
         self.month.text = month.map { " \($0) " }; self.month.isHidden = month == nil
         accessibilityTraits = selected ? [.button, .selected] : [.button]
-        storage.isHidden = entry == nil
+        storage.isHidden = entry == nil || !showsStorage
         if case .local(let photo) = entry {
             accessibilityLabel = photo.title + ", on this phone"
             storage.image = UIImage(systemName: "iphone")

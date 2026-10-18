@@ -45,7 +45,7 @@ struct TimeRail: View {
                 let target = Int(min(1, max(0, (value.location.y - 24) / height)) * Double(total))
                 var sum = 0
                 let index = buckets.firstIndex { sum += $0.count; return sum > target } ?? max(0, buckets.count - 1)
-                if selected != index { choose(index); UISelectionFeedbackGenerator().selectionChanged() }
+                if selected != index { choose(index); Haptics.selectionChanged() }
             }.onEnded { _ in scheduleDismiss() })
             .onTapGesture { expanded = true; visible = true; scheduleDismiss(delay: .seconds(3)) }
             .accessibilityElement(children: expanded ? .contain : .ignore)
