@@ -205,6 +205,22 @@ actor EntityStore {
         }
     }
 
+    /// Mirrors the server's `GET /partners`: the other user of each relationship, with the relationship's `inTimeline`.
+    func partners(direction: String) throws -> [Partner] {
+        let (mine, theirs): (String, String)
+        switch direction {
+        case "shared-with": (mine, theirs) = ("sharedWithId", "sharedById")
+        case "shared-by": (mine, theirs) = ("sharedById", "sharedWithId")
+        default: throw APIError.invalidResponse("Unsupported partner direction.")
+        }
+        return try database.query("SELECT u.payload,p.payload FROM entities p JOIN entities u ON u.kind='user' AND u.id=json_extract(p.payload,'$.\(theirs)') WHERE p.kind='partner' AND json_extract(p.payload,'$.\(mine)')=? AND json_extract(u.payload,'$.deletedAt') IS NULL ORDER BY json_extract(u.payload,'$.name') COLLATE NOCASE, u.id", [userID]).compactMap { row in
+            guard let user = row[0], let relation = row[1] else { return nil }
+            var object = try JSONDecoder().decode([String: EntityJSON].self, from: Data(user.utf8))
+            object["inTimeline"] = try JSONDecoder().decode([String: EntityJSON].self, from: Data(relation.utf8))["inTimeline"]
+            return try APIJSON.decoder().decode(Partner.self, from: JSONEncoder().encode(object))
+        }
+    }
+
     func assetOCR(id: String) throws -> [RecognizedText] {
         guard try entityData(kind: "asset", id: id) != nil else { return [] }
         return try database.query("SELECT payload FROM entities WHERE kind='ocr' AND json_extract(payload,'$.assetId')=? AND json_extract(payload,'$.isVisible')=1 ORDER BY id", [id]).compactMap { row in

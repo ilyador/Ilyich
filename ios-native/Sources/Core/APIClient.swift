@@ -165,7 +165,7 @@ actor APIClient {
     }
     func syncStatistics() async throws -> EntityStoreStatistics? { try await entityStore?.statistics() }
     private func canReadOffline(_ error: any Error) -> Bool {
-        error is URLError && (error as? URLError)?.code != .cancelled && !Task.isCancelled
+        TransportFailure.isDefinite(error) && !Task.isCancelled
     }
     func asset(id: String) async throws -> Asset {
         do { return try await request(.get, path: "assets/\(id)") }
@@ -229,7 +229,9 @@ actor APIClient {
         }
     }
     func partners(direction: String = "shared-with") async throws -> [Partner] {
-        try await request(.get, path: "partners", query: [.init(name: "direction", value: direction)])
+        guard ["shared-with", "shared-by"].contains(direction) else { throw APIError.invalidResponse("Unsupported partner direction.") }
+        do { return try await request(.get, path: "partners", query: [.init(name: "direction", value: direction)]) }
+        catch { if canReadOffline(error), let store = entityStore, try await store.isComplete() { return try await store.partners(direction: direction) }; throw error }
     }
     func sharedLinks() async throws -> [SharedLink] { try await request(.get, path: "shared-links") }
     func createSharedLink(_ body: SharedLinkCreation) async throws -> SharedLink { try await request(.post, path: "shared-links", body: body) }
