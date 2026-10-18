@@ -22,10 +22,10 @@ struct PixelCrop: Codable, Equatable, Sendable {
         guard size.width > 0, size.height > 0, [x, y, width, height].allSatisfy(\.isFinite), width > 0, height > 0 else {
             throw APIError.invalidResponse("The image dimensions are unavailable for cropping.")
         }
-        let left = min(size.width - 1, max(0, Int((x * Double(size.width)).rounded(.down))))
-        let top = min(size.height - 1, max(0, Int((y * Double(size.height)).rounded(.down))))
-        let right = min(size.width, max(left + 1, Int(((x + width) * Double(size.width)).rounded())))
-        let bottom = min(size.height, max(top + 1, Int(((y + height) * Double(size.height)).rounded())))
+        let left = min(size.width - 1, Int((min(1, max(0, x)) * Double(size.width)).rounded(.down)))
+        let top = min(size.height - 1, Int((min(1, max(0, y)) * Double(size.height)).rounded(.down)))
+        let right = min(size.width, max(left + 1, Int((min(1, max(0, x + width)) * Double(size.width)).rounded())))
+        let bottom = min(size.height, max(top + 1, Int((min(1, max(0, y + height)) * Double(size.height)).rounded())))
         return .init(x: left, y: top, width: right - left, height: bottom - top)
     }
 }

@@ -219,9 +219,10 @@ actor APIClient {
         if !useOriginal { query.append(.init(name: "size", value: "fullsize")) }
         let (temporaryURL, response) = try await session.download(for: authorizedRequest(path: path, query: query))
         try Self.validate(response)
+        try Task.checkCancellation()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let rawName = response.suggestedFilename ?? (original ? asset.originalFileName : "photo.jpg")
+        let rawName = response.suggestedFilename ?? (useOriginal ? asset.originalFileName : "photo.jpg")
         let name = (rawName as NSString).lastPathComponent.replacingOccurrences(of: "\\", with: "_")
         let destination = directory.appendingPathComponent(name.isEmpty || name == "." || name == ".." ? "photo" : name)
         try FileManager.default.moveItem(at: temporaryURL, to: destination)

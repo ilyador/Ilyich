@@ -76,8 +76,7 @@ struct AssetViewer: View {
         }
         .sheet(isPresented: $info) {
             NavigationStack {
-                AssetInfoView(api: api, pipeline: pipeline, asset: current, onUpdated: update,
-                              onExportOriginal: { exportAsset(original: true) })
+                AssetInfoView(api: api, pipeline: pipeline, asset: current, onUpdated: update)
                 .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { info = false } } }
             }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
         }

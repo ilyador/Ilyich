@@ -6,7 +6,6 @@ struct AssetInfoView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onUpdated: (Asset) -> Void
-    let onExportOriginal: () -> Void
     @State private var asset: Asset
     @State private var caption: String
     @State private var albums: [Album] = []
@@ -17,9 +16,10 @@ struct AssetInfoView: View {
     @State private var editingFaces = false
     @State private var collection: InfoCollection?
     @State private var saving = false
+    @State private var export: ViewerExport?
 
-    init(api: APIClient, pipeline: MediaPipeline, asset: Asset, onUpdated: @escaping (Asset) -> Void, onExportOriginal: @escaping () -> Void) {
-        self.api = api; self.pipeline = pipeline; self.onUpdated = onUpdated; self.onExportOriginal = onExportOriginal
+    init(api: APIClient, pipeline: MediaPipeline, asset: Asset, onUpdated: @escaping (Asset) -> Void) {
+        self.api = api; self.pipeline = pipeline; self.onUpdated = onUpdated
         _asset = State(initialValue: asset); _caption = State(initialValue: asset.exifInfo?.description ?? "")
     }
     private var ownsAsset: Bool { asset.ownerId == nil || asset.ownerId == api.userID }
@@ -81,7 +81,14 @@ struct AssetInfoView: View {
                     Text("Preview developed from the XMP sidecar.").font(.caption).foregroundStyle(.secondary)
                 }
                 if asset.isEdited { Label("Edited in Ilyich", systemImage: "crop.rotate") }
-                Button("Download original", systemImage: "arrow.down.document", action: onExportOriginal)
+                Button("Download original", systemImage: "arrow.down.document") {
+                    saving = true
+                    Task {
+                        defer { saving = false }
+                        do { export = ViewerExport(url: try await api.download(asset: asset, original: true)) }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }.disabled(saving)
             }
             if !(asset.people ?? []).isEmpty || ownsAsset {
                 Section("People") {
@@ -121,6 +128,7 @@ struct AssetInfoView: View {
         .sheet(item: $collection) { selection in
             NavigationStack { InfoCollectionView(api: api, pipeline: pipeline, collection: selection) }
         }
+        .sheet(item: $export) { item in ViewerShareSheet(url: item.url).onDisappear { item.removeTemporaryFile() } }
     }
     private func exifMetric(_ title: String, value: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) { Text(value ?? "—").font(.headline); Text(title).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading)
@@ -160,8 +168,8 @@ private struct MetadataEditor: View {
     init(api: APIClient, asset: Asset, onUpdated: @escaping (Asset) -> Void) {
         self.api = api; self.asset = asset; self.onUpdated = onUpdated
         _date = State(initialValue: asset.fileCreatedAt ?? .now)
-        _latitude = State(initialValue: asset.exifInfo?.latitude.map(String.init) ?? "")
-        _longitude = State(initialValue: asset.exifInfo?.longitude.map(String.init) ?? "")
+        _latitude = State(initialValue: asset.exifInfo?.latitude.map { String($0) } ?? "")
+        _longitude = State(initialValue: asset.exifInfo?.longitude.map { String($0) } ?? "")
     }
     var body: some View {
         Form {

@@ -8,14 +8,16 @@ struct PlacesGlobeView: View {
     let places: [PlaceCollection]
     var focus: PlaceFocus? = nil
     var compact = false
+    var api: APIClient? = nil
+    var pipeline: MediaPipeline? = nil
     let onSelect: (PlaceCollection) -> Void
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
-        GlobeSurface(places: places, focus: focus, compact: compact, dark: colorScheme == .dark,
+        GlobeSurface(places: places, focus: focus, compact: compact, api: api, pipeline: pipeline, dark: colorScheme == .dark,
                      reduceMotion: reduceMotion, active: scenePhase == .active, onSelect: onSelect)
-            .accessibilityElement(children: .ignore)
+            .accessibilityElement(children: .contain)
             .accessibilityLabel("Interactive Earth")
             .accessibilityHint("Drag to rotate and pinch to zoom. Choose a location from the list to explore its photos.")
     }
@@ -25,24 +27,27 @@ private struct GlobeSurface: UIViewRepresentable {
     let places: [PlaceCollection]
     let focus: PlaceFocus?
     let compact: Bool
+    let api: APIClient?
+    let pipeline: MediaPipeline?
     let dark: Bool
     let reduceMotion: Bool
     let active: Bool
     let onSelect: (PlaceCollection) -> Void
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> ARView {
-        let view = ARView(frame: .zero, cameraMode: .nonAR, automaticallyConfigureSession: false)
+        let view = GlobeARView(frame: .zero, cameraMode: .nonAR, automaticallyConfigureSession: false)
         view.environment.background = .color(.clear)
         view.isOpaque = false
         view.renderOptions = [.disableMotionBlur, .disableDepthOfField, .disableGroundingShadows, .disableCameraGrain]
         context.coordinator.cameraDistance = compact ? 2.6 : 3.2
         context.coordinator.setUp(view)
+        view.onLayout = { [weak coordinator = context.coordinator] in coordinator?.updatePhotoMarkers() }
         return view
     }
     func updateUIView(_ view: ARView, context: Context) {
-        context.coordinator.update(places: places, focus: focus, dark: dark, reduceMotion: reduceMotion, active: active, onSelect: onSelect)
+        context.coordinator.update(places: places, focus: focus, api: api, pipeline: pipeline, dark: dark, reduceMotion: reduceMotion, active: active, onSelect: onSelect)
     }
-    static func dismantleUIView(_ view: ARView, coordinator: Coordinator) { coordinator.stop(); view.scene.anchors.removeAll() }
+    static func dismantleUIView(_ view: ARView, coordinator: Coordinator) { coordinator.stop(); coordinator.photoMarkers.forEach { $0.cancelImage() }; view.scene.anchors.removeAll() }
 
     @MainActor final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         weak var view: ARView?
@@ -68,6 +73,10 @@ private struct GlobeSurface: UIViewRepresentable {
         var panOrigin = SIMD2<Float>.zero
         var pinchOrigin: Float = 3.2
         var velocity = SIMD2<Float>.zero
+        var api: APIClient?
+        var pipeline: MediaPipeline?
+        var photoMarkers: [GlobePhotoMarker] = []
+        let markerImageCache = GlobeMarkerImageCache()
         var displayLink: CADisplayLink?
         var lastTimestamp: CFTimeInterval = 0
 
@@ -101,11 +110,19 @@ private struct GlobeSurface: UIViewRepresentable {
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinch(_:)))
             pinch.delegate = self
             view.addGestureRecognizer(pan); view.addGestureRecognizer(pinch)
-            view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tap(_:))))
+            let tap = UITapGestureRecognizer(target: self, action: #selector(tap(_:)))
+            tap.delegate = self; view.addGestureRecognizer(tap)
+            for _ in 0..<8 {
+                let marker = GlobePhotoMarker()
+                marker.isHidden = true
+                marker.addTarget(self, action: #selector(photoMarkerTapped(_:)), for: .touchUpInside)
+                view.addSubview(marker); photoMarkers.append(marker)
+            }
             applyTransform()
         }
 
-        func update(places: [PlaceCollection], focus: PlaceFocus?, dark: Bool, reduceMotion: Bool, active: Bool, onSelect: @escaping (PlaceCollection) -> Void) {
+        func update(places: [PlaceCollection], focus: PlaceFocus?, api: APIClient?, pipeline: MediaPipeline?, dark: Bool, reduceMotion: Bool, active: Bool, onSelect: @escaping (PlaceCollection) -> Void) {
+            self.api = api; self.pipeline = pipeline
             selection = onSelect; self.reduceMotion = reduceMotion; self.active = active
             if reduceMotion || !active { stop() }
             if night != dark {
@@ -138,6 +155,7 @@ private struct GlobeSurface: UIViewRepresentable {
                 }
                 applyTransform()
             }
+            updatePhotoMarkers()
         }
 
         private func addMarker(_ place: PlaceCollection, highlighted: Bool = false) {
@@ -162,6 +180,7 @@ private struct GlobeSurface: UIViewRepresentable {
         private func applyTransform() {
             globe.orientation = simd_quatf(angle: pitch, axis: [1, 0, 0]) * simd_quatf(angle: yaw, axis: [0, 1, 0])
             camera.position = [0, 0, cameraDistance]
+            updatePhotoMarkers()
         }
         @objc private func pan(_ recognizer: UIPanGestureRecognizer) {
             guard let view else { return }
@@ -196,6 +215,44 @@ private struct GlobeSurface: UIViewRepresentable {
                 if distance < 32, nearest == nil || distance < nearest!.0 { nearest = (distance, place) }
             }
             if let place = nearest?.1 { stop(); selection?(place); UISelectionFeedbackGenerator().selectionChanged() }
+        }
+        @objc private func photoMarkerTapped(_ sender: GlobePhotoMarker) {
+            guard let place = sender.place else { return }
+            stop(); selection?(place); UISelectionFeedbackGenerator().selectionChanged()
+        }
+        func updatePhotoMarkers() {
+            guard let view, let api, let pipeline, active, view.bounds.width > 0 else {
+                photoMarkers.forEach { $0.isHidden = true }; return
+            }
+            var placed: [CGRect] = []
+            var visible: [(CGPoint, PlaceCollection)] = []
+            let ordered = markers.sorted { left, right in
+                if left.1.id.hasPrefix("focused-") { return true }
+                if right.1.id.hasPrefix("focused-") { return false }
+                return left.1.assetIDs.count > right.1.assetIDs.count
+            }
+            for (entity, place) in ordered {
+                let world = entity.position(relativeTo: nil)
+                guard simd_dot(world, camera.position - world) > 0.12, let point = view.project(world) else { continue }
+                let width: CGFloat = min(190, max(126, CGFloat(place.title.count) * 7 + 72))
+                let frame = CGRect(x: point.x - width / 2, y: point.y - 30, width: width, height: 54)
+                guard view.bounds.insetBy(dx: 6, dy: 6).contains(frame), !placed.contains(where: { $0.insetBy(dx: -8, dy: -10).intersects(frame) }) else { continue }
+                placed.append(frame); visible.append((point, place))
+                if placed.count == photoMarkers.count { break }
+            }
+            for (index, marker) in photoMarkers.enumerated() {
+                guard index < visible.count else { marker.isHidden = true; marker.cancelImage(); continue }
+                marker.frame = placed[index]; marker.isHidden = false
+                marker.configure(place: visible[index].1, api: api, pipeline: pipeline, cache: markerImageCache)
+            }
+        }
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var current = touch.view
+            while let candidate = current, candidate !== view {
+                if candidate is UIControl { return false }
+                current = candidate.superview
+            }
+            return true
         }
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
         private func startInertia() {
@@ -243,5 +300,72 @@ private struct GlobeSurface: UIViewRepresentable {
             descriptor.textureCoordinates = MeshBuffer(coordinates); descriptor.primitives = .triangles(indices)
             return try MeshResource.generate(from: [descriptor])
         }
+    }
+}
+
+
+@MainActor private final class GlobeARView: ARView {
+    var onLayout: (() -> Void)?
+    override func layoutSubviews() { super.layoutSubviews(); onLayout?() }
+}
+
+@MainActor private final class GlobePhotoMarker: UIControl {
+    private let backdrop = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+    private let thumbnail = UIImageView()
+    private let nameLabel = UILabel()
+    private let countLabel = UILabel()
+    private var imageTask: Task<Void, Never>?
+    private var imageID: String?
+    var place: PlaceCollection?
+
+    init() {
+        super.init(frame: .zero)
+        isAccessibilityElement = true; accessibilityTraits = .button
+        backdrop.isUserInteractionEnabled = false
+        backdrop.layer.cornerRadius = 27; backdrop.clipsToBounds = true
+        addSubview(backdrop)
+        thumbnail.contentMode = .scaleAspectFill; thumbnail.clipsToBounds = true; thumbnail.layer.cornerRadius = 10
+        thumbnail.backgroundColor = .secondarySystemFill
+        nameLabel.font = .preferredFont(forTextStyle: .subheadline); nameLabel.textColor = .label
+        countLabel.font = .preferredFont(forTextStyle: .caption2); countLabel.textColor = .secondaryLabel
+        for view in [thumbnail, nameLabel, countLabel] { view.isUserInteractionEnabled = false; addSubview(view) }
+        layer.shadowColor = UIColor.black.cgColor; layer.shadowOpacity = 0.18; layer.shadowRadius = 8; layer.shadowOffset = CGSize(width: 0, height: 4)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func layoutSubviews() {
+        super.layoutSubviews(); backdrop.frame = bounds
+        thumbnail.frame = CGRect(x: 9, y: 9, width: 36, height: 36)
+        nameLabel.frame = CGRect(x: 54, y: 8, width: bounds.width - 65, height: 22)
+        countLabel.frame = CGRect(x: 54, y: 30, width: bounds.width - 65, height: 15)
+    }
+    func configure(place: PlaceCollection, api: APIClient, pipeline: MediaPipeline, cache: GlobeMarkerImageCache) {
+        self.place = place; nameLabel.text = place.title; countLabel.text = place.assetIDs.count.formatted()
+        accessibilityLabel = "\(place.title), \(place.assetIDs.count) items"
+        guard let id = place.assetIDs.first, id != imageID else { return }
+        imageTask?.cancel(); imageID = id; thumbnail.image = nil
+        if let image = cache.images[id] { thumbnail.image = image; return }
+        imageTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(120))
+                let asset = try await api.asset(id: id)
+                let image = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: 120)
+                try Task.checkCancellation()
+                guard let self, self.imageID == id else { return }
+                let uiImage = image.uiImage
+                self.thumbnail.image = uiImage; cache.insert(uiImage, id: id)
+            } catch { }
+        }
+    }
+    func cancelImage() { imageTask?.cancel(); imageTask = nil; imageID = nil }
+}
+
+
+@MainActor private final class GlobeMarkerImageCache {
+    var images: [String: UIImage] = [:]
+    private var order: [String] = []
+    func insert(_ image: UIImage, id: String) {
+        if images[id] == nil { order.append(id) }
+        images[id] = image
+        if order.count > 64 { images.removeValue(forKey: order.removeFirst()) }
     }
 }

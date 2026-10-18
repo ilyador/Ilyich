@@ -1,5 +1,5 @@
 import SwiftUI
-import Security
+import WidgetKit
 
 @MainActor @Observable final class SessionStore {
     var api: APIClient?
@@ -37,6 +37,7 @@ import Security
     func acceptLogin(_ result: LoginResponse, server: URL) throws {
         let saved = SavedSession(server: server, token: result.accessToken, userID: result.userId, name: result.name)
         if !isUITesting { try SessionKeychain.save(saved) }
+        if !isUITesting { WidgetCenter.shared.reloadAllTimelines() }
         try connect(saved)
     }
 
@@ -51,6 +52,7 @@ import Security
         do {
             await BackupCoordinator.shared.disconnect()
             if !isUITesting { try SessionKeychain.remove() }
+            if !isUITesting { WidgetCenter.shared.reloadAllTimelines() }
             let previous = api
             if let previous { LockedPINStore.remove(for: previous) }
             let previousPipeline = pipeline
