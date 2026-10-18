@@ -65,7 +65,7 @@ actor MediaPipeline {
     }
 
     func animation(for asset: Asset, pixelSize: Int) async throws -> AnimatedImageSource {
-        guard asset.isAnimatedImage, !asset.isDeveloped, !asset.isEdited else { throw APIError.invalidResponse("This photo uses a developed preview.") }
+        guard asset.hasKnownEditState, asset.isAnimatedImage, !asset.isDeveloped, !asset.isEdited else { throw APIError.invalidResponse("Use this photo’s processed preview until its edit information is available.") }
         let epoch = generation, privateEpoch = privateGeneration
         let file = try await client.download(asset: asset, original: true)
         do {

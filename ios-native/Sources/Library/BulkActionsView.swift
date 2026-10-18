@@ -16,7 +16,11 @@ struct BulkActionsView: View {
     @State private var confirmTrash = false
     @State private var features: ServerFeatures?
     private var ids: [String] { assets.map(\.id) }
-    private var owned: Bool { !assets.isEmpty && assets.allSatisfy { $0.ownerId == api.userID } }
+    @State private var featuresFailure: String?
+    private var owned: Bool {
+        guard let userID = api.userID, !assets.isEmpty else { return false }
+        return assets.allSatisfy { $0.ownerId == userID }
+    }
     private var favorites: Bool { assets.allSatisfy(\.isFavorite) }
     private var archived: Bool { assets.allSatisfy { $0.visibility == .archive } }
     private var writableAlbums: [Album] { albums.filter { $0.albumUsers?.contains(where: { $0.user.id == api.userID && ["owner", "editor"].contains($0.role) }) == true } }
@@ -35,7 +39,7 @@ struct BulkActionsView: View {
         .overlay(alignment: .bottom) {
             if busy { Button("Cancel") { operation?.cancel() }.buttonStyle(.glass).padding().disabled(false) }
         }
-        .task { albums = (try? await api.albums()) ?? []; features = try? await api.serverFeatures() }
+        .task { albums = (try? await api.albums()) ?? []; await loadFeatures() }
         .onDisappear { operation?.cancel() }
         .sheet(item: $share, onDismiss: { share?.clean(); share = nil }) { item in
             BulkShareSheet(urls: item.files).onDisappear { item.clean() }
@@ -68,7 +72,20 @@ struct BulkActionsView: View {
             Button("Move to Locked Folder", systemImage: "lock") { update(.init(ids: ids, visibility: .locked)) }
             if assets.count > 1 { Button("Stack photos", systemImage: "square.stack.3d.up", action: stack) }
             Button(features?.trash == false ? "Delete permanently" : "Move to Trash", systemImage: "trash", role: .destructive) { confirmTrash = true }
+                .disabled(features == nil)
+            if features == nil, let featuresFailure {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Couldn’t check whether Trash is available, so delete is unavailable. \(featuresFailure)").font(.footnote).foregroundStyle(.secondary)
+                    Button("Retry", systemImage: "arrow.clockwise") { Task { await loadFeatures() } }
+                }
+            }
         }.requiresWriteAccess(api)
+    }
+    private func loadFeatures() async {
+        featuresFailure = nil
+        do { let loaded = try await api.serverFeatures(); try Task.checkCancellation(); features = loaded }
+        catch is CancellationError { }
+        catch { featuresFailure = error.localizedDescription }
     }
     private func add(to album: Album) { run {
         let result = try await api.addToAlbum(id: album.id, assetIDs: ids)

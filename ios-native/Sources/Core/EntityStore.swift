@@ -108,6 +108,36 @@ actor EntityStore {
         }
         return result
     }
+    func memories(onCivilDate day: String) throws -> [Memory] {
+        let preference = try database.query("SELECT json_extract(payload,'$.value.memories.enabled') FROM entities WHERE kind='userMetadata' AND json_extract(payload,'$.userId')=? AND json_extract(payload,'$.key')='preferences'", [userID]).first?[0]
+        guard preference != "0" else { return [] }
+        let rows = try database.query("""
+        SELECT payload FROM entities WHERE kind='memory' AND json_extract(payload,'$.ownerId')=?
+        AND json_extract(payload,'$.deletedAt') IS NULL
+        AND (json_extract(payload,'$.showAt') IS NULL OR julianday(json_extract(payload,'$.showAt'))<=julianday(?))
+        AND (json_extract(payload,'$.hideAt') IS NULL OR julianday(json_extract(payload,'$.hideAt'))>=julianday(?))
+        ORDER BY json_extract(payload,'$.showAt') IS NULL,julianday(json_extract(payload,'$.showAt')) DESC,julianday(json_extract(payload,'$.memoryAt')) DESC
+        """, [userID, day, day])
+        return try rows.compactMap { row in
+            guard let payload = row[0] else { return nil }
+            var object = try JSONDecoder().decode([String: EntityJSON].self, from: Data(payload.utf8))
+            guard let id = object["id"]?.string else { return nil }
+            let assetRows = try database.query("""
+            SELECT a.payload FROM entities r JOIN entities a ON a.kind='asset' AND a.id=json_extract(r.payload,'$.assetId')
+            WHERE r.kind='memoryAsset' AND json_extract(r.payload,'$.memoryId')=?
+            AND json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL
+            AND NOT EXISTS(SELECT 1 FROM entities f JOIN entities p ON p.kind='person' AND p.id=json_extract(f.payload,'$.personId')
+                           WHERE f.kind='face' AND json_extract(f.payload,'$.assetId')=a.id AND json_extract(p.payload,'$.isHidden')=1)
+            ORDER BY julianday(json_extract(a.payload,'$.fileCreatedAt')) ASC,a.id
+            """, [id])
+            object["assets"] = .array([])
+            var memory = try APIJSON.decoder().decode(Memory.self, from: JSONEncoder().encode(object))
+            memory.assets = try assetRows.compactMap { row in
+                try row[0].map { try decodeAsset(Data($0.utf8)) }
+            }
+            return memory.assets.isEmpty ? nil : memory
+        }
+    }
     func timelineAssets(filter: TimelineFilter = .init(), offset: Int = 0, limit: Int = 200) throws -> [Asset] {
         let (whereSQL, arguments) = timelinePredicate(filter)
         let date = filter.orderBy == "createdAt" ? "createdAt" : "localDateTime"
@@ -333,6 +363,7 @@ private final class EntityDatabase: @unchecked Sendable {
             try execute("CREATE TABLE IF NOT EXISTS acknowledgements(type TEXT PRIMARY KEY,ack TEXT NOT NULL)")
             try execute("CREATE INDEX IF NOT EXISTS entity_asset ON entities(kind,json_extract(payload,'$.assetId'))")
             try execute("CREATE INDEX IF NOT EXISTS entity_album ON entities(kind,json_extract(payload,'$.albumId'))")
+            try execute("CREATE INDEX IF NOT EXISTS entity_memory ON entities(kind,json_extract(payload,'$.memoryId'))")
             try execute("CREATE INDEX IF NOT EXISTS asset_stack ON entities(kind,json_extract(payload,'$.stackId'))")
             try execute("CREATE INDEX IF NOT EXISTS asset_timeline ON entities(kind,json_extract(payload,'$.ownerId'),json_extract(payload,'$.visibility'),json_extract(payload,'$.localDateTime'))")
             sqlite3_busy_timeout(handle, 5_000)

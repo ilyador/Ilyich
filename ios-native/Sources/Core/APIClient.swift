@@ -179,11 +179,15 @@ actor APIClient {
         catch { if canReadOffline(error), let store = entityStore, try await store.isComplete() { return try await store.albums() }; throw error }
     }
     func album(id: String) async throws -> Album { try await request(.get, path: "albums/\(id)") }
-    func people(page: Int = 1, size: Int = 100) async throws -> PeopleResponse {
-        do { return try await request(.get, path: "people", query: [.init(name: "page", value: String(page)), .init(name: "size", value: String(size))]) }
+    func people(page: Int = 1, size: Int = 100, name: String? = nil) async throws -> PeopleResponse {
+        let name = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var query = [URLQueryItem(name: "page", value: String(page)), .init(name: "size", value: String(size))]
+        if !name.isEmpty { query.append(.init(name: "name", value: name)) }
+        do { return try await request(.get, path: "people", query: query) }
         catch {
             guard canReadOffline(error), let store = entityStore, try await store.isComplete() else { throw error }
-            let all = try await store.people(), visible = all.filter { $0.isHidden != true }
+            let all = try await store.people().filter { name.isEmpty || $0.name.localizedStandardContains(name) }
+            let visible = all.filter { $0.isHidden != true }
             let safeSize = min(max(size, 1), 1_000), start = min(max(page - 1, 0), visible.count) * min(max(size, 1), 1_000)
             return PeopleResponse(people: Array(visible.dropFirst(start).prefix(safeSize)), total: all.count, hidden: all.count - visible.count, hasNextPage: start + safeSize < visible.count)
         }
@@ -211,7 +215,19 @@ actor APIClient {
     func removeFromAlbum(id: String, assetIDs: [String]) async throws -> [BulkResult] {
         try await request(.delete, path: "albums/\(id)/assets", body: BulkIDs(ids: assetIDs))
     }
-    func memories() async throws -> [Memory] { try await request(.get, path: "memories") }
+    func memories(on date: Date = Date()) async throws -> [Memory] {
+        let parts = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day], from: date)
+        let day = String(format: "%04d-%02d-%02d", parts.year ?? 1970, parts.month ?? 1, parts.day ?? 1)
+        do {
+            let preferences: MemoryPreferences = try await request(.get, path: "users/me/preferences")
+            guard preferences.memories.enabled else { return [] }
+            return try await request(.get, path: "memories", query: [.init(name: "for", value: day)])
+        }
+        catch {
+            guard canReadOffline(error), let store = entityStore, try await store.isComplete() else { throw error }
+            return try await store.memories(onCivilDate: day)
+        }
+    }
     func partners(direction: String = "shared-with") async throws -> [Partner] {
         try await request(.get, path: "partners", query: [.init(name: "direction", value: direction)])
     }
@@ -314,6 +330,10 @@ struct RatingUpdate: Encodable, Sendable {
 }
 
 private struct LoginBody: Encodable, Sendable { let email: String; let password: String }
+private struct MemoryPreferences: Decodable {
+    struct Memories: Decodable { let enabled: Bool }
+    let memories: Memories
+}
 struct BulkIDs: Encodable, Sendable { let ids: [String] }
 private struct AssetDeletion: Encodable, Sendable { let ids: [String]; let force: Bool }
 private struct AlbumCreation: Encodable, Sendable { let albumName: String; let assetIds: [String] }

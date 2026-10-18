@@ -32,6 +32,7 @@ struct AlbumAssetsManager: View {
     }
     var body: some View {
         ScrollView {
+            AlbumUploadStatusView(albumID: album.id) { Task { await refreshAlbum() } }.padding(.horizontal, 20)
             if mode == .add {
                 Picker("Choose from", selection: $source) { Text("Library").tag("timeline"); Text("Archive").tag("archive") }.pickerStyle(.segmented).padding()
                 NavigationLink {

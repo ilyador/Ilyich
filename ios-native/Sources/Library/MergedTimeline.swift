@@ -24,8 +24,10 @@ enum LibraryEntry: Hashable, Identifiable, Sendable {
 struct MergedTimeline: Sendable {
     var localOnly: [String: [LocalPhoto]] = [:]
     var remoteToLocal: [String: LocalPhoto] = [:]
+    let localToRemote: [String: String]
 
     init(photos: [LocalPhoto] = [], associations: [String: String] = [:]) {
+        localToRemote = associations
         for photo in photos {
             if let remote = associations[photo.id] {
                 if remoteToLocal[remote] == nil { remoteToLocal[remote] = photo }

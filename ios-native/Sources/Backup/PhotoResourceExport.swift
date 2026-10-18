@@ -21,7 +21,7 @@ final class PhotoResourceExport: @unchecked Sendable {
 
     /// The same streamed resource used by backup, with no temporary export or
     /// iCloud network request. A cloud-only resource fails for the caller to skip.
-    static func checksum(_ resource: PHAssetResource) async throws -> String {
+    @MainActor static func checksum(_ resource: PHAssetResource) async throws -> String {
         let reader = PhotoResourceExport()
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = false
@@ -29,7 +29,9 @@ final class PhotoResourceExport: @unchecked Sendable {
         return reader.lock.withLock { Data(reader.hash.finalize()).base64EncodedString() }
     }
 
-    func write(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions, allowCellular: Bool = true) async throws {
+    // Resource discovery is main-actor isolated. Keep PhotoKit request setup on
+    // that actor; PhotoKit still streams bytes and hashes on its callback queue.
+    @MainActor func write(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions, allowCellular: Bool = true) async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 begin(resource, options: options, allowCellular: allowCellular, continuation: continuation)

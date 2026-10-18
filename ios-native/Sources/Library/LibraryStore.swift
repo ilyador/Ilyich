@@ -54,9 +54,11 @@ extension APIClient: LibraryAPI {}
     var selected: Set<String> = [] { didSet {
         selectedRecords = selectedRecords.filter { selected.contains($0.key) }
         selectedLocalRecords = selectedLocalRecords.filter { selected.contains("local:" + $0.key) }
+        selectedMatchedCopies = selectedMatchedCopies.filter { selected.contains($0.key) }
     } }
     private var selectedRecords: [String: Asset] = [:]
     private var selectedLocalRecords: [String: LocalPhoto] = [:]
+    private var selectedMatchedCopies: [String: LocalPhoto] = [:]
     var isSelecting = false {
         didSet { if !isSelecting { groupSelectionTask?.cancel(); isSelectingGroup = false } }
     }
@@ -89,12 +91,17 @@ extension APIClient: LibraryAPI {}
     }
     private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && timelineFilter == TimelineFilter() }
     var selectedLocalPhotos: [LocalPhoto] { Array(selectedLocalRecords.values) }
+    var selectedDevicePhotos: [LocalPhoto] {
+        var seen = Set<String>()
+        return (Array(selectedLocalRecords.values) + Array(selectedMatchedCopies.values)).filter { seen.insert($0.id).inserted }
+    }
+    var matchingDevicePhotos: [String: LocalPhoto] { deviceTimeline.remoteToLocal }
     func updateDeviceTimeline(_ snapshot: MergedTimeline) {
         deviceTimeline = snapshot
         guard mergesDevicePhotos else { return }
         restorePosition = position
         if let id = restorePosition?.assetID, id.hasPrefix("local:"),
-           let remote = snapshot.remoteToLocal.first(where: { "local:" + $0.value.id == id })?.key {
+           let remote = snapshot.localToRemote[String(id.dropFirst(6))] {
             restorePosition?.assetID = remote
         }
         updateSections(); resetID = UUID(); revision += 1
@@ -128,13 +135,17 @@ extension APIClient: LibraryAPI {}
     }
     func select(_ asset: Asset) { selected.insert(asset.id); selectedRecords[asset.id] = asset }
     func toggleSelection(_ entry: LibraryEntry) {
-        if let asset = entry.remote { toggleSelection(asset); return }
+        if let asset = entry.remote {
+            toggleSelection(asset)
+            if selected.contains(asset.id), let local = entry.local { selectedMatchedCopies[asset.id] = local }
+            return
+        }
         guard let photo = entry.local else { return }
         if selected.contains(entry.id) { selected.remove(entry.id) }
         else { selected.insert(entry.id); selectedLocalRecords[photo.id] = photo }
     }
     func select(_ entry: LibraryEntry) {
-        if let asset = entry.remote { select(asset) }
+        if let asset = entry.remote { select(asset); if let local = entry.local { selectedMatchedCopies[asset.id] = local } }
         else if let photo = entry.local { selected.insert(entry.id); selectedLocalRecords[photo.id] = photo }
     }
 
@@ -163,7 +174,10 @@ extension APIClient: LibraryAPI {}
                 if !selecting { selected.subtract(ids) }
                 else {
                     for entry in entries {
-                        if let asset = entry.remote { selectedRecords[asset.id] = asset }
+                        if let asset = entry.remote {
+                            selectedRecords[asset.id] = asset
+                            if let local = entry.local { selectedMatchedCopies[asset.id] = local }
+                        }
                         else if let photo = entry.local { selectedLocalRecords[photo.id] = photo }
                     }
                     selected.formUnion(ids)

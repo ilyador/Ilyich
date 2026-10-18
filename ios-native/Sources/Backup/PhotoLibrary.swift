@@ -120,6 +120,9 @@ enum BackupError: LocalizedError {
 
     static func prepare(_ localID: String, directory: URL, allowCloud: Bool, cellularPhotos: Bool, cellularVideos: Bool,
                         progress: @escaping @Sendable (Double) -> Void) async throws -> PreparedPhoto {
+        guard [.authorized, .limited].contains(authorization) else {
+            throw BackupError.message("Photos access was removed. Allow access in Settings before resuming backup.")
+        }
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil).firstObject else {
             throw BackupError.item("This photo is no longer available to Ilyich. Check Photos access and retry.")
         }

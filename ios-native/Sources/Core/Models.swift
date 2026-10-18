@@ -114,6 +114,9 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
     var isTrashed: Bool
     var isEdited: Bool
     var isDeveloped: Bool
+    /// Timeline columns omit edit state. Only detailed/API sync records can
+    /// authorize substituting a local original for the server's rendition.
+    var hasKnownEditState: Bool
     var visibility: AssetVisibility
     var mediaRevision: String?
     var thumbhash: String?
@@ -139,12 +142,12 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
         self.fileCreatedAt = fileCreatedAt; self.localDateTime = localDateTime; self.width = width; self.height = height
         self.isFavorite = isFavorite; self.isDeveloped = isDeveloped; self.mediaRevision = mediaRevision
         self.thumbhash = thumbhash; self.timelineRatio = timelineRatio
-        self.isTrashed = false; self.isEdited = false; self.visibility = .timeline
+        self.isTrashed = false; self.isEdited = false; self.visibility = .timeline; self.hasKnownEditState = false
     }
 
     enum CodingKeys: String, CodingKey {
         case id, ownerId, owner, tags, stack, type, originalFileName, fileCreatedAt, localDateTime, createdAt, width, height, duration
-        case isFavorite, isTrashed, isEdited, isDeveloped, visibility, mediaRevision, thumbhash, livePhotoVideoId, exifInfo, people, timelineRatio
+        case isFavorite, isTrashed, isEdited, isDeveloped, hasKnownEditState, visibility, mediaRevision, thumbhash, livePhotoVideoId, exifInfo, people, timelineRatio
     }
 
     init(from decoder: Decoder) throws {
@@ -165,6 +168,7 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
         isTrashed = try c.decodeIfPresent(Bool.self, forKey: .isTrashed) ?? false
         isEdited = try c.decodeIfPresent(Bool.self, forKey: .isEdited) ?? false
         isDeveloped = try c.decodeIfPresent(Bool.self, forKey: .isDeveloped) ?? false
+        hasKnownEditState = try c.decodeIfPresent(Bool.self, forKey: .hasKnownEditState) ?? (c.contains(.isEdited) && c.contains(.isDeveloped))
         visibility = try c.decodeIfPresent(AssetVisibility.self, forKey: .visibility) ?? .timeline
         mediaRevision = try c.decodeIfPresent(String.self, forKey: .mediaRevision)
         thumbhash = try c.decodeIfPresent(String.self, forKey: .thumbhash)
@@ -279,8 +283,11 @@ struct Memory: Decodable, Identifiable, Sendable {
     let type: String
     let memoryAt: Date
     let isSaved: Bool
-    let assets: [Asset]
+    var assets: [Asset]
     let data: MemoryData
+    var seenAt: Date? = nil
+    var showAt: Date? = nil
+    var hideAt: Date? = nil
 }
 struct MemoryData: Decodable, Sendable { let year: Int; let personId: String?; let personName: String? }
 

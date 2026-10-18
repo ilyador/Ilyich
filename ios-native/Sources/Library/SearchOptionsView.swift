@@ -6,8 +6,6 @@ struct SearchOptionsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var mode: SearchMode
     @State private var filter: SearchFilter
-    @State private var people: [Person] = []
-    @State private var tags: [AssetTag] = []
     @State private var features: ServerFeatures?
     @State private var failure: String?
     @State private var dateEnabled: Bool
@@ -19,16 +17,16 @@ struct SearchOptionsView: View {
         _mode = State(initialValue: mode); _filter = State(initialValue: filter)
         _dateEnabled = State(initialValue: filter.takenAt != nil)
         _start = State(initialValue: filter.takenAt?.gte ?? Calendar.current.date(byAdding: .month, value: -1, to: Date())!)
-        _end = State(initialValue: filter.takenAt?.lt ?? Date())
+        _end = State(initialValue: filter.takenAt?.lt.flatMap { Calendar.current.date(byAdding: .day, value: -1, to: $0) } ?? Date())
     }
     var body: some View {
         Form {
             Section("Search in") {
-                Picker("Search mode", selection: $mode) {
-                    ForEach(SearchMode.allCases.filter { $0 != .context || features?.smartSearch != false }.filter { $0 != .ocr || features?.ocr != false }) {
+                if let features { Picker("Search mode", selection: $mode) {
+                    ForEach(SearchMode.allCases.filter { $0 != .context || features.smartSearch }.filter { $0 != .ocr || features.ocr }) {
                         Text($0.rawValue).tag($0)
                     }
-                }
+                } } else { ProgressView("Checking search features") }
             }
             Section("People and tags") {
                 NavigationLink("People", value: "people")
@@ -37,13 +35,13 @@ struct SearchOptionsView: View {
                 if let count = filter.tagIds?.all?.count { Text("\(count) tags required").font(.footnote).foregroundStyle(.secondary) }
             }
             Section("Location") {
-                TextField("Country", text: text(\.country))
-                TextField("State or region", text: text(\.state))
-                TextField("City", text: text(\.city))
+                SearchMetadataField(title: "Country", api: api, request: .init(kind: .country), value: text(\.country))
+                SearchMetadataField(title: "State or region", api: api, request: .init(kind: .state, country: filter.country?.eq), value: text(\.state))
+                SearchMetadataField(title: "City", api: api, request: .init(kind: .city, country: filter.country?.eq, state: filter.state?.eq), value: text(\.city))
             }
             Section("Camera") {
-                TextField("Make", text: text(\.make))
-                TextField("Model", text: text(\.model))
+                SearchMetadataField(title: "Make", api: api, request: .init(kind: .make), value: text(\.make))
+                SearchMetadataField(title: "Model", api: api, request: .init(kind: .model, make: filter.make?.eq), value: text(\.model))
             }
             Section("Date taken") {
                 Toggle("Limit dates", isOn: $dateEnabled)
@@ -79,31 +77,35 @@ struct SearchOptionsView: View {
         }
         .navigationTitle("Search options")
         .navigationDestination(for: String.self) { page in
-            if page == "people" { choices(people.map { ($0.id, $0.name.isEmpty ? "Unnamed person" : $0.name) }, path: \.personIds, title: "People") }
-            else { choices(tags.map { ($0.id, $0.value) }, path: \.tagIds, title: "Tags") }
+            if page == "people" { SearchPeoplePicker(api: api, selected: requiredIDs(\.personIds)) }
+            else { SearchTagPicker(api: api, selected: requiredIDs(\.tagIds)) }
         }
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Reset") { filter = SearchFilter(); mode = .context; dateEnabled = false } }
+            ToolbarItem(placement: .cancellationAction) { Button("Reset") { filter = SearchFilter(); mode = features?.smartSearch == false ? .filename : .context; dateEnabled = false } }
             ToolbarItem(placement: .confirmationAction) { Button("Apply") {
                 if dateEnabled {
                     filter.takenAt = .init(gte: Calendar.current.startOfDay(for: start), lt: Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: end)))
                 } else { filter.takenAt = nil }
                 onApply(mode, filter); dismiss()
-            }.disabled(dateEnabled && end < start) }
+            }.disabled(features == nil || (dateEnabled && end < start)) }
         }
         .task { await load() }
     }
-    private func choices(_ items: [(String, String)], path: WritableKeyPath<SearchFilter, IDsFilter?>, title: String) -> some View {
-        List(items, id: \.0) { id, label in
-            Toggle(label, isOn: Binding(get: { filter[keyPath: path]?.all?.contains(id) == true }, set: { checked in
-                var selected = filter[keyPath: path]?.all ?? []
-                selected.removeAll { $0 == id }; if checked { selected.append(id) }
-                filter[keyPath: path] = selected.isEmpty ? nil : .init(all: selected)
-            }))
-        }.navigationTitle(title)
+    private func requiredIDs(_ path: WritableKeyPath<SearchFilter, IDsFilter?>) -> Binding<[String]> {
+        .init(get: { filter[keyPath: path]?.all ?? [] }, set: { ids in
+            var value = filter[keyPath: path] ?? IDsFilter()
+            value.all = ids.isEmpty ? nil : ids
+            filter[keyPath: path] = value.all == nil && value.any == nil && value.none == nil ? nil : value
+        })
     }
     private func text(_ path: WritableKeyPath<SearchFilter, StringFilter?>) -> Binding<String> {
-        .init(get: { filter[keyPath: path]?.eq ?? "" }, set: { filter[keyPath: path] = $0.isEmpty ? nil : .init(eq: $0) })
+        .init(get: { filter[keyPath: path]?.eq ?? "" }, set: { value in
+            guard value != filter[keyPath: path]?.eq else { return }
+            filter[keyPath: path] = value.isEmpty ? nil : .init(eq: value)
+            if path == \.country { filter.state = nil; filter.city = nil }
+            if path == \.state { filter.city = nil }
+            if path == \.make { filter.model = nil }
+        })
     }
     private func flag(_ path: WritableKeyPath<SearchFilter, BoolFilter?>) -> Binding<Bool> {
         .init(get: { filter[keyPath: path]?.eq == true }, set: { filter[keyPath: path] = $0 ? .init(eq: true) : nil })
@@ -112,11 +114,9 @@ struct SearchOptionsView: View {
     private func load() async {
         failure = nil
         do {
-            async let personResponse = api.people()
-            async let tagResponse: [AssetTag] = api.request(.get, path: "tags")
-            async let featureResponse = api.serverFeatures()
-            people = try await personResponse.people; tags = try await tagResponse; features = try await featureResponse
+            features = try await api.serverFeatures()
             if mode == .context && features?.smartSearch == false { mode = .filename }
-        } catch { failure = error.localizedDescription }
+            if mode == .ocr && features?.ocr == false { mode = .filename }
+        } catch is CancellationError { } catch { failure = error.localizedDescription }
     }
 }

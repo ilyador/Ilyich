@@ -56,6 +56,7 @@ struct MemoryPlaybackView: View {
                         Button("Previous memory", systemImage: "chevron.up") { cursor.previousMemory(counts: counts) }.labelStyle(.iconOnly).disabled(cursor.memory == 0)
                         Button("Previous photo", systemImage: "chevron.left") { cursor.previous(counts: counts) }.labelStyle(.iconOnly).disabled(cursor.memory == 0 && cursor.asset == 0)
                         Button("Next photo", systemImage: "chevron.right") { cursor.next(counts: counts) }.labelStyle(.iconOnly)
+                            .accessibilityIdentifier("memories.nextPhoto")
                         Button("Next memory", systemImage: "chevron.down") { cursor.nextMemory(counts: counts) }.labelStyle(.iconOnly)
                     }.buttonStyle(.glass).controlSize(.large) }
                 }.padding(22)

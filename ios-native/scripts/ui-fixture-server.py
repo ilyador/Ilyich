@@ -28,6 +28,25 @@ def asset(index, date='2026-12-01'):
                 'fileSizeInByte': 100000, 'iso': 100, 'fNumber': 4, 'focalLength': 35,
             }, 'people': [PERSON]}
 
+def iso(value):
+    return value.astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+def memories():
+    # Current-date windows keep the fixture valid whenever the UI test runs.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    specs = [('00000000-0000-4000-8000-0000000000a1', 'Maya Memory One', 3, range(0, 3)),
+             ('00000000-0000-4000-8000-0000000000a2', 'Maya Memory Two', 1, range(3, 5))]
+    result = []
+    for identifier, name, years, indexes in specs:
+        at = now.replace(year=now.year - years) if not (now.month == 2 and now.day == 29) else now.replace(year=now.year - years, day=28)
+        result.append({'id': identifier, 'type': 'on_this_day', 'ownerId': OWNER, 'isSaved': False,
+                       'memoryAt': iso(at), 'showAt': iso(start), 'hideAt': iso(start + datetime.timedelta(days=1)),
+                       'createdAt': iso(start), 'updatedAt': iso(start), 'seenAt': None,
+                       'data': {'year': at.year, 'personId': PERSON['id'], 'personName': name},
+                       'assets': [asset(i) for i in indexes]})
+    return result
+
 def bucket(date):
     assets = [asset(i,date) for i in range(100)]
     return {key: [a.get(key) for a in assets] for key in ['id','ownerId','isFavorite','isTrashed','visibility','fileCreatedAt','duration','mediaRevision']} | {
@@ -69,6 +88,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/albums':return self.send([ALBUM])
         if path=='/people':return self.send({'people':[PERSON],'total':1,'hidden':0,'hasNextPage':False})
         if path=='/users/me':return self.send({'id':OWNER,'name':'Test library','email':'fixture@example.test'})
+        if path=='/users/me/preferences':return self.send({'memories':{'enabled':True,'duration':5},'people':{'enabled':True,'sidebarWeb':False}})
+        if path=='/memories':return self.send(memories())
         if path=='/map/markers':return self.send([{'id':asset(i)['id'],'lat':lat,'lon':lon,'city':city,'country':country} for i,(lat,lon,city,country) in enumerate([(52.3676,4.9041,'Amsterdam','Netherlands'),(38.7223,-9.1393,'Lisbon','Portugal'),(64.1466,-21.9426,'Reykjavik','Iceland'),(35.6762,139.6503,'Tokyo','Japan')])])
         if path=='/server/features':return self.send({k:True for k in ['passwordLogin','smartSearch','ocr','facialRecognition','map','trash','sidecar','realtimeTranscoding']}|{'oauth':False})
         if path=='/server/version':return self.send({'major':3,'minor':3,'patch':3})
