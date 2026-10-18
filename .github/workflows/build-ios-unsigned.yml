@@ -87,6 +87,12 @@ jobs:
               configuration.build_settings['MARKETING_VERSION'] = version
               configuration.build_settings['CURRENT_PROJECT_VERSION'] = build
             end
+            # Explicit plist values override the matching Xcode build settings.
+            info_path = "#{name}/Info.plist"
+            info = Xcodeproj::Plist.read_from_path(info_path)
+            info['CFBundleShortVersionString'] = version
+            info['CFBundleVersion'] = build
+            Xcodeproj::Plist.write_to_path(info, info_path)
           end
           project.save
           RUBY
@@ -96,6 +102,7 @@ jobs:
         run: bundle exec flutter build ios --release --no-codesign --no-pub
 
       - name: Package complete unsigned app
+        id: package
         shell: bash
         run: |
           set -euo pipefail
@@ -166,6 +173,7 @@ jobs:
                       'build': info['CFBundleVersion'],
                       'minimumOSVersion': info.get('MinimumOSVersion'),
                   })
+              print(json.dumps(bundles, indent=2), flush=True)
               assert bundles[0]['displayName'] == 'Ilyich', 'Unexpected app display name'
               assert all(
                   bundle['version'] == bundles[0]['version'] and bundle['build'] == bundles[0]['build']
@@ -223,4 +231,14 @@ jobs:
           path: ios-unsigned-artifact/
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
+
+      - name: Preserve IPA for failed verification diagnostics
+        if: failure() && steps.package.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Ilyich-ios-unverified-diagnostics
+          path: ios-unsigned-artifact/
+          if-no-files-found: error
+          retention-days: 7
           compression-level: 0
