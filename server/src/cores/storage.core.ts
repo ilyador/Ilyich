@@ -287,7 +287,7 @@ export class StorageCore {
         try {
           await this.storageRepository.unlink(move.oldPath);
         } catch (error: any) {
-          this.logger.warn(`Unable to delete old file, it will now no longer be tracked by Immich: ${error.message}`);
+          this.logger.warn(`Unable to delete old file, it will now no longer be tracked by Ilyich: ${error.message}`);
         }
       }
     }

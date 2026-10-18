@@ -1347,7 +1347,7 @@ describe(MediaService.name, () => {
       expect(mocks.media.decodeImage).toHaveBeenCalled();
     });
 
-    it.each([false, true])('shares one sidecar render with Immich edits (base fullsize: %s)', async (enabled) => {
+    it.each([false, true])('shares one sidecar render with Ilyich edits (base fullsize: %s)', async (enabled) => {
       const asset = AssetFactory.from({ originalFileName: 'photo.dng', originalPath: '/photos/photo.dng' })
         .exif({ exifImageWidth: 6016, exifImageHeight: 4016 })
         .file({ type: AssetFileType.Sidecar, path: '/photos/photo.dng.xmp' })
@@ -1439,7 +1439,7 @@ describe(MediaService.name, () => {
       expect(mocks.asset.update).not.toHaveBeenCalled();
     });
 
-    it('uses one native render for the developed base and Immich crop variants', async () => {
+    it('uses one native render for the developed base and Ilyich crop variants', async () => {
       const asset = makeSidecarAsset()
         .edit({ action: AssetEditAction.Crop, parameters: { x: 100, y: 200, width: 2000, height: 1000 } })
         .build();
@@ -1466,14 +1466,14 @@ describe(MediaService.name, () => {
       );
     });
 
-    it('rejects an existing Immich crop outside the newly developed base', async () => {
+    it('rejects an existing Ilyich crop outside the newly developed base', async () => {
       const asset = makeSidecarAsset()
         .edit({ action: AssetEditAction.Crop, parameters: { x: 2900, y: 0, width: 200, height: 100 } })
         .build();
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
 
       await expect(sut.handleGenerateThumbnails({ id: asset.id })).rejects.toThrow(
-        'Existing Immich crop is outside the developed image',
+        'Existing Ilyich crop is outside the developed image',
       );
 
       expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();

@@ -321,8 +321,8 @@ const patchOpenAPI = (document: OpenAPIObject) => {
 
 export const useSwagger = (app: INestApplication, { write }: { write: boolean }) => {
   const builder = new DocumentBuilder()
-    .setTitle('Immich')
-    .setDescription('Immich API')
+    .setTitle('Ilyich')
+    .setDescription('Ilyich API')
     .setVersion(serverVersion.toString())
     .addBearerAuth({
       type: 'http',
@@ -360,7 +360,7 @@ export const useSwagger = (app: INestApplication, { write }: { write: boolean })
     },
     jsonDocumentUrl: '/api/spec.json',
     yamlDocumentUrl: '/api/spec.yaml',
-    customSiteTitle: 'Immich API Documentation',
+    customSiteTitle: 'Ilyich API Documentation',
   };
 
   SwaggerModule.setup('doc', app, openApiDoc, customOptions);

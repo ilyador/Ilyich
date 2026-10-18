@@ -9,16 +9,17 @@
 </p>
 
 <p align="center">
-  <img src="../design/immich-logo-stacked-light.svg" width="300" title="การเข้าสู่ระบบด้วย URL แบบกำหนดเอง">
+  <img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
 </p>
+<h1 align="center">Ilyich</h1>
 
 <h3 align="center">โซลูชันการจัดการภาพถ่ายและวิดีโอแบบโฮสต์เองที่มีประสิทธิภาพสูง</h3>
 <br/>
 
-<a href="https://immich.app">
-  <img src="../design/immich-screenshots.png" title="ภาพหน้าจอหลัก">
-</a>
-<br/>
+
+
+
+> Ilyich is a fork of [Immich](https://github.com/immich-app/immich). See the [English README](../README.md) for current fork features and branch policy. This translated overview describes the upstream base; its documentation, demo and community links refer to the upstream project.
 
 <p align="center">
   <a href="../README.md">English</a>
@@ -116,19 +117,21 @@
 
 ## กิจกรรมของ Repository
 
-![กิจกรรม](https://repobeats.axiom.co/api/embed/9e86d9dc3ddd137161f2f6d2e758d7863b1789cb.svg "ภาพการวิเคราะห์ของ Repobeats")
+[Ilyich repository activity](https://github.com/ilyador/Ilyich/activity)
 
 ## ประวัติการให้ดาว
 
-<a href="https://star-history.com/#immich-app/immich&Date">
+<a href="https://star-history.com/#ilyador/Ilyich&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=immich-app/immich&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=immich-app/immich&type=Date" />
-   <img alt="แผนภูมิประวัติการให้ดาว" src="https://api.star-history.com/svg?repos=immich-app/immich&type=Date" width="100%" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ilyador/Ilyich&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ilyador/Ilyich&type=Date" />
+   <img alt="แผนภูมิประวัติการให้ดาว" src="https://api.star-history.com/svg?repos=ilyador/Ilyich&type=Date" width="100%" />
  </picture>
 </a>
 
 ## ผู้ร่วมพัฒนา
+
+Upstream attribution: [Immich contributors](https://github.com/immich-app/immich/graphs/contributors).
 
 <a href="https://github.com/alextran1502/immich/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=immich-app/immich" width="100%"/>

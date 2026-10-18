@@ -6,7 +6,7 @@ const ARCHIVED_VERSIONS_URL = 'https://version.immich.cloud/v1/docs/versions';
 
 export default function VersionSwitcher(): JSX.Element {
   const [versions, setVersions] = useState([]);
-  const [activeLabel, setLabel] = useState('Versions');
+  const [activeLabel, setLabel] = useState('Upstream versions');
 
   const windowSize = useWindowSize();
 
@@ -18,8 +18,8 @@ export default function VersionSwitcher(): JSX.Element {
         const archiveVersions = await response.json();
 
         const allVersions = [
-          { label: 'Next', url: 'https://docs.main.preview.immich.app' },
-          { label: 'Latest', url: 'https://docs.immich.app' },
+          { label: 'Upstream next', url: 'https://docs.main.preview.immich.app' },
+          { label: 'Upstream latest', url: 'https://docs.immich.app' },
           ...archiveVersions,
         ].map(({ label, url, rootPath }) => ({
           label,

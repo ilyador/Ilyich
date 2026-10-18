@@ -62,11 +62,7 @@ export const FutoLayout = ({ children, preview }: FutoLayoutProps) => (
         <Container className="my-[40px] mx-auto max-w-[465px]">
           <Section className="my-6 p-12 border border-red-400 rounded-[50px] bg-gray-50">
             <Section className="flex justify-center mb-12">
-              <Img
-                src="https://immich.app/img/immich-logo-inline-light.png"
-                className="h-12 antialiased rounded-none"
-                alt="Immich"
-              />
+              <Text className="m-0 text-center text-5xl font-semibold text-immich-primary">Ilyich</Text>
             </Section>
 
             {children}

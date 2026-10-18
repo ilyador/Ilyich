@@ -7,7 +7,7 @@ import WidgetKit
 struct MemoryConfigurationAppIntent: WidgetConfigurationIntent {
   static var title: LocalizedStringResource { "Memories" }
   static var description: IntentDescription {
-    "See memories from Immich."
+    "See memories from Ilyich."
   }
 
   @Parameter(title: "Always Display in Full Color", default: false)
@@ -175,6 +175,6 @@ struct ImmichMemoryWidget: Widget {
 
     // widget picker info
     .configurationDisplayName("Memories")
-    .description("See memories from Immich.")
+    .description("See memories from Ilyich.")
   }
 }

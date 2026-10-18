@@ -27,6 +27,9 @@
 <Modal title={$t('obtainium_configurator')} size="medium" {onClose}>
   <ModalBody>
     <Text color="muted" size="small">{$t('obtainium_configurator_instructions')}</Text>
+    <Text color="muted" size="small" class="mt-2">
+      This configurator downloads the original upstream Immich Android app, not Ilyich.
+    </Text>
 
     <Field label={$t('app_architecture_variant')} class="mt-4">
       <Select

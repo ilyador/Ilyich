@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Logo } from '@immich/ui';
+  import Logo from '$lib/components/shared-components/BrandLogo.svelte';
+
   import { t } from 'svelte-i18n';
 
   interface Props {

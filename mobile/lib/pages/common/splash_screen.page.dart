@@ -47,7 +47,7 @@ class BootstrapErrorWidget extends StatelessWidget {
       assetLoader: const CodegenLoader(),
       child: Builder(
         builder: (lCtx) => MaterialApp(
-          title: 'Immich',
+          title: 'Ilyich',
           debugShowCheckedModeBanner: true,
           localizationsDelegates: lCtx.localizationDelegates,
           supportedLocales: lCtx.supportedLocales,
@@ -167,7 +167,7 @@ class _BottomPanelState extends State<_BottomPanel> {
               icon: Icons.bug_report_outlined,
               label: context.t.profile_drawer_github,
               onTap: () => launchUrl(
-                Uri.parse('https://github.com/immich-app/immich/issues'),
+                Uri.parse('https://github.com/ilyador/Ilyich/issues'),
                 mode: LaunchMode.externalApplication,
               ),
             ),

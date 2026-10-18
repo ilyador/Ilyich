@@ -106,7 +106,7 @@
       <span
         class="text-[11px] text-gray-500 opacity-70 transition-colors group-hover:text-immich-primary group-hover:opacity-100 dark:text-gray-400 dark:group-hover:text-immich-dark-primary"
       >
-        {$t('new_update')}!
+        Upstream update
       </span>
     </div>
   </a>

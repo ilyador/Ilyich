@@ -1,11 +1,12 @@
 <script lang="ts">
+  import Logo from '$lib/components/shared-components/BrandLogo.svelte';
   import { page } from '$app/state';
   import { shouldIgnoreEvent } from '$lib/actions/shortcut';
   import { authManager } from '$lib/managers/auth-manager.svelte';
   import { dragAndDropFilesStore } from '$lib/stores/drag-and-drop-files.store';
   import { fileUploadHandler } from '$lib/utils/file-uploader';
   import { isAlbumsRoute, isLockedFolderRoute } from '$lib/utils/navigation';
-  import { Logo } from '@immich/ui';
+
   import { t } from 'svelte-i18n';
   import { fade } from 'svelte/transition';
 

@@ -64,13 +64,13 @@
 
       <!--TODO:
       Add this filter if you want to handle shared images-->
-      <intent-filter android:label="Upload to Immich">
+      <intent-filter android:label="Upload to Ilyich">
         <action android:name="android.intent.action.SEND" />
         <category android:name="android.intent.category.DEFAULT" />
         <data android:mimeType="image/*" />
       </intent-filter>
 
-      <intent-filter android:label="Upload to Immich">
+      <intent-filter android:label="Upload to Ilyich">
         <action android:name="android.intent.action.SEND_MULTIPLE" />
         <category android:name="android.intent.category.DEFAULT" />
         <data android:mimeType="image/*" />
@@ -78,26 +78,26 @@
 
       <!--TODO:
       Add this filter if you want to handle shared videos-->
-      <intent-filter android:label="Upload to Immich">
+      <intent-filter android:label="Upload to Ilyich">
         <action android:name="android.intent.action.SEND" />
         <category android:name="android.intent.category.DEFAULT" />
         <data android:mimeType="video/*" />
       </intent-filter>
-      <intent-filter android:label="Upload to Immich">
+      <intent-filter android:label="Upload to Ilyich">
         <action android:name="android.intent.action.SEND_MULTIPLE" />
         <category android:name="android.intent.category.DEFAULT" />
         <data android:mimeType="video/*" />
       </intent-filter>
 
       <!-- Allow Immich to act as an image viewer -->
-      <intent-filter android:label="View in Immich">
+      <intent-filter android:label="View in Ilyich">
         <action android:name="android.intent.action.VIEW" />
         <category android:name="android.intent.category.DEFAULT" />
         <data android:scheme="content" android:mimeType="image/*" />
       </intent-filter>
 
       <!-- Allow Immich to act as a video viewer -->
-      <intent-filter android:label="View in Immich">
+      <intent-filter android:label="View in Ilyich">
         <action android:name="android.intent.action.VIEW" />
         <category android:name="android.intent.category.DEFAULT" />
         <data android:scheme="content" android:mimeType="video/*" />

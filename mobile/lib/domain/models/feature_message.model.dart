@@ -7,7 +7,7 @@ enum FeatureHighlight {
   slideshow(image: 'assets/feature_message/slideshow.webp'),
   recentlyAdded(image: 'assets/feature_message/recently_added.webp'),
   ocr(image: 'assets/feature_message/ocr.webp'),
-  openInImmich(image: 'assets/feature_message/open_in_immich.webp', platform: [.android]),
+  openInImmich(platform: [.android]),
   uploadToAlbum();
 
   /// Asset path of the feature screenshot, or null to show a placeholder.

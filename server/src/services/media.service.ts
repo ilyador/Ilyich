@@ -409,7 +409,7 @@ export class MediaService extends BaseService {
         (crop.parameters.x + crop.parameters.width > baseDimensions.width ||
           crop.parameters.y + crop.parameters.height > baseDimensions.height)
       ) {
-        throw new Error('Existing Immich crop is outside the developed image');
+        throw new Error('Existing Ilyich crop is outside the developed image');
       }
       const generated = await this.generateImageThumbnails(asset, config, false, source, generation);
       const edited =

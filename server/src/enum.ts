@@ -662,7 +662,7 @@ export enum ImmichEnvironment {
 
 export const ImmichEnvironmentSchema = z
   .enum(ImmichEnvironment)
-  .describe('Immich environment')
+  .describe('Ilyich environment')
   .meta({ id: 'ImmichEnvironment' });
 
 export enum ImmichWorker {

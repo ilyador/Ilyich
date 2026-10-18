@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Logo from '$lib/components/shared-components/BrandLogo.svelte';
   import { shortcut } from '$lib/actions/shortcut';
   import AlbumMap from '$lib/components/album-page/AlbumMap.svelte';
   import DownloadAction from '$lib/components/timeline/actions/DownloadAction.svelte';
@@ -17,7 +18,7 @@
   import { handlePromiseError } from '$lib/utils';
   import { fileUploadHandler, openFileUploadDialog } from '$lib/utils/file-uploader';
   import type { AlbumResponseDto, SharedLinkResponseDto } from '@immich/sdk';
-  import { ActionButton, IconButton, Logo } from '@immich/ui';
+  import { ActionButton, IconButton } from '@immich/ui';
   import { mdiDownload, mdiFileImagePlusOutline, mdiPresentationPlay } from '@mdi/js';
   import { t } from 'svelte-i18n';
   import ControlAppBar from '../shared-components/ControlAppBar.svelte';

@@ -279,7 +279,7 @@ export class NotificationService extends BaseService {
     });
     const { messageId } = await this.emailRepository.sendEmail({
       to: user.email,
-      subject: 'Test email from Immich',
+      subject: 'Test email from Ilyich',
       html,
       text,
       from: dto.from,
@@ -313,7 +313,7 @@ export class NotificationService extends BaseService {
       name: JobName.SendMail,
       data: {
         to: user.email,
-        subject: 'Welcome to Immich',
+        subject: 'Welcome to Ilyich',
         html,
         text,
       },

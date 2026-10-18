@@ -486,7 +486,7 @@
         onFavorite={(ids, isFavorite) => timelineManager.update(ids, (asset) => (asset.isFavorite = isFavorite))}
       />
       <ButtonContextMenu icon={mdiDotsVertical} title={$t('menu')}>
-        <DownloadAction menuItem filename={person.name || 'immich'} />
+        <DownloadAction menuItem filename={person.name || 'ilyich'} />
         <MenuOption
           icon={mdiAccountMultipleCheckOutline}
           text={$t('fix_incorrect_match')}

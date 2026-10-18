@@ -1,8 +1,9 @@
 <script lang="ts">
+  import Logo from '$lib/components/shared-components/BrandLogo.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
   import { serverConfigManager } from '$lib/managers/server-config-manager.svelte';
   import { OnboardingRole } from '$lib/types';
-  import { Logo } from '@immich/ui';
+
   import { t } from 'svelte-i18n';
 
   let userRole = $derived(
