@@ -8,20 +8,29 @@ import Network
 @MainActor final class BackupLifecycle: NSObject, @preconcurrency PHPhotoLibraryChangeObserver {
     static let shared = BackupLifecycle()
     static let identifier = "app.ilyich.native.backup.processing"
+    static let refreshIdentifier = "app.ilyich.native.backup.refresh"
     private var registered = false
     private var observing = false
+    private var hasActiveTask = false
     private var delayedStart: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
     private let network = NWPathMonitor()
 
     func register() {
         guard !registered else { return }
-        registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.identifier, using: .main) { task in
+        let processingRegistered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.identifier, using: .main) { task in
             MainActor.assumeIsolated {
-                guard let processing = task as? BGProcessingTask else { task.setTaskCompleted(success: false); return }
-                self.process(processing)
+                guard task is BGProcessingTask else { task.setTaskCompleted(success: false); return }
+                self.process(task)
             }
         }
+        let refreshRegistered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshIdentifier, using: .main) { task in
+            MainActor.assumeIsolated {
+                guard task is BGAppRefreshTask else { task.setTaskCompleted(success: false); return }
+                self.process(task)
+            }
+        }
+        registered = processingRegistered && refreshRegistered
         UIDevice.current.isBatteryMonitoringEnabled = true
         network.pathUpdateHandler = { _ in Task { @MainActor in self.foregroundChanged() } }
         network.start(queue: DispatchQueue(label: "app.ilyich.backup-network"))
@@ -37,6 +46,7 @@ import Network
         guard registered else { return }
         delayedStart?.cancel(); delayedStart = nil
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.identifier)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshIdentifier)
         let preferences = BackupCoordinator.shared.preferences
         if !preferences.automatic {
             if observing { PHPhotoLibrary.shared().unregisterChangeObserver(self); observing = false }
@@ -79,14 +89,21 @@ import Network
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.identifier)
         do { try BGTaskScheduler.shared.submit(request) }
         catch { BackupCoordinator.shared.reportSchedulingError(error) }
+        let refresh = BGAppRefreshTaskRequest(identifier: Self.refreshIdentifier)
+        refresh.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshIdentifier)
+        do { try BGTaskScheduler.shared.submit(refresh) }
+        catch { BackupCoordinator.shared.reportSchedulingError(error) }
     }
 
-    private func process(_ task: BGProcessingTask) {
-        let window = ProcessingWindow(task)
+    private func process(_ task: BGTask) {
+        schedule()
+        guard !hasActiveTask, !BackupCoordinator.shared.isRunning else { task.setTaskCompleted(success: true); return }
+        hasActiveTask = true
+        let window = ProcessingWindow(task) { [weak self] in self?.hasActiveTask = false }
         task.expirationHandler = { Task { @MainActor in await window.expire() } }
         window.work = Task {
             await BackupCoordinator.shared.startAutomatically()
-            schedule()
             do {
                 while BackupCoordinator.shared.isRunning {
                     try Task.checkCancellation()
@@ -100,15 +117,17 @@ import Network
 }
 
 @MainActor private final class ProcessingWindow {
-    let task: BGProcessingTask
+    let task: BGTask
     var work: Task<Void, Never>?
+    private let onFinish: () -> Void
     private var finished = false
-    init(_ task: BGProcessingTask) { self.task = task }
+    init(_ task: BGTask, onFinish: @escaping () -> Void) { self.task = task; self.onFinish = onFinish }
     func finish(success: Bool) {
         guard !finished else { return }
         finished = true; task.expirationHandler = nil
         task.setTaskCompleted(success: success)
         work = nil
+        onFinish()
     }
     func expire() async {
         work?.cancel()

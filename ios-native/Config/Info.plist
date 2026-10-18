@@ -5,9 +5,9 @@
     <key>AppGroupId</key>
     <string>$(CUSTOM_GROUP_ID)</string>
     <key>BGTaskSchedulerPermittedIdentifiers</key>
-    <array><string>app.ilyich.native.backup.processing</string></array>
+    <array><string>app.ilyich.native.backup.processing</string><string>app.ilyich.native.backup.refresh</string></array>
     <key>UIBackgroundModes</key>
-    <array><string>processing</string></array>
+    <array><string>processing</string><string>fetch</string></array>
     <key>CFBundleDisplayName</key>
     <string>Ilyich</string>
     <key>CADisableMinimumFrameDurationOnPhone</key>
