@@ -214,20 +214,55 @@ private struct BackupState: Codable {
         let session = try currentSession(runID)
         let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
         var ids: [String] = []
+        var measured: [String: BackupReceipt] = [:]
         for (localID, receipt) in state.receipts ?? [:] {
             _ = try currentSession(runID)
             guard DevicePhotos.canRemove(localID, revision: receipt.modificationDate) else { continue }
             let remote: BackupRemoteAsset = try await api.request(.get, path: "assets/\(receipt.original.id)")
             guard receipt.original.matches(remote, ownerID: session.userID) else { continue }
+            var counted = receipt
+            counted.original.byteCount = remote.knownByteCount
             if let motion = receipt.motion {
                 guard remote.livePhotoVideoId == motion.id else { continue }
                 let remoteMotion: BackupRemoteAsset = try await api.request(.get, path: "assets/\(motion.id)")
                 guard motion.matches(remoteMotion, ownerID: session.userID) else { continue }
+                counted.motion?.byteCount = remoteMotion.knownByteCount
             }
             _ = try currentSession(runID)
-            if DevicePhotos.canRemove(localID, revision: receipt.modificationDate) { ids.append(localID) }
+            if DevicePhotos.canRemove(localID, revision: receipt.modificationDate) { ids.append(localID); measured[localID] = counted }
         }
+        // Record sizes only for receipts that are unchanged since verification began.
+        var changed = false
+        for (localID, counted) in measured {
+            guard let current = state.receipts?[localID], current.modificationDate == counted.modificationDate,
+                  current.original.id == counted.original.id, current.motion?.id == counted.motion?.id,
+                  current.original.byteCount != counted.original.byteCount || current.motion?.byteCount != counted.motion?.byteCount else { continue }
+            var updated = current
+            updated.original.byteCount = counted.original.byteCount
+            updated.motion?.byteCount = counted.motion?.byteCount
+            state.receipts?[localID] = updated; changed = true
+        }
+        if changed { try? persist() }
         return ids.sorted()
+    }
+
+    /// Total original bytes (still/video plus paired motion) from the last verification, or nil if any is unknown.
+    func verifiedOriginalByteCount(for localIDs: Set<String>) -> Int64? {
+        var total: Int64 = 0
+        for localID in localIDs {
+            guard let receipt = state.receipts?[localID], let original = receipt.original.byteCount else { return nil }
+            var bytes = original
+            if let motion = receipt.motion {
+                guard let motionBytes = motion.byteCount else { return nil }
+                let (sum, overflow) = bytes.addingReportingOverflow(motionBytes)
+                guard !overflow else { return nil }
+                bytes = sum
+            }
+            let (sum, overflow) = total.addingReportingOverflow(bytes)
+            guard !overflow else { return nil }
+            total = sum
+        }
+        return total
     }
 
     private func run(retryFailures: Bool = false) {
