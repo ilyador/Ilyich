@@ -12,6 +12,7 @@ import Network
     private var registered = false
     private var observing = false
     private var hasActiveTask = false
+    private var backgroundPreparation: (@MainActor () async -> Bool)?
     private var delayedStart: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
     private let network = NWPathMonitor()
@@ -40,6 +41,10 @@ import Network
                 MainActor.assumeIsolated { self.foregroundChanged() }
             })
         }
+    }
+
+    func setBackgroundPreparation(_ prepare: @escaping @MainActor () async -> Bool) {
+        backgroundPreparation = prepare
     }
 
     func configure() {
@@ -103,6 +108,14 @@ import Network
         let window = ProcessingWindow(task) { [weak self] in self?.hasActiveTask = false }
         task.expirationHandler = { Task { @MainActor in await window.expire() } }
         window.work = Task {
+            // A daemon-owned transfer must continue even if metadata sync fails.
+            if !(await BackgroundUploads.shared.hasActiveTransfer()) {
+                guard let backgroundPreparation, await backgroundPreparation() else {
+                    window.finish(success: false)
+                    return
+                }
+            }
+            guard !Task.isCancelled else { window.finish(success: false); return }
             await BackupCoordinator.shared.startAutomatically()
             do {
                 while BackupCoordinator.shared.isRunning {
