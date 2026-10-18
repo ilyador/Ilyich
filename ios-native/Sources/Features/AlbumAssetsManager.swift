@@ -32,7 +32,12 @@ struct AlbumAssetsManager: View {
     }
     var body: some View {
         ScrollView {
-            if mode == .add { Picker("Choose from", selection: $source) { Text("Library").tag("timeline"); Text("Archive").tag("archive") }.pickerStyle(.segmented).padding() }
+            if mode == .add {
+                Picker("Choose from", selection: $source) { Text("Library").tag("timeline"); Text("Archive").tag("archive") }.pickerStyle(.segmented).padding()
+                NavigationLink {
+                    LocalLibraryView(destinationAlbumID: album.id, destinationAlbumName: album.albumName, onBackupFinished: { Task { await refreshAlbum() } })
+                } label: { Label("Upload from this phone", systemImage: "icloud.and.arrow.up") }.buttonStyle(.bordered).requiresWriteAccess(api).padding(.bottom, 12)
+            }
             if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary).padding() }
             if loaded && !loading && assets.isEmpty { FeatureEmpty(title: "No photos here", symbol: "photo.on.rectangle", description: mode == .add ? "Try another collection." : "This album has no photos or videos.") }
             LazyVGrid(columns: Array(repeating: .init(.flexible(), spacing: 3), count: 3), spacing: 3) {
@@ -62,6 +67,9 @@ struct AlbumAssetsManager: View {
         .alert("Couldn’t update album", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
+    }
+    private func refreshAlbum() async {
+        do { onSaved(try await api.album(id: album.id)) } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func select(_ id: String) {
         if mode == .cover { selection = selection.contains(id) ? [] : [id] }

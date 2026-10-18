@@ -10,6 +10,6 @@ Reference: the user's Claude artifact, 14 artboards, inspected on 2026-10-18. Th
 - Search results present actual verification state and useful recovery. Preserve the reference's filter chips only where backed by a real server field. Do not invent an understood-query breakdown or progress percentage.
 - Viewer presents the photo on black with sparse glass controls, a dismiss gesture, zoom, paging, video/Live Photo playback and a native details sheet. Details include real EXIF, albums, OCR, and Lightroom development state.
 - Use system typography and SF Symbols for native Dynamic Type and accessibility. Semantic foreground/background colors adapt to appearance. The reference's cyan selection accent is reserved for selected controls; the app's star identity is retained.
-- Use actual iOS 26 glass materials and shared glass containers. No CSS-style imitation of refraction, no full-grid blur while a search runs. Press and gesture feedback remains interruptible.
+- Use actual native Liquid Glass on iOS 27 and shared glass containers. No CSS-style imitation of refraction, no full-grid blur while a search runs. Press and gesture feedback remains interruptible.
 
 The downloaded HTML reference is evidence only, never embedded into the app. Its editor-only glow rule is excluded from the local design detector; native UI remains subject to visual review.

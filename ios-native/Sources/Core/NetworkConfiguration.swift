@@ -148,7 +148,7 @@ enum ClientCertificateStore {
             completion(.performDefaultHandling, nil); return
         }
         guard challenge.previousFailureCount == 0, let requestURL,
-              requestURL.scheme?.lowercased() == "https",
+              ["https", "wss"].contains(requestURL.scheme?.lowercased() ?? ""),
               requestURL.host?.lowercased() == challenge.protectionSpace.host.lowercased(),
               (requestURL.port ?? 443) == challenge.protectionSpace.port else { completion(.cancelAuthenticationChallenge, nil); return }
         do {
@@ -174,7 +174,7 @@ final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendab
         ClientCertificateStore.respond(to: challenge, server: origin, requestURL: task.originalRequest?.url, completion: completionHandler)
     }
     static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
-        func port(_ url: URL) -> Int { url.port ?? (url.scheme?.lowercased() == "https" ? 443 : 80) }
+        func port(_ url: URL) -> Int { url.port ?? (["https", "wss"].contains(url.scheme?.lowercased() ?? "") ? 443 : 80) }
         return a.scheme?.lowercased() == b.scheme?.lowercased() && a.host?.lowercased() == b.host?.lowercased() && port(a) == port(b)
     }
 }

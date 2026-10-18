@@ -11,6 +11,7 @@ struct BackupReceipt: Codable, Sendable {
     let modificationDate: Date
     let original: BackupRemoteFile
     let motion: BackupRemoteFile?
+    var confirmedAt: Date?
 }
 
 struct BackupRemoteFile: Codable, Sendable {

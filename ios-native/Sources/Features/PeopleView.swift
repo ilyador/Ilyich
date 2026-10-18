@@ -23,6 +23,9 @@ struct PeopleView: View {
                         VStack(spacing: 10) {
                             PersonThumbnail(pipeline: pipeline, person: person).aspectRatio(1, contentMode: .fit)
                             Text(person.name.isEmpty ? "Unnamed person" : person.name).font(.subheadline.weight(.medium)).lineLimit(2)
+                            if let value = person.birthDate, let birthday = PersonBirthday.label(value) {
+                                Text(birthday).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                            }
                         }
                     }.buttonStyle(.plain)
                     .contextMenu { Button("Edit person", systemImage: "pencil") { editing = person }.requiresWriteAccess(api) }
@@ -81,7 +84,10 @@ private struct PersonEditor: View {
         Form {
             TextField("Name", text: $name).textContentType(.name)
             Toggle("Birthday", isOn: $hasBirthday)
-            if hasBirthday { DatePicker("Date", selection: $birthday, in: ...Date(), displayedComponents: .date) }
+            if hasBirthday {
+                DatePicker("Date", selection: $birthday, in: ...Date(), displayedComponents: .date).environment(\.calendar, PersonBirthday.calendar())
+                if let age = PersonBirthday.age(birthday) { Text(age).foregroundStyle(.secondary) }
+            }
         }.navigationTitle("Edit person")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -89,7 +95,7 @@ private struct PersonEditor: View {
         }
         .task {
             name = person.name
-            if let value = person.birthDate, let date = APIDate.parse(value) { hasBirthday = true; birthday = date }
+            if let value = person.birthDate, let date = PersonBirthday.parse(value) { hasBirthday = true; birthday = date }
         }
         .alert("Couldn’t save person", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
@@ -108,9 +114,8 @@ private struct PersonEditor: View {
             }
         }
         saving = true; defer { saving = false }
-        let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd"; formatter.locale = Locale(identifier: "en_US_POSIX")
         do {
-            let updated: Person = try await api.request(.put, path: "people/\(person.id)", body: Update(name: name, birthDate: hasBirthday ? formatter.string(from: birthday) : nil))
+            let updated: Person = try await api.request(.put, path: "people/\(person.id)", body: Update(name: name, birthDate: hasBirthday ? PersonBirthday.encode(birthday) : nil))
             onSaved(updated); dismiss()
         } catch { failure = .init(error) }
     }

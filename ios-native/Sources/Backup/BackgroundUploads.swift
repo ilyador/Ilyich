@@ -15,7 +15,7 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     static var shareIdentifier: String { (Bundle.main.bundleIdentifier ?? "app.alextran.immich") + ".share-upload" }
 
     private struct Descriptor: Codable, Equatable { let id: String; let receipt: URL }
-    private struct Outcome: Codable { let receipt: UploadReceipt?; let error: String? }
+    private struct Outcome: Codable { let receipt: UploadReceipt?; let error: String?; var httpStatus: Int? }
     private struct TransferError: LocalizedError { let errorDescription: String? }
     private let lock = NSLock()
     private var responses: [Int: Data] = [:]
@@ -40,6 +40,20 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
         lock.withLock { eventsCompletion = completion }
     }
 
+    func completedReceipt(at url: URL) -> UploadReceipt? {
+        lock.withLock {
+            guard let data = try? Data(contentsOf: url), let outcome = try? JSONDecoder().decode(Outcome.self, from: data) else { return nil }
+            return outcome.receipt
+        }
+    }
+
+    func clearFailedReceipt(at url: URL) {
+        lock.withLock {
+            guard let data = try? Data(contentsOf: url), let outcome = try? JSONDecoder().decode(Outcome.self, from: data), outcome.receipt == nil else { return }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     func upload(_ request: URLRequest, body: URL, id: String, receipt: URL) async throws -> UploadReceipt {
         if let saved = try SessionKeychain.read(), ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID) {
             throw ReadOnlyPolicy.ReadOnlyError()
@@ -59,6 +73,7 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
                 let completed = lock.withLock { () -> Bool in
                     if let data = try? Data(contentsOf: receipt), let outcome = try? JSONDecoder().decode(Outcome.self, from: data) {
                         if let value = outcome.receipt { continuation.resume(returning: value) }
+                        else if let status = outcome.httpStatus, !(200..<300).contains(status) { continuation.resume(throwing: APIError.http(status)) }
                         else { continuation.resume(throwing: TransferError(errorDescription: outcome.error)) }
                         return true
                     }
@@ -98,9 +113,8 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
             let result: Result<UploadReceipt, any Error>
             do {
                 if let error { throw error }
-                guard let response = task.response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
-                    throw TransferError(errorDescription: "Upload failed (HTTP \((task.response as? HTTPURLResponse)?.statusCode ?? 0)). Retry after checking your server.")
-                }
+                guard let response = task.response else { throw APIError.invalidResponse("The upload returned no server response.") }
+                try APIClient.validate(response)
                 let receipt = try JSONDecoder().decode(UploadReceipt.self, from: data)
                 guard UUID(uuidString: receipt.id) != nil, ["created", "duplicate"].contains(receipt.status) else {
                     throw TransferError(errorDescription: "The server did not confirm this upload. Retry to verify its checksum.")
@@ -112,7 +126,8 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
                 let outcome: Outcome
                 switch result {
                 case .success(let receipt): outcome = Outcome(receipt: receipt, error: nil)
-                case .failure(let error): outcome = Outcome(receipt: nil, error: error.localizedDescription)
+                case .failure(let error): outcome = Outcome(receipt: nil, error: error.localizedDescription,
+                    httpStatus: (task.response as? HTTPURLResponse)?.statusCode)
                 }
                 // Failure to persist is surfaced rather than claiming a resumable success.
                 do { try JSONEncoder().encode(outcome).write(to: descriptor.receipt, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }

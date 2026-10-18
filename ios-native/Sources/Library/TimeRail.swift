@@ -3,6 +3,7 @@ import SwiftUI
 struct TimeRail: View {
     let store: LibraryStore
     let pipeline: MediaPipeline
+    let viewportWidth: CGFloat
     @State private var selected: Int?
     @State private var yearSelection: Int?
     @State private var expanded = false
@@ -27,7 +28,7 @@ struct TimeRail: View {
                     }
                     if buckets.indices.contains(activeIndex) {
                         lens(index: activeIndex)
-                            .frame(width: min(250, UIScreen.main.bounds.width - 110), alignment: .leading)
+                            .frame(width: max(120, min(250, viewportWidth - 110)), alignment: .leading)
                             .offset(x: -66)
                             .position(x: -60, y: min(max(100, fraction(activeIndex) * height + 24), geometry.size.height - 100))
                             .allowsHitTesting(false)

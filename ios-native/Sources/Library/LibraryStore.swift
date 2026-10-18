@@ -10,6 +10,7 @@ struct GridPosition: Equatable {
     let section: String
     let item: Int
     let offset: Double
+    var assetID: String? = nil
 }
 @MainActor @Observable final class TimelinePosition {
     var section = 0
@@ -23,13 +24,19 @@ protocol LibraryAPI: Sendable {
     func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset]
     func search(_ query: SearchQuery) async throws -> SearchResponse
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse
+    func refresh() async throws
 }
+extension LibraryAPI { func refresh() async throws {} }
 extension APIClient: LibraryAPI {}
 
 @MainActor @Observable final class LibraryStore {
     let api: any LibraryAPI
     var buckets: [TimeBucket] = []
     var loaded: [String: [Asset]] = [:]
+    private var remoteBuckets: [TimeBucket] = []
+    private var deviceTimeline = MergedTimeline()
+    private var merged: [String: [LibraryEntry]] = [:]
+    private let includesDevicePhotos: Bool
     var results: [Asset] = []
     var isLoading = false
     var isSearching = false
@@ -44,9 +51,18 @@ extension APIClient: LibraryAPI {}
     var resetID = UUID()
     var scrollTarget: String?
     var restorePosition: GridPosition?
-    var selected: Set<String> = [] { didSet { selectedRecords = selectedRecords.filter { selected.contains($0.key) } } }
+    var selected: Set<String> = [] { didSet {
+        selectedRecords = selectedRecords.filter { selected.contains($0.key) }
+        selectedLocalRecords = selectedLocalRecords.filter { selected.contains("local:" + $0.key) }
+    } }
     private var selectedRecords: [String: Asset] = [:]
-    var isSelecting = false
+    private var selectedLocalRecords: [String: LocalPhoto] = [:]
+    var isSelecting = false {
+        didSet { if !isSelecting { groupSelectionTask?.cancel(); isSelectingGroup = false } }
+    }
+    private(set) var isSelectingGroup = false
+    @ObservationIgnored private var groupSelectionTask: Task<Void, Never>?
+    @ObservationIgnored private var groupSelectionID = UUID()
     let navigation = TimelinePosition()
     private(set) var timelineFilter = TimelineFilter()
     private(set) var searchFilter = SearchFilter()
@@ -68,7 +84,33 @@ extension APIClient: LibraryAPI {}
     @ObservationIgnored var position: GridPosition?
     @ObservationIgnored var started = false
 
-    init(api: any LibraryAPI) { self.api = api }
+    init(api: any LibraryAPI, includesDevicePhotos: Bool = false) {
+        self.api = api; self.includesDevicePhotos = includesDevicePhotos
+    }
+    private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && timelineFilter == TimelineFilter() }
+    var selectedLocalPhotos: [LocalPhoto] { Array(selectedLocalRecords.values) }
+    func updateDeviceTimeline(_ snapshot: MergedTimeline) {
+        deviceTimeline = snapshot
+        guard mergesDevicePhotos else { return }
+        restorePosition = position
+        if let id = restorePosition?.assetID, id.hasPrefix("local:"),
+           let remote = snapshot.remoteToLocal.first(where: { "local:" + $0.value.id == id })?.key {
+            restorePosition?.assetID = remote
+        }
+        updateSections(); resetID = UUID(); revision += 1
+    }
+
+    func restoredIndex(for position: GridPosition) -> (section: Int, item: Int)? {
+        if let id = position.assetID {
+            if showingResults, let item = results.firstIndex(where: { $0.id == id }) { return (0, item) }
+            for (section, bucket) in buckets.enumerated() {
+                if mergesDevicePhotos, let item = merged[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
+                if !mergesDevicePhotos, let item = loaded[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
+            }
+        }
+        guard let section = sections.firstIndex(where: { $0.id == position.section }), sections[section].count > 0 else { return nil }
+        return (section, min(position.item, sections[section].count - 1))
+    }
 
     var sections: [LibrarySection] {
         if showingResults { return [.init(id: "results", count: results.count, title: query.isEmpty ? filterTitle ?? "Library" : "Search")] }
@@ -85,6 +127,62 @@ extension APIClient: LibraryAPI {}
         else { selected.insert(asset.id); selectedRecords[asset.id] = asset }
     }
     func select(_ asset: Asset) { selected.insert(asset.id); selectedRecords[asset.id] = asset }
+    func toggleSelection(_ entry: LibraryEntry) {
+        if let asset = entry.remote { toggleSelection(asset); return }
+        guard let photo = entry.local else { return }
+        if selected.contains(entry.id) { selected.remove(entry.id) }
+        else { selected.insert(entry.id); selectedLocalRecords[photo.id] = photo }
+    }
+    func select(_ entry: LibraryEntry) {
+        if let asset = entry.remote { select(asset) }
+        else if let photo = entry.local { selected.insert(entry.id); selectedLocalRecords[photo.id] = photo }
+    }
+
+    /// Resolve the whole date group before changing selection. A virtualized
+    /// viewport or an evicted bucket must not silently select only visible cells.
+    func selectMonth(_ selecting: Bool) {
+        guard isSelecting, !showingResults, !isSelectingGroup,
+              buckets.indices.contains(navigation.section) else { return }
+        let bucket = buckets[navigation.section].id
+        let current = generation, filter = timelineFilter
+        let operation = UUID(); groupSelectionID = operation
+        isSelectingGroup = true
+        groupSelectionTask = Task {
+            defer { if generation == current && groupSelectionID == operation { isSelectingGroup = false } }
+            do {
+                let assets: [Asset]
+                if let cached = loaded[bucket], !cachedBuckets.contains(bucket) { assets = cached }
+                else if remoteBuckets.contains(where: { $0.id == bucket }) {
+                    assets = try await api.timeBucket(bucket, filter: filter)
+                } else { assets = [] }
+                try Task.checkCancellation()
+                guard generation == current, isSelecting else { return }
+                let entries = mergesDevicePhotos ? deviceTimeline.entries(remote: assets, bucket: bucket)
+                    : assets.map { LibraryEntry.remote($0) }
+                let ids = Set(entries.map(\.id))
+                if !selecting { selected.subtract(ids) }
+                else {
+                    for entry in entries {
+                        if let asset = entry.remote { selectedRecords[asset.id] = asset }
+                        else if let photo = entry.local { selectedLocalRecords[photo.id] = photo }
+                    }
+                    selected.formUnion(ids)
+                }
+            } catch is CancellationError { }
+            catch { if generation == current { self.error = error.localizedDescription } }
+        }
+    }
+
+    var canSelectMonth: Bool { !showingResults && buckets.indices.contains(navigation.section) }
+
+    func entry(section: Int, item: Int) -> LibraryEntry? {
+        if mergesDevicePhotos, buckets.indices.contains(section) {
+            let key = buckets[section].id
+            if let entries = merged[key], entries.indices.contains(item) { return entries[item] }
+            return nil
+        }
+        return asset(section: section, item: item).map { .remote($0, local: deviceTimeline.remoteToLocal[$0.id]) }
+    }
 
     func asset(section: Int, item: Int) -> Asset? {
         if showingResults { return results.indices.contains(item) ? results[item] : nil }
@@ -97,12 +195,15 @@ extension APIClient: LibraryAPI {}
         return buckets[max(0, i - 1)...min(buckets.count - 1, i + 1)].flatMap { loaded[$0.id] ?? [] }
     }
 
-    func reload() async {
+    func reload(preservingPosition: Bool = false) async {
         cancelRequests()
+        groupSelectionTask?.cancel(); groupSelectionID = UUID(); isSelectingGroup = false
         queryTask?.cancel()
         searchGeneration = UUID(); isSearching = false
         generation = UUID(); let current = generation
-        isLoading = true; error = nil; buckets = []; loaded = [:]; recentBuckets = []; bucketErrors = [:]; cachedBuckets = []
+        isLoading = true; error = nil; bucketErrors = [:]; cachedBuckets = []
+        if preservingPosition { restorePosition = position }
+        else { remoteBuckets = []; buckets = []; loaded = [:]; recentBuckets = [] }
         updateSections()
         resetID = UUID()
         defer { if generation == current { isLoading = false } }
@@ -110,15 +211,22 @@ extension APIClient: LibraryAPI {}
             if showingResults { await loadResults(reset: true); return }
             cacheEpoch = await TimelineCache.shared.epoch(scope: api.cacheScope)
             if let snapshot = await TimelineCache.shared.load(scope: api.cacheScope, filter: timelineFilter), generation == current {
-                buckets = snapshot.buckets; loaded = snapshot.assets; cachedBuckets = Set(loaded.keys)
+                remoteBuckets = snapshot.buckets; loaded = snapshot.assets; cachedBuckets = Set(loaded.keys)
                 recentBuckets = buckets.map(\.id).filter { loaded[$0] != nil }; updateSections(); revision += 1
             }
             let response = try await api.timeBuckets(filter: timelineFilter)
             guard generation == current else { return }
-            buckets = response
+            remoteBuckets = response
             updateSections()
-            title = Self.monthTitle(response.first?.date)
+            title = Self.monthTitle(buckets.first?.date)
             revision += 1
+            if preservingPosition {
+                cachedBuckets = Set(loaded.keys)
+                if let anchor = restorePosition, let index = buckets.firstIndex(where: { $0.id == anchor.section }) {
+                    requestBucket(index)
+                    if index + 1 < buckets.count { requestBucket(index + 1) }
+                }
+            }
             for index in 0..<min(2, buckets.count) { requestBucket(index) }
         } catch is CancellationError {} catch { if generation == current { self.error = error.localizedDescription } }
     }
@@ -126,6 +234,7 @@ extension APIClient: LibraryAPI {}
     func requestBucket(_ section: Int) {
         guard !showingResults, buckets.indices.contains(section) else { return }
         let bucket = buckets[section]
+        guard remoteBuckets.contains(where: { $0.id == bucket.id }) else { return }
         guard loaded[bucket.id] == nil || cachedBuckets.contains(bucket.id), requests[bucket.id] == nil, bucketErrors[bucket.id] == nil else { return }
         let current = generation, filter = timelineFilter
         requests[bucket.id] = Task { [weak self, api] in
@@ -137,9 +246,9 @@ extension APIClient: LibraryAPI {}
                 self.recentBuckets.removeAll { $0 == bucket.id }; self.recentBuckets.append(bucket.id)
                 // Bucket summaries are cheap; keep a bounded window while the grid remains virtual.
                 while self.recentBuckets.count > 12 { self.loaded[self.recentBuckets.removeFirst()] = nil }
-                self.requests[bucket.id] = nil; self.revision += 1
+                self.requests[bucket.id] = nil; self.updateMergedEntries(); self.revision += 1
                 if let epoch = self.cacheEpoch {
-                    let snapshot = TimelineSnapshot(buckets: self.buckets, assets: self.loaded)
+                    let snapshot = TimelineSnapshot(buckets: self.remoteBuckets, assets: self.loaded)
                     await TimelineCache.shared.save(snapshot, scope: api.cacheScope, filter: filter, epoch: epoch)
                 }
             } catch is CancellationError {} catch {
@@ -206,7 +315,7 @@ extension APIClient: LibraryAPI {}
         selected = []; isSelecting = false
         if let saved = originalTimeline {
             cancelRequests(); generation = UUID(); searchGeneration = UUID()
-            buckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2
+            remoteBuckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2
             recentBuckets = buckets.map(\.id).filter { loaded[$0] != nil }; cachedBuckets = Set(loaded.keys)
             updateSections(); restorePosition = saved.1; resetID = UUID(); revision += 1
             error = nil; isLoading = false; isSearching = false; originalTimeline = nil
@@ -322,12 +431,21 @@ extension APIClient: LibraryAPI {}
         for key in Array(loaded.keys) {
             if let i = loaded[key]?.firstIndex(where: { $0.id == asset.id }) { loaded[key]?[i] = asset }
         }
+        updateMergedEntries()
         revision += 1
     }
-    func refreshAfterMutation() async { originalTimeline = nil; await reload() }
+    func refreshAfterMutation() async {
+        originalTimeline = nil
+        do { try await api.refresh(); await reload(preservingPosition: true) }
+        catch is CancellationError { }
+        catch { self.error = error.localizedDescription }
+    }
 
     private func cancelRequests() { requests.values.forEach { $0.cancel() }; requests = [:] }
-    func stop() { cancelRequests(); queryTask?.cancel(); generation = UUID(); searchGeneration = UUID() }
+    func stop() {
+        cancelRequests(); queryTask?.cancel(); groupSelectionTask?.cancel(); isSelectingGroup = false
+        generation = UUID(); searchGeneration = UUID()
+    }
     private func beginScopeChange() {
         stop(); selected = []; isSelecting = false; isSearching = false; isLoading = false
         verification = nil; retryBatch = nil; cursor = nil; hasMore = false
@@ -340,11 +458,22 @@ extension APIClient: LibraryAPI {}
     }
     private func rememberOriginal() {
         if originalTimeline == nil && !isFiltered && !showingResults {
-            originalTimeline = (TimelineSnapshot(buckets: buckets, assets: loaded), position, title)
+            originalTimeline = (TimelineSnapshot(buckets: remoteBuckets, assets: loaded), position, title)
         }
     }
     private func updateSections() {
+        buckets = mergesDevicePhotos ? deviceTimeline.buckets(remote: remoteBuckets) : remoteBuckets
+        updateMergedEntries()
         timelineSections = buckets.map { .init(id: $0.id, count: $0.count, title: Self.monthTitle($0.date)) }
+    }
+    private func updateMergedEntries() {
+        merged = [:]
+        guard mergesDevicePhotos else { return }
+        let remoteKeys = Set(remoteBuckets.map(\.id))
+        for bucket in buckets {
+            if let assets = loaded[bucket.id] { merged[bucket.id] = deviceTimeline.entries(remote: assets, bucket: bucket.id) }
+            else if !remoteKeys.contains(bucket.id) { merged[bucket.id] = deviceTimeline.entries(remote: [], bucket: bucket.id) }
+        }
     }
     private static func monthTitle(_ date: Date?) -> String {
         guard let date else { return "Library" }

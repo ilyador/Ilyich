@@ -19,7 +19,7 @@ enum ReadOnlyPolicy {
         switch method.uppercased() {
         case "GET", "HEAD": return true
         case "POST":
-            return ["search/smart", "search/metadata", "search/random", "search/explore", "auth/login", "auth/logout", "auth/validateToken", "auth/session/unlock", "auth/session/lock", "sessions"].contains(path)
+            return ["search/smart", "search/metadata", "search/random", "search/explore", "auth/login", "auth/logout", "auth/validateToken", "auth/session/unlock", "auth/session/lock", "sessions", "sync/stream", "sync/ack"].contains(path)
         case "DELETE": return path.hasPrefix("sessions/") && path.split(separator: "/").count == 2
         default: return false
         }

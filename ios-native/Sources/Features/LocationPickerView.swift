@@ -23,6 +23,7 @@ struct LocationPickerView: View {
     init(api: APIClient, initial: CLLocationCoordinate2D? = nil, onSelect: @escaping (CLLocationCoordinate2D) -> Void) {
         self.api = api; self.onSelect = onSelect
         let valid = initial.flatMap { CLLocationCoordinate2DIsValid($0) ? $0 : nil }
+        _center = State(initialValue: valid ?? .init(latitude: 0, longitude: 0))
         _selected = State(initialValue: valid.map { .init(latitude: $0.latitude, longitude: $0.longitude) })
         _camera = State(initialValue: valid.map { .region(.init(center: $0, span: .init(latitudeDelta: 0.03, longitudeDelta: 0.03))) } ?? .region(.init(center: .init(latitude: 0, longitude: 0), span: .init(latitudeDelta: 120, longitudeDelta: 180))))
     }
@@ -31,7 +32,10 @@ struct LocationPickerView: View {
             if mapEnabled == false {
                 FeatureEmpty(title: "Maps are turned off", symbol: "map", description: "Enable maps on your server before selecting a photo location.")
             } else if mapEnabled == nil {
-                Spacer(); ProgressView("Loading map settings"); Spacer()
+                Spacer()
+                if failure == nil { ProgressView("Loading map settings") }
+                else { ContentUnavailableView("Map unavailable", systemImage: "map") }
+                Spacer()
             } else {
                 mapCanvas
                 if !query.isEmpty {

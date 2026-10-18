@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CryptoKit
 
 @MainActor @Observable final class ShareInboxStore {
     static let shared = ShareInboxStore()
@@ -11,6 +12,7 @@ import Observation
     private(set) var errors: [String: String] = [:]
     var error: String?
     private var worker: Task<Void, Never>?
+    private var stopping: Task<Void, Never>?
     private var generation = UUID()
 
     func refresh() {
@@ -19,18 +21,29 @@ import Observation
     }
 
     func cancel() {
-        generation = UUID(); worker?.cancel(); worker = nil
-        isRunning = false; currentID = nil; progress = nil
+        guard stopping == nil else { return }
+        generation = UUID()
+        let activeWorker = worker
+        activeWorker?.cancel()
+        stopping = Task {
+            await BackgroundUploads.sharing.cancelAll()
+            await activeWorker?.value
+            worker = nil; stopping = nil
+            isRunning = false; currentID = nil; progress = nil
+            refresh()
+        }
     }
 
+    func waitUntilPaused() async { await stopping?.value }
+
     func discard(_ batch: SharedBatch) {
-        guard !isRunning else { return }
+        guard !isRunning, stopping == nil else { return }
         do { try SharedInbox.remove(batch.id); refresh() }
         catch { self.error = error.localizedDescription }
     }
 
     func upload(selected: Set<String>, api: APIClient) {
-        guard !isRunning, !selected.isEmpty else { return }
+        guard !isRunning, stopping == nil, !selected.isEmpty else { return }
         let items = batches.flatMap { batch in batch.attachments.filter { selected.contains($0.id) }.map { (batch.id, $0) } }
         guard !items.isEmpty else { return }
         generation = UUID(); let runID = generation
@@ -87,6 +100,12 @@ import Observation
     private func transfer(_ file: UploadFile, sidecar: UploadFile?, fields: [String: String], api: APIClient,
                           saved: SavedSession, runID: UUID) async throws -> String {
         let checksum = try await UploadBody.work { try UploadBody.checksum(file.url) }
+        let sidecarChecksum = try await UploadBody.work { try sidecar.map { try UploadBody.checksum($0.url) } ?? "" }
+        let identity = [saved.scope, file.url.path, checksum, sidecarChecksum, fields["livePhotoVideoId"] ?? ""].joined(separator: "|")
+        let id = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        let folder = file.url.deletingLastPathComponent()
+        let body = folder.appendingPathComponent(id + ".multipart")
+        let receipt = folder.appendingPathComponent(id + ".receipt")
         try checkSession(saved, runID: runID)
         let check: UploadCheckResponse = try await api.request(.post, path: "assets/bulk-upload-check",
             body: UploadCheck(assets: [.init(id: file.url.lastPathComponent, checksum: checksum)]))
@@ -98,18 +117,21 @@ import Observation
             guard result.reason == "duplicate", let id = result.assetId, result.isTrashed != true else {
                 throw BackupError.message("The server rejected this file. Check its format or restore its server copy from trash, then retry.")
             }
-            if sidecar != nil { throw BackupError.message("This photo already exists. Its XMP cannot be updated by uploading a duplicate; the shared files were kept.") }
+            let ownReceipt = BackgroundUploads.sharing.completedReceipt(at: receipt)
+            if sidecar != nil && !(ownReceipt?.id == id && ownReceipt?.status == "created") {
+                throw BackupError.message("This photo already exists. Its XMP cannot be updated by uploading a duplicate; the shared files were kept.")
+            }
             if let motionID = fields["livePhotoVideoId"] {
                 try await LivePhotoPairing.ensure(assetID: id, motionID: motionID, api: api)
             }
             return id
         }
         guard result.action == "accept" else { throw BackupError.message("The server returned an unknown upload decision.") }
-        let id = UUID().uuidString
-        let body = file.url.deletingLastPathComponent().appendingPathComponent(id + ".multipart")
-        let receipt = file.url.deletingLastPathComponent().appendingPathComponent(id + ".receipt")
-        defer { try? FileManager.default.removeItem(at: body); try? FileManager.default.removeItem(at: receipt) }
-        try await UploadBody.work { try UploadBody.write(to: body, boundary: id, fields: fields, asset: file, sidecar: sidecar) }
+        defer { try? FileManager.default.removeItem(at: body) }
+        BackgroundUploads.sharing.clearFailedReceipt(at: receipt)
+        if !FileManager.default.fileExists(atPath: body.path) {
+            try await UploadBody.work { try UploadBody.write(to: body, boundary: id, fields: fields, asset: file, sidecar: sidecar) }
+        }
         try checkSession(saved, runID: runID)
         var request = try await api.authorizedRequest(path: "assets")
         request.httpMethod = "POST"; request.setValue("multipart/form-data; boundary=\(id)", forHTTPHeaderField: "Content-Type")
