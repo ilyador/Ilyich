@@ -6,6 +6,11 @@ struct LibrarySection: Identifiable, Equatable {
     let count: Int
     let title: String
 }
+struct TimelineDayGroup: Equatable, Sendable {
+    let startItem: Int
+    var count: Int
+    let title: String
+}
 struct GridPosition: Equatable {
     let section: String
     let item: Int
@@ -41,6 +46,7 @@ extension APIClient: LibraryAPI {}
     private var remoteBuckets: [TimeBucket] = []
     private var deviceTimeline = MergedTimeline()
     private var merged: [String: [LibraryEntry]] = [:]
+    private var dayGroupCache: [String: [TimelineDayGroup]] = [:]
     private let includesDevicePhotos: Bool
     var results: [Asset] = []
     var isLoading = false
@@ -225,6 +231,11 @@ extension APIClient: LibraryAPI {}
             return nil
         }
         return asset(section: section, item: item).map { .remote($0, local: deviceTimeline.remoteToLocal[$0.id]) }
+    }
+
+    func dayGroups(section: Int) -> [TimelineDayGroup] {
+        guard !showingResults, buckets.indices.contains(section) else { return [] }
+        return dayGroupCache[buckets[section].id] ?? []
     }
 
     func asset(section: Int, item: Int) -> Asset? {
@@ -571,11 +582,35 @@ extension APIClient: LibraryAPI {}
     }
     private func updateMergedEntries() {
         merged = [:]
-        guard mergesDevicePhotos else { return }
-        let remoteKeys = Set(remoteBuckets.map(\.id))
+        if mergesDevicePhotos {
+            let remoteKeys = Set(remoteBuckets.map(\.id))
+            for bucket in buckets {
+                if let assets = loaded[bucket.id] { merged[bucket.id] = deviceTimeline.entries(remote: assets, bucket: bucket.id) }
+                else if !remoteKeys.contains(bucket.id) { merged[bucket.id] = deviceTimeline.entries(remote: [], bucket: bucket.id) }
+            }
+        }
+        dayGroupCache = [:]
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        var style = Date.FormatStyle().month(.wide).day().year()
+        style.timeZone = calendar.timeZone
         for bucket in buckets {
-            if let assets = loaded[bucket.id] { merged[bucket.id] = deviceTimeline.entries(remote: assets, bucket: bucket.id) }
-            else if !remoteKeys.contains(bucket.id) { merged[bucket.id] = deviceTimeline.entries(remote: [], bucket: bucket.id) }
+            let entries: [LibraryEntry]?
+            if mergesDevicePhotos { entries = merged[bucket.id] }
+            else { entries = loaded[bucket.id]?.map { .remote($0) } }
+            guard let entries, !entries.isEmpty else { continue }
+            var groups: [TimelineDayGroup] = []
+            var currentDay: Date?
+            for (item, entry) in entries.enumerated() {
+                let day = calendar.startOfDay(for: entry.date)
+                if currentDay == day {
+                    groups[groups.count - 1].count += 1
+                } else {
+                    groups.append(TimelineDayGroup(startItem: item, count: 1, title: day.formatted(style)))
+                    currentDay = day
+                }
+            }
+            dayGroupCache[bucket.id] = groups
         }
     }
     private static func monthTitle(_ date: Date?) -> String {

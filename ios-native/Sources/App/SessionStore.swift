@@ -225,6 +225,8 @@ import UIKit
         let date = try? await entities.lastSyncDate()
         guard api === client else { return }
         lastSyncDate = date; syncError = nil
+        await client.persistCachedServerFeatures()
+        guard api === client else { return }
         guard summary.changed || summary.completed || !summary.assetIDs.isEmpty else { return }
         let accessChanged = (try? await entities.takeAccessInvalidation()) == true
         guard api === client else { return }
@@ -297,6 +299,7 @@ import UIKit
         try? await previousEntities?.clear()
         await previous?.attachEntityStore(nil)
         await BackupCoordinator.shared.disconnect()
+        await TransferNotifications.clearAll()
         if let previous { LockedPINStore.remove(for: previous) }
         if let previous, !isUITesting {
             do { try NetworkConfigurationStore.remove(server: previous.baseURL) }

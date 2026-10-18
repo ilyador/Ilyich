@@ -46,9 +46,13 @@ import CryptoKit
         guard !isRunning, stopping == nil, !selected.isEmpty else { return }
         let items = batches.flatMap { batch in batch.attachments.filter { selected.contains($0.id) }.map { (batch.id, $0) } }
         guard !items.isEmpty else { return }
+        var totals: [UUID: Int] = [:]
+        for (batchID, _) in items { totals[batchID, default: 0] += 1 }
         generation = UUID(); let runID = generation
         isRunning = true; error = nil; errors = [:]; completed = 0
         worker = Task {
+            var notificationCompleted: [UUID: Int] = [:]
+            var notificationsStarted = false
             defer {
                 if generation == runID { isRunning = false; worker = nil; currentID = nil; progress = nil; refresh() }
             }
@@ -56,6 +60,10 @@ import CryptoKit
                 guard let saved = try SessionKeychain.read(), saved.server == api.baseURL, saved.userID == api.userID else {
                     throw BackupError.message("Sign in before uploading these shared files.")
                 }
+                for (batchID, total) in totals {
+                    await TransferNotifications.started(id: batchID, kind: "Shared upload", total: total)
+                }
+                notificationsStarted = true
                 for (batchID, item) in items {
                     try checkSession(saved, runID: runID)
                     currentID = item.id; progress = nil
@@ -72,6 +80,7 @@ import CryptoKit
                         try checkSession(saved, runID: runID)
                         try consume(item, batchID: batchID)
                         completed += 1; refresh()
+                        notificationCompleted[batchID, default: 0] += 1
                     } catch is CancellationError { throw CancellationError() }
                     catch APIError.unauthorized { throw APIError.unauthorized }
                     catch {
@@ -81,6 +90,15 @@ import CryptoKit
                 }
             } catch is CancellationError { }
             catch { if generation == runID { self.error = error.localizedDescription } }
+            if notificationsStarted {
+                for (batchID, total) in totals {
+                    guard !Task.isCancelled, generation == runID else { TransferNotifications.cancel(id: batchID); continue }
+                    let done = notificationCompleted[batchID, default: 0]
+                    await TransferNotifications.finished(id: batchID, kind: "Shared upload", total: total,
+                                                         completed: done, failed: total - done)
+                    if Task.isCancelled || generation != runID { TransferNotifications.cancel(id: batchID) }
+                }
+            }
         }
     }
 

@@ -38,6 +38,7 @@ actor APIClient {
     private let connection: ServerConnection
     private var castAuthorization: CastAuthorization?
     private var entityStore: EntityStore?
+    private var cachedServerFeatures: ServerFeatures?
 
     init(baseURL: URL, accessToken: String? = nil, userID: String? = nil, session: URLSession? = nil, networkConfiguration: NetworkConfiguration? = nil) throws {
         self.baseURL = try Self.normalizedBaseURL(baseURL)
@@ -146,7 +147,28 @@ actor APIClient {
     }
     func logout() async throws { try await requestVoid(.post, path: "auth/logout") }
     func validateToken() async throws { try await requestVoid(.post, path: "auth/validateToken") }
-    func serverFeatures() async throws -> ServerFeatures { try await request(.get, path: "server/features") }
+    func serverFeatures() async throws -> ServerFeatures {
+        do {
+            let features: ServerFeatures = try await request(.get, path: "server/features")
+            cachedServerFeatures = features
+            if let entityStore { try? await entityStore.persistCachedServerFeatures(features) }
+            return features
+        } catch {
+            guard canReadOffline(error), let entityStore, try await entityStore.isComplete() else { throw error }
+            let saved: ServerFeatures?
+            if let cachedServerFeatures {
+                saved = cachedServerFeatures
+            } else {
+                saved = try await entityStore.cachedServerFeatures()
+            }
+            guard let saved else { throw error }
+            return saved
+        }
+    }
+    func persistCachedServerFeatures() async {
+        guard let cachedServerFeatures, let entityStore else { return }
+        try? await entityStore.persistCachedServerFeatures(cachedServerFeatures)
+    }
     func serverConfig() async throws -> ServerConfig { try await request(.get, path: "server/config") }
     func authStatus() async throws -> AuthStatus { try await request(.get, path: "auth/status") }
     func unlock(pin: String) async throws { try await requestVoid(.post, path: "auth/session/unlock", body: ["pinCode": pin]) }
@@ -160,8 +182,11 @@ actor APIClient {
         let payload: TimeBucketPayload = try await request(.get, path: "timeline/bucket", query: filter.queryItems + [.init(name: "timeBucket", value: bucket)])
         return try payload.assets()
     }
-    func attachEntityStore(_ store: EntityStore?) {
+    func attachEntityStore(_ store: EntityStore?) async {
         entityStore = store.flatMap { $0.scope == cacheScope && $0.userID == userID ? $0 : nil }
+        if let cachedServerFeatures, let entityStore {
+            try? await entityStore.persistCachedServerFeatures(cachedServerFeatures)
+        }
     }
     func syncStatistics() async throws -> EntityStoreStatistics? { try await entityStore?.statistics() }
     private func canReadOffline(_ error: any Error) -> Bool {
@@ -178,7 +203,13 @@ actor APIClient {
         do { return try await request(.get, path: "albums") }
         catch { if canReadOffline(error), let store = entityStore, try await store.isComplete() { return try await store.albums() }; throw error }
     }
-    func album(id: String) async throws -> Album { try await request(.get, path: "albums/\(id)") }
+    func album(id: String) async throws -> Album {
+        do { return try await request(.get, path: "albums/\(id)") }
+        catch {
+            guard canReadOffline(error), let store = entityStore, try await store.isComplete(), let cached = try await store.album(id: id) else { throw error }
+            return cached
+        }
+    }
     func people(page: Int = 1, size: Int = 100, name: String? = nil) async throws -> PeopleResponse {
         let name = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         var query = [URLQueryItem(name: "page", value: String(page)), .init(name: "size", value: String(size))]
@@ -192,8 +223,20 @@ actor APIClient {
             return PeopleResponse(people: Array(visible.dropFirst(start).prefix(safeSize)), total: all.count, hidden: all.count - visible.count, hasNextPage: start + safeSize < visible.count)
         }
     }
-    func person(id: String) async throws -> Person { try await request(.get, path: "people/\(id)") }
-    func mapMarkers() async throws -> [MapMarker] { try await request(.get, path: "map/markers") }
+    func person(id: String) async throws -> Person {
+        do { return try await request(.get, path: "people/\(id)") }
+        catch {
+            guard canReadOffline(error), let store = entityStore, try await store.isComplete(), let cached = try await store.person(id: id) else { throw error }
+            return cached
+        }
+    }
+    func mapMarkers(_ query: MapMarkerQuery = .init()) async throws -> [MapMarker] {
+        do { return try await request(.get, path: "map/markers", query: query.queryItems) }
+        catch {
+            guard canReadOffline(error), let entityStore, try await entityStore.isComplete() else { throw error }
+            return try await entityStore.mapMarkers(query)
+        }
+    }
     func updateFavorite(assetID: String, value: Bool) async throws -> Asset {
         try await request(.put, path: "assets/\(assetID)", body: ["isFavorite": value])
     }
