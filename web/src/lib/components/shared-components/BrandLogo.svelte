@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { immichLogo, type Size } from '@immich/ui';
+  import type { Size } from '@immich/ui';
   import { tv } from 'tailwind-variants';
 
   type Props = {
@@ -25,7 +25,7 @@
 </script>
 
 <span class={styles({ size, class: className })} role="img" aria-label="Ilyich logo">
-  <img src={immichLogo} class="aspect-square h-full" alt="" draggable="false" />
+  <img src="/ilyich-logo.png" class="aspect-square h-full rounded-[20%]" alt="" draggable="false" />
   {#if variant === 'inline'}
     <span class="font-semibold tracking-tight" aria-hidden="true">Ilyich</span>
   {/if}

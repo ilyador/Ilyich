@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-<img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
+<img src="../design/ilyich-logo.png" width="120" alt="Ilyich icon">
 </p>
 <h1 align="center">Ilyich</h1>
 <h3 align="center">ഫോട്ടോകളും വീഡിയോകളും കൈകാര്യം ചെയ്യുന്നതിനുള്ള ഉയർന്ന കാര്യക്ഷമതയുള്ള സെൽഫ്-ഹോസ്റ്റഡ് ആപ്ലിക്കേഷൻ</h3>

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-<img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
+<img src="../design/ilyich-logo.png" width="120" alt="Ilyich icon">
 </p>
 <h1 align="center">Ilyich</h1>
 <h3 align="center">Ilyich - Solució de gestió de fotos i vídeos autoallotjada i d’alt rendiment</h3>

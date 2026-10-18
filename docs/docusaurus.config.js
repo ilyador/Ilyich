@@ -86,8 +86,7 @@ const config = {
         title: 'Ilyich',
         logo: {
           alt: 'Ilyich icon',
-          src: 'img/logomark-light.svg',
-          srcDark: 'img/logomark-dark.svg',
+          src: 'img/ilyich-logo.png',
           className: 'rounded-none',
         },
         items: [
