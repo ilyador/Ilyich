@@ -203,12 +203,35 @@ struct LocalPhotoViewer: View {
     }
 }
 
-private struct LocalLivePhoto: UIViewRepresentable {
+struct LocalLivePhoto: UIViewRepresentable {
     let livePhoto: PHLivePhoto
     let active: Bool
-    func makeUIView(context: Context) -> PHLivePhotoView { let view = PHLivePhotoView(); view.contentMode = .scaleAspectFit; view.livePhoto = livePhoto; return view }
-    func updateUIView(_ view: PHLivePhotoView, context: Context) { view.livePhoto = livePhoto; if !active { view.stopPlayback() } }
-    static func dismantleUIView(_ view: PHLivePhotoView, coordinator: ()) { view.stopPlayback(); view.livePhoto = nil }
+    /// Optional: play once automatically and report the end of playback.
+    var autoplay = false
+    var muted = false
+    var onEnded: (() -> Void)? = nil
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> PHLivePhotoView {
+        let view = PHLivePhotoView(); view.contentMode = .scaleAspectFit; view.livePhoto = livePhoto
+        view.delegate = context.coordinator
+        return view
+    }
+    func updateUIView(_ view: PHLivePhotoView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.onEnded = onEnded
+        view.isMuted = muted
+        if view.livePhoto !== livePhoto { view.livePhoto = livePhoto; coordinator.started = nil }
+        if !active { view.stopPlayback(); coordinator.started = nil }
+        else if autoplay, coordinator.started !== livePhoto { coordinator.started = livePhoto; view.startPlayback(with: .full) }
+    }
+    static func dismantleUIView(_ view: PHLivePhotoView, coordinator: Coordinator) {
+        coordinator.onEnded = nil; view.delegate = nil; view.stopPlayback(); view.livePhoto = nil
+    }
+    @MainActor final class Coordinator: NSObject, @preconcurrency PHLivePhotoViewDelegate {
+        var onEnded: (() -> Void)?
+        var started: PHLivePhoto?
+        func livePhotoView(_ livePhotoView: PHLivePhotoView, didEndPlaybackWith playbackStyle: PHLivePhotoViewPlaybackStyle) { onEnded?() }
+    }
 }
 
 struct LimitedPhotoAccessPicker: UIViewControllerRepresentable {
