@@ -76,7 +76,7 @@ struct LocalPhoto: Identifiable, Hashable, Sendable {
     private var generation = UUID()
     private let manager = PHImageManager.default()
 
-    func load(_ photo: LocalPhoto, full: Bool, network: Bool, motion: Bool = false) {
+    func load(_ photo: LocalPhoto, full: Bool, network: Bool, motion: Bool = false, maximumResolution: Bool = false) {
         cancel(); image = nil; livePhoto = nil; cloud = false; failure = nil; loading = true
         let token = generation
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject else { loading = false; failure = "This item is no longer available to Ilyich."; return }
@@ -107,9 +107,11 @@ struct LocalPhoto: Identifiable, Hashable, Sendable {
                 }
             }
         } else {
-            let options = PHImageRequestOptions(); options.version = .current; options.deliveryMode = .opportunistic; options.resizeMode = .fast; options.isNetworkAccessAllowed = network
+            let options = PHImageRequestOptions(); options.version = .current; options.deliveryMode = .opportunistic
+            options.resizeMode = full && maximumResolution ? .none : .fast; options.isNetworkAccessAllowed = network
             let pixels: CGFloat = full ? 3000 : 420
-            request = manager.requestImage(for: asset, targetSize: CGSize(width: pixels, height: pixels), contentMode: full ? .aspectFit : .aspectFill, options: options) { [weak self] image, info in
+            let targetSize = full && maximumResolution ? PHImageManagerMaximumSize : CGSize(width: pixels, height: pixels)
+            request = manager.requestImage(for: asset, targetSize: targetSize, contentMode: full ? .aspectFit : .aspectFill, options: options) { [weak self] image, info in
                 let error = (info?[PHImageErrorKey] as? Error)?.localizedDescription
                 let inCloud = (info?[PHImageResultIsInCloudKey] as? Bool) == true
                 let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
@@ -156,6 +158,7 @@ struct LocalPhotoViewer: View {
     @State private var motion = false
     @State private var network = false
     @State private var retry = 0
+    @AppStorage("imageLoadOriginal") private var fullResolution = false
     var body: some View {
         NavigationStack {
             ZStack {
@@ -183,7 +186,9 @@ struct LocalPhotoViewer: View {
                 if photo.live { ToolbarItem(placement: .topBarTrailing) { Toggle("Live Photo", isOn: $motion).toggleStyle(.button) } }
             }
         }.preferredColorScheme(.dark)
-        .task(id: "\(photo.id)|\(network)|\(motion)|\(retry)") { media.load(photo, full: true, network: network, motion: motion) }
+        .task(id: "\(photo.id)|\(network)|\(motion)|\(retry)|\(fullResolution)") {
+            media.load(photo, full: true, network: network, motion: motion, maximumResolution: fullResolution)
+        }
         .onChange(of: scenePhase) { _, phase in if phase != .active { media.player?.pause() } }
         .onDisappear { media.cancel() }
         .sheet(isPresented: $showActions) {

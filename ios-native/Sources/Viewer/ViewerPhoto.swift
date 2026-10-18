@@ -91,7 +91,7 @@ struct ViewerPhoto: View {
                asset.hasKnownEditState, !asset.isDeveloped, !asset.isEdited, !asset.isAnimatedImage,
                let photo = matchedLocalPhoto, DevicePhotos.modificationDate(for: photo.id) == photo.modified {
                 usingLocalCopy = true
-                localMedia.load(photo, full: true, network: false)
+                localMedia.load(photo, full: true, network: false, maximumResolution: fullResolution || zoomed)
             }
         }
     }
