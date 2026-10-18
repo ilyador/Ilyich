@@ -41,6 +41,7 @@ jobs:
 
       - name: Select Xcode 27 and verify the iOS 27 SDK
         run: |
+          set -euo pipefail
           echo "DERIVED_DATA=$RUNNER_TEMP/ilyich-native-derived-data" >> "$GITHUB_ENV"
           echo "TEST_RESULTS=$RUNNER_TEMP/Ilyich-native.xcresult" >> "$GITHUB_ENV"
           sudo xcode-select -s /Applications/Xcode_27.app/Contents/Developer
@@ -48,6 +49,10 @@ jobs:
           sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
           [[ "$sdk_version" == 27.* ]] || { echo "Expected iOS 27 SDK, found $sdk_version"; exit 1; }
           echo "Using iOS SDK $sdk_version"
+          if ! xcrun --sdk iphoneos metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun --sdk iphoneos metal --version
 
       - name: Install pinned XcodeGen
         run: |
