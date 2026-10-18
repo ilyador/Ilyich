@@ -22,8 +22,8 @@ struct ProfilePhotoSettingsView: View {
                     }.frame(width: 120, height: 120).clipShape(Circle()).padding(16).accessibilityLabel("Your profile photo")
                     Spacer()
                 }
-                PhotosPicker(selection: $selected, matching: .images) { Label("Choose from Photos", systemImage: "photo") }
-                if avatar != nil { Button("Remove profile photo", role: .destructive) { confirmRemove = true } }
+                PhotosPicker(selection: $selected, matching: .images) { Label("Choose from Photos", systemImage: "photo") }.requiresWriteAccess(api)
+                if avatar != nil { Button("Remove profile photo", role: .destructive) { confirmRemove = true }.requiresWriteAccess(api) }
             } footer: { Text("You can also set a photo from your Ilyich library using the photo viewer’s menu. Your profile photo is visible to other people on your server.") }
             if loading { ProgressView() }
         }.navigationTitle("Profile photo").disabled(loading)
@@ -102,7 +102,7 @@ struct ProfilePhotoCropView: View {
             }.padding(.bottom, 20).navigationTitle("Crop profile photo").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(image == nil || saving) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(image == nil || saving).requiresWriteAccess(api) }
             }.interactiveDismissDisabled(saving).disabled(saving)
         }.task {
             defer { loading = false }

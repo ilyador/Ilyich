@@ -53,11 +53,11 @@ struct AlbumAssetsManager: View {
         .safeAreaInset(edge: .bottom) {
             if !selection.isEmpty { Text(mode == .cover ? "1 cover selected" : "\(selection.count.formatted()) selected").font(.subheadline).padding(.horizontal, 24).padding(.vertical, 12).glassEffect().padding(.bottom, 8) }
         }
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button(action) { if mode == .remove { confirmRemove = true } else { Task { await save() } } }.disabled(selection.isEmpty || busy || loading) } }
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button(action) { if mode == .remove { confirmRemove = true } else { Task { await save() } } }.disabled(selection.isEmpty || busy || loading).requiresWriteAccess(api) } }
         .disabled(busy)
         .task(id: source) { await reload() }
         .confirmationDialog("Remove \(selection.count) items from this album?", isPresented: $confirmRemove, titleVisibility: .visible) {
-            Button("Remove from album", role: .destructive) { Task { await save() } }
+            Button("Remove from album", role: .destructive) { Task { await save() } }.requiresWriteAccess(api)
         } message: { Text("The photos and videos will stay in your library.") }
         .alert("Couldn’t update album", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }

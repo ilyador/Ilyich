@@ -49,9 +49,17 @@ struct PlacesView: View {
     @State private var favoritesOnly = false
     @State private var includeArchived = false
     @State private var includePartners = true
+    @State private var mapEnabled: Bool?
+    @State private var generation = UUID()
+    @State private var dateFilter = false
+    @State private var startDate = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
+    @State private var endDate = Date()
+    @State private var showingDates = false
     var body: some View {
         GeometryReader { geometry in
-            if compact {
+            if mapEnabled == false {
+                FeatureEmpty(title: "Maps are turned off", symbol: "globe", description: "Enable maps on your server to browse photo locations.")
+            } else if compact {
                 PlacesGlobeView(places: places, focus: selected?.focus ?? focus, compact: true, api: api, pipeline: pipeline, onSelect: { selected = $0; onSelect($0) })
                     .overlay(alignment: .bottom) {
                         ScrollView(.horizontal, showsIndicators: false) {
@@ -106,26 +114,57 @@ struct PlacesView: View {
                     Toggle("Favorites only", isOn: $favoritesOnly)
                     Toggle("Include archived", isOn: $includeArchived)
                     Toggle("Include partners", isOn: $includePartners)
+                    Button(dateFilter ? "Change date range" : "Filter by date") { showingDates = true }
+                    if dateFilter { Button("Clear date range") { dateFilter = false } }
                 } label: { Image(systemName: "line.3.horizontal.decrease") }.accessibilityLabel("Filter places")
             }
             }
         }
-        .task(id: "\(favoritesOnly)|\(includeArchived)|\(includePartners)") { await load() }
+        .task(id: "\(favoritesOnly)|\(includeArchived)|\(includePartners)|\(dateFilter)|\(startDate)|\(endDate)") { await load() }
         .refreshable { await load() }
+        .sheet(isPresented: $showingDates) {
+            NavigationStack {
+                Form {
+                    Toggle("Use date range", isOn: $dateFilter)
+                    DatePicker("From", selection: $startDate, in: ...endDate, displayedComponents: .date)
+                    DatePicker("Through", selection: $endDate, in: startDate...Date(), displayedComponents: .date)
+                }.navigationTitle("Photo dates")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingDates = false } } }
+            }.presentationDetents([.medium])
+        }
         .sheet(item: $mapPlace) { place in NavigationStack { PlaceMapDetail(place: place, onSelect: onSelect) } }
         .alert("Couldn’t load places", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
     }
     private func load() async {
-        loading = true; defer { loading = false }
+        let requestGeneration = UUID(); generation = requestGeneration
+        loading = true; failure = nil
+        defer { if requestGeneration == generation { loading = false } }
         do {
+            let features = try await api.serverFeatures()
+            try Task.checkCancellation()
+            guard generation == requestGeneration else { return }
+            mapEnabled = features.map
+            guard features.map else { places = []; selected = nil; return }
             var query = [URLQueryItem(name: "withPartners", value: String(includePartners)), .init(name: "withSharedAlbums", value: "true")]
             if favoritesOnly { query.append(.init(name: "isFavorite", value: "true")) }
             if !includeArchived { query.append(.init(name: "isArchived", value: "false")) }
+            if dateFilter {
+                let calendar = Calendar.current
+                let first = calendar.startOfDay(for: startDate)
+                let last = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: endDate)) ?? endDate
+                query.append(.init(name: "fileCreatedAfter", value: first.ISO8601Format()))
+                query.append(.init(name: "fileCreatedBefore", value: last.ISO8601Format()))
+            }
             let markers: [MapMarker] = try await api.request(.get, path: "map/markers", query: query)
+            try Task.checkCancellation()
+            guard generation == requestGeneration else { return }
             places = PlaceCollection.group(markers)
-        } catch is CancellationError { } catch { failure = .init(error) }
+            if let previous = selected { selected = places.first { $0.id == previous.id } }
+        } catch is CancellationError { } catch {
+            if generation == requestGeneration { places = []; selected = nil; failure = .init(error) }
+        }
     }
 }
 
@@ -133,14 +172,18 @@ private struct PlaceMapDetail: View {
     let place: PlaceCollection
     let onSelect: (PlaceCollection) -> Void
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("mapDetailStyle") private var style = "satellite"
     var body: some View {
         Map(initialPosition: .region(.init(center: .init(latitude: place.latitude, longitude: place.longitude), span: .init(latitudeDelta: 0.15, longitudeDelta: 0.15)))) {
             Marker(place.title, coordinate: .init(latitude: place.latitude, longitude: place.longitude))
-        }.mapStyle(.imagery(elevation: .realistic))
+        }.mapStyle(style == "standard" ? .standard(elevation: .realistic) : style == "hybrid" ? .hybrid(elevation: .realistic) : .imagery(elevation: .realistic))
         .navigationTitle(place.title).navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) { Button("Open photos") { dismiss(); onSelect(place) } }
+            ToolbarItem(placement: .bottomBar) {
+                Picker("Map style", selection: $style) { Text("Map").tag("standard"); Text("Satellite").tag("satellite"); Text("Hybrid").tag("hybrid") }.pickerStyle(.segmented)
+            }
         }
     }
 }

@@ -40,7 +40,7 @@ struct LocalLibraryView: View {
                     Text("\(selection.count.formatted()) selected").font(.subheadline)
                     Spacer()
                     Button("Back up selected", systemImage: "icloud.and.arrow.up") { Task { await upload() } }
-                        .disabled(selection.isEmpty || uploading || backup.isRunning)
+                        .disabled(selection.isEmpty || uploading || backup.isRunning).requiresWriteAccess()
                 }.padding().glassEffect().padding(.horizontal, 12)
             }
         }
@@ -171,7 +171,7 @@ struct FreeUpSpaceView: View {
             }
         }.navigationTitle("Free up space").disabled(removing)
         .safeAreaInset(edge: .bottom) {
-            if !selection.isEmpty { Button("Remove \(selection.count) from Photos", role: .destructive) { confirming = true }.buttonStyle(.glassProminent).padding().disabled(loading || removing) }
+            if !selection.isEmpty { Button("Remove \(selection.count) from Photos", role: .destructive) { confirming = true }.buttonStyle(.glassProminent).padding().disabled(loading || removing).requiresWriteAccess() }
         }
         .task {
             guard !filtersReady else { return }
@@ -185,7 +185,7 @@ struct FreeUpSpaceView: View {
         .onDisappear { operation?.cancel(); operation = nil }
         .fullScreenCover(item: $viewing) { LocalPhotoViewer(photo: $0) }
         .confirmationDialog("Remove \(selection.count) items from Apple Photos?", isPresented: $confirming, titleVisibility: .visible) {
-            Button("Remove from Photos", role: .destructive) { operation = Task { await remove() } }
+            Button("Remove from Photos", role: .destructive) { operation = Task { await remove() } }.requiresWriteAccess()
         } message: { Text("Their verified server copies will be kept. iCloud Photos will remove them from your other synced devices too. Apple will ask you to confirm.") }
         .alert("Couldn’t free up space", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
@@ -210,6 +210,7 @@ struct FreeUpSpaceView: View {
         let requested = selection
         do {
             guard let originalSession = try SessionKeychain.read() else { throw APIError.unauthorized }
+            guard !ReadOnlyPolicy.isEnabled(server: originalSession.server, userID: originalSession.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
             let verified = Set(try await BackupCoordinator.shared.verifiedLocalDeletionCandidates())
             try Task.checkCancellation()
             guard requested.isSubset(of: verified) else { throw BackupError.message("A photo or its backup changed since you reviewed it. Nothing was removed. Check again before continuing.") }
@@ -223,6 +224,7 @@ struct FreeUpSpaceView: View {
             guard let currentSession = try SessionKeychain.read(), currentSession.scope == originalSession.scope,
                   currentSession.token == originalSession.token else { throw APIError.unauthorized }
             try Task.checkCancellation()
+            guard !ReadOnlyPolicy.isEnabled(server: currentSession.server, userID: currentSession.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
             try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(fetched) }
             photos.removeAll { requested.contains($0.id) }; selection = []; message = "Removed \(requested.count) items from Apple Photos. Your server copies are kept."
         } catch is CancellationError { } catch { failure = .init(error) }

@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     env:
       APP_VERSION: ${{ inputs.version || '3.3.3' }}
@@ -39,13 +39,15 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Select Xcode 26.2
+      - name: Select Xcode 27 and verify the iOS 27 SDK
         run: |
           echo "DERIVED_DATA=$RUNNER_TEMP/ilyich-native-derived-data" >> "$GITHUB_ENV"
           echo "TEST_RESULTS=$RUNNER_TEMP/Ilyich-native.xcresult" >> "$GITHUB_ENV"
-          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_27.app/Contents/Developer
           xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          [[ "$sdk_version" == 27.* ]] || { echo "Expected iOS 27 SDK, found $sdk_version"; exit 1; }
+          echo "Using iOS SDK $sdk_version"
 
       - name: Install pinned XcodeGen
         run: |
@@ -69,28 +71,24 @@ jobs:
           echo "APP_BUILD=$((3040000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
           xcodegen generate
 
-      - name: Select an available iOS 26 simulator
+      - name: Create the iPhone 15 Pro simulator on iOS 27
         run: |
           set -euo pipefail
-          xcrun simctl list devices available --json > "$RUNNER_TEMP/simulator-devices.json"
           python3 - <<'PY'
           import json
           import os
-          from pathlib import Path
+          import subprocess
 
-          devices = json.loads((Path(os.environ['RUNNER_TEMP']) / 'simulator-devices.json').read_text())['devices']
-          candidates = [
-              device for runtime, entries in sorted(devices.items(), reverse=True)
-              if runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS-26-')
-              for device in entries
-              if device.get('isAvailable') and device['name'].startswith('iPhone')
-          ]
-          if not candidates:
-              raise SystemExit('No available iOS 26 iPhone simulator in this runner image')
-          selected = candidates[0]
-          print(f"Using {selected['name']} ({selected['udid']})")
+          runtimes = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'runtimes', '--json']))['runtimes']
+          runtime = next((item for item in runtimes if item.get('isAvailable') and item['identifier'].endswith('.iOS-27-0')), None)
+          types = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devicetypes', '--json']))['devicetypes']
+          device = next((item for item in types if item['name'] == 'iPhone 15 Pro'), None)
+          if runtime is None or device is None:
+              raise SystemExit('This build requires the iOS 27.0 runtime and iPhone 15 Pro device type')
+          udid = subprocess.check_output(['xcrun', 'simctl', 'create', 'Ilyich iPhone 15 Pro', device['identifier'], runtime['identifier']], text=True).strip()
+          print(f"Using iPhone 15 Pro / iOS 27.0 ({udid})")
           with open(os.environ['GITHUB_ENV'], 'a') as output:
-              output.write(f"SIMULATOR_ID={selected['udid']}\n")
+              output.write(f"SIMULATOR_ID={udid}\n")
           PY
 
       - name: Run unit and UI tests

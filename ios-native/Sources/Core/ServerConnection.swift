@@ -38,7 +38,11 @@ actor ServerConnection {
         var request = URLRequest(url: try ServerAddress.url(base: endpoint, path: path, query: query))
         for (name, value) in configuration.customHeaders { request.setValue(value, forHTTPHeaderField: name) }
         request.setValue("Ilyich/3.3.3 (iOS)", forHTTPHeaderField: "User-Agent")
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if let token {
+            if request.value(forHTTPHeaderField: "Authorization") != nil {
+                request.setValue(token, forHTTPHeaderField: "x-immich-user-token")
+            } else { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        }
         return request
     }
 

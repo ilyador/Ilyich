@@ -9,6 +9,7 @@ struct DuplicatesView: View {
     @State private var loading = true
     @State private var busy = false
     @State private var confirming: DuplicateGroup?
+    @State private var trashEnabled = false
     @State private var failure: FeatureFailure?
     var body: some View {
         ScrollView {
@@ -32,10 +33,10 @@ struct DuplicatesView: View {
                             }
                         }
                         HStack {
-                            Button("Not duplicates") { Task { await dismissGroup(group) } }
+                            Button("Not duplicates") { Task { await dismissGroup(group) } }.requiresWriteAccess(api)
                             Spacer()
-                            Button("Move others to trash") { confirming = group }.buttonStyle(.borderedProminent)
-                                .disabled(selected(group).isEmpty || selected(group).count == group.assets.count)
+                            Button("Move others to trash") { confirming = group }.buttonStyle(.borderedProminent).requiresWriteAccess(api)
+                                .disabled(!trashEnabled || selected(group).isEmpty || selected(group).count == group.assets.count)
                         }.font(.subheadline)
                     }.padding(.horizontal, 20)
                 }
@@ -43,13 +44,19 @@ struct DuplicatesView: View {
         }.navigationTitle("Duplicates").disabled(busy)
         .task { await load() }.refreshable { await load() }
         .confirmationDialog("Move \(confirming.map { $0.assets.count - selected($0).count } ?? 0) items to trash?", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }), titleVisibility: .visible) {
-            Button("Move to trash", role: .destructive) { if let group = confirming { Task { await resolve(group) } } }
+            Button("Move to trash", role: .destructive) { if let group = confirming { Task { await resolve(group) } } }.requiresWriteAccess(api)
         } message: { Text("The items marked Keep will remain in your library.") }
         .alert("Couldn’t update duplicates", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
     private func selected(_ group: DuplicateGroup) -> Set<String> { keep[group.id] ?? Set(group.suggestedKeepAssetIds.isEmpty ? Array(group.assets.prefix(1).map(\.id)) : group.suggestedKeepAssetIds) }
     private func toggle(_ asset: Asset, in group: DuplicateGroup) { var ids = selected(group); if !ids.insert(asset.id).inserted { ids.remove(asset.id) }; keep[group.id] = ids }
-    private func load() async { defer { loading = false }; do { groups = try await api.duplicates() } catch { failure = .init(error) } }
+    private func load() async {
+        loading = true; defer { loading = false }
+        do {
+            trashEnabled = try await api.serverFeatures().trash
+            groups = try await api.duplicates()
+        } catch is CancellationError { } catch { failure = .init(error) }
+    }
     private func dismissGroup(_ group: DuplicateGroup) async {
         busy = true; defer { busy = false }
         do { try await api.requestVoid(.delete, path: "duplicates/\(group.id)"); groups.removeAll { $0.id == group.id } } catch { failure = .init(error) }
@@ -60,9 +67,11 @@ struct DuplicatesView: View {
         busy = true; defer { busy = false }
         let kept = selected(group), trashed = group.assets.map(\.id).filter { !kept.contains($0) }
         do {
+            guard try await api.serverFeatures().trash else { throw APIError.invalidResponse("Trash is turned off on this server. No photos were removed.") }
             let result: [BulkResult] = try await api.request(.post, path: "duplicates/resolve", body: Body(groups: [.init(duplicateId: group.id, keepAssetIds: Array(kept), trashAssetIds: trashed)]))
             guard result.allSatisfy(\.success) else { throw APIError.invalidResponse("Some items could not be moved. Refresh this collection and try again.") }
             groups.removeAll { $0.id == group.id }; confirming = nil
+            await invalidateBrowsingCache(api: api, pipeline: pipeline)
         } catch { failure = .init(error) }
     }
 }
@@ -79,9 +88,15 @@ struct TrashView: View {
     @State private var selection = Set<String>()
     @State private var failure: FeatureFailure?
     @State private var confirmPermanent = false
+    @State private var confirmAll = false
+    @State private var emptyAll = false
+    @State private var trashEnabled: Bool?
+    @State private var resultMessage: String?
     var body: some View {
         ScrollView {
-            if !loading && initialized && assets.isEmpty { FeatureEmpty(title: "Trash is empty", symbol: "trash", description: "Deleted photos stay here until your server’s retention period ends.") }
+            if trashEnabled == false { FeatureEmpty(title: "Trash is turned off", symbol: "trash.slash", description: "Your server does not keep deleted photos in trash.") }
+            if let resultMessage { Text(resultMessage).font(.subheadline).foregroundStyle(.secondary).padding() }
+            if trashEnabled == true && !loading && initialized && assets.isEmpty { FeatureEmpty(title: "Trash is empty", symbol: "trash", description: "Deleted photos stay here until your server’s retention period ends.") }
             LazyVGrid(columns: Array(repeating: .init(.flexible(), spacing: 2), count: 3), spacing: 2) {
                 ForEach(assets) { asset in
                     Button { if !selection.insert(asset.id).inserted { selection.remove(asset.id) } } label: {
@@ -95,23 +110,38 @@ struct TrashView: View {
         }.navigationTitle(selection.isEmpty ? "Trash" : "\(selection.count) selected")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { Button(selection.count == assets.count && !assets.isEmpty ? "Deselect" : "Select loaded") { selection = selection.count == assets.count ? [] : Set(assets.map(\.id)) }.disabled(assets.isEmpty) }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Restore all items") { emptyAll = false; confirmAll = true }
+                    Button("Empty trash", role: .destructive) { emptyAll = true; confirmAll = true }
+                } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Trash actions")
+                    .disabled(loading || trashEnabled != true || buckets.isEmpty).requiresWriteAccess(api)
+            }
             ToolbarItemGroup(placement: .bottomBar) {
-                Button("Restore", systemImage: "arrow.uturn.backward") { Task { await restore() } }.disabled(selection.isEmpty || loading)
+                Button("Restore", systemImage: "arrow.uturn.backward") { Task { await restore() } }.disabled(selection.isEmpty || loading).requiresWriteAccess(api)
                 Spacer()
-                Button("Delete forever", systemImage: "trash", role: .destructive) { confirmPermanent = true }.disabled(selection.isEmpty || loading)
+                Button("Delete forever", systemImage: "trash", role: .destructive) { confirmPermanent = true }.disabled(selection.isEmpty || loading).requiresWriteAccess(api)
             }
         }
         .task { await reload() }.refreshable { await reload() }
         .confirmationDialog("Permanently delete \(selection.count) items?", isPresented: $confirmPermanent, titleVisibility: .visible) {
-            Button("Delete forever", role: .destructive) { Task { await remove() } }
+            Button("Delete forever", role: .destructive) { Task { await remove() } }.requiresWriteAccess(api)
         } message: { Text("These photos and videos will be permanently removed from your server. This cannot be undone.") }
+        .confirmationDialog(emptyAll ? "Permanently delete everything in trash?" : "Restore every item in trash?", isPresented: $confirmAll, titleVisibility: .visible) {
+            if emptyAll { Button("Empty trash", role: .destructive) { Task { await changeAll(permanently: true) } }.requiresWriteAccess(api) }
+            else { Button("Restore all items") { Task { await changeAll(permanently: false) } }.requiresWriteAccess(api) }
+        } message: { Text(emptyAll ? "This removes all of your trashed photos and videos from the server, including items you have not loaded here. This cannot be undone." : "All of your trashed photos and videos will return to their previous visibility, including items you have not loaded here.") }
         .alert("Couldn’t update trash", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
     private var filter: TimelineFilter { var filter = TimelineFilter(); filter.visibility = nil; filter.isTrashed = true; filter.withStacked = false; return filter }
     private func reload() async {
         guard !loading else { return }
         loading = true
-        do { buckets = try await api.timeBuckets(filter: filter); assets = []; nextBucket = 0; selection = []; initialized = true } catch { failure = .init(error) }
+        do {
+            trashEnabled = try await api.serverFeatures().trash
+            guard trashEnabled == true else { assets = []; buckets = []; selection = []; loading = false; initialized = true; return }
+            buckets = try await api.timeBuckets(filter: filter); assets = []; nextBucket = 0; selection = []; initialized = true
+        } catch is CancellationError { } catch { failure = .init(error) }
         loading = false
         if !buckets.isEmpty { await loadNext() }
     }
@@ -122,10 +152,36 @@ struct TrashView: View {
     }
     private func restore() async {
         loading = true; defer { loading = false }
-        do { _ = try await api.restoreAssets(ids: Array(selection)); assets.removeAll { selection.contains($0.id) }; selection = [] } catch { failure = .init(error) }
+        do {
+            let result = try await api.restoreAssets(ids: Array(selection))
+            await invalidateBrowsingCache(api: api, pipeline: pipeline)
+            resultMessage = "Restored \(result.count.formatted()) items."
+            loading = false; await reload()
+        } catch { failure = .init(error) }
     }
     private func remove() async {
         loading = true; defer { loading = false }
-        do { try await api.trashAssets(ids: Array(selection), permanently: true); assets.removeAll { selection.contains($0.id) }; selection = [] } catch { failure = .init(error) }
+        do {
+            try await api.trashAssets(ids: Array(selection), permanently: true)
+            await invalidateBrowsingCache(api: api, pipeline: pipeline)
+            loading = false; await reload()
+        } catch { failure = .init(error) }
     }
+    private func changeAll(permanently: Bool) async {
+        guard !loading else { return }
+        loading = true; defer { loading = false }
+        do {
+            guard try await api.serverFeatures().trash else { throw APIError.invalidResponse("Trash is turned off on this server.") }
+            let result: TrashResult = try await api.request(.post, path: permanently ? "trash/empty" : "trash/restore")
+            resultMessage = permanently ? "Permanently removed \(result.count.formatted()) items." : "Restored \(result.count.formatted()) items."
+            await invalidateBrowsingCache(api: api, pipeline: pipeline)
+            loading = false; await reload()
+        } catch { failure = .init(error) }
+    }
+}
+
+@MainActor private func invalidateBrowsingCache(api: APIClient, pipeline: MediaPipeline) async {
+    await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    await pipeline.removeAll()
+    NotificationCenter.default.post(name: .ilyichCachesReset, object: nil, userInfo: ["scope": api.cacheScope])
 }

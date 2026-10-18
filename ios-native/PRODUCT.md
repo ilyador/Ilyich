@@ -26,6 +26,8 @@ Ilyich name and approved gold origami star on crimson (`design/ilyich-logo.png`)
 
 No voice-search control. Places must be a beautiful, performant 3D globe matching the reference, with day and night appearances selected by light and dark mode.
 
+The user's device is an iPhone 15 Pro running iOS 27. Target iOS 27 directly, with no older-iOS compatibility layers or iPad layouts. The globe supports pinch zoom and rotation, and a photo's location opens the same globe focused on that photo.
+
 ## Success and accessibility
 
 Fast first useful content, responsive scrolling and gestures, bounded memory, no image decoding on the main thread. Native Liquid Glass, native accessibility, Dynamic Type, sufficient contrast and touch targets, and Reduce Motion support. Verify real flows, error recovery, and actual iOS rendering rather than treating a successful build as usability evidence.
