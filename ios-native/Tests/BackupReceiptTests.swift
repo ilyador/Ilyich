@@ -25,6 +25,24 @@ final class BackupReceiptTests: XCTestCase {
         XCTAssertNil(asset.knownByteCount)
     }
 
+    func testOptionalSizeDecodesOnlyWhenValidAndRequiredFieldsStayStrict() throws {
+        func decode(_ exif: String) throws -> BackupRemoteAsset {
+            let json = #"{"id":"a","ownerId":"u","checksum":"c","isTrashed":false"# + exif + "}"
+            return try JSONDecoder().decode(BackupRemoteAsset.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(try decode(#","exifInfo":{"fileSizeInByte":1234,"make":"x"}"#).knownByteCount, 1234)
+        XCTAssertNil(try decode("").knownByteCount)
+        XCTAssertNil(try decode(#","exifInfo":null"#).knownByteCount)
+        XCTAssertNil(try decode(#","exifInfo":"bad""#).knownByteCount)
+        XCTAssertNil(try decode(#","exifInfo":{}"#).knownByteCount)
+        XCTAssertNil(try decode(#","exifInfo":{"fileSizeInByte":null}"#).knownByteCount)
+        XCTAssertNil(try decode(#","exifInfo":{"fileSizeInByte":-1}"#).knownByteCount)
+        XCTAssertNil(try decode(#","exifInfo":{"fileSizeInByte":99999999999999999999}"#).knownByteCount)
+
+        let missingChecksum = #"{"id":"a","ownerId":"u","isTrashed":false,"exifInfo":{"fileSizeInByte":1}}"#
+        XCTAssertThrowsError(try JSONDecoder().decode(BackupRemoteAsset.self, from: Data(missingChecksum.utf8)))
+    }
+
     func testSavedPreferencesKeepAutomaticAndCellularOffWhenMissing() throws {
         let preferences = try JSONDecoder().decode(BackupPreferences.self, from: Data("{}".utf8))
         XCTAssertFalse(preferences.automatic)

@@ -30,15 +30,26 @@ struct BackupRemoteAsset: Decodable, Sendable {
     let checksum: String
     let isTrashed: Bool
     let livePhotoVideoId: String?
-    let exifInfo: ExifInfo?
+    /// Server-reported original size, or nil when missing or invalid.
+    let knownByteCount: Int64?
 
-    init(id: String, ownerId: String, checksum: String, isTrashed: Bool, livePhotoVideoId: String?, exifInfo: ExifInfo? = nil) {
+    init(id: String, ownerId: String, checksum: String, isTrashed: Bool, livePhotoVideoId: String?) {
         self.id = id
         self.ownerId = ownerId
         self.checksum = checksum
         self.isTrashed = isTrashed
         self.livePhotoVideoId = livePhotoVideoId
-        self.exifInfo = exifInfo
+        self.knownByteCount = nil
+    }
+
+    /// Size-only view of `exifInfo`, so this file does not depend on app models.
+    private struct ExifSize: Decodable {
+        let fileSizeInByte: Int64?
+        private enum CodingKeys: String, CodingKey { case fileSizeInByte }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            fileSizeInByte = try? c.decodeIfPresent(Int64.self, forKey: .fileSizeInByte)
+        }
     }
 
     private enum CodingKeys: String, CodingKey { case id, ownerId, checksum, isTrashed, livePhotoVideoId, exifInfo }
@@ -50,11 +61,9 @@ struct BackupRemoteAsset: Decodable, Sendable {
         isTrashed = try c.decode(Bool.self, forKey: .isTrashed)
         livePhotoVideoId = try c.decodeIfPresent(String.self, forKey: .livePhotoVideoId)
         // Size metadata is optional and must never affect verification.
-        exifInfo = try? c.decodeIfPresent(ExifInfo.self, forKey: .exifInfo)
+        let size = (try? c.decodeIfPresent(ExifSize.self, forKey: .exifInfo))?.fileSizeInByte
+        knownByteCount = size.flatMap { $0 >= 0 ? $0 : nil }
     }
-
-    /// Server-reported original size, or nil when missing or invalid.
-    var knownByteCount: Int64? { exifInfo?.fileSizeInByte.flatMap { $0 >= 0 ? $0 : nil } }
 }
 
 enum BackupDeferral: LocalizedError {
