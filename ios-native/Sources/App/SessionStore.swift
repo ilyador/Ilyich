@@ -112,8 +112,8 @@ import WidgetKit
         }
     }
 
-    func resetLibraryMetadata() async -> Bool {
-        guard !isResettingLibraryMetadata, !isSigningOut, !isSyncing, let client = api, let sync, let entities else { return false }
+    func resetLibraryMetadata() async {
+        guard !isResettingLibraryMetadata, !isSigningOut, !isSyncing, let client = api, let sync, let entities else { return }
         isResettingLibraryMetadata = true
         var resetRequested = false
         defer {
@@ -129,20 +129,19 @@ import WidgetKit
         syncShutdown = nil
         await sync.stop()
         await previousTask?.value
-        guard api === client, self.sync === sync, self.entities === entities else { return false }
+        guard api === client, self.sync === sync, self.entities === entities else { return }
         do {
             try await entities.clear()
             resetRequested = true
             await TimelineCache.shared.removeAll(scope: client.cacheScope)
-            guard api === client else { return false }
+            guard api === client else { return }
             NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
                                             userInfo: ["scope": client.cacheScope, "collections": true, "accessChanged": false])
         } catch {
-            guard api === client else { return false }
+            guard api === client else { return }
             syncError = error.localizedDescription
             isSyncing = false
         }
-        return resetRequested && isForeground
     }
 
     private func didSync(_ summary: SyncChangeSummary, client: APIClient) async {
