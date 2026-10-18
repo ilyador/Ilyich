@@ -2,6 +2,12 @@ import SwiftUI
 import UIKit
 import Observation
 
+private final class ChromeAwareCollectionView: UICollectionView {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        super.point(inside: point, with: event) && bounds.inset(by: contentInset).contains(point)
+    }
+}
+
 struct PhotoGrid: UIViewRepresentable {
     let store: LibraryStore
     let pipeline: MediaPipeline
@@ -17,7 +23,7 @@ struct PhotoGrid: UIViewRepresentable {
     func makeUIView(context: Context) -> UICollectionView {
         let layout = VirtualPhotoLayout()
         layout.columns = columns
-        let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        let view = ChromeAwareCollectionView(frame: .zero, collectionViewLayout: layout)
         view.backgroundColor = .systemBackground
         view.contentInsetAdjustmentBehavior = .never
         view.showsVerticalScrollIndicator = false

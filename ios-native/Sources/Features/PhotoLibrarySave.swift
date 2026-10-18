@@ -36,7 +36,13 @@ enum PhotoLibrarySave {
         try beforeCommit()
         let isVideo = asset.isVideo
         let pairedURL = motionURL
-        try await PHPhotoLibrary.shared().performChanges {
+        try await PHPhotoLibrary.shared().performChanges(changeBlock(file: file, isVideo: isVideo, pairedURL: pairedURL))
+    }
+
+    // PhotoKit executes this callback on its own queue; building it outside the
+    // MainActor method prevents an inherited executor check from trapping there.
+    private nonisolated static func changeBlock(file: URL, isVideo: Bool, pairedURL: URL?) -> @Sendable () -> Void {
+        {
             let creation = PHAssetCreationRequest.forAsset()
             creation.addResource(with: isVideo ? .video : .photo, fileURL: file, options: nil)
             if let pairedURL { creation.addResource(with: .pairedVideo, fileURL: pairedURL, options: nil) }
