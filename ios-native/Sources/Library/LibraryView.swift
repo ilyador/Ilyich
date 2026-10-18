@@ -1,5 +1,16 @@
 import SwiftUI
 
+/// Separate view so only the subtitle, not the whole library, observes timeline position.
+private struct HeaderPlaceSubtitle: View {
+    let store: LibraryStore
+    var body: some View {
+        if let places = store.currentPlaceSummary {
+            Text(places).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                .accessibilityIdentifier("library.places")
+        }
+    }
+}
+
 struct LibraryView: View {
     let api: APIClient
     let pipeline: MediaPipeline
@@ -97,7 +108,7 @@ struct LibraryView: View {
                   }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }.zIndex(1)
                 if !shelves && !searchFocused && store.query.isEmpty && !store.buckets.isEmpty {
-                    TimeRail(store: store, pipeline: pipeline, viewportWidth: geometry.size.width)
+                    TimeRail(store: store, viewportWidth: geometry.size.width)
                         .frame(width: 44).padding(.top, 130).padding(.bottom, showPlaces ? geometry.size.height * 0.42 : 100)
                         .frame(maxWidth: .infinity, alignment: .trailing).zIndex(2)
                 }
@@ -201,10 +212,13 @@ struct LibraryView: View {
 
     private var headingText: some View {
         let wrapped = dynamicTypeSize.isAccessibilitySize
-        return Text(store.query.isEmpty || store.isSearching ? store.title : "\(store.totalCount.formatted()) matches")
-            .font(.title.bold()).lineLimit(wrapped ? nil : 1).minimumScaleFactor(wrapped ? 1 : 0.75)
-            .fixedSize(horizontal: false, vertical: wrapped)
-            .accessibilityIdentifier("library.heading")
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(store.query.isEmpty || store.isSearching ? store.title : "\(store.totalCount.formatted()) matches")
+                .font(.title.bold()).lineLimit(wrapped ? nil : 1).minimumScaleFactor(wrapped ? 1 : 0.75)
+                .fixedSize(horizontal: false, vertical: wrapped)
+                .accessibilityIdentifier("library.heading")
+            if !store.isSelecting { HeaderPlaceSubtitle(store: store) }
+        }
     }
 
     @ViewBuilder private var headerTitle: some View {
