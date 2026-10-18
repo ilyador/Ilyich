@@ -2,7 +2,6 @@ import SwiftUI
 
 struct TimeRail: View {
     let store: LibraryStore
-    let pipeline: MediaPipeline
     let viewportWidth: CGFloat
     @State private var selected: Int?
     @State private var yearSelection: Int?
@@ -89,18 +88,11 @@ struct TimeRail: View {
     private func lens(index: Int) -> some View {
         let bucket = buckets[index]
         let count = yearSelection.map { y in buckets.filter { year($0) == y }.reduce(0) { $0 + $1.count } } ?? bucket.count
-        let photos = Array((store.loaded[bucket.id] ?? []).prefix(4))
+        let places = yearSelection == nil ? store.placeSummary(section: index) : nil
         return VStack(alignment: .leading, spacing: 10) {
             Text(yearSelection.map(String.init) ?? month(bucket.date)).font(.title2.bold()).lineLimit(2)
+            if let places { Text(places).font(.subheadline).foregroundStyle(.secondary).lineLimit(2) }
             Text("\(count.formatted()) items").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
-            if !photos.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(photos) { asset in
-                        FeatureAssetImage(pipeline: pipeline, asset: asset).frame(width: 42, height: 42)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-                }
-            }
         }.padding(16).glassEffect(in: .rect(cornerRadius: 24))
     }
     private func month(_ date: Date?) -> String {
