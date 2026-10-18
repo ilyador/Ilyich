@@ -128,7 +128,7 @@ private struct GlobeSurface: UIViewRepresentable {
             if night != dark {
                 night = dark
                 var material = PhysicallyBasedMaterial()
-                material.roughness = 1
+                material.roughness = .init(floatLiteral: 1)
                 if let texture = dark ? nightTexture : dayTexture {
                     material.baseColor = .init(tint: .white, texture: .init(texture))
                     if dark { material.emissiveColor = .init(color: .white, texture: .init(texture)); material.emissiveIntensity = 0.55 }

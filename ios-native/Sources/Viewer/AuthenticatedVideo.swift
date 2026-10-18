@@ -7,9 +7,14 @@ struct AuthenticatedVideo: View {
     let api: APIClient
     let assetID: String
     let active: Bool
+    var onEnded: (() -> Void)? = nil
     @State private var transport: AuthenticatedVideoTransport?
     @State private var error: String?
     @State private var attempt = 0
+    @AppStorage("viewerAutoPlayVideo") private var autoPlay = true
+    @AppStorage("viewerLoopVideo") private var loop = true
+    @AppStorage("viewerLoadOriginalVideo") private var original = false
+    @AppStorage("viewerMuteVideo") private var muted = false
     var body: some View {
         ZStack {
             Color.black
@@ -20,24 +25,32 @@ struct AuthenticatedVideo: View {
                 actions: { Button("Retry") { attempt += 1 } }
             } else { ProgressView().tint(.white) }
         }
-        .task(id: assetID + String(attempt)) {
+        .task(id: assetID + String(attempt) + String(original)) {
             guard active else { return }
             do {
-                let request = try await api.authorizedRequest(path: "assets/\(assetID)/video/playback")
+                let request = try await api.authorizedRequest(path: "assets/\(assetID)/" + (original ? "original" : "video/playback"))
                 try Task.checkCancellation()
                 let newTransport = try AuthenticatedVideoTransport(request: request)
                 transport?.close(); transport = newTransport
-                newTransport.onFailure = { message in
+                newTransport.onFailure = { [weak newTransport] message in
+                    guard let newTransport, transport === newTransport else { return }
                     self.error = message; transport?.close(); transport = nil
                 }
-                newTransport.player.play()
+                newTransport.player.isMuted = muted
+                if autoPlay || onEnded != nil { newTransport.player.play() }
             } catch is CancellationError { } catch { self.error = error.localizedDescription }
         }
         .onChange(of: active) { _, active in
-            if active { if transport == nil { attempt += 1 } else { transport?.player.play() } }
+            if active { if transport == nil { attempt += 1 } else if autoPlay || onEnded != nil { transport?.player.play() } }
             else { transport?.player.pause() }
         }
         .onDisappear { transport?.close(); transport = nil }
+        .onChange(of: muted) { _, value in transport?.player.isMuted = value }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            guard active, let item = notification.object as? AVPlayerItem, item === transport?.player.currentItem else { return }
+            if let onEnded { onEnded() }
+            else if loop { transport?.player.seek(to: .zero); transport?.player.play() }
+        }
     }
 }
 
@@ -52,6 +65,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     private struct Transfer {
         let loading: AVAssetResourceLoadingRequest
         var receivedOffset: Int64 = 0
+        var contentLength: Int64?
     }
     private var transfers: [Int: Transfer] = [:]
 
@@ -79,6 +93,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
 
     func close() {
         observation = nil
+        onFailure = nil
         player.pause(); player.replaceCurrentItem(with: nil)
         for transfer in transfers.values { transfer.loading.finishLoading(with: CancellationError()) }
         transfers.removeAll(); session.invalidateAndCancel()
@@ -119,15 +134,26 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
         do { try APIClient.validate(response) }
         catch { transfer.loading.finishLoading(with: error); transfers.removeValue(forKey: dataTask.taskIdentifier); completionHandler(.cancel); return }
         let http = response as? HTTPURLResponse
-        let contentRange = http?.value(forHTTPHeaderField: "Content-Range")
-        let total = contentRange?.split(separator: "/").last.flatMap { Int64($0) } ?? response.expectedContentLength
-        if http?.statusCode == 206, let range = contentRange?.split(separator: " ").last?.split(separator: "/").first {
-            transfer.receivedOffset = range.split(separator: "-").first.flatMap { Int64($0) } ?? 0
+        let range = http?.value(forHTTPHeaderField: "Content-Range").flatMap(HTTPContentRange.init)
+        if http?.statusCode == 206 {
+            let expectedStart = transfer.loading.dataRequest.map { max($0.requestedOffset, $0.currentOffset) } ?? 0
+            guard let range, range.start == expectedStart,
+                  response.expectedContentLength < 0 || response.expectedContentLength == range.end - range.start + 1 else {
+                transfer.loading.finishLoading(with: APIError.invalidResponse("The video server returned an invalid byte range."))
+                transfers.removeValue(forKey: dataTask.taskIdentifier); completionHandler(.cancel); return
+            }
+            transfer.receivedOffset = range.start
         }
+        let total = range?.total ?? response.expectedContentLength
+        transfer.contentLength = total >= 0 ? total : nil
         if let info = transfer.loading.contentInformationRequest {
             info.contentType = response.mimeType.flatMap { UTType(mimeType: $0)?.identifier } ?? UTType.movie.identifier
             info.contentLength = max(0, total)
             info.isByteRangeAccessSupported = http?.statusCode == 206 || http?.value(forHTTPHeaderField: "Accept-Ranges")?.lowercased() == "bytes"
+        }
+        if transfer.loading.dataRequest == nil {
+            transfer.loading.finishLoading(); transfers.removeValue(forKey: dataTask.taskIdentifier)
+            completionHandler(.cancel); return
         }
         transfers[dataTask.taskIdentifier] = transfer
         completionHandler(.allow)
@@ -138,7 +164,8 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
         let wantedStart = max(requested.requestedOffset, requested.currentOffset)
         let chunkStart = transfer.receivedOffset
         let chunkEnd = chunkStart + Int64(data.count)
-        let wantedEnd = requested.requestsAllDataToEndOfResource ? Int64.max : requested.requestedOffset + Int64(requested.requestedLength)
+        let requestEnd = requested.requestsAllDataToEndOfResource ? Int64.max : requested.requestedOffset + Int64(requested.requestedLength)
+        let wantedEnd = min(requestEnd, transfer.contentLength ?? Int64.max)
         let start = max(wantedStart, chunkStart)
         let end = min(wantedEnd, chunkEnd)
         if end > start {
@@ -153,6 +180,12 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let transfer = transfers.removeValue(forKey: task.taskIdentifier) else { return }
         if let error { transfer.loading.finishLoading(with: error) }
-        else { transfer.loading.finishLoading() }
+        else if let data = transfer.loading.dataRequest {
+            let requestEnd = data.requestsAllDataToEndOfResource ? transfer.contentLength : data.requestedOffset + Int64(data.requestedLength)
+            let expectedEnd = requestEnd.map { min($0, transfer.contentLength ?? $0) }
+            if let expectedEnd, data.currentOffset < expectedEnd {
+                transfer.loading.finishLoading(with: APIError.invalidResponse("The video transfer ended before the requested data arrived. Try again."))
+            } else { transfer.loading.finishLoading() }
+        } else { transfer.loading.finishLoading() }
     }
 }

@@ -45,6 +45,7 @@ struct SharedLinksView: View {
 struct SharedLinkEditor: View {
     let api: APIClient
     let album: Album?
+    var assetIDs: [String] = []
     var link: SharedLink?
     var onSaved: () -> Void = { }
     @Environment(\.dismiss) private var dismiss
@@ -78,7 +79,7 @@ struct SharedLinkEditor: View {
                 Toggle("Allow uploads", isOn: $upload)
                 Toggle("Show photo metadata", isOn: $metadata)
             }.disabled(result != nil)
-        }.navigationTitle(link == nil ? "Share album" : "Edit shared link")
+        }.navigationTitle(link == nil ? (album == nil ? "Share photos" : "Share album") : "Edit shared link")
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button(result == nil ? "Save" : "Done") {
             if result != nil { dismiss() } else { Task { await save() } }
         }.disabled(saving) } }
@@ -99,8 +100,9 @@ struct SharedLinkEditor: View {
                 let body = SharedLinkUpdate(description: description, slug: slug.isEmpty ? nil : slug, expiresAt: expiryEnabled ? expiry : nil, password: password.isEmpty ? nil : password, changePassword: passwordChange, allowDownload: download, allowUpload: upload, showMetadata: metadata)
                 let updated: SharedLink = try await api.request(.patch, path: "shared-links/\(link.id)", body: body)
                 result = updated
-            } else if let album {
-                result = try await api.request(.post, path: "shared-links", body: AlbumLinkCreation(albumId: album.id, description: description, slug: slug.isEmpty ? nil : slug, expiresAt: expiryEnabled ? expiry : nil, password: password.isEmpty ? nil : password, allowDownload: download, allowUpload: upload, showMetadata: metadata))
+            } else {
+                guard album != nil || !assetIDs.isEmpty else { throw APIError.invalidResponse("Choose some photos or an album to share.") }
+                result = try await api.request(.post, path: "shared-links", body: AlbumLinkCreation(type: album == nil ? "INDIVIDUAL" : "ALBUM", albumId: album?.id, assetIds: album == nil ? assetIDs : nil, description: description, slug: slug.isEmpty ? nil : slug, expiresAt: expiryEnabled ? expiry : nil, password: password.isEmpty ? nil : password, allowDownload: download, allowUpload: upload, showMetadata: metadata))
             }
             onSaved()
         } catch { failure = .init(error) }
@@ -127,8 +129,9 @@ private func sharedURL(link: SharedLink, api: APIClient) -> URL? {
 }
 
 private struct AlbumLinkCreation: Encodable, Sendable {
-    let type = "ALBUM"
-    let albumId: String
+    let type: String
+    let albumId: String?
+    let assetIds: [String]?
     let description: String
     let slug: String?
     let expiresAt: Date?

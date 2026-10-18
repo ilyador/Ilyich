@@ -17,6 +17,7 @@ struct AssetInfoView: View {
     @State private var collection: InfoCollection?
     @State private var saving = false
     @State private var export: ViewerExport?
+    @State private var tagging = false
 
     init(api: APIClient, pipeline: MediaPipeline, asset: Asset, onUpdated: @escaping (Asset) -> Void) {
         self.api = api; self.pipeline = pipeline; self.onUpdated = onUpdated
@@ -33,6 +34,15 @@ struct AssetInfoView: View {
                 TextField("Add a caption", text: $caption, axis: .vertical).disabled(!ownsAsset).lineLimit(2...6)
                 if caption != (asset.exifInfo?.description ?? "") {
                     Button("Save caption") { saveCaption() }.disabled(saving)
+                }
+                if ownsAsset {
+                    Menu {
+                        ForEach(1...5, id: \.self) { rating in Button("\(rating) \(rating == 1 ? "star" : "stars")") { setRating(rating) } }
+                        Button("Rejected") { setRating(-1) }
+                        Button("Clear rating") { setRating(nil) }
+                    } label: {
+                        LabeledContent("Rating", value: asset.exifInfo?.rating.map { $0 == -1 ? "Rejected" : "\($0) stars" } ?? "Unrated")
+                    }.disabled(saving)
                 }
             }
             if let exif = asset.exifInfo {
@@ -71,6 +81,7 @@ struct AssetInfoView: View {
             }
             Section {
                 Text(asset.originalFileName).font(.headline).textSelection(.enabled)
+                if let name = asset.owner?.name { LabeledContent("Owner", value: name) }
                 if let width = asset.width, let height = asset.height {
                     Text("\((Double(width) * Double(height) / 1_000_000).formatted(.number.precision(.fractionLength(1)))) MP · \(width) × \(height)")
                         .font(.subheadline).foregroundStyle(.secondary)
@@ -107,6 +118,12 @@ struct AssetInfoView: View {
                     }
                 }
             }
+            if !(asset.tags ?? []).isEmpty || ownsAsset {
+                Section("Tags") {
+                    ForEach(asset.tags ?? []) { tag in Text(tag.value) }
+                    if ownsAsset { Button("Edit tags") { tagging = true } }
+                }
+            }
             if !text.isEmpty {
                 Section("Text in this photo") {
                     Text(text.map(\.text).joined(separator: "\n")).textSelection(.enabled)
@@ -129,6 +146,7 @@ struct AssetInfoView: View {
             NavigationStack { InfoCollectionView(api: api, pipeline: pipeline, collection: selection) }
         }
         .sheet(item: $export) { item in ViewerShareSheet(url: item.url).onDisappear { item.removeTemporaryFile() } }
+        .sheet(isPresented: $tagging) { NavigationStack { ViewerTagEditor(api: api, asset: asset, onUpdated: update) } }
     }
     private func exifMetric(_ title: String, value: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) { Text(value ?? "—").font(.headline); Text(title).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading)
@@ -138,12 +156,18 @@ struct AssetInfoView: View {
         saving = true
         Task { defer { saving = false }; do { update(try await api.updateAsset(id: asset.id, update: .init(description: caption))) } catch { self.error = error.localizedDescription } }
     }
+    private func setRating(_ rating: Int?) {
+        saving = true
+        Task { defer { saving = false }; do { update(try await api.updateRating(id: asset.id, rating: rating)) } catch { self.error = error.localizedDescription } }
+    }
     private func loadDetails() async {
         loading = true; error = nil
         defer { loading = false }
         let api = api, id = asset.id
+        async let assetResult = Result { try await api.asset(id: id) }
         async let albumsResult = Result { try await api.assetAlbums(id: id) }
         async let textResult = Result { try await api.assetOCR(id: id) }
+        switch await assetResult { case .success(let asset): update(asset); case .failure(let failure): error = failure.localizedDescription }
         switch await albumsResult { case .success(let albums): self.albums = albums; case .failure(let failure): error = failure.localizedDescription }
         switch await textResult { case .success(let text): self.text = text; case .failure(let failure): error = failure.localizedDescription }
     }

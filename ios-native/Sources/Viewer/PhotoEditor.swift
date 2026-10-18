@@ -65,8 +65,11 @@ struct PhotoEditor: View {
                 Button("Original") { crop = CGRect(x: 0, y: 0, width: 1, height: 1) }
                 Button("Square") { setRatio(1) }
                 Button("4:3") { setRatio(4.0 / 3) }
+                Button("3:4") { setRatio(3.0 / 4) }
                 Button("3:2") { setRatio(3.0 / 2) }
+                Button("2:3") { setRatio(2.0 / 3) }
                 Button("16:9") { setRatio(16.0 / 9) }
+                Button("9:16") { setRatio(9.0 / 16) }
             }.buttonStyle(.glass)
             Spacer()
             if let dimensions, let pixelCrop = try? PixelCrop.normalized(x: crop.minX, y: crop.minY, width: crop.width, height: crop.height, in: dimensions) {
@@ -76,7 +79,8 @@ struct PhotoEditor: View {
     }
     private var transformControls: some View {
         HStack(spacing: 30) {
-            Button("Rotate", systemImage: "rotate.left") { transform = PhotoTransform(edits: [.rotate(90)]) * transform }.buttonStyle(.glass)
+            Button("Left", systemImage: "rotate.left") { transform = PhotoTransform(edits: [.rotate(90)]) * transform }.buttonStyle(.glass).accessibilityLabel("Rotate left")
+            Button("Right", systemImage: "rotate.right") { transform = PhotoTransform(edits: [.rotate(270)]) * transform }.buttonStyle(.glass).accessibilityLabel("Rotate right")
             Menu("Flip", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right") {
                 Button("Left to right") { transform = PhotoTransform(edits: [.mirror(.vertical)]) * transform }
                 Button("Top to bottom") { transform = PhotoTransform(edits: [.mirror(.horizontal)]) * transform }

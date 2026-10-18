@@ -7,6 +7,9 @@ import WidgetKit
     var name = ""
     var isRestoring = true
     var error: String?
+    var requiresPasswordChange = false
+    var pendingLink: AppLink?
+    @ObservationIgnored private var validationTask: Task<Void, Never>?
     let isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
 
     func restore() async {
@@ -35,7 +38,8 @@ import WidgetKit
     }
 
     func acceptLogin(_ result: LoginResponse, server: URL) throws {
-        let saved = SavedSession(server: server, token: result.accessToken, userID: result.userId, name: result.name)
+        let saved = SavedSession(server: server, token: result.accessToken, userID: result.userId, name: result.name,
+                                 requiresPasswordChange: result.shouldChangePassword)
         if !isUITesting { try SessionKeychain.save(saved) }
         if !isUITesting { WidgetCenter.shared.reloadAllTimelines() }
         try connect(saved)
@@ -46,9 +50,29 @@ import WidgetKit
         api = client
         pipeline = MediaPipeline(client: client)
         name = saved.name
+        requiresPasswordChange = saved.requiresPasswordChange == true
+        validateSession()
+    }
+
+    func validateSession() {
+        guard !isUITesting, let client = api else { return }
+        validationTask?.cancel()
+        validationTask = Task { [weak self] in
+            do { try await client.validateToken() }
+            catch APIError.unauthorized {
+                guard !Task.isCancelled, let self, self.api === client else { return }
+                await self.signOut()
+                self.error = APIError.unauthorized.localizedDescription
+            } catch { /* A temporary network failure must not discard an offline session. */ }
+        }
+    }
+
+    func open(_ url: URL) {
+        if let link = AppLink(url: url, server: api?.baseURL) { pendingLink = link }
     }
 
     func signOut() async {
+        validationTask?.cancel()
         do {
             await BackupCoordinator.shared.disconnect()
             if !isUITesting { try SessionKeychain.remove() }
@@ -56,8 +80,9 @@ import WidgetKit
             let previous = api
             if let previous { LockedPINStore.remove(for: previous) }
             let previousPipeline = pipeline
-            api = nil; pipeline = nil; name = ""
+            api = nil; pipeline = nil; name = ""; requiresPasswordChange = false; pendingLink = nil
             await previousPipeline?.removeAll()
+            if let previous { await TimelineCache.shared.removeAll(scope: previous.cacheScope) }
             try? await previous?.logout()
         } catch { self.error = error.localizedDescription }
     }

@@ -61,7 +61,7 @@ struct LockedFolderView: View {
     @State private var generation = UUID()
     @State private var biometricAvailable = false
     private var settingUp: Bool { status?.pinCode == false }
-    private var validPIN: Bool { pin.count == 6 && pin.allSatisfy(\.isNumber) }
+    private var validPIN: Bool { pin.count == 6 && pin.allSatisfy { "0123456789".contains($0) } }
     var body: some View {
         Group {
             if unlocked && scenePhase == .active {

@@ -8,6 +8,7 @@ struct AssetViewer: View {
     let assets: [Asset]
     let onUpdated: (Asset) -> Void
     let onDeleted: () -> Void
+    let albumID: String?
     @State private var selectedID: String
     @State private var replacements: [String: Asset] = [:]
     @State private var controls = true
@@ -19,13 +20,20 @@ struct AssetViewer: View {
     @State private var working = false
     @State private var export: ViewerExport?
     @State private var playingLive = false
+    @State private var slideshow = false
+    @State private var sharedLink = false
+    @State private var showStack = false
+    @State private var albumActivity = false
+    @AppStorage("viewerTapToNavigate") private var tapToNavigate = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     init(api: APIClient, pipeline: MediaPipeline, assets: [Asset], initial: Asset,
-         onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping () -> Void) {
+         onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping () -> Void, albumID: String? = nil) {
         self.api = api; self.pipeline = pipeline
         self.assets = assets.contains(where: { $0.id == initial.id }) ? assets : [initial] + assets
         self.onUpdated = onUpdated; self.onDeleted = onDeleted
+        self.albumID = albumID
         _selectedID = State(initialValue: initial.id)
         _replacements = State(initialValue: [initial.id: initial])
     }
@@ -48,9 +56,9 @@ struct AssetViewer: View {
                             if asset.isVideo {
                                 AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id)
                             } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
-                                AuthenticatedVideo(api: api, assetID: videoID, active: true)
+                                AuthenticatedVideo(api: api, assetID: videoID, active: true, onEnded: { playingLive = false })
                             } else {
-                                ViewerPhoto(pipeline: pipeline, asset: asset, onTap: { controls.toggle() }, onDismiss: { dismiss() })
+                                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() })
                             }
                         } else { Color.black }
                     }.tag(asset.id)
@@ -86,6 +94,14 @@ struct AssetViewer: View {
         .sheet(isPresented: $chooseAlbum) {
             NavigationStack { ViewerAlbumPicker(api: api, assetID: current.id) }
         }
+        .fullScreenCover(isPresented: $slideshow) { SlideshowView(api: api, pipeline: pipeline, assets: assets.map { replacements[$0.id] ?? $0 }, initial: current) }
+        .sheet(isPresented: $sharedLink) { NavigationStack { SharedLinkEditor(api: api, album: nil, assetIDs: [current.id]) } }
+        .sheet(isPresented: $showStack) {
+            if let stack = current.stack { NavigationStack { ViewerStackView(api: api, pipeline: pipeline, stackID: stack.id, onUpdated: update, onChanged: onDeleted) } }
+        }
+        .sheet(isPresented: $albumActivity) {
+            if let albumID { NavigationStack { AlbumActivityView(api: api, albumID: albumID, assetID: current.id) } }
+        }
         .sheet(item: $export) { item in
             ViewerShareSheet(url: item.url).onDisappear { item.removeTemporaryFile() }
         }
@@ -112,9 +128,20 @@ struct AssetViewer: View {
             }.padding(.horizontal, 14).frame(minHeight: 48).frame(maxWidth: .infinity).glassEffect(in: .capsule)
             Menu {
                 Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }
+                Button("Slideshow", systemImage: "play.rectangle") { slideshow = true }
+                Button("Create shared link", systemImage: "link") { sharedLink = true }
+                if let stack = current.stack { Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { showStack = true } }
+                if let albumID {
+                    Button("Comments and likes", systemImage: "bubble") { albumActivity = true }
+                    Button("Set album cover", systemImage: "photo.on.rectangle.angled") {
+                        let id = current.id
+                        run { let _: Album = try await api.request(.patch, path: "albums/\(albumID)", body: ["albumThumbnailAssetId": id]) }
+                    }
+                }
                 Button("Share displayed version", systemImage: "square.and.arrow.up") { exportAsset(original: false) }
                 Button("Download original", systemImage: "arrow.down.document") { exportAsset(original: true) }
                 Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }
+                Button("Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
                 if ownsAsset {
                     if current.isTrashed {
                         Button("Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }
@@ -158,6 +185,11 @@ struct AssetViewer: View {
             .buttonStyle(.glass).buttonBorderShape(.circle).accessibilityLabel(title)
     }
     private func update(_ asset: Asset) { replacements[asset.id] = asset; onUpdated(asset) }
+    private func handlePhotoTap(_ horizontalFraction: Double) {
+        if tapToNavigate && horizontalFraction < 0.33 && selectedIndex > 0 { selectedID = assets[selectedIndex - 1].id }
+        else if tapToNavigate && horizontalFraction > 0.67 && selectedIndex + 1 < assets.count { selectedID = assets[selectedIndex + 1].id }
+        else { controls.toggle() }
+    }
     private func run(_ operation: @escaping @MainActor () async throws -> Void) {
         guard !working else { return }; working = true
         Task { defer { working = false }; do { try await operation() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
@@ -190,8 +222,8 @@ struct AssetViewer: View {
             let file = ViewerExport(url: try await api.download(asset: asset))
             defer { file.removeTemporaryFile() }
             try await PHPhotoLibrary.shared().performChanges {
-                if asset.isVideo { PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: file.url) }
-                else { PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: file.url) }
+                let creation = PHAssetCreationRequest.forAsset()
+                creation.addResource(with: asset.isVideo ? .video : .photo, fileURL: file.url, options: nil)
             }
         }
     }
