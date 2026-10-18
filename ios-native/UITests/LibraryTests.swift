@@ -12,6 +12,17 @@ final class LibraryTests: XCTestCase {
     @MainActor private func capture(_ app: XCUIApplication, _ title: String) {
         let image = XCTAttachment(screenshot: app.screenshot()); image.name = title; image.lifetime = .keepAlways; add(image)
     }
+    @MainActor private func requireHittable(_ element: XCUIElement, in app: XCUIApplication,
+                                          file: StaticString = #filePath, line: UInt = #line) {
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element)
+        let result = XCTWaiter.wait(for: [ready], timeout: 5)
+        if result != .completed {
+            capture(app, "Interaction timeout")
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "Interaction timeout — accessibility hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
+        }
+        XCTAssertEqual(result, .completed, "The control must become interactive after scrolling settles.", file: file, line: line)
+    }
     @MainActor func testLibrarySelectAndShelvesReturnToInteractiveGrid() {
         let app = launch()
         let grid = app.collectionViews["library.grid"]
@@ -26,7 +37,11 @@ final class LibraryTests: XCTestCase {
         capture(app, "Shelves — native glass")
         app.buttons["Close"].tap()
         grid.swipeUp()
-        XCTAssertTrue(app.buttons["library.select"].isHittable)
+        let select = app.buttons["library.select"]
+        requireHittable(select, in: app)
+        select.tap()
+        grid.cells.firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
     }
     @MainActor func testSearchContinuesAnEmptyVerifiedPageAndCanClear() {
         let app = launch()
