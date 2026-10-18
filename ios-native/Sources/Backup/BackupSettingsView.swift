@@ -10,6 +10,10 @@ struct BackupSettingsView: View {
             Section {
                 Label(backup.activity, systemImage: backup.isRunning ? "arrow.triangle.2.circlepath" : "icloud.and.arrow.up")
                 if let progress = backup.progress { ProgressView(value: progress).accessibilityLabel("Current file progress") }
+                if backup.totalTransferBytes > 0 {
+                    LabeledContent("Transferred", value: "\(ByteCountFormatter.string(fromByteCount: backup.bytesTransferred, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: backup.totalTransferBytes, countStyle: .file))")
+                }
+                if let rate = backup.transferRate { LabeledContent("Upload speed", value: "\(ByteCountFormatter.string(fromByteCount: rate, countStyle: .file))/s") }
                 LabeledContent("Remaining", value: backup.remaining.formatted())
                 LabeledContent("Confirmed uploads", value: backup.confirmed.formatted())
                 if let error = backup.error { Text(error).foregroundStyle(.red).accessibilityIdentifier("backup.error") }
@@ -21,6 +25,18 @@ struct BackupSettingsView: View {
                 }
             } header: { Text("Backup") } footer: {
                 Text("Original files stay in Photos. Transfers already started can continue while Ilyich is in the background.")
+            }
+
+            if !backup.failures.isEmpty {
+                Section("Uploads needing retry") {
+                    ForEach(backup.failures) { failure in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(failure.filename)
+                            Text(failure.message).font(.footnote).foregroundStyle(.secondary)
+                            Text(failure.date, style: .relative).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
 
             if backup.permission == .notDetermined {
@@ -40,6 +56,7 @@ struct BackupSettingsView: View {
                     }
                 }
                 Section("Albums") {
+                    Toggle("Sync albums to server", isOn: $backup.preferences.syncAlbums).disabled(backup.isRunning)
                     ForEach(backup.albums) { album in
                         Picker(selection: Binding(get: { selection(for: album.id) }, set: { setSelection($0, for: album.id) })) {
                             Text("Off").tag(0)
@@ -63,7 +80,7 @@ struct BackupSettingsView: View {
                     Toggle("Use cellular for videos", isOn: $backup.preferences.cellularVideos)
                     Toggle("Download iCloud originals", isOn: $backup.preferences.downloadCloudOriginals)
                 } header: { Text("Transfers") } footer: {
-                    Text("iOS decides when background work can run. iCloud downloads follow your system Photos network settings. With downloads off, unavailable originals pause backup for you to review.")
+                    Text("iOS decides when background work can run. Cellular settings apply to uploads and iCloud downloads. With downloads off, unavailable originals pause backup for you to review.")
                 }
                 .disabled(backup.isRunning)
             }

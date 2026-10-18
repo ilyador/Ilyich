@@ -30,7 +30,7 @@ struct AuthenticatedVideo: View {
             do {
                 let request = try await api.authorizedRequest(path: "assets/\(assetID)/" + (original ? "original" : "video/playback"))
                 try Task.checkCancellation()
-                let newTransport = try AuthenticatedVideoTransport(request: request)
+                let newTransport = try AuthenticatedVideoTransport(request: request, server: api.baseURL)
                 transport?.close(); transport = newTransport
                 newTransport.onFailure = { [weak newTransport] message in
                     guard let newTransport, transport === newTransport else { return }
@@ -59,6 +59,7 @@ struct AuthenticatedVideo: View {
 final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResourceLoaderDelegate, @preconcurrency URLSessionDataDelegate {
     let player: AVPlayer
     private let request: URLRequest
+    private let server: URL
     private var session: URLSession!
     private var observation: NSKeyValueObservation?
     var onFailure: ((String) -> Void)?
@@ -69,12 +70,13 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     }
     private var transfers: [Int: Transfer] = [:]
 
-    init(request: URLRequest) throws {
+    init(request: URLRequest, server: URL) throws {
         guard let originalURL = request.url,
               var parts = URLComponents(url: originalURL, resolvingAgainstBaseURL: false) else { throw APIError.invalidServerURL }
         parts.scheme = "ilyich-media"
         guard let proxyURL = parts.url else { throw APIError.invalidServerURL }
         self.request = request
+        self.server = server
         let asset = AVURLAsset(url: proxyURL)
         player = AVPlayer()
         super.init()
@@ -126,6 +128,11 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
             completionHandler(nil); return
         }
         completionHandler(request)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        ClientCertificateStore.respond(to: challenge, server: server, requestURL: task.originalRequest?.url, completion: completionHandler)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,

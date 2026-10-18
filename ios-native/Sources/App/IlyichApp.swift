@@ -4,6 +4,7 @@ import SwiftUI
     @UIApplicationDelegateAdaptor(BackupAppDelegate.self) private var appDelegate
     @State private var session = SessionStore()
     @Environment(\.scenePhase) private var scenePhase
+    init() { _ = CastController.shared }
     var body: some Scene {
         WindowGroup {
             Group {

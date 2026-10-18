@@ -1,0 +1,253 @@
+import SwiftUI
+@preconcurrency import Photos
+
+struct LocalLibraryView: View {
+    @State private var library = LocalPhotoLibrary()
+    @State private var backup = BackupCoordinator.shared
+    @State private var selection = Set<String>()
+    @State private var selecting = false
+    @State private var viewing: LocalPhoto?
+    @State private var accessPicker = false
+    @State private var uploading = false
+    @State private var showBackup = false
+    @Environment(\.scenePhase) private var scenePhase
+    var body: some View {
+        Group {
+            if [.authorized, .limited].contains(library.permission) { photoGrid }
+            else {
+                ContentUnavailableView {
+                    Label("Photos on this phone", systemImage: "iphone")
+                } description: { Text("Choose which photos Ilyich can show and back up. Your server library is available without this permission.") }
+                actions: {
+                    if library.permission == .notDetermined { Button("Choose Photos access") { Task { await library.requestAccess() } }.buttonStyle(.borderedProminent) }
+                    else { Button("Open Settings") { openPhotoSettings() }.buttonStyle(.borderedProminent) }
+                }
+            }
+        }.navigationTitle("On this phone")
+        .toolbar {
+            if [.authorized, .limited].contains(library.permission) {
+                ToolbarItem(placement: .topBarTrailing) { Button(selecting ? "Done" : "Select") { selecting.toggle(); selection = [] } }
+                ToolbarItem(placement: .topBarTrailing) { Menu {
+                    NavigationLink("Free up space") { FreeUpSpaceView() }
+                    NavigationLink("Backup settings") { BackupSettingsView() }
+                    if library.permission == .limited { Button("Choose more photos") { accessPicker = true } }
+                } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Device photo options") }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if selecting {
+                HStack {
+                    Text("\(selection.count.formatted()) selected").font(.subheadline)
+                    Spacer()
+                    Button("Back up selected", systemImage: "icloud.and.arrow.up") { Task { await upload() } }
+                        .disabled(selection.isEmpty || uploading || backup.isRunning)
+                }.padding().glassEffect().padding(.horizontal, 12)
+            }
+        }
+        .task { library.begin() }
+        .onDisappear { library.stop() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { library.begin() } }
+        .onChange(of: library.albumID) { _, _ in selection = []; library.selectAlbum() }
+        .onChange(of: library.photos) { _, values in selection.formIntersection(Set(values.map(\.id))) }
+        .fullScreenCover(item: $viewing) { LocalPhotoViewer(photo: $0) }
+        .sheet(isPresented: $accessPicker, onDismiss: { library.refresh() }) { LimitedPhotoAccessPicker { accessPicker = false; library.refresh() } }
+        .sheet(isPresented: $showBackup) { NavigationStack { BackupSettingsView().toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showBackup = false } } } } }
+    }
+    private var photoGrid: some View {
+        ScrollView {
+            if library.permission == .limited {
+                HStack { Text("Showing your selected photos").font(.footnote).foregroundStyle(.secondary); Spacer(); Button("Manage") { accessPicker = true }.font(.footnote) }.padding(.horizontal).padding(.top, 8)
+            }
+            Picker("Album", selection: $library.albumID) {
+                Text("All photos").tag("")
+                ForEach(library.albums) { Text($0.title).tag($0.id) }
+            }.padding(.horizontal)
+            if library.photos.isEmpty { FeatureEmpty(title: "No photos available", symbol: "photo.on.rectangle", description: library.permission == .limited ? "Allow more photos to see them here." : "Photos and videos saved on this phone will appear here.") }
+            LazyVGrid(columns: Array(repeating: .init(.flexible(), spacing: 3), count: 3), spacing: 3) {
+                ForEach(library.photos) { photo in
+                    Button {
+                        if selecting { if !selection.insert(photo.id).inserted { selection.remove(photo.id) } }
+                        else { viewing = photo }
+                    } label: {
+                        ZStack(alignment: .bottomTrailing) {
+                            LocalPhotoThumbnail(photo: photo).aspectRatio(1, contentMode: .fit)
+                            if selecting { Image(systemName: selection.contains(photo.id) ? "checkmark.circle.fill" : "circle").font(.title3).symbolRenderingMode(.palette).foregroundStyle(selection.contains(photo.id) ? Color.accentColor : Color.white, Color.black.opacity(0.4)).padding(7) }
+                        }
+                    }.buttonStyle(.plain).accessibilityLabel(photo.title).accessibilityAddTraits(selection.contains(photo.id) ? .isSelected : [])
+                }
+            }
+            if library.photos.count < library.total { Button("Load more photos") { library.loadMore() }.padding(24) }
+            Text("\(library.total.formatted()) items").font(.caption).foregroundStyle(.secondary).padding()
+        }.refreshable { library.refresh() }
+    }
+    private func upload() async {
+        uploading = true; defer { uploading = false }
+        await backup.enqueue(localIDs: Array(selection))
+        if backup.error == nil { selection = []; selecting = false }
+        showBackup = true
+    }
+}
+
+struct FreeUpSpaceView: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("cleanupKeepFavorites") private var keepFavorites = true
+    @AppStorage("cleanupKeepMediaType") private var keepMediaType = "none"
+    @AppStorage("cleanupKeepAlbumIDs") private var keepAlbumData = Data()
+    @AppStorage("cleanupCutoffDaysAgo") private var cutoffDays = -1
+    @AppStorage("cleanupDefaultsInitialized") private var defaultsInitialized = false
+    @State private var cutoff = Date()
+    @State private var albums: [DeviceAlbum] = []
+    @State private var filtersReady = false
+    @State private var permission = DevicePhotos.authorization
+    @State private var photos: [LocalPhoto] = []
+    @State private var selection = Set<String>()
+    @State private var loading = false
+    @State private var checked = false
+    @State private var removing = false
+    @State private var confirming = false
+    @State private var viewing: LocalPhoto?
+    @State private var failure: FeatureFailure?
+    @State private var message: String?
+    @State private var operation: Task<Void, Never>?
+    private var keptAlbums: Set<String> { (try? JSONDecoder().decode(Set<String>.self, from: keepAlbumData)) ?? [] }
+    private var policy: CleanupPolicy { .init(cutoff: cutoff, keepFavorites: keepFavorites, keepMediaType: keepMediaType) }
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Keep your backup. Clear space in Photos.").font(.title2.bold())
+                Text("Only unchanged originals with a verified copy on your current server appear here. Edited photos and formats without a complete backup stay on your phone.").foregroundStyle(.secondary)
+                Text("Removing items also removes them from iCloud Photos and other synced devices. They remain in Apple Photos’ Recently Deleted album until you clear it or it expires.").font(.footnote).foregroundStyle(.secondary)
+                if let message { Text(message).font(.subheadline) }
+            }.padding(20)
+            if ![PHAuthorizationStatus.authorized, .limited].contains(permission) {
+                VStack(spacing: 12) {
+                    Text("Allow Photos access to check originals stored on this phone.").foregroundStyle(.secondary)
+                    if permission == .notDetermined {
+                        Button("Choose Photos access") { Task { permission = await PHPhotoLibrary.requestAuthorization(for: .readWrite); initializeFilters() } }
+                    } else { Button("Open Settings") { openPhotoSettings() } }
+                }.padding(20)
+            }
+            VStack(alignment: .leading, spacing: 18) {
+                DatePicker("Remove only before", selection: $cutoff, in: ...Date(), displayedComponents: .date)
+                Toggle("Keep favorites", isOn: $keepFavorites)
+                Picker("Always keep", selection: $keepMediaType) {
+                    Text("Neither media type").tag("none")
+                    Text("Photos").tag("photos")
+                    Text("Videos").tag("videos")
+                }
+                NavigationLink("Keep albums (\(keptAlbums.count))") {
+                    Form {
+                        ForEach(albums) { album in
+                            Toggle(album.title, isOn: Binding(get: { keptAlbums.contains(album.id) }, set: { value in
+                                var ids = keptAlbums
+                                if value { ids.insert(album.id) } else { ids.remove(album.id) }
+                                keepAlbumData = (try? JSONEncoder().encode(ids)) ?? Data()
+                            }))
+                        }
+                    }.navigationTitle("Keep albums")
+                }
+                Button("Check eligible backups", systemImage: "checkmark.shield") { operation = Task { await check() } }
+                    .disabled(!filtersReady || loading || removing || ![PHAuthorizationStatus.authorized, .limited].contains(permission))
+            }.padding(20).disabled(loading || removing)
+            if loading { ProgressView("Checking backups with your server…").padding(28) }
+            else if checked && photos.isEmpty { FeatureEmpty(title: "Nothing ready to remove", symbol: "checkmark.shield", description: "No verified originals match your removal settings. Your phone’s photos have not been changed.") }
+            else if checked {
+                HStack {
+                    Text("\(photos.count.formatted()) verified items").font(.subheadline)
+                    Spacer()
+                    Button(selection.count == photos.count ? "Deselect all" : "Select all") { selection = selection.count == photos.count ? [] : Set(photos.map(\.id)) }
+                }.padding(.horizontal, 20).padding(.vertical, 8)
+                LazyVGrid(columns: Array(repeating: .init(.flexible(), spacing: 3), count: 3), spacing: 3) {
+                    ForEach(photos) { photo in
+                        Button { if !selection.insert(photo.id).inserted { selection.remove(photo.id) } } label: {
+                            ZStack(alignment: .bottomTrailing) {
+                                LocalPhotoThumbnail(photo: photo).aspectRatio(1, contentMode: .fit)
+                                Image(systemName: selection.contains(photo.id) ? "checkmark.circle.fill" : "circle").font(.title3).symbolRenderingMode(.palette).foregroundStyle(selection.contains(photo.id) ? Color.accentColor : Color.white, Color.black.opacity(0.4)).padding(7)
+                            }
+                        }.buttonStyle(.plain).accessibilityLabel(photo.title).accessibilityAddTraits(selection.contains(photo.id) ? .isSelected : [])
+                        .contextMenu { Button("Preview") { viewing = photo } }
+                    }
+                }
+            }
+        }.navigationTitle("Free up space").disabled(removing)
+        .safeAreaInset(edge: .bottom) {
+            if !selection.isEmpty { Button("Remove \(selection.count) from Photos", role: .destructive) { confirming = true }.buttonStyle(.glassProminent).padding().disabled(loading || removing) }
+        }
+        .task {
+            guard !filtersReady else { return }
+            initializeFilters()
+            cutoff = Calendar.current.startOfDay(for: Calendar.current.date(byAdding: .day, value: -(cutoffDays < 0 ? 30 : cutoffDays), to: Date()) ?? Date())
+            filtersReady = true
+        }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { initializeFilters() } }
+        .onChange(of: policy) { _, _ in invalidate() }
+        .onChange(of: keepAlbumData) { _, _ in invalidate() }
+        .onDisappear { operation?.cancel(); operation = nil }
+        .fullScreenCover(item: $viewing) { LocalPhotoViewer(photo: $0) }
+        .confirmationDialog("Remove \(selection.count) items from Apple Photos?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Remove from Photos", role: .destructive) { operation = Task { await remove() } }
+        } message: { Text("Their verified server copies will be kept. iCloud Photos will remove them from your other synced devices too. Apple will ask you to confirm.") }
+        .alert("Couldn’t free up space", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
+    }
+    private func check() async {
+        guard !loading else { return }
+        loading = true; defer { loading = false }
+        selection = []; photos = []; checked = false; message = nil
+        do {
+            guard [.authorized, .limited].contains(DevicePhotos.authorization) else { throw BackupError.message("Allow Photos access before checking local items.") }
+            cutoffDays = max(0, Calendar.current.dateComponents([.day], from: cutoff, to: Date()).day ?? 0)
+            let ids = try await BackupCoordinator.shared.verifiedLocalDeletionCandidates()
+            try Task.checkCancellation()
+            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+            let protected = protectedAlbumAssets()
+            photos = (0..<fetched.count).map { fetched.object(at: $0) }.filter { eligible($0, protected: protected) }.map(LocalPhoto.init).sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+            checked = true
+        } catch is CancellationError { } catch { failure = .init(error) }
+    }
+    private func remove() async {
+        guard !selection.isEmpty, !removing else { return }
+        removing = true; defer { removing = false }
+        let requested = selection
+        do {
+            guard let originalSession = try SessionKeychain.read() else { throw APIError.unauthorized }
+            let verified = Set(try await BackupCoordinator.shared.verifiedLocalDeletionCandidates())
+            try Task.checkCancellation()
+            guard requested.isSubset(of: verified) else { throw BackupError.message("A photo or its backup changed since you reviewed it. Nothing was removed. Check again before continuing.") }
+            let revisions = Dictionary(uniqueKeysWithValues: photos.filter { requested.contains($0.id) }.map { ($0.id, $0.modified) })
+            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(requested), options: nil)
+            let protected = protectedAlbumAssets()
+            guard fetched.count == requested.count, (0..<fetched.count).allSatisfy({ index in
+                let asset = fetched.object(at: index)
+                return revisions[asset.localIdentifier] == .some(asset.modificationDate) && eligible(asset, protected: protected)
+            }) else { throw BackupError.message("Your photo library changed. Nothing was removed. Check again before continuing.") }
+            guard let currentSession = try SessionKeychain.read(), currentSession.scope == originalSession.scope,
+                  currentSession.token == originalSession.token else { throw APIError.unauthorized }
+            try Task.checkCancellation()
+            try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(fetched) }
+            photos.removeAll { requested.contains($0.id) }; selection = []; message = "Removed \(requested.count) items from Apple Photos. Your server copies are kept."
+        } catch is CancellationError { } catch { failure = .init(error) }
+    }
+    private func invalidate() { operation?.cancel(); selection = []; photos = []; checked = false; message = nil }
+    private func initializeFilters() {
+        permission = DevicePhotos.authorization; albums = DevicePhotos.albums()
+        if !defaultsInitialized, [.authorized, .limited].contains(permission) {
+            let messaging = ["whatsapp", "telegram", "signal", "messenger", "viber", "wechat", "line"]
+            let defaults = albums.filter { album in messaging.contains { album.title.localizedCaseInsensitiveContains($0) } }.map(\.id)
+            keepAlbumData = (try? JSONEncoder().encode(keptAlbums.union(defaults))) ?? Data(); defaultsInitialized = true
+        }
+    }
+    private func protectedAlbumAssets() -> Set<String> {
+        var ids = Set<String>()
+        PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: Array(keptAlbums), options: nil).enumerateObjects { album, _, _ in
+            PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { asset, _, _ in ids.insert(asset.localIdentifier) }
+        }
+        return ids
+    }
+    private func eligible(_ asset: PHAsset, protected: Set<String>) -> Bool {
+        policy.allows(date: asset.creationDate, favorite: asset.isFavorite, video: asset.mediaType == .video, inKeptAlbum: protected.contains(asset.localIdentifier))
+    }
+}
+
+@MainActor private func openPhotoSettings() {
+    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+}

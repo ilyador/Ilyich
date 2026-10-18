@@ -1,5 +1,12 @@
 import Foundation
 
+struct BackupFailure: Codable, Identifiable, Sendable {
+    let id: String
+    let filename: String
+    let message: String
+    let date: Date
+}
+
 struct BackupReceipt: Codable, Sendable {
     let modificationDate: Date
     let original: BackupRemoteFile
@@ -24,5 +31,11 @@ struct BackupRemoteAsset: Decodable, Sendable {
 
 enum BackupDeferral: LocalizedError {
     case waitingForDevice
-    var errorDescription: String? { "Waiting for charging or for the device to cool down" }
+    case waitingForWiFi
+    var errorDescription: String? {
+        switch self {
+        case .waitingForDevice: "Waiting for charging or for the device to cool down"
+        case .waitingForWiFi: "Waiting for Wi-Fi to download the iCloud original"
+        }
+    }
 }

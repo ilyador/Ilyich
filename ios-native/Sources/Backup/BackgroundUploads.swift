@@ -1,5 +1,11 @@
 import Foundation
 
+struct UploadProgressSnapshot: Sendable {
+    let taskID: Int
+    let sent: Int64
+    let expected: Int64
+}
+
 /// URLSession owns transfer lifetime. Receipts survive a terminated app and are
 /// written before continuations are resumed, closing the completion/relaunch race.
 final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Sendable {
@@ -65,9 +71,9 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
         for task in tasks { task.cancel() }
     }
 
-    func currentProgress() async -> Double? {
-        guard let task = await session.allTasks.first, task.countOfBytesExpectedToSend > 0 else { return nil }
-        return Double(task.countOfBytesSent) / Double(task.countOfBytesExpectedToSend)
+    func progressSnapshot() async -> UploadProgressSnapshot? {
+        guard let task = await session.allTasks.first else { return nil }
+        return UploadProgressSnapshot(taskID: task.taskIdentifier, sent: task.countOfBytesSent, expected: task.countOfBytesExpectedToSend)
     }
 
     func hasActiveTransfer() async -> Bool { await session.allTasks.contains { $0.state == .running } }
@@ -118,6 +124,17 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         // Redirecting a multipart POST can lose its body or forward credentials.
         completionHandler(nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let saved = try? SessionKeychain.read(), let url = task.originalRequest?.url,
+              task.originalRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer \(saved.token)",
+              let configuration = try? NetworkConfigurationStore.load(server: saved.server),
+              (configuration.alternateEndpoints + [saved.server]).contains(where: { SameOriginRedirectDelegate.sameOrigin($0, url) }) else {
+            completionHandler(.performDefaultHandling, nil); return
+        }
+        ClientCertificateStore.respond(to: challenge, server: saved.server, requestURL: url, completion: completionHandler)
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {

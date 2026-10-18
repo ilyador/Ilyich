@@ -11,11 +11,12 @@ struct BackupPreferences: Codable, Equatable, Sendable {
     var automatic = false
     var requireCharging = false
     var triggerDelay = 30
+    var syncAlbums = false
 
     init() {}
     private enum CodingKeys: String, CodingKey {
         case includedAlbums, excludedAlbums, cellularPhotos, cellularVideos, downloadCloudOriginals
-        case automatic, requireCharging, triggerDelay
+        case automatic, requireCharging, triggerDelay, syncAlbums
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -27,6 +28,7 @@ struct BackupPreferences: Codable, Equatable, Sendable {
         automatic = try c.decodeIfPresent(Bool.self, forKey: .automatic) ?? false
         requireCharging = try c.decodeIfPresent(Bool.self, forKey: .requireCharging) ?? false
         triggerDelay = min(3600, max(0, try c.decodeIfPresent(Int.self, forKey: .triggerDelay) ?? 30))
+        syncAlbums = try c.decodeIfPresent(Bool.self, forKey: .syncAlbums) ?? false
     }
 }
 
@@ -36,6 +38,8 @@ private struct BackupState: Codable {
     var current: PreparedPhoto?
     var confirmed: [String: Date] = [:]
     var receipts: [String: BackupReceipt]?
+    var linkedAlbums: [String: String]?
+    var failures: [String: BackupFailure]?
     var paused = true
     var error: String?
 }
@@ -49,6 +53,10 @@ private struct BackupState: Codable {
     private(set) var remaining = 0
     private(set) var confirmed = 0
     private(set) var progress: Double?
+    private(set) var bytesTransferred: Int64 = 0
+    private(set) var totalTransferBytes: Int64 = 0
+    private(set) var transferRate: Int64?
+    var failures: [BackupFailure] { (state.failures ?? [:]).values.sorted { $0.date > $1.date } }
     private(set) var activity = "Choose albums to back up"
     private(set) var error: String?
     private var state = BackupState()
@@ -56,6 +64,7 @@ private struct BackupState: Codable {
     private var directory: URL?
     private var worker: Task<Void, Never>?
     private var generation = UUID()
+    private var lastProgress: (id: Int, time: Date, sent: Int64)?
 
     func activate() async {
         do {
@@ -112,7 +121,7 @@ private struct BackupState: Codable {
                     return confirmedDate != modifiedDate
                 }
         }
-        guard !state.queue.isEmpty else { activity = "No new photos in the selected albums"; return }
+        guard !state.queue.isEmpty || preferences.syncAlbums else { activity = "No new photos in the selected albums"; return }
         state.paused = false; state.error = nil; error = nil
         // A new attempt checks the server checksum before retrying a failed transfer.
         if let current = state.current {
@@ -180,7 +189,7 @@ private struct BackupState: Codable {
     }
 
     private func run() {
-        guard worker == nil, !state.queue.isEmpty else { return }
+        guard worker == nil, !state.queue.isEmpty || preferences.syncAlbums else { return }
         let runID = generation
         isRunning = true
         worker = Task { await process(runID: runID) }
@@ -196,11 +205,12 @@ private struct BackupState: Codable {
                 try requireTransferConditions()
                 guard let directory else { throw CancellationError() }
                 if state.current == nil {
-                    activity = "Preparing original"
+                    activity = "Preparing full-size photo"
                     let folder = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
                     let prepared: PreparedPhoto
                     do {
-                        prepared = try await DevicePhotos.prepare(localID, directory: folder, allowCloud: preferences.downloadCloudOriginals) { value in
+                        prepared = try await DevicePhotos.prepare(localID, directory: folder, allowCloud: preferences.downloadCloudOriginals,
+                            cellularPhotos: preferences.cellularPhotos, cellularVideos: preferences.cellularVideos) { value in
                             Task { @MainActor in
                                 if self.generation == runID { self.progress = value }
                             }
@@ -224,6 +234,12 @@ private struct BackupState: Codable {
                 if let id = prepared.livePhotoID { fields["livePhotoVideoId"] = id }
                 let original = try await transfer(file: prepared.original, sidecar: prepared.sidecar, fields: fields, prepared: prepared, session: session, runID: runID)
                 _ = try currentSession(runID)
+                if let previous = state.receipts?[localID]?.original, previous.id != original.id {
+                    let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
+                    struct StackCreation: Encodable, Sendable { let assetIds: [String] }
+                    let _: StackDetails = try await api.request(.post, path: "stacks", body: StackCreation(assetIds: [original.id, previous.id]))
+                    _ = try currentSession(runID)
+                }
                 var motion: BackupRemoteFile?
                 if let id = prepared.livePhotoID, let checksum = prepared.motionChecksum { motion = BackupRemoteFile(id: id, checksum: checksum) }
                 // An older partially uploaded Live Photo has no durable video hash.
@@ -233,11 +249,13 @@ private struct BackupState: Codable {
                     state.receipts?[localID] = BackupReceipt(modificationDate: prepared.modificationDate, original: original, motion: motion)
                 }
                 state.confirmed[localID] = prepared.modificationDate
+                state.failures?[localID] = nil
                 state.queue.removeFirst(); state.current = nil
                 try persist()
                 try? FileManager.default.removeItem(at: prepared.original.url.deletingLastPathComponent())
                 refreshCounts()
             }
+            if preferences.syncAlbums { try await syncLinkedAlbums(runID: runID) }
             state.paused = true; activity = "Selected photos backed up"; try persist()
         } catch is CancellationError { }
         catch let deferred as BackupDeferral {
@@ -248,6 +266,11 @@ private struct BackupState: Codable {
         catch {
             guard generation == runID else { return }
             self.error = error.localizedDescription; state.error = self.error; state.paused = true
+            if let localID = state.queue.first {
+                if state.failures == nil { state.failures = [:] }
+                state.failures?[localID] = BackupFailure(id: localID, filename: state.current?.original.filename ?? "Photo in selected album",
+                    message: error.localizedDescription, date: Date())
+            }
             activity = "Backup needs attention"
             do { try persist() } catch { self.error = "Could not save backup progress. Free some device storage and retry." }
         }
@@ -305,7 +328,18 @@ private struct BackupState: Codable {
     }
 
     func refreshProgress() async {
-        if isRunning, let value = await BackgroundUploads.shared.currentProgress() { progress = value }
+        guard isRunning, let value = await BackgroundUploads.shared.progressSnapshot() else {
+            bytesTransferred = 0; totalTransferBytes = 0; transferRate = nil; lastProgress = nil
+            return
+        }
+        bytesTransferred = max(0, value.sent); totalTransferBytes = max(0, value.expected)
+        if value.expected > 0 { progress = min(1, Double(value.sent) / Double(value.expected)) }
+        let now = Date()
+        if let lastProgress, lastProgress.id == value.taskID, value.sent >= lastProgress.sent {
+            let elapsed = now.timeIntervalSince(lastProgress.time)
+            transferRate = elapsed > 0 ? Int64(Double(value.sent - lastProgress.sent) / elapsed) : nil
+        } else { transferRate = nil }
+        lastProgress = (value.taskID, now, value.sent)
     }
 
     func reportSchedulingError(_ error: Error) {
@@ -323,6 +357,41 @@ private struct BackupState: Codable {
     private func requireTransferConditions() throws {
         guard BackupLifecycle.shared.conditionsPermitBackup(requireCharging: preferences.requireCharging) else {
             throw BackupDeferral.waitingForDevice
+        }
+    }
+
+    private func syncLinkedAlbums(runID: UUID) async throws {
+        let session = try currentSession(runID)
+        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
+        var remote: [Album] = try await api.request(.get, path: "albums", query: [.init(name: "isOwned", value: "true")])
+        _ = try currentSession(runID)
+        for local in albums where preferences.includedAlbums.contains(local.id) && !preferences.excludedAlbums.contains(local.id) {
+            try requireTransferConditions()
+            let localIDs = DevicePhotos.candidates(included: [local.id], excluded: preferences.excludedAlbums)
+            let assetIDs = Set(localIDs.compactMap { state.receipts?[$0]?.original.id }).sorted()
+            guard !assetIDs.isEmpty else { continue }
+            activity = "Syncing album \(local.title)"
+            let linked = state.linkedAlbums?[local.id]
+            let album: Album
+            if let existing = remote.first(where: { $0.id == linked }) ?? remote.first(where: { $0.albumName == local.title }) {
+                album = existing
+            } else {
+                _ = try currentSession(runID)
+                album = try await api.createAlbum(name: local.title)
+                remote.append(album)
+            }
+            _ = try currentSession(runID)
+            if state.linkedAlbums == nil { state.linkedAlbums = [:] }
+            state.linkedAlbums?[local.id] = album.id
+            try persist()
+            for offset in stride(from: 0, to: assetIDs.count, by: 500) {
+                _ = try currentSession(runID)
+                let batch = Array(assetIDs[offset..<min(offset + 500, assetIDs.count)])
+                let results = try await api.addToAlbum(id: album.id, assetIDs: batch)
+                guard results.count == batch.count, results.allSatisfy({ $0.success || $0.error == "duplicate" }) else {
+                    throw BackupError.message("Some backed-up photos could not be added to \(local.title). Check album permissions and retry.")
+                }
+            }
         }
     }
 

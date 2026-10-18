@@ -11,6 +11,11 @@ struct GridPosition: Equatable {
     let item: Int
     let offset: Double
 }
+@MainActor @Observable final class TimelinePosition {
+    var section = 0
+    var item = 0
+    var isScrolling = false
+}
 
 protocol LibraryAPI: Sendable {
     var cacheScope: String { get }
@@ -41,8 +46,11 @@ extension APIClient: LibraryAPI {}
     var restorePosition: GridPosition?
     var selected: Set<String> = []
     var isSelecting = false
+    let navigation = TimelinePosition()
     private(set) var timelineFilter = TimelineFilter()
-    private var searchFilter = SearchFilter()
+    private(set) var searchFilter = SearchFilter()
+    private(set) var searchMode = SearchMode.context
+    private var similarAssetID: String?
     private var cursor: String?
     private var retryBatch: (cursor: String?, prefix: [Asset])?
     private var requests: [String: Task<Void, Never>] = [:]
@@ -184,7 +192,7 @@ extension APIClient: LibraryAPI {}
 
     func clearFilters() {
         beginScopeChange(); timelineFilter = TimelineFilter(); searchFilter = SearchFilter()
-        filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false
+        filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false; searchMode = .context
         selected = []; isSelecting = false
         if let saved = originalTimeline {
             cancelRequests(); generation = UUID(); searchGeneration = UUID()
@@ -208,7 +216,25 @@ extension APIClient: LibraryAPI {}
         queryTask = Task { await loadResults(reset: true) }
     }
 
-    func loadMore() { guard hasMore, !isSearching else { return }; queryTask = Task { await loadResults(reset: false) } }
+    func applySearchOptions(mode: SearchMode, filter: SearchFilter) {
+        rememberOriginal(); beginScopeChange()
+        searchMode = mode; searchFilter = filter; usesMetadata = true; showingResults = true
+        filterTitle = mode == .context ? "Filtered library" : mode.rawValue
+        queryTask = Task { await loadResults(reset: true) }
+    }
+
+    func findSimilar(to asset: Asset) {
+        rememberOriginal(); beginScopeChange()
+        query = ""; searchMode = .context; searchFilter = SearchFilter(); similarAssetID = asset.id
+        filterTitle = "Similar photos"; showingResults = true; usesMetadata = true
+        queryTask = Task { await loadResults(reset: true) }
+    }
+
+    func loadMore() {
+        guard hasMore, !isSearching, error == nil else { return }
+        isSearching = true
+        queryTask = Task { await loadResults(reset: false) }
+    }
     func retrySearch() {
         queryTask?.cancel()
         let batch = retryBatch
@@ -221,7 +247,8 @@ extension APIClient: LibraryAPI {}
 
     private func loadResults(reset: Bool, retry: (cursor: String?, prefix: [Asset])? = nil) async {
         let searchID = UUID(); searchGeneration = searchID
-        let text = query, filter = searchFilter, requestGeneration = generation
+        let text = query, filter = searchFilter.matching(query, mode: searchMode), requestGeneration = generation
+        let mode = searchMode, reference = similarAssetID
         let startCursor: String?
         if let retry { startCursor = retry.cursor } else { startCursor = reset ? nil : cursor }
         let prefix = retry?.prefix ?? (reset ? [] : results)
@@ -240,7 +267,9 @@ extension APIClient: LibraryAPI {}
                 try Task.checkCancellation()
                 failedBatch = (nextCursor, prefix + accumulated)
                 let response: SearchResponse
-                if text.isEmpty {
+                if reference != nil {
+                    response = try await api.search(SearchQuery(query: nil, queryAssetId: reference, filter: filter, cursor: nextCursor))
+                } else if text.isEmpty || mode != .context {
                     response = try await api.metadataSearch(MetadataQuery(filter: filter, cursor: nextCursor))
                 } else {
                     response = try await api.search(SearchQuery(query: text, filter: filter, cursor: nextCursor))
@@ -289,6 +318,7 @@ extension APIClient: LibraryAPI {}
     private func beginScopeChange() {
         stop(); selected = []; isSelecting = false; isSearching = false; isLoading = false
         verification = nil; retryBatch = nil; cursor = nil; hasMore = false
+        similarAssetID = nil
         restorePosition = nil; error = nil
     }
     private func scheduleReload() {

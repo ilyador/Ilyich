@@ -75,29 +75,33 @@ enum BackupError: LocalizedError {
         }
     }
 
-    static func prepare(_ localID: String, directory: URL, allowCloud: Bool,
+    static func prepare(_ localID: String, directory: URL, allowCloud: Bool, cellularPhotos: Bool, cellularVideos: Bool,
                         progress: @escaping @Sendable (Double) -> Void) async throws -> PreparedPhoto {
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil).firstObject else {
             throw BackupError.message("This photo is no longer available to Ilyich. Check Photos access and retry.")
         }
         let resources = PHAssetResource.assetResources(for: asset)
         let type: PHAssetResourceType = asset.mediaType == .video ? .video : .photo
-        guard let original = resources.first(where: { $0.type == type }) else {
-            throw BackupError.message("Photos did not provide this asset’s original file. Nothing was marked as backed up.")
+        let editedType: PHAssetResourceType = asset.mediaType == .video ? .fullSizeVideo : .fullSizePhoto
+        // Back up the current full-size version when Photos has applied edits,
+        // matching its visible image without rendering our own replacement.
+        guard let original = resources.first(where: { $0.type == editedType }) ?? resources.first(where: { $0.type == type }) else {
+            throw BackupError.message("Photos did not provide this asset’s full-size file. Nothing was marked as backed up.")
         }
-        let motion = resources.first { $0.type == .pairedVideo }
+        let motion = resources.first { $0.type == .fullSizePairedVideo } ?? resources.first { $0.type == .pairedVideo }
         if asset.mediaSubtypes.contains(.photoLive), motion == nil {
             throw BackupError.message("Photos did not provide the Live Photo video. Retry after it downloads from iCloud.")
         }
         // Apple's adjustment archives are not Lightroom XMP. Only attach actual XMP.
         let sidecar = resources.first { $0.originalFilename.lowercased().hasSuffix(".xmp") }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = try await export(original, directory: directory, name: "original", allowCloud: allowCloud, progress: progress)
+        let file = try await export(original, directory: directory, name: "original", allowCloud: allowCloud,
+                                    allowCellular: asset.mediaType == .video ? cellularVideos : cellularPhotos, progress: progress)
         let video: UploadFile?
-        if let motion { video = try await export(motion, directory: directory, name: "motion", allowCloud: allowCloud, progress: progress) }
+        if let motion { video = try await export(motion, directory: directory, name: "motion", allowCloud: allowCloud, allowCellular: cellularVideos, progress: progress) }
         else { video = nil }
         let xmp: UploadFile?
-        if let sidecar { xmp = try await export(sidecar, directory: directory, name: "sidecar", allowCloud: allowCloud, progress: progress) }
+        if let sidecar { xmp = try await export(sidecar, directory: directory, name: "sidecar", allowCloud: allowCloud, allowCellular: cellularPhotos, progress: progress) }
         else { xmp = nil }
         let created = asset.creationDate ?? Date()
         let modified = asset.modificationDate ?? created
@@ -107,14 +111,22 @@ enum BackupError: LocalizedError {
                              isVideo: asset.mediaType == .video)
     }
 
-    private static func export(_ resource: PHAssetResource, directory: URL, name: String, allowCloud: Bool,
+    private static func export(_ resource: PHAssetResource, directory: URL, name: String, allowCloud: Bool, allowCellular: Bool,
                                progress: @escaping @Sendable (Double) -> Void) async throws -> UploadFile {
         let destination = directory.appendingPathComponent(name)
         if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
         let options = PHAssetResourceRequestOptions()
-        options.isNetworkAccessAllowed = allowCloud
+        options.isNetworkAccessAllowed = false
         options.progressHandler = progress
-        try await PhotoResourceExport(destination: destination).write(resource, options: options)
+        do { try await PhotoResourceExport(destination: destination).write(resource, options: options) }
+        catch {
+            let details = error as NSError
+            guard allowCloud, details.domain == PHPhotosErrorDomain,
+                  details.code == PHPhotosError.networkAccessRequired.rawValue else { throw error }
+            try Task.checkCancellation()
+            options.isNetworkAccessAllowed = true
+            try await PhotoResourceExport(destination: destination).write(resource, options: options, allowCellular: allowCellular)
+        }
         try Task.checkCancellation()
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: destination.path)
         return UploadFile(url: destination, filename: resource.originalFilename,

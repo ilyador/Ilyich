@@ -1,4 +1,5 @@
 import Foundation
+import Network
 @preconcurrency import Photos
 
 /// PhotoKit streams on its own serial queue. A lock also covers cancellation,
@@ -11,19 +12,21 @@ final class PhotoResourceExport: @unchecked Sendable {
     private var continuation: CheckedContinuation<Void, any Error>?
     private var completed = false
     private var cancelled = false
+    private var monitor: NWPathMonitor?
+    private var started = false
 
     init(destination: URL) { self.destination = destination }
 
-    func write(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions) async throws {
+    func write(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions, allowCellular: Bool = true) async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                begin(resource, options: options, continuation: continuation)
+                begin(resource, options: options, allowCellular: allowCellular, continuation: continuation)
             }
         } onCancel: { self.cancel() }
         try Task.checkCancellation()
     }
 
-    private func begin(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions,
+    private func begin(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions, allowCellular: Bool,
                        continuation: CheckedContinuation<Void, any Error>) {
         lock.lock()
         guard !cancelled else { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
@@ -32,6 +35,26 @@ final class PhotoResourceExport: @unchecked Sendable {
             try Data().write(to: destination, options: .completeFileProtectionUntilFirstUserAuthentication)
             output = try FileHandle(forWritingTo: destination)
         } catch { lock.unlock(); finish(error); return }
+        if options.isNetworkAccessAllowed, !allowCellular {
+            let monitor = NWPathMonitor()
+            self.monitor = monitor
+            monitor.pathUpdateHandler = { path in
+                if path.status != .satisfied || path.isExpensive || path.usesInterfaceType(.cellular) {
+                    self.finish(BackupDeferral.waitingForWiFi, cancelRequest: true)
+                } else { self.startRequest(resource, options: options) }
+            }
+            lock.unlock()
+            monitor.start(queue: DispatchQueue(label: "app.ilyich.photo-network"))
+            return
+        }
+        lock.unlock()
+        startRequest(resource, options: options)
+    }
+
+    private func startRequest(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions) {
+        lock.lock()
+        guard !started, !completed, !cancelled else { lock.unlock(); return }
+        started = true
         lock.unlock()
         let id = PHAssetResourceManager.default().requestData(for: resource, options: options,
             dataReceivedHandler: { self.append($0) }, completionHandler: { self.finish($0) })
@@ -65,7 +88,11 @@ final class PhotoResourceExport: @unchecked Sendable {
         let continuation = self.continuation
         self.continuation = nil
         let id = requestID
+        let monitor = self.monitor
+        self.monitor = nil
         lock.unlock()
+        monitor?.pathUpdateHandler = nil
+        monitor?.cancel()
         if cancelRequest, let id { PHAssetResourceManager.default().cancelDataRequest(id) }
         if let result { continuation?.resume(throwing: result) }
         else { continuation?.resume() }

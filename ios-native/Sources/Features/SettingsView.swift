@@ -23,6 +23,7 @@ struct SettingsView: View {
                 Picker("Grid", selection: $columns) { ForEach(2...6, id: \.self) { Text("\($0) columns").tag($0) } }
             }
             Section {
+                NavigationLink { NetworkSettingsView(api: api, server: api.baseURL) } label: { Label("Network", systemImage: "network") }
                 NavigationLink { ServerSettingsView(api: api) } label: { Label("Server", systemImage: "externaldrive.connected.to.line.below") }
                 NavigationLink { AboutIlyichView() } label: { Label("About", systemImage: "info.circle") }
             }
@@ -47,16 +48,16 @@ private struct ViewerSettingsView: View {
     @AppStorage("imageLoadOriginal") private var originalImage = false
     var body: some View {
         Form {
-            Section("Photos") {
+            Section {
                 Toggle("Full-resolution photos", isOn: $originalImage)
                 Toggle("Tap edges to navigate", isOn: $tapNavigation)
-            } footer: { Text("Full-resolution photos use more data. Lightroom edits are preserved.") }
-            Section("Videos") {
+            } header: { Text("Photos") } footer: { Text("Full-resolution photos use more data. Lightroom edits are preserved.") }
+            Section {
                 Toggle("Play automatically", isOn: $autoplay)
                 Toggle("Repeat videos", isOn: $loop)
                 Toggle("Start muted", isOn: $mute)
                 Toggle("Play original videos", isOn: $originalVideo)
-            } footer: { Text("Original files can use more data and take longer to load. Video formats unsupported by this phone may need server playback.") }
+            } header: { Text("Videos") } footer: { Text("Original files can use more data and take longer to load. Video formats unsupported by this phone may need server playback.") }
         }.navigationTitle("Photo and video viewer")
     }
 }
@@ -73,6 +74,7 @@ private struct AccountSettingsView: View {
         Form {
             Section("Profile") { TextField("Name", text: $name).textContentType(.name); LabeledContent("Email", value: email) }
             Section {
+                NavigationLink("Profile photo") { ProfilePhotoSettingsView(api: api) }
                 NavigationLink("Change password") { ChangePasswordView(api: api) }
                 NavigationLink("Locked folder PIN") { PINSettingsView(api: api) }
             }

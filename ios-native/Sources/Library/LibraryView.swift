@@ -25,7 +25,7 @@ struct LibraryView: View {
     @Namespace private var glass
 
     private enum Shelf { case root, people, albums, more, settings }
-    private enum Screen: String, Identifiable { case people, albums, more, settings, places; var id: String { rawValue } }
+    private enum Screen: String, Identifiable { case people, albums, more, settings, places, searchOptions; var id: String { rawValue } }
 
     init(api: APIClient, pipeline: MediaPipeline, session: SessionStore) {
         self.api = api; self.pipeline = pipeline; self.session = session
@@ -77,7 +77,7 @@ struct LibraryView: View {
                     }
                 }
                 if !shelves && !searchFocused && store.query.isEmpty && !store.buckets.isEmpty {
-                    TimeRail(buckets: store.buckets) { bucket in store.scrollTarget = bucket.id }
+                    TimeRail(store: store, pipeline: pipeline)
                         .frame(width: 44).padding(.top, 130).padding(.bottom, showPlaces ? geometry.size.height * 0.42 : 100)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
@@ -113,7 +113,7 @@ struct LibraryView: View {
             guard let link = session.pendingLink else { return }
             do {
                 switch link {
-                case .asset(let id): viewing = try await api.asset(id)
+                case .asset(let id): viewing = try await api.asset(id: id)
                 case .album(let id): store.setAlbum(try await api.album(id: id))
                 case .person(let id):
                     let person: Person = try await api.request(.get, path: "people/\(id)")
@@ -167,7 +167,9 @@ struct LibraryView: View {
                     .accessibilityIdentifier("search.checking")
             }
             HStack(spacing: 12) {
-                Image(systemName: "magnifyingglass").accessibilityHidden(true)
+                Button { searchFocused = false; screen = .searchOptions } label: {
+                    Image(systemName: "magnifyingglass").frame(width: 44, height: 44)
+                }.accessibilityLabel("Search options")
                 TextField(store.filterTitle.map { "Search \($0)" } ?? "Describe a moment", text: $searchText)
                     .focused($searchFocused).submitLabel(.search).onSubmit { store.search(searchText); searchFocused = false }
                     .accessibilityIdentifier("library.search")
@@ -271,6 +273,9 @@ struct LibraryView: View {
 
     @ViewBuilder private func destinationView(_ destination: Screen) -> some View {
         switch destination {
+        case .searchOptions: SearchOptionsView(api: api, mode: store.searchMode, filter: store.searchFilter) { mode, filter in
+            store.applySearchOptions(mode: mode, filter: filter)
+        }
         case .people: PeopleView(api: api, pipeline: pipeline) { store.setPerson($0); screen = nil; searchText = "" }
         case .albums: AlbumsView(api: api, pipeline: pipeline) { store.setAlbum($0); screen = nil; searchText = "" }
         case .places: PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace)
@@ -300,41 +305,4 @@ struct LibraryView: View {
             catch { actionError = error.localizedDescription }
         }
     }
-}
-
-private struct TimeRail: View {
-    let buckets: [TimeBucket]
-    let onSelect: (TimeBucket) -> Void
-    @State private var selected: Int?
-    @State private var dragging = false
-    private var total: Int { max(1, buckets.reduce(0) { $0 + $1.count }) }
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .trailing) {
-                Capsule().fill(.secondary.opacity(0.35)).frame(width: dragging ? 5 : 2).padding(.trailing, 8)
-                if dragging, let selected {
-                    Text(buckets[selected].date?.formatted(.dateTime.month(.abbreviated).year()) ?? "")
-                        .font(.headline.monospacedDigit()).padding(12).glassEffect().fixedSize().offset(x: -24)
-                }
-                Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.bold))
-                    .frame(width: 32, height: 48).glassEffect()
-                    .position(x: 24, y: dragging ? position(selected ?? 0) * geometry.size.height : 24)
-            }.contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                    dragging = true
-                    let value = min(1, max(0, value.location.y / max(1, geometry.size.height)))
-                    let target = Int(value * Double(total))
-                    var sum = 0
-                    let index = buckets.firstIndex { bucket in sum += bucket.count; return sum > target } ?? max(0, buckets.count - 1)
-                    if selected != index { selected = index; onSelect(buckets[index]); UISelectionFeedbackGenerator().selectionChanged() }
-                }.onEnded { _ in dragging = false })
-                .accessibilityElement().accessibilityLabel("Timeline month")
-                .accessibilityValue(selected.flatMap { buckets[$0].date?.formatted(.dateTime.month(.wide).year()) } ?? "Most recent")
-                .accessibilityAdjustableAction { direction in
-                    let next = min(buckets.count - 1, max(0, (selected ?? 0) + (direction == .increment ? 1 : -1)))
-                    selected = next; onSelect(buckets[next])
-                }.accessibilityIdentifier("library.timeRail")
-        }
-    }
-    private func position(_ index: Int) -> CGFloat { CGFloat(buckets.prefix(index).reduce(0) { $0 + $1.count }) / CGFloat(total) }
 }
