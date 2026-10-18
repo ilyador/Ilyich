@@ -1,0 +1,217 @@
+name: Build and test native Ilyich iOS
+
+on:
+  push:
+    branches: [dev, feature/native-ios-liquid-glass]
+    paths:
+      - 'ios-native/**'
+      - 'mobile/ios/WidgetExtension/**'
+      - '.github/workflows/build-ios-native.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: App version
+        default: '3.3.3'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      APP_VERSION: ${{ inputs.version || '3.3.3' }}
+      DERIVED_DATA: ${{ runner.temp }}/ilyich-native-derived-data
+      TEST_RESULTS: ${{ runner.temp }}/Ilyich-native.xcresult
+      ARTIFACT_DIR: ${{ github.workspace }}/ios-native/build/artifacts
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact build revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select Xcode 26.2
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/xcodegen-2.46.0"
+          mkdir -p "$tool_dir"
+          curl --fail --location --retry 3 \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$tool_dir/xcodegen.zip"
+          printf '%s  %s\n' \
+            4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806 \
+            "$tool_dir/xcodegen.zip" | shasum -a 256 --check
+          unzip -q "$tool_dir/xcodegen.zip" -d "$tool_dir"
+          echo "$tool_dir/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Generate native Xcode project
+        working-directory: ios-native
+        run: |
+          set -euo pipefail
+          [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid app version'; exit 1; }
+          echo "APP_BUILD=$((3040000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          xcodegen generate
+
+      - name: Select an available iOS 26 simulator
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/simulator-devices.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          devices = json.loads((Path(os.environ['RUNNER_TEMP']) / 'simulator-devices.json').read_text())['devices']
+          candidates = [
+              device for runtime, entries in sorted(devices.items(), reverse=True)
+              if runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS-26-')
+              for device in entries
+              if device.get('isAvailable') and device['name'].startswith('iPhone')
+          ]
+          if not candidates:
+              raise SystemExit('No available iOS 26 iPhone simulator in this runner image')
+          selected = candidates[0]
+          print(f"Using {selected['name']} ({selected['udid']})")
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f"SIMULATOR_ID={selected['udid']}\n")
+          PY
+
+      - name: Run unit and UI tests
+        working-directory: ios-native
+        run: |
+          set -euo pipefail
+          python3 scripts/ui-fixture-server.py > "$RUNNER_TEMP/ilyich-fixture-server.log" 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
+          xcrun simctl bootstatus "$SIMULATOR_ID" -b
+          xcodebuild test \
+            -project Ilyich.xcodeproj -scheme Ilyich -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$DERIVED_DATA" -resultBundlePath "$TEST_RESULTS" \
+            -parallel-testing-enabled NO \
+            MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_BUILD" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Export test screenshots and diagnostics
+        if: always()
+        run: |
+          if [ -d "$TEST_RESULTS" ]; then
+            xcrun xcresulttool export attachments --path "$TEST_RESULTS" \
+              --output-path "$RUNNER_TEMP/ilyich-native-test-attachments"
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Ilyich-native-test-results
+          path: |
+            ${{ runner.temp }}/Ilyich-native.xcresult
+            ${{ runner.temp }}/ilyich-native-test-attachments
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Build native app for iPhone without signing
+        working-directory: ios-native
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project Ilyich.xcodeproj -scheme Ilyich -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath "$DERIVED_DATA" \
+            MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_BUILD" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package unsigned native IPA and provenance
+        env:
+          BUILD_SOURCE_COMMIT: ${{ github.sha }}
+          BUILD_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          app="$DERIVED_DATA/Build/Products/Release-iphoneos/Ilyich.app"
+          test -f "$app/Info.plist"
+          test ! -e "$app/embedded.mobileprovision"
+          for bundle in "$app" "$app/PlugIns/ShareExtension.appex" "$app/PlugIns/WidgetExtension.appex"; do
+            test -f "$bundle/Info.plist"
+            executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")
+            xcrun lipo "$bundle/$executable" -verify_arch arm64
+          done
+          staging_dir=$(mktemp -d "$RUNNER_TEMP/ilyich-native-payload.XXXXXX")
+          mkdir -p "$staging_dir/Payload" "$ARTIFACT_DIR"
+          ditto "$app" "$staging_dir/Payload/Ilyich.app"
+          ditto -c -k --norsrc --noextattr --keepParent "$staging_dir/Payload" \
+            "$ARTIFACT_DIR/Ilyich-native-${APP_VERSION}-unsigned.ipa"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import plistlib
+          import subprocess
+          import zipfile
+          from pathlib import Path
+
+          output = Path(os.environ['ARTIFACT_DIR'])
+          ipa = output / f"Ilyich-native-{os.environ['APP_VERSION']}-unsigned.ipa"
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert source == os.environ['BUILD_SOURCE_COMMIT'], 'Unexpected source revision'
+          with zipfile.ZipFile(ipa) as archive:
+              assert archive.testzip() is None, 'Corrupt IPA archive'
+              assert all(name.startswith('Payload/') for name in archive.namelist()), 'Unexpected IPA root'
+              info = plistlib.loads(archive.read('Payload/Ilyich.app/Info.plist'))
+              assert info['CFBundleIdentifier'] == 'app.alextran.immich'
+              assert info['CFBundleDisplayName'] == 'Ilyich'
+              assert info['CFBundleShortVersionString'] == os.environ['APP_VERSION']
+              assert info['CFBundleVersion'] == os.environ['APP_BUILD']
+              assert f"Payload/Ilyich.app/{info['CFBundleExecutable']}" in archive.namelist()
+              for extension in ('ShareExtension', 'WidgetExtension'):
+                  extension_path = f'Payload/Ilyich.app/PlugIns/{extension}.appex'
+                  extension_info = plistlib.loads(archive.read(f'{extension_path}/Info.plist'))
+                  assert extension_info['CFBundleVersion'] == info['CFBundleVersion']
+                  assert extension_info['CFBundleShortVersionString'] == info['CFBundleShortVersionString']
+                  assert extension_info['AppGroupId'] == info['AppGroupId']
+                  assert f"{extension_path}/{extension_info['CFBundleExecutable']}" in archive.namelist()
+          digest = hashlib.file_digest(ipa.open('rb'), 'sha256').hexdigest()
+          metadata = {
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'sourceCommit': source,
+              'workflowCommit': os.environ['BUILD_WORKFLOW_COMMIT'],
+              'workflowRun': os.environ['BUILD_RUN_URL'],
+              'version': info['CFBundleShortVersionString'],
+              'build': info['CFBundleVersion'],
+              'bundleId': info['CFBundleIdentifier'],
+              'minimumOSVersion': info['MinimumOSVersion'],
+              'signed': False,
+              'requiresSigningBeforeInstallation': True,
+              'ipa': ipa.name,
+              'sha256': digest,
+          }
+          (output / 'provenance.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          (output / 'SHA256SUMS').write_text(f'{digest}  {ipa.name}\n')
+          PY
+          { xcodebuild -version; xcrun --sdk iphoneos --show-sdk-version; xcodegen --version; } \
+            > "$ARTIFACT_DIR/tool-versions.txt"
+
+      - name: Upload unsigned native IPA
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Ilyich-native-ios-unsigned
+          path: ios-native/build/artifacts/
+          if-no-files-found: error
+          retention-days: 14

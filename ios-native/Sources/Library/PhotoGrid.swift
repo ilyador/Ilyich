@@ -1,0 +1,215 @@
+import SwiftUI
+import UIKit
+
+struct PhotoGrid: UIViewRepresentable {
+    let store: LibraryStore
+    let pipeline: MediaPipeline
+    let columns: Int
+    let topInset: CGFloat
+    let bottomInset: CGFloat
+    let onOpen: (Asset) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIView(context: Context) -> UICollectionView {
+        let layout = VirtualPhotoLayout()
+        layout.columns = columns
+        let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        view.backgroundColor = .systemBackground
+        view.contentInsetAdjustmentBehavior = .never
+        view.showsVerticalScrollIndicator = false
+        view.alwaysBounceVertical = true
+        view.accessibilityIdentifier = "library.grid"
+        view.register(PhotoCell.self, forCellWithReuseIdentifier: "photo")
+        view.dataSource = context.coordinator
+        view.delegate = context.coordinator
+        view.prefetchDataSource = context.coordinator
+        let refresh = UIRefreshControl()
+        refresh.addTarget(context.coordinator, action: #selector(Coordinator.refresh(_:)), for: .valueChanged)
+        view.refreshControl = refresh
+        context.coordinator.collection = view
+        return view
+    }
+
+    func updateUIView(_ view: UICollectionView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+        let sections = store.sections
+        let reset = coordinator.resetID != store.resetID
+        if let layout = view.collectionViewLayout as? VirtualPhotoLayout {
+            if layout.columns != columns { layout.columns = columns; layout.invalidateLayout() }
+        }
+        view.contentInset = UIEdgeInsets(top: topInset, left: 0, bottom: bottomInset, right: 0)
+        if coordinator.sections != sections || reset {
+            coordinator.sections = sections; coordinator.resetID = store.resetID
+            view.reloadData()
+            if reset { view.setContentOffset(CGPoint(x: 0, y: -topInset), animated: false) }
+        } else if coordinator.revision != store.revision || coordinator.selection != store.selected || coordinator.selecting != store.isSelecting {
+            for cell in view.visibleCells {
+                guard let cell = cell as? PhotoCell, let index = view.indexPath(for: cell) else { continue }
+                coordinator.configure(cell, at: index)
+            }
+        }
+        coordinator.revision = store.revision; coordinator.selection = store.selected; coordinator.selecting = store.isSelecting
+        if let target = store.scrollTarget, target != coordinator.lastScrollTarget,
+           let section = sections.firstIndex(where: { $0.id == target }), sections[section].count > 0 {
+            coordinator.lastScrollTarget = target
+            view.scrollToItem(at: IndexPath(item: 0, section: section), at: .top, animated: false)
+        }
+    }
+
+    @MainActor final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate, UICollectionViewDataSourcePrefetching {
+        var parent: PhotoGrid
+        weak var collection: UICollectionView?
+        var sections: [LibrarySection] = []
+        var resetID: UUID?
+        var revision = -1
+        var selection: Set<String> = []
+        var selecting = false
+        var lastScrollTarget: String?
+        init(_ parent: PhotoGrid) { self.parent = parent }
+        func numberOfSections(in collectionView: UICollectionView) -> Int { sections.count }
+        func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { sections[section].count }
+        func collectionView(_ view: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+            let cell = view.dequeueReusableCell(withReuseIdentifier: "photo", for: indexPath) as! PhotoCell
+            configure(cell, at: indexPath)
+            return cell
+        }
+        func configure(_ cell: PhotoCell, at index: IndexPath) {
+            let asset = parent.store.asset(section: index.section, item: index.item)
+            cell.configure(asset: asset, pipeline: parent.pipeline,
+                           selected: asset.map { parent.store.selected.contains($0.id) } ?? false,
+                           selecting: parent.store.isSelecting,
+                           month: index.item == 0 && sections.indices.contains(index.section) ? sections[index.section].title : nil)
+            if asset == nil { parent.store.requestBucket(index.section) }
+        }
+        func collectionView(_ view: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+            guard let asset = parent.store.asset(section: indexPath.section, item: indexPath.item) else { return }
+            if parent.store.isSelecting {
+                if !parent.store.selected.insert(asset.id).inserted { parent.store.selected.remove(asset.id) }
+                UISelectionFeedbackGenerator().selectionChanged()
+            } else { parent.onOpen(asset) }
+        }
+        func collectionView(_ view: UICollectionView, prefetchItemsAt paths: [IndexPath]) {
+            for section in Set(paths.map(\.section)) { parent.store.requestBucket(section) }
+        }
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            guard let collection, let first = collection.indexPathsForVisibleItems.min() else { return }
+            parent.store.visibleSection(first.section)
+        }
+        @objc func refresh(_ sender: UIRefreshControl) {
+            Task { await parent.store.reload(); sender.endRefreshing() }
+        }
+    }
+}
+
+/// The layout computes attributes only for visible rows, not for every photo in the library.
+@MainActor final class VirtualPhotoLayout: UICollectionViewLayout {
+    var columns = 4
+    private var sectionOffsets: [CGFloat] = []
+    private var sectionCounts: [Int] = []
+    private var edge: CGFloat = 1
+    private var totalHeight: CGFloat = 0
+    override func prepare() {
+        super.prepare()
+        guard let collectionView else { return }
+        edge = max(1, (collectionView.bounds.width - CGFloat(columns - 1)) / CGFloat(columns))
+        sectionOffsets = []; sectionCounts = []; totalHeight = 0
+        for section in 0..<collectionView.numberOfSections {
+            let count = collectionView.numberOfItems(inSection: section)
+            sectionOffsets.append(totalHeight); sectionCounts.append(count)
+            totalHeight += CGFloat((count + columns - 1) / columns) * (edge + 1)
+        }
+    }
+    override var collectionViewContentSize: CGSize { CGSize(width: collectionView?.bounds.width ?? 0, height: totalHeight) }
+    override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+        var result: [UICollectionViewLayoutAttributes] = []
+        for section in sectionOffsets.indices {
+            let top = sectionOffsets[section]
+            let bottom = section + 1 < sectionOffsets.count ? sectionOffsets[section + 1] : totalHeight
+            guard bottom >= rect.minY && top <= rect.maxY else { continue }
+            let firstRow = max(0, Int((rect.minY - top) / (edge + 1)))
+            let lastRow = max(firstRow, Int((rect.maxY - top) / (edge + 1)))
+            let first = min(sectionCounts[section], firstRow * columns)
+            let last = min(sectionCounts[section], (lastRow + 1) * columns)
+            for item in first..<last {
+                if let attributes = layoutAttributesForItem(at: IndexPath(item: item, section: section)) { result.append(attributes) }
+            }
+        }
+        return result
+    }
+    override func layoutAttributesForItem(at index: IndexPath) -> UICollectionViewLayoutAttributes? {
+        guard sectionOffsets.indices.contains(index.section), index.item < sectionCounts[index.section] else { return nil }
+        let attributes = UICollectionViewLayoutAttributes(forCellWith: index)
+        attributes.frame = CGRect(x: CGFloat(index.item % columns) * (edge + 1),
+                                  y: sectionOffsets[index.section] + CGFloat(index.item / columns) * (edge + 1),
+                                  width: edge, height: edge)
+        return attributes
+    }
+    override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool { newBounds.width != collectionView?.bounds.width }
+}
+
+@MainActor final class PhotoCell: UICollectionViewCell {
+    private let image = UIImageView()
+    private let badge = UILabel()
+    private let month = UILabel()
+    private let check = UIImageView()
+    private var task: Task<Void, Never>?
+    private var identity: String?
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.backgroundColor = .secondarySystemBackground
+        image.contentMode = .scaleAspectFill; image.clipsToBounds = true
+        image.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(image)
+        NSLayoutConstraint.activate([image.leadingAnchor.constraint(equalTo: contentView.leadingAnchor), image.trailingAnchor.constraint(equalTo: contentView.trailingAnchor), image.topAnchor.constraint(equalTo: contentView.topAnchor), image.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)])
+        for label in [badge, month] {
+            label.textColor = .white; label.backgroundColor = .black.withAlphaComponent(0.6)
+            label.font = .preferredFont(forTextStyle: .caption2); label.layer.cornerRadius = 5; label.clipsToBounds = true
+            label.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview(label)
+        }
+        check.tintColor = .systemCyan; check.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview(check)
+        NSLayoutConstraint.activate([
+            badge.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -4), badge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            month.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4), month.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4), month.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -4),
+            check.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -5), check.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5), check.widthAnchor.constraint(equalToConstant: 24), check.heightAnchor.constraint(equalToConstant: 24)
+        ])
+        isAccessibilityElement = true
+    }
+    required init?(coder: NSCoder) { fatalError("PhotoCell is created programmatically") }
+    override func prepareForReuse() { super.prepareForReuse(); task?.cancel(); task = nil; identity = nil; image.image = nil }
+    func configure(asset: Asset?, pipeline: MediaPipeline, selected: Bool, selecting: Bool, month: String?) {
+        check.isHidden = !selecting
+        check.image = UIImage(systemName: selected ? "checkmark.circle.fill" : "circle")
+        self.month.text = month.map { " \($0) " }; self.month.isHidden = month == nil
+        accessibilityTraits = selected ? [.button, .selected] : [.button]
+        guard let asset else {
+            task?.cancel(); identity = nil; image.image = nil; badge.isHidden = true
+            accessibilityLabel = "Loading photo"; return
+        }
+        accessibilityLabel = asset.displayName + (asset.isVideo ? ", video" : "")
+        badge.isHidden = !asset.isVideo && asset.livePhotoVideoId == nil
+        badge.text = asset.isVideo ? " \(Self.duration(asset.duration ?? 0)) " : " LIVE "
+        let pixels = max(128, Int(bounds.width * traitCollection.displayScale))
+        let key = "\(asset.id)|\(asset.cacheRevision)|\(pixels)"
+        guard identity != key else { return }
+        task?.cancel(); identity = key; image.image = nil
+        task = Task { [weak self] in
+            do {
+                let prepared = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: pixels)
+                guard !Task.isCancelled, self?.identity == key else { return }
+                self?.image.image = prepared.uiImage
+            } catch is CancellationError {} catch {
+                guard self?.identity == key else { return }
+                self?.image.image = UIImage(systemName: "photo.badge.exclamationmark")
+                self?.image.tintColor = .secondaryLabel
+                self?.accessibilityLabel = "Preview unavailable, \(asset.displayName)"
+                // Permit retry when the row is next configured after connectivity returns.
+                self?.identity = nil
+            }
+        }
+    }
+    private static func duration(_ milliseconds: Int) -> String {
+        let seconds = milliseconds / 1000
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}

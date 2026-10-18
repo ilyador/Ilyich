@@ -1,0 +1,137 @@
+import SwiftUI
+
+struct SettingsView: View {
+    let api: APIClient
+    let onSignOut: () -> Void
+    @AppStorage("gridColumns") private var columns = 4
+    @AppStorage("appearance") private var appearance = "system"
+    @State private var user: User?
+    @State private var failure: FeatureFailure?
+    @State private var confirmSignOut = false
+    var body: some View {
+        Form {
+            Section {
+                NavigationLink { AccountSettingsView(api: api) } label: {
+                    Label { VStack(alignment: .leading) { Text(user?.name ?? "Account"); if let email = user?.email { Text(email).font(.caption).foregroundStyle(.secondary) } } } icon: { Image(systemName: "person.crop.circle") }
+                }
+                NavigationLink { BackupSettingsView() } label: { Label("Backup", systemImage: "icloud.and.arrow.up") }
+            }
+            Section("Appearance") {
+                Picker("Theme", selection: $appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }
+                Picker("Grid", selection: $columns) { ForEach(2...6, id: \.self) { Text("\($0) columns").tag($0) } }
+            }
+            Section {
+                NavigationLink { ServerSettingsView(api: api) } label: { Label("Server", systemImage: "externaldrive.connected.to.line.below") }
+                NavigationLink { AboutIlyichView() } label: { Label("About", systemImage: "info.circle") }
+            }
+            Section { Button("Sign out", role: .destructive) { confirmSignOut = true } }
+        }.navigationTitle("Settings")
+        .task { do { user = try await api.currentUser() } catch { failure = .init(error) } }
+        .confirmationDialog("Sign out of Ilyich?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+            Button("Sign out", role: .destructive) { onSignOut() }
+        } message: { Text("Backup will stop on this phone. Photos already on your server are kept.") }
+        .alert("Couldn’t load account", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: { Text(failure?.message ?? "") }
+    }
+}
+
+private struct AccountSettingsView: View {
+    let api: APIClient
+    @State private var name = ""
+    @State private var email = ""
+    @State private var loading = true
+    @State private var saving = false
+    @State private var saved = false
+    @State private var failure: FeatureFailure?
+    var body: some View {
+        Form {
+            Section("Profile") { TextField("Name", text: $name).textContentType(.name); LabeledContent("Email", value: email) }
+            Section { NavigationLink("Change password") { ChangePasswordView(api: api) } }
+            if saved { Label("Profile saved", systemImage: "checkmark.circle").foregroundStyle(.secondary) }
+        }.navigationTitle("Account").disabled(loading || saving)
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(loading || saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) } }
+        .task {
+            do { let user = try await api.currentUser(); name = user.name; email = user.email ?? "" } catch { failure = .init(error) }
+            loading = false
+        }
+        .alert("Couldn’t update account", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: { Text(failure?.message ?? "") }
+    }
+    private func save() async {
+        saving = true; saved = false; defer { saving = false }
+        do { let _: User = try await api.request(.put, path: "users/me", body: ["name": name]); saved = true } catch { failure = .init(error) }
+    }
+}
+
+private struct ChangePasswordView: View {
+    let api: APIClient
+    @Environment(\.dismiss) private var dismiss
+    @State private var current = ""
+    @State private var password = ""
+    @State private var confirmation = ""
+    @State private var invalidate = false
+    @State private var saving = false
+    @State private var failure: FeatureFailure?
+    var body: some View {
+        Form {
+            Section {
+                SecureField("Current password", text: $current).textContentType(.password)
+                SecureField("New password", text: $password).textContentType(.newPassword)
+                SecureField("Confirm new password", text: $confirmation).textContentType(.newPassword)
+            } footer: { Text("Use at least 8 characters.") }
+            Toggle("Sign out other devices", isOn: $invalidate)
+        }.navigationTitle("Change password")
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving || current.isEmpty || password.count < 8 || password != confirmation) } }
+        .alert("Couldn’t change password", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: { Text(failure?.message ?? "") }
+    }
+    private func save() async {
+        struct Body: Encodable, Sendable { let password: String; let newPassword: String; let invalidateSessions: Bool }
+        saving = true; defer { saving = false }
+        do { try await api.requestVoid(.post, path: "auth/change-password", body: Body(password: current, newPassword: password, invalidateSessions: invalidate)); current = ""; password = ""; confirmation = ""; dismiss() } catch { failure = .init(error) }
+    }
+}
+
+private struct ServerSettingsView: View {
+    let api: APIClient
+    @State private var stats: AssetStatistics?
+    @State private var version = ""
+    @State private var failure: FeatureFailure?
+    var body: some View {
+        Form {
+            Section("Connection") { LabeledContent("Server", value: api.baseURL.deletingLastPathComponent().absoluteString); if !version.isEmpty { LabeledContent("Version", value: version) } }
+            if let stats { Section("Your library") { LabeledContent("Photos", value: stats.images.formatted()); LabeledContent("Videos", value: stats.videos.formatted()); LabeledContent("Total", value: stats.total.formatted()) } }
+        }.navigationTitle("Server")
+        .task {
+            struct Version: Decodable, Sendable { let major: Int; let minor: Int; let patch: Int }
+            do {
+                stats = try await api.assetStatistics()
+                let response: Version = try await api.request(.get, path: "server/version")
+                version = "\(response.major).\(response.minor).\(response.patch)"
+            } catch { failure = .init(error) }
+        }
+        .alert("Couldn’t load server details", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: { Text(failure?.message ?? "") }
+    }
+}
+
+private struct AboutIlyichView: View {
+    var body: some View {
+        Form {
+            Section {
+                HStack(spacing: 16) { Image("IlyichLogo").resizable().scaledToFit().frame(width: 48, height: 48); VStack(alignment: .leading) { Text("Ilyich").font(.headline); Text("Your memories, with you.").foregroundStyle(.secondary) } }
+                LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
+                LabeledContent("Build", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")
+                Link("Source code", destination: URL(string: "https://github.com/ilyador/Ilyich")!)
+            }
+            Section("Credits") {
+                Text("Based on Immich. Licensed under the GNU AGPL v3.")
+                Text("Earth imagery: NASA Goddard Space Flight Center; Reto Stöckli and Robert Simmon. City lights: NASA/NOAA and the Defense Meteorological Satellite Program.").font(.footnote).foregroundStyle(.secondary)
+            }
+        }.navigationTitle("About")
+    }
+}

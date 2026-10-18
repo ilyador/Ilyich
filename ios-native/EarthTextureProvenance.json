@@ -1,0 +1,19 @@
+{
+  "credit": "NASA Goddard Space Flight Center; Reto St\u00f6ckli (land, water, clouds), Robert Simmon (compositing), DMSP (city lights)",
+  "sourcePage": "https://science.nasa.gov/earth/earth-observatory/the-blue-marble-true-color-global-imagery-at-1km-resolution/",
+  "usage": "NASA page states these images are freely available to educators, scientists, museums, and the public. No endorsement implied.",
+  "textures": [
+    {
+      "asset": "EarthDay",
+      "source": "https://assets.science.nasa.gov/content/dam/science/esd/eo/content-feature/bluemarble/images/land_ocean_ice_cloud_2048.jpg",
+      "sha256": "fb67ac030214c1891994c8f976e7f6c9cd5b0f21586aba8567250781a4fe708e",
+      "processing": "None; original 2048x1024 image"
+    },
+    {
+      "asset": "EarthNight",
+      "source": "https://assets.science.nasa.gov/content/dam/science/esd/eo/content-feature/bluemarble/images/land_ocean_ice_lights_2048.jpg",
+      "sha256": "6d3a23dc7ce2ab98bfd91222389bbeef07c56a5980d934365116196daeb22e07",
+      "processing": "None; original 2048x1024 image"
+    }
+  ]
+}
