@@ -4,6 +4,7 @@ import SwiftUI
     @UIApplicationDelegateAdaptor(BackupAppDelegate.self) private var appDelegate
     @State private var session: SessionStore
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     init() {
         let session = SessionStore()
         _session = State(initialValue: session)
@@ -32,7 +33,7 @@ import SwiftUI
                     SignInView(session: session)
                 }
             }
-            .tint(.primary)
+            .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }
             .onChange(of: scenePhase, initial: true) { _, phase in session.sceneChanged(phase) }

@@ -7,8 +7,10 @@ struct SettingsView: View {
     let onSignOut: () -> Void
     @AppStorage("gridColumns") private var columns = 4
     @AppStorage("appearance") private var appearance = "system"
+    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     @AppStorage("hapticFeedback") private var haptics = true
     @AppStorage("timelineStorageIndicator") private var storageIndicator = true
+    @AppStorage("timelineGrouping") private var timelineGrouping = "month"
     @State private var user: User?
     @State private var failure: FeatureFailure?
     @State private var confirmSignOut = false
@@ -38,14 +40,20 @@ struct SettingsView: View {
             } footer: { Text("Browse and search without changing photos, albums or account details. Turning this on pauses uploads. Backup stays paused until you start it again.") }
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }
+                Picker("Accent color", selection: $accentName) { ForEach(AppearanceAccent.allCases) { Text($0.title).tag($0.rawValue) } }
                 NavigationLink("Photo and video viewer") { ViewerSettingsView() }
                 NavigationLink("Slideshow") { SlideshowSettingsView() }
                 Picker("Grid", selection: $columns) { ForEach(2...6, id: \.self) { Text("\($0) columns").tag($0) } }
+                Picker("Timeline", selection: $timelineGrouping) {
+                    Text("Month").tag("month")
+                    Text("Day").tag("day")
+                }
                 Toggle("Storage indicators", isOn: $storageIndicator)
                 Toggle("Haptic feedback", isOn: $haptics)
             }
             Section {
                 NavigationLink { NetworkSettingsView(api: api, server: api.baseURL) } label: { Label("Network", systemImage: "network") }
+                NavigationLink { NotificationSettingsView() } label: { Label("Notifications", systemImage: "bell") }
                 NavigationLink { ServerSettingsView(api: api) } label: { Label("Server", systemImage: "externaldrive.connected.to.line.below") }
                 NavigationLink { DiagnosticsView(api: api, pipeline: pipeline, session: session) } label: { Label("Diagnostics", systemImage: "stethoscope") }
                 NavigationLink { AboutIlyichView() } label: { Label("About", systemImage: "info.circle") }

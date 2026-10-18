@@ -45,7 +45,9 @@ struct LibraryView: View {
     @State private var seenShareBatches = Set<UUID>()
     @AppStorage("gridColumns") private var columns = 4
     @AppStorage("appearance") private var appearance = "system"
+    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     @AppStorage("timelineStorageIndicator") private var storageIndicator = true
+    @AppStorage("timelineGrouping") private var timelineGrouping = "month"
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -64,6 +66,7 @@ struct LibraryView: View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
                 PhotoGrid(store: store, pipeline: pipeline, columns: max(2, min(6, columns)), showsStorageIndicator: storageIndicator,
+                          showsDayHeaders: timelineGrouping == "day",
                           topInset: geometry.safeAreaInsets.top + headerHeight,
                           bottomInset: geometry.safeAreaInsets.bottom + (showPlaces ? geometry.size.height * 0.4 : 90),
                           onDensityChange: { columns = $0 }, onOpenLocal: { searchFocused = false; viewingLocal = $0 }) { asset in
@@ -245,7 +248,7 @@ struct LibraryView: View {
     @ViewBuilder private var headerControls: some View {
         Button(store.isSelecting ? "Done" : "Select") {
             store.isSelecting.toggle(); if !store.isSelecting { store.selected = [] }
-        }.buttonStyle(.glass).controlSize(.large).tint(store.isSelecting ? Color.cyan : Color.primary)
+        }.buttonStyle(.glass).controlSize(.large).tint(store.isSelecting ? (AppearanceAccent(rawValue: accentName) ?? .design).selectionTint : Color.primary)
             .accessibilityIdentifier("library.select")
         if !store.isSelecting {
             Button { screen = .settings } label: {

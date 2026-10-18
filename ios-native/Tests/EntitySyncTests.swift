@@ -112,6 +112,39 @@ final class EntitySyncTests: XCTestCase {
         let afterDelete = try await store.partners(direction: "shared-with")
         XCTAssertTrue(afterDelete.isEmpty)
     }
+    func testSingleAlbumAndPersonReadersMatchListsAndHonorDeletion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root), epoch = await store.epoch()
+        func user(_ id: String) throws -> EntitySyncEvent {
+            try event("UserV1", #"{"id":"\#(id)","name":"\#(id.capitalized)","email":"\#(id)@example.com","deletedAt":null}"#, ack: "UserV1|\(id)")
+        }
+        _ = try await store.apply([
+            user("alice"), user("bob"), asset("a1"), asset("a2"),
+            event("AlbumV2", #"{"id":"album","name":"Trip","description":"","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","thumbnailAssetId":"a1","isActivityEnabled":true,"order":"desc"}"#, ack: "A|1"),
+            event("AlbumV2", #"{"id":"other","name":"Other","description":"","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","thumbnailAssetId":null,"isActivityEnabled":true,"order":"desc"}"#, ack: "A|2"),
+            event("AlbumUserV1", #"{"albumId":"album","userId":"alice","role":"owner"}"#, ack: "AU|1"),
+            event("AlbumUserV1", #"{"albumId":"album","userId":"bob","role":"editor"}"#, ack: "AU|2"),
+            event("AlbumToAssetV1", #"{"albumId":"album","assetId":"a1"}"#, ack: "AA|1"),
+            event("AlbumToAssetV1", #"{"albumId":"album","assetId":"a2"}"#, ack: "AA|2"),
+            event("PersonV1", #"{"id":"person","name":"Pat","isHidden":true}"#, ack: "P|1")
+        ], epoch: epoch)
+        let list = try await store.albums(), detail = try await store.album(id: "album")
+        XCTAssertEqual(detail?.id, "album")
+        XCTAssertEqual(detail?.assetCount, 2)
+        XCTAssertEqual(detail?.shared, true)
+        XCTAssertEqual(detail?.albumName, list.first { $0.id == "album" }?.albumName)
+        XCTAssertEqual(detail?.albumUsers?.map { "\($0.user.id):\($0.role)" }.sorted(), ["alice:owner", "bob:editor"])
+        let person = try await store.person(id: "person"), missingPerson = try await store.person(id: "nobody"), missingAlbum = try await store.album(id: "nobody")
+        XCTAssertEqual(person?.name, "Pat"); XCTAssertEqual(person?.isHidden, true)
+        XCTAssertNil(missingPerson); XCTAssertNil(missingAlbum)
+        _ = try await store.apply([
+            event("AlbumDeleteV1", #"{"albumId":"album"}"#, ack: "AD|1"),
+            event("PersonDeleteV1", #"{"personId":"person"}"#, ack: "PD|1")
+        ], epoch: epoch)
+        let deletedAlbum = try await store.album(id: "album"), deletedPerson = try await store.person(id: "person")
+        XCTAssertNil(deletedAlbum); XCTAssertNil(deletedPerson)
+    }
     func testLockedTransitionPurgesMetadataAndCannotBeRepopulatedByLaterExif() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -296,5 +329,69 @@ extension EntitySyncTests {
         XCTAssertEqual(requests.map { $0["reset"] }, [.bool(true), .bool(false)])
         let pending = try await store.pendingAcknowledgements()
         XCTAssertTrue(pending.isEmpty)
+    }
+}
+
+extension EntitySyncTests {
+    func testOfflineMapMarkersMatchMapScopeFiltersAndCoordinateProjection() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root), epoch = await store.epoch()
+        func located(_ id: String, owner: String = "alice", visibility: String = "timeline", favorite: Bool = true, deleted: Bool = false) throws -> [EntitySyncEvent] {
+            [try asset(id, owner: owner, visibility: visibility, favorite: favorite, deleted: deleted),
+             try event("AssetExifV1", #"{"assetId":"\#(id)","latitude":38.7,"longitude":-9.1,"city":"Lisbon","state":"Lisbon","country":"Portugal"}"#)]
+        }
+        var events = try located("owned")
+        events += try located("not-favorite", favorite: false)
+        events += try located("archived", visibility: "archive")
+        events += try located("hidden", visibility: "hidden")
+        events += try located("locked", visibility: "locked")
+        events += try located("deleted", favorite: false, deleted: true)
+        events += try located("partner-photo", owner: "bob")
+        events += try located("partner-archive", owner: "bob", visibility: "archive")
+        events += try located("album-photo", owner: "carol")
+        events += [
+            try event("UserV1", #"{"id":"bob","name":"Bob","email":"bob@example.com","deletedAt":null}"#),
+            try event("PartnerV1", #"{"sharedById":"bob","sharedWithId":"alice","inTimeline":false}"#),
+            try event("AlbumV2", #"{"id":"shared-album","name":"Shared","deletedAt":null}"#),
+            try event("AlbumUserV1", #"{"albumId":"shared-album","userId":"alice","role":"viewer"}"#),
+            try event("AlbumToAssetV1", #"{"albumId":"shared-album","assetId":"album-photo"}"#)
+        ]
+        _ = try await store.apply(events, epoch: epoch)
+
+        let standard = try await store.mapMarkers(.init(withPartners: true, withSharedAlbums: true, isArchived: false))
+        XCTAssertEqual(Set(standard.map(\.id)), ["owned", "not-favorite", "partner-photo", "album-photo"])
+        let ownOnly = try await store.mapMarkers(.init(isArchived: false))
+        XCTAssertEqual(Set(ownOnly.map(\.id)), ["owned", "not-favorite"])
+        let favorites = try await store.mapMarkers(.init(withPartners: true, withSharedAlbums: true, isArchived: false, isFavorite: true))
+        XCTAssertEqual(Set(favorites.map(\.id)), ["owned", "partner-photo", "album-photo"])
+        let withArchive = try await store.mapMarkers(.init(withPartners: true, withSharedAlbums: true, isArchived: true))
+        XCTAssertEqual(Set(withArchive.map(\.id)), ["owned", "not-favorite", "archived", "partner-photo", "album-photo"])
+        let after = try await store.mapMarkers(.init(withPartners: true, withSharedAlbums: true, isArchived: true,
+                                                    fileCreatedAfter: APIDate.parse("2026-02-01T00:00:00Z")))
+        XCTAssertTrue(after.isEmpty)
+        XCTAssertEqual(standard.first?.city, "Lisbon")
+    }
+
+    func testCachedServerFeaturesPersistThroughSyncResetAndClearWithStore() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root)
+        _ = try await store.prepare(sessionFingerprint: "session-one")
+        let features = ServerFeatures(passwordLogin: true, oauth: false, smartSearch: true, searchVerification: nil,
+                                      ocr: false, facialRecognition: true, map: true, trash: true, sidecar: false,
+                                      realtimeTranscoding: true)
+        try await store.persistCachedServerFeatures(features)
+        let epoch = await store.epoch()
+        _ = try await store.apply([event("SyncCompleteV1", "{}")], epoch: epoch)
+        _ = try await store.apply([event("SyncResetV1", "{}", ack: "SyncResetV1|reset")], epoch: epoch)
+        let cached = try await store.cachedServerFeatures()
+        let complete = try await store.isComplete()
+        XCTAssertEqual(cached?.map, true)
+        XCTAssertEqual(cached?.smartSearch, true)
+        XCTAssertFalse(complete)
+        try await store.clear()
+        let cleared = try await store.cachedServerFeatures()
+        XCTAssertNil(cleared)
     }
 }

@@ -124,13 +124,16 @@ private struct GlobeSurface: UIViewRepresentable {
             if night != dark {
                 night = dark
                 textureTask?.cancel()
-                applyMaterial(texture: nil, dark: dark)
+                applyMaterial(dayTexture: nil, nightTexture: nil, dark: dark)
                 textureTask = Task { [weak self] in
                     do {
-                        let texture = try await GlobeTextures.texture(dark: dark)
+                        let dayTexture = try await GlobeTextures.texture(dark: false)
+                        let nightTexture: TextureResource?
+                        if dark { nightTexture = try await GlobeTextures.texture(dark: true) }
+                        else { nightTexture = nil }
                         try Task.checkCancellation()
                         guard let self, self.night == dark else { return }
-                        self.applyMaterial(texture: texture, dark: dark)
+                        self.applyMaterial(dayTexture: dayTexture, nightTexture: nightTexture, dark: dark)
                     } catch { /* Keep the navigable fallback globe if texture loading fails. */ }
                 }
             }
@@ -157,16 +160,26 @@ private struct GlobeSurface: UIViewRepresentable {
         }
 
         private func applyMaterial(texture: TextureResource?, dark: Bool) {
-            light.isEnabled = !dark
+            applyMaterial(dayTexture: dark ? nil : texture, nightTexture: nil, dark: dark)
+        }
+
+        private func applyMaterial(dayTexture: TextureResource?, nightTexture: TextureResource?, dark: Bool) {
+            light.isEnabled = true
+            light.light.intensity = dark ? 2800 * 0.12 : 2800
             if dark {
-                // The night map already contains city illumination; daylight lighting washes it out.
-                var material = UnlitMaterial(color: UIColor(red: 0.02, green: 0.04, blue: 0.09, alpha: 1))
-                if let texture { material.color = .init(tint: .white, texture: .init(texture)) }
+                var material = PhysicallyBasedMaterial()
+                material.roughness = .init(floatLiteral: 1)
+                material.baseColor = .init(
+                    tint: UIColor(red: 0.2, green: 0.27, blue: 0.42, alpha: 1),
+                    texture: dayTexture.map { .init($0) })
+                let emissiveTint: UIColor = nightTexture == nil ? .black : .white
+                material.emissiveColor = .init(color: emissiveTint, texture: nightTexture.map { .init($0) })
+                material.emissiveIntensity = 0.8
                 earth.model?.materials = [material]
             } else {
                 var material = PhysicallyBasedMaterial()
                 material.roughness = .init(floatLiteral: 1)
-                material.baseColor = .init(tint: texture == nil ? .systemBlue : .white, texture: texture.map { .init($0) })
+                material.baseColor = .init(tint: dayTexture == nil ? .systemBlue : .white, texture: dayTexture.map { .init($0) })
                 earth.model?.materials = [material]
             }
         }

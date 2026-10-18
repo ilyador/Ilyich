@@ -359,7 +359,8 @@ struct AssetViewer: View {
     }
     /// Tracked download pipeline for export and Save to Photos only; ordinary mutations keep using `run`.
     /// `working` stays the shared guard, and `transferID` fences late progress and completions.
-    private func transfer(label: String, _ operation: @escaping @MainActor (UUID, @escaping @Sendable (Double?) -> Void) async throws -> Void) {
+    private func transfer(label: String, notificationKind: String,
+                          _ operation: @escaping @MainActor (UUID, @escaping @Sendable (Double?) -> Void) async throws -> Void) {
         guard !working else { return }
         let id = UUID()
         working = true; transferID = id; transferLabel = label; transferProgress = nil; transferSaving = false
@@ -368,9 +369,21 @@ struct AssetViewer: View {
         }
         transferTask = Task {
             defer { if transferID == id { finishTransfer() } }
-            do { try await operation(id, report) }
-            catch is CancellationError { }
-            catch { if transferID == id, !Task.isCancelled { self.error = error.localizedDescription } }
+            await TransferNotifications.started(id: id, kind: notificationKind, total: 1)
+            guard transferID == id, !Task.isCancelled else { TransferNotifications.cancel(id: id); return }
+            do {
+                try await operation(id, report)
+                guard transferID == id, !Task.isCancelled else { TransferNotifications.cancel(id: id); return }
+                await TransferNotifications.finished(id: id, kind: notificationKind, total: 1, completed: 1, failed: 0)
+                if Task.isCancelled || transferID != id { TransferNotifications.cancel(id: id) }
+            } catch is CancellationError { TransferNotifications.cancel(id: id) }
+            catch {
+                if transferID == id, !Task.isCancelled {
+                    await TransferNotifications.finished(id: id, kind: notificationKind, total: 1, completed: 0, failed: 1)
+                    if Task.isCancelled || transferID != id { TransferNotifications.cancel(id: id) }
+                    if transferID == id, !Task.isCancelled { self.error = error.localizedDescription }
+                } else { TransferNotifications.cancel(id: id) }
+            }
         }
     }
     private func finishTransfer() {
@@ -378,12 +391,13 @@ struct AssetViewer: View {
     }
     private func cancelTransfer() {
         guard transferID != nil else { return }
+        if let transferID { TransferNotifications.cancel(id: transferID) }
         transferTask?.cancel()
         finishTransfer()
     }
     private func exportAsset(original: Bool) {
         let asset = current
-        transfer(label: original || asset.isVideo ? "Downloading original…" : "Preparing photo…") { id, report in
+        transfer(label: original || asset.isVideo ? "Downloading original…" : "Preparing photo…", notificationKind: "Download") { id, report in
             let file = ViewerExport(url: try await api.download(asset: asset, original: original, progress: report))
             guard !Task.isCancelled, transferID == id, selectedID == asset.id else { file.removeTemporaryFile(); throw CancellationError() }
             export = file
@@ -391,7 +405,7 @@ struct AssetViewer: View {
     }
     private func saveToPhotos() {
         let asset = current
-        transfer(label: "Downloading…") { id, report in
+        transfer(label: "Downloading…", notificationKind: "Save to Photos") { id, report in
             try await PhotoLibrarySave.requestPermission(api: api)
             try await PhotoLibrarySave.save(asset, api: api, original: false, progress: report) {
                 guard transferID == id else { throw CancellationError() }

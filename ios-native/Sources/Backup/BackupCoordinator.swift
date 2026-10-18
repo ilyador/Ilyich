@@ -32,6 +32,14 @@ struct BackupPreferences: Codable, Equatable, Sendable {
     }
 }
 
+private struct BackupTransferNotification: Codable {
+    var id: UUID
+    var total: Int
+    var completed = 0
+    /// Nil while active; set once a terminal result is ready for replay.
+    var terminalFailures: Int?
+}
+
 private struct BackupState: Codable {
     var preferences = BackupPreferences()
     var queue: [String] = []
@@ -42,6 +50,7 @@ private struct BackupState: Codable {
     var pendingAlbumAdds: [String: Set<String>]?
     var suspended: [String: PreparedPhoto]?
     var failures: [String: BackupFailure]?
+    var transferNotification: BackupTransferNotification?
     var paused = true
     var error: String?
 }
@@ -100,7 +109,22 @@ private struct BackupState: Codable {
             saved = session; directory = folder; preferences = state.preferences
             error = state.error; refreshCounts(); refreshLibrary()
             BackupLifecycle.shared.configure()
-            if !state.paused, !state.queue.isEmpty { run() }
+            if state.transferNotification?.terminalFailures != nil { await replayFinishedTransferNotification() }
+            if !state.paused, !state.queue.isEmpty {
+                if state.transferNotification == nil {
+                    state.transferNotification = BackupTransferNotification(id: UUID(), total: state.queue.count)
+                    try persist()
+                }
+                if let batch = state.transferNotification {
+                    let currentGeneration = generation
+                    await TransferNotifications.started(id: batch.id, kind: "Backup", total: batch.total)
+                    guard generation == currentGeneration, saved?.scope == session.scope,
+                          state.transferNotification?.id == batch.id, !state.paused else {
+                        TransferNotifications.cancel(id: batch.id); return
+                    }
+                }
+                run()
+            }
         } catch { self.error = error.localizedDescription }
     }
 
@@ -150,14 +174,42 @@ private struct BackupState: Codable {
         }
         guard !state.queue.isEmpty || preferences.syncAlbums else { activity = "No new photos in the selected albums"; return }
         state.paused = false; state.error = nil; error = nil
+        if !state.queue.isEmpty {
+            if state.transferNotification == nil {
+                state.transferNotification = BackupTransferNotification(id: UUID(), total: 0)
+            }
+            if var batch = state.transferNotification {
+                batch.terminalFailures = nil
+                batch.total = max(batch.total, batch.completed + state.queue.count)
+                state.transferNotification = batch
+            }
+        }
         // A new attempt checks the server checksum before retrying a failed transfer.
         if var current = state.current { resetFailedTransfer(&current); state.current = current }
-        do { try persist(); run(retryFailures: retryFailures) } catch { self.error = error.localizedDescription }
+        do {
+            try persist()
+            if let batch = state.transferNotification {
+                await TransferNotifications.started(id: batch.id, kind: "Backup", total: batch.total)
+            }
+            guard generation == runID, !state.paused else {
+                if let id = state.transferNotification?.id { TransferNotifications.cancel(id: id) }
+                return
+            }
+            run(retryFailures: retryFailures)
+        } catch { self.error = error.localizedDescription }
     }
 
     func pause(disableAutomatic: Bool = true) async {
         if disableAutomatic { preferences.automatic = false; state.preferences = preferences }
-        if let stopping { await stopping.value; return }
+        if let stopping {
+            await stopping.value
+            if disableAutomatic, let id = state.transferNotification?.id {
+                TransferNotifications.cancel(id: id)
+                clearTransferNotificationState()
+                try? persist()
+            }
+            return
+        }
         generation = UUID()
         let activeWorker = worker
         let activeDiscovery = discovery
@@ -169,6 +221,10 @@ private struct BackupState: Codable {
             await activeWorker?.value
             _ = try? await activeDiscovery?.value
             self.stopping = nil; worker = nil; discovery = nil; isRunning = false; activity = "Backup paused"
+            if disableAutomatic, let id = state.transferNotification?.id {
+                TransferNotifications.cancel(id: id)
+                clearTransferNotificationState()
+            }
             do { try persist() } catch { self.error = error.localizedDescription }
             BackupLifecycle.shared.configure()
         }
@@ -351,6 +407,10 @@ private struct BackupState: Codable {
                     state.confirmed[localID] = prepared.modificationDate
                     state.failures?[localID] = nil
                     state.queue.removeAll { $0 == localID }; state.current = nil
+                    if var batch = state.transferNotification {
+                        batch.completed += 1
+                        state.transferNotification = batch
+                    }
                     try persist()
                     try? FileManager.default.removeItem(at: prepared.original.url.deletingLastPathComponent())
                     refreshCounts()
@@ -381,6 +441,7 @@ private struct BackupState: Codable {
             state.paused = true
             activity = state.queue.isEmpty ? "Selected photos backed up" : "\(state.queue.count.formatted()) uploads need retry"
             try persist()
+            await finishTransferNotification(runID: runID)
         } catch is CancellationError { }
         catch let deferred as BackupDeferral {
             guard generation == runID else { return }
@@ -392,6 +453,7 @@ private struct BackupState: Codable {
             self.error = error.localizedDescription; state.error = self.error; state.paused = true
             activity = "Backup needs attention"
             do { try persist() } catch { self.error = "Could not save backup progress. Free some device storage and retry." }
+            await finishTransferNotification(runID: runID)
         }
     }
 
@@ -408,6 +470,38 @@ private struct BackupState: Codable {
         if state.failures == nil { state.failures = [:] }
         state.failures?[localID] = BackupFailure(id: localID, filename: state.current?.original.filename ?? "Photo in selected album",
             message: error.localizedDescription, date: Date())
+    }
+
+    private func finishTransferNotification(runID: UUID) async {
+        guard generation == runID, var batch = state.transferNotification else { return }
+        let id = batch.id
+        let completed = batch.completed
+        // A failed attempt may later succeed on retry. At batch end, queued
+        // photos are the actual failures; historical retry counts are not.
+        let failures = state.queue.count
+        let total = max(batch.total, completed + failures)
+        batch.total = total
+        batch.terminalFailures = failures
+        state.transferNotification = batch
+        do { try persist() } catch { self.error = error.localizedDescription; return }
+        await TransferNotifications.finished(id: id, kind: "Backup", total: total, completed: completed, failed: failures)
+        guard generation == runID, state.transferNotification?.id == id else { TransferNotifications.cancel(id: id); return }
+        clearTransferNotificationState()
+        do { try persist() } catch { self.error = error.localizedDescription }
+    }
+
+    private func replayFinishedTransferNotification() async {
+        guard let batch = state.transferNotification, let failures = batch.terminalFailures else { return }
+        let id = batch.id
+        await TransferNotifications.finished(id: id, kind: "Backup", total: batch.total,
+                                             completed: batch.completed, failed: failures)
+        guard state.transferNotification?.id == id else { TransferNotifications.cancel(id: id); return }
+        clearTransferNotificationState()
+        try? persist()
+    }
+
+    private func clearTransferNotificationState() {
+        state.transferNotification = nil
     }
 
     private func transfer(file: UploadFile, sidecar: UploadFile?, fields: [String: String], prepared: PreparedPhoto,

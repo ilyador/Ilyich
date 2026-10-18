@@ -148,17 +148,19 @@ struct PlacesView: View {
             guard generation == requestGeneration else { return }
             mapEnabled = features.map
             guard features.map else { places = []; selected = nil; return }
-            var query = [URLQueryItem(name: "withPartners", value: String(includePartners)), .init(name: "withSharedAlbums", value: "true")]
-            if favoritesOnly { query.append(.init(name: "isFavorite", value: "true")) }
-            if !includeArchived { query.append(.init(name: "isArchived", value: "false")) }
+            var fileCreatedAfter: Date?
+            var fileCreatedBefore: Date?
             if dateFilter {
                 let calendar = Calendar.current
                 let first = calendar.startOfDay(for: startDate)
                 let last = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: endDate)) ?? endDate
-                query.append(.init(name: "fileCreatedAfter", value: first.ISO8601Format()))
-                query.append(.init(name: "fileCreatedBefore", value: last.ISO8601Format()))
+                fileCreatedAfter = first
+                fileCreatedBefore = last
             }
-            let markers: [MapMarker] = try await api.request(.get, path: "map/markers", query: query)
+            let query = MapMarkerQuery(withPartners: includePartners, withSharedAlbums: true,
+                                       isArchived: includeArchived, isFavorite: favoritesOnly ? true : nil,
+                                       fileCreatedAfter: fileCreatedAfter, fileCreatedBefore: fileCreatedBefore)
+            let markers = try await api.mapMarkers(query)
             try Task.checkCancellation()
             guard generation == requestGeneration else { return }
             let grouped = await Task.detached(priority: .userInitiated) { PlaceCollection.group(markers) }.value
