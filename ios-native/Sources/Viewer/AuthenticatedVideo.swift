@@ -8,29 +8,67 @@ struct AuthenticatedVideo: View {
     let assetID: String
     let active: Bool
     var onEnded: (() -> Void)? = nil
+    /// The remote still asset that owns this video (the still itself for a Live Photo's motion).
+    var sourceAsset: Asset? = nil
+    var matchedLocalPhoto: LocalPhoto? = nil
+    /// `assetID` is a Live Photo motion video rather than a regular video.
+    var isLivePhotoMotion = false
     @State private var transport: AuthenticatedVideoTransport?
     @State private var error: String?
     @State private var attempt = 0
-    @State private var loadedKey: String?
+    @State private var loadedKey: PlaybackRequest?
+    @State private var localMedia = LocalPhotoMedia()
+    @State private var localPhoto: LocalPhoto?
+    @State private var usingLocal = false
+    @State private var activeNow = false
     @AppStorage("viewerAutoPlayVideo") private var autoPlay = true
     @AppStorage("viewerLoopVideo") private var loop = true
     @AppStorage("viewerLoadOriginalVideo") private var original = false
     @AppStorage("viewerMuteVideo") private var muted = false
-    private var requestKey: String { assetID + String(attempt) + String(original) }
+    @Environment(\.scenePhase) private var scenePhase
+    private struct PlaybackRequest: Equatable {
+        let assetID: String
+        let revision: String?
+        let attempt: Int
+        let original: Bool
+        let localPhoto: LocalPhoto?
+        let liveMotion: Bool
+        let active: Bool
+    }
+    private var requestKey: PlaybackRequest {
+        PlaybackRequest(assetID: assetID, revision: sourceAsset?.cacheRevision, attempt: attempt,
+                        original: original, localPhoto: matchedLocalPhoto, liveMotion: isLivePhotoMotion, active: active)
+    }
+    private var shouldPlayLocal: Bool { usingLocal && active && scenePhase == .active && (autoPlay || onEnded != nil) }
     var body: some View {
         ZStack {
             Color.black
-            if let transport { VideoPlayer(player: transport.player) }
+            if usingLocal {
+                if let player = localMedia.player { VideoPlayer(player: player) }
+                else if let live = localMedia.livePhoto {
+                    LocalLivePhoto(livePhoto: live, active: active && scenePhase == .active, autoplay: shouldPlayLocal, muted: muted, onEnded: {
+                        if usingLocal, active, scenePhase == .active { onEnded?() }
+                    })
+                }
+                else if localMedia.loading { ProgressView().tint(.white) }
+                else {
+                    ContentUnavailableView { Label("Video couldn’t load", systemImage: "video.slash") }
+                    description: { Text(localMedia.failure ?? error ?? "This item is unavailable.") }
+                    actions: { Button("Retry") { attempt += 1 } }
+                }
+            }
+            else if let transport { VideoPlayer(player: transport.player) }
             else if let error {
                 ContentUnavailableView { Label("Video couldn’t load", systemImage: "video.slash") }
                 description: { Text(error) }
                 actions: { Button("Retry") { attempt += 1 } }
             } else { ProgressView().tint(.white) }
         }
-        .task(id: requestKey + String(active)) {
+        .task(id: requestKey) {
             guard active else { return }
+            stopLocal()
             if let transport, loadedKey == requestKey {
-                if autoPlay || onEnded != nil { transport.player.play() }
+                if scenePhase == .active && (autoPlay || onEnded != nil) { transport.player.play() }
                 return
             }
             do {
@@ -38,24 +76,59 @@ struct AuthenticatedVideo: View {
                 try Task.checkCancellation()
                 let newTransport = try AuthenticatedVideoTransport(request: request, server: api.baseURL)
                 transport?.close(); transport = newTransport; loadedKey = requestKey
-                newTransport.onFailure = { [weak newTransport] message in
+                newTransport.onFailure = { [weak newTransport] failure in
                     guard let newTransport, transport === newTransport else { return }
-                    self.error = message; transport?.close(); transport = nil
+                    self.error = failure.localizedDescription; transport?.close(); transport = nil
+                    startLocalFallback(after: failure)
                 }
                 newTransport.player.isMuted = muted
-                if autoPlay || onEnded != nil { newTransport.player.play() }
+                if scenePhase == .active && (autoPlay || onEnded != nil) { newTransport.player.play() }
             } catch is CancellationError { } catch { self.error = error.localizedDescription }
         }
-        .onChange(of: active) { _, active in
-            if !active { transport?.player.pause() }
+        .onChange(of: active, initial: true) { _, active in
+            activeNow = active
+            if !active { transport?.player.pause(); stopLocal() }
         }
-        .onDisappear { transport?.close(); transport = nil; loadedKey = nil }
-        .onChange(of: muted) { _, value in transport?.player.isMuted = value }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { transport?.player.pause(); localMedia.player?.pause() }
+            else if active && (autoPlay || onEnded != nil) {
+                if usingLocal { localMedia.player?.play() } else { transport?.player.play() }
+            }
+        }
+        .onChange(of: localMedia.player) { _, _ in adoptLocal() }
+        .onChange(of: localMedia.livePhoto) { _, _ in adoptLocal() }
+        .onDisappear { transport?.close(); transport = nil; loadedKey = nil; stopLocal() }
+        .onChange(of: muted) { _, value in transport?.player.isMuted = value; localMedia.player?.isMuted = value }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
-            guard active, let item = notification.object as? AVPlayerItem, item === transport?.player.currentItem else { return }
+            guard active, scenePhase == .active, let item = notification.object as? AVPlayerItem else { return }
+            let player = usingLocal ? localMedia.player : transport?.player
+            guard let player, item === player.currentItem else { return }
             if let onEnded { onEnded() }
-            else if loop { transport?.player.seek(to: .zero); transport?.player.play() }
+            else if loop { player.seek(to: .zero); player.play() }
         }
+    }
+
+    private func startLocalFallback(after failure: Error) {
+        guard let sourceAsset, let photo = LocalMediaFallback.photo(after: failure, asset: sourceAsset, matched: matchedLocalPhoto, active: activeNow,
+                                                                    kind: isLivePhotoMotion ? .motion : .video) else { return }
+        localPhoto = photo; usingLocal = true
+        localMedia.load(photo, full: true, network: false, motion: isLivePhotoMotion)
+    }
+
+    /// A Photos edit during the asynchronous request invalidates the proven match.
+    private func adoptLocal() {
+        guard usingLocal, let photo = localPhoto else { return }
+        guard LocalMediaFallback.isUnchanged(photo) else {
+            stopLocal(); error = "The copy on this phone changed. Try again."; return
+        }
+        guard let player = localMedia.player else { return }
+        player.isMuted = muted
+        if shouldPlayLocal { player.play() } else { player.pause() }
+    }
+
+    private func stopLocal() {
+        guard usingLocal || localPhoto != nil else { return }
+        localMedia.cancel(); localPhoto = nil; usingLocal = false
     }
 }
 
@@ -67,7 +140,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     private let server: URL
     private var session: URLSession!
     private var observation: NSKeyValueObservation?
-    var onFailure: ((String) -> Void)?
+    var onFailure: ((Error) -> Void)?
     private struct Transfer {
         let loading: AVAssetResourceLoadingRequest
         var receivedOffset: Int64 = 0
@@ -92,8 +165,8 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
         let item = AVPlayerItem(asset: asset)
         observation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard item.status == .failed else { return }
-            let message = item.error?.localizedDescription ?? "This video could not be played."
-            Task { @MainActor [weak self] in self?.onFailure?(message) }
+            let failure: Error = item.error ?? APIError.invalidResponse("This video could not be played.")
+            Task { @MainActor [weak self] in self?.onFailure?(failure) }
         }
         player.replaceCurrentItem(with: item)
     }
@@ -144,15 +217,19 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
         guard var transfer = transfers[dataTask.taskIdentifier] else { completionHandler(.cancel); return }
         do { try APIClient.validate(response) }
-        catch { transfer.loading.finishLoading(with: error); transfers.removeValue(forKey: dataTask.taskIdentifier); completionHandler(.cancel); return }
+        catch {
+            transfers.removeValue(forKey: dataTask.taskIdentifier); transfer.loading.finishLoading(with: error)
+            completionHandler(.cancel); onFailure?(error); return
+        }
         let http = response as? HTTPURLResponse
         let range = http?.value(forHTTPHeaderField: "Content-Range").flatMap(HTTPContentRange.init)
         if http?.statusCode == 206 {
             let expectedStart = transfer.loading.dataRequest.map { max($0.requestedOffset, $0.currentOffset) } ?? 0
             guard let range, range.start == expectedStart,
                   response.expectedContentLength < 0 || response.expectedContentLength == range.end - range.start + 1 else {
-                transfer.loading.finishLoading(with: APIError.invalidResponse("The video server returned an invalid byte range."))
-                transfers.removeValue(forKey: dataTask.taskIdentifier); completionHandler(.cancel); return
+                let failure = APIError.invalidResponse("The video server returned an invalid byte range.")
+                transfers.removeValue(forKey: dataTask.taskIdentifier); transfer.loading.finishLoading(with: failure)
+                completionHandler(.cancel); onFailure?(failure); return
             }
             transfer.receivedOffset = range.start
         }
@@ -191,12 +268,17 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let transfer = transfers.removeValue(forKey: task.taskIdentifier) else { return }
-        if let error { transfer.loading.finishLoading(with: error) }
+        if let error {
+            transfer.loading.finishLoading(with: error)
+            // A cancelled task is not a connectivity failure; AVPlayerItem reports it if playback needs it.
+            if (error as? URLError)?.code != .cancelled { onFailure?(error) }
+        }
         else if let data = transfer.loading.dataRequest {
             let requestEnd = data.requestsAllDataToEndOfResource ? transfer.contentLength : data.requestedOffset + Int64(data.requestedLength)
             let expectedEnd = requestEnd.map { min($0, transfer.contentLength ?? $0) }
             if let expectedEnd, data.currentOffset < expectedEnd {
-                transfer.loading.finishLoading(with: APIError.invalidResponse("The video transfer ended before the requested data arrived. Try again."))
+                let failure = APIError.invalidResponse("The video transfer ended before the requested data arrived. Try again.")
+                transfer.loading.finishLoading(with: failure); onFailure?(failure)
             } else { transfer.loading.finishLoading() }
         } else { transfer.loading.finishLoading() }
     }
