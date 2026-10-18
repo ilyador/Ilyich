@@ -54,10 +54,14 @@ private struct MediaCollectionView: View {
     @State private var loading = false
     @State private var examined = 0
     @State private var failure: FeatureFailure?
+    @State private var generation = 0
+    @State private var failedFresh = true
+    @State private var reloadToken = 0
+    @State private var loadedToken = -1
     var body: some View {
         ScrollView {
             if category == .developed { Text("Photos developed from Lightroom XMP sidecars.").font(.subheadline).foregroundStyle(.secondary).padding() }
-            FeatureAssetGrid(pipeline: pipeline, assets: assets, onOpenAsset: onOpenAsset)
+            SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: onOpenAsset, onChanged: { reloadToken += 1 })
             if assets.isEmpty && !loading && !hasMore { FeatureEmpty(title: "No \(category.rawValue.lowercased()) yet", symbol: "photo", description: "Matching photos and videos will appear here.") }
             if hasMore {
                 Button { Task { await load() } } label: {
@@ -66,28 +70,37 @@ private struct MediaCollectionView: View {
             }
             if category == .developed && examined > 0 && hasMore { Text("Checked \(examined.formatted()) library items").font(.caption).foregroundStyle(.secondary) }
         }.navigationTitle(category.rawValue)
-        .task { if assets.isEmpty { await load() } }
+        .task(id: reloadToken) { if assets.isEmpty || loadedToken != reloadToken { loadedToken = reloadToken; await load(fresh: true) } }
+        .refreshable { await load(fresh: true) }
         .alert("Couldn’t load collection", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
+            Button("Retry") { Task { await load(fresh: failedFresh) } }; Button("Cancel", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
     }
-    private func load() async {
-        guard !loading else { return }
+    /// A fresh load restarts paging and supersedes any in-flight load; stale results are discarded.
+    private func load(fresh: Bool = false) async {
+        guard fresh || !loading else { return }
         struct Filter: Encodable, Sendable { var type: StringFilter?; var isMotion: BoolFilter?; var visibility = StringFilter(eq: "timeline") }
         struct Query: Encodable, Sendable { let filter: Filter; let cursor: String?; let page: Int?; let size = 200; let withExif = true }
-        loading = true; defer { loading = false }
+        if fresh { generation += 1 }
+        let current = generation
+        let startCursor = fresh ? nil : cursor, startPage = fresh ? 1 : page
+        loading = true; failure = nil
+        defer { if current == generation { loading = false } }
         do {
             var filter = Filter()
             if category == .videos { filter.type = .init(eq: "VIDEO") }
             if category == .motion { filter.isMotion = .init(eq: true) }
-            let result: SearchResponse = try await api.request(.post, path: "search/metadata", body: Query(filter: filter, cursor: cursor, page: cursor == nil ? page : nil))
-            examined += result.assets.items.count
-            let known = Set(assets.map(\.id))
-            assets += result.assets.items.filter { !known.contains($0.id) && (category != .developed || $0.isDeveloped) }
+            let result: SearchResponse = try await api.request(.post, path: "search/metadata", body: Query(filter: filter, cursor: startCursor, page: startCursor == nil ? startPage : nil))
+            try Task.checkCancellation()
+            guard current == generation else { return }
+            let base = fresh ? [] : assets
+            let known = Set(base.map(\.id))
+            examined = (fresh ? 0 : examined) + result.assets.items.count
+            assets = base + result.assets.items.filter { !known.contains($0.id) && (category != .developed || $0.isDeveloped) }
             cursor = result.assets.nextCursor
-            page = result.assets.nextPage.flatMap(Int.init) ?? page + 1
+            page = result.assets.nextPage.flatMap(Int.init) ?? startPage + 1
             hasMore = result.assets.hasMore
-        } catch is CancellationError { } catch { failure = .init(error) }
+        } catch is CancellationError { } catch { if current == generation { failedFresh = fresh; failure = .init(error) } }
     }
 }
 
@@ -239,13 +252,29 @@ private struct FolderAssetsView: View {
     @State private var assets: [Asset] = []
     @State private var loading = true
     @State private var failure: FeatureFailure?
+    @State private var reloadToken = 0
+    @State private var generation = 0
     var body: some View {
         ScrollView {
             if loading { ProgressView().padding(40) }
-            FeatureAssetGrid(pipeline: pipeline, assets: assets, onOpenAsset: onOpenAsset)
+            SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: onOpenAsset, onChanged: { reloadToken += 1 })
             if !loading && assets.isEmpty { FeatureEmpty(title: "This folder is empty", symbol: "folder", description: "No photos are available in this folder.") }
         }.navigationTitle((path as NSString).lastPathComponent)
-        .task { do { assets = try await api.folderAssets(path: path) } catch { failure = .init(error) }; loading = false }
+        .task(id: reloadToken) { await load() }
+        .refreshable { await load() }
         .alert("Couldn’t load folder", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
+    }
+    /// Cancellation (a newer reload token or leaving the view) never replaces the current assets.
+    private func load() async {
+        generation += 1
+        let current = generation
+        loading = true; failure = nil
+        defer { if current == generation { loading = false } }
+        do {
+            let loaded = try await api.folderAssets(path: path)
+            try Task.checkCancellation()
+            guard current == generation else { return }
+            assets = loaded
+        } catch is CancellationError { } catch { if current == generation { failure = .init(error) } }
     }
 }

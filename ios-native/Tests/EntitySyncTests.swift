@@ -131,6 +131,38 @@ final class EntitySyncTests: XCTestCase {
         XCTAssertEqual(paired.adjustmentTime, Date(timeIntervalSince1970: 1700000000))
         XCTAssertEqual(paired.latitude, 38.7)
     }
+    func testOfflineMemoriesUseServerDateWindowAndExcludeUnavailableOrHiddenPeopleAssets() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root), epoch = await store.epoch()
+        func memory(_ id: String, show: String?, hide: String?, owner: String = "alice", deleted: Bool = false) throws -> EntitySyncEvent {
+            let object: [String: EntityJSON] = ["id": .string(id), "ownerId": .string(owner), "type": .string("OnThisDay"), "memoryAt": .string("2024-10-18T00:00:00Z"), "data": .object(["year": .integer(2024)]), "isSaved": .bool(false), "showAt": show.map(EntityJSON.string) ?? .null, "hideAt": hide.map(EntityJSON.string) ?? .null, "seenAt": .string("2026-10-18T09:00:00Z"), "deletedAt": deleted ? .string("2026-10-18T00:00:00Z") : .null]
+            return EntitySyncEvent(type: "MemoryV2", data: object, ack: "MemoryV2|" + id)
+        }
+        _ = try await store.apply([
+            asset("visible"), asset("hidden-person"), asset("archived", visibility: "archive"), asset("trash", deleted: true), asset("locked", visibility: "locked"),
+            memory("today", show: "2026-10-18T00:00:00Z", hide: "2026-10-18T00:00:00Z"),
+            memory("anytime", show: nil, hide: nil),
+            memory("future", show: "2026-10-19T00:00:00Z", hide: nil),
+            memory("expired", show: nil, hide: "2026-10-17T23:59:59Z"),
+            memory("other", show: nil, hide: nil, owner: "bob"),
+            memory("deleted", show: nil, hide: nil, deleted: true),
+            event("PersonV1", #"{"id":"person","isHidden":true}"#),
+            event("AssetFaceV3", #"{"id":"face","assetId":"hidden-person","personId":"person"}"#)
+        ], epoch: epoch)
+        for id in ["visible", "hidden-person", "archived", "trash", "locked"] {
+            _ = try await store.apply([event("MemoryToAssetV2", "{\"memoryId\":\"today\",\"assetId\":\"\(id)\"}")], epoch: epoch)
+        }
+        _ = try await store.apply([event("MemoryToAssetV2", #"{"memoryId":"anytime","assetId":"visible"}"#)], epoch: epoch)
+        let memories = try await store.memories(onCivilDate: "2026-10-18")
+        XCTAssertEqual(memories.map(\.id), ["today", "anytime"])
+        XCTAssertEqual(memories.first?.assets.map(\.id), ["visible"])
+        XCTAssertEqual(memories.first?.seenAt, APIDate.parse("2026-10-18T09:00:00Z"))
+        _ = try await store.apply([event("UserMetadataV1", #"{"userId":"alice","key":"preferences","value":{"memories":{"enabled":false}}}"#)], epoch: epoch)
+        let disabled = try await store.memories(onCivilDate: "2026-10-18")
+        XCTAssertTrue(disabled.isEmpty)
+    }
+
     func testSocketProtocolHandlesHeartbeatEditsAndSessionErrorsWithoutCredentialsInMessages() throws {
         if case .ping(let payload) = try SocketEventPacket.parse("2probe") { XCTAssertEqual(payload, "probe") }
         else { XCTFail("Engine.IO ping requires pong") }

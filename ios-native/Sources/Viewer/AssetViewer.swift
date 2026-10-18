@@ -9,6 +9,7 @@ struct AssetViewer: View {
     let onUpdated: (Asset) -> Void
     let onDeleted: () -> Void
     let albumID: String?
+    let matchedLocalPhotos: [String: LocalPhoto]
     @ObservedObject private var cast = CastController.shared
     @State private var selectedID: String
     @State private var replacements: [String: Asset] = [:]
@@ -36,16 +37,20 @@ struct AssetViewer: View {
     @State private var similarPresented = false
     @State private var features: ServerFeatures?
     @State private var profilePhoto = false
+    @State private var localPhotoActions = false
+    @State private var changedLocalCopies: Set<String> = []
     @AppStorage("viewerTapToNavigate") private var tapToNavigate = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
     init(api: APIClient, pipeline: MediaPipeline, assets: [Asset], initial: Asset,
-         onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping () -> Void, albumID: String? = nil) {
+         onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping () -> Void, albumID: String? = nil,
+         matchedLocalPhotos: [String: LocalPhoto] = [:]) {
         self.api = api; self.pipeline = pipeline
         self.assets = assets.contains(where: { $0.id == initial.id }) ? assets : [initial] + assets
         self.onUpdated = onUpdated; self.onDeleted = onDeleted
         self.albumID = albumID
+        self.matchedLocalPhotos = matchedLocalPhotos
         _selectedID = State(initialValue: initial.id)
         _replacements = State(initialValue: [initial.id: initial])
     }
@@ -70,7 +75,7 @@ struct AssetViewer: View {
                             } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
                                 AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false })
                             } else {
-                                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() })
+                                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() }, matchedLocalPhoto: changedLocalCopies.contains(asset.id) ? nil : matchedLocalPhotos[asset.id])
                             }
                         } else { Color.black }
                     }.tag(asset.id)
@@ -118,6 +123,15 @@ struct AssetViewer: View {
         .sheet(isPresented: $castPresented) { CastView(api: api, asset: current) }
         .fullScreenCover(isPresented: $ocrPresented) { OCRPhotoReader(api: api, pipeline: pipeline, asset: current) }
         .sheet(isPresented: $similarPresented) { SimilarPhotosView(api: api, pipeline: pipeline, reference: current) }
+        .sheet(isPresented: $localPhotoActions) {
+            if let photo = matchedLocalPhotos[current.id], !changedLocalCopies.contains(current.id) {
+                NavigationStack {
+                    LocalPhotoActionsView(photos: [photo]) {
+                        changedLocalCopies.insert(current.id); localPhotoActions = false
+                    }
+                }
+            }
+        }
     }
 
     private var detailSheets: some View {
@@ -187,6 +201,9 @@ struct AssetViewer: View {
                 Button("Share displayed version", systemImage: "square.and.arrow.up") { exportAsset(original: false) }
                 Button("Download original", systemImage: "arrow.down.document") { exportAsset(original: true) }
                 Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }.requiresWriteAccess(api)
+                if matchedLocalPhotos[current.id] != nil, !changedLocalCopies.contains(current.id) {
+                    Button("On this phone", systemImage: "iphone") { localPhotoActions = true }
+                }
                 Button("Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
                 if ownsAsset {
                     if current.isTrashed, features?.trash == true {

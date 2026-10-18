@@ -335,11 +335,16 @@ private struct BackupState: Codable {
                     state.current = nil; progress = nil
                     try persist()
                     if let disposable { try? FileManager.default.removeItem(at: disposable) }
+                    else if let suspended = state.suspended?[localID] {
+                        // Keep the source/receipt needed to resume, but not a second
+                        // multipart copy after this completed transfer attempt.
+                        try? FileManager.default.removeItem(at: suspended.original.url.deletingLastPathComponent().appendingPathComponent(suspended.stageID + ".multipart"))
+                    }
                 }
             }
             if preferences.syncAlbums { try await syncLinkedAlbums(runID: runID) }
             state.paused = true
-            activity = state.queue.isEmpty ? "Selected photos backed up" : "Other photos backed up; \(state.queue.count.formatted()) need retry"
+            activity = state.queue.isEmpty ? "Selected photos backed up" : "\(state.queue.count.formatted()) uploads need retry"
             try persist()
         } catch is CancellationError { }
         catch let deferred as BackupDeferral {

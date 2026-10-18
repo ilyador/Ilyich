@@ -7,54 +7,120 @@ struct ViewerPhoto: View {
     let active: Bool
     let onTap: (Double) -> Void
     let onDismiss: () -> Void
+    var matchedLocalPhoto: LocalPhoto? = nil
     @State private var image: UIImage?
     @State private var failure: String?
+    @State private var animationFailure: String?
+    @State private var loadingFull = false
+    @State private var loadingAnimation = false
+    @State private var imageLoadID = UUID()
+    @State private var animationLoadID = UUID()
+    @State private var animatedRevision: String?
+    @State private var localMedia = LocalPhotoMedia()
+    @State private var usingLocalCopy = false
     @State private var reload = 0
     @State private var zoomed = false
     @AppStorage("imageLoadOriginal") private var fullResolution = false
     @Environment(\.displayScale) private var scale
     @Environment(\.scenePhase) private var scenePhase
+    private var mediaKey: String { asset.id + "|" + asset.cacheRevision + "|" + String(asset.hasKnownEditState) + String(asset.isEdited) + String(asset.isDeveloped) }
+    private var displayedImage: UIImage? { usingLocalCopy ? (localMedia.image ?? image) : image }
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                if let image { ZoomablePhoto(image: image, resetZoom: !active, onTap: onTap, onDismiss: onDismiss, onZoom: { zoomed = true }) }
+                if let image = displayedImage { ZoomablePhoto(image: image, resetZoom: !active, onTap: onTap, onDismiss: onDismiss, onZoom: { zoomed = true }) }
+                else if usingLocalCopy && localMedia.loading { ProgressView().tint(.white) }
                 else if let failure {
                     ContentUnavailableView { Label("Photo couldn’t load", systemImage: "photo.badge.exclamationmark") }
                     description: { Text(failure) }
                     actions: { Button("Retry") { reload += 1 } }
                 } else { ProgressView().tint(.white) }
             }.frame(width: geometry.size.width, height: geometry.size.height)
-                .task(id: asset.id + asset.cacheRevision + String(reload) + String(zoomed) + String(fullResolution) + String(active)) {
-                    failure = nil
-                    do {
-                        let pixels = Int(max(geometry.size.width, geometry.size.height) * scale)
-                        let preview = try await pipeline.image(for: asset, size: .preview, pixelSize: pixels)
-                        try Task.checkCancellation(); image = preview.uiImage
-                        // A full-size source supports real pinch-to-zoom without decoding the entire RAW.
-                        if active && !asset.isAnimatedImage && (fullResolution || zoomed) {
-                            let full = try await pipeline.image(for: asset, size: .fullsize, pixelSize: fullResolution ? min(8192, max(asset.width ?? 4096, asset.height ?? 4096)) : min(4096, pixels * 2))
-                            try Task.checkCancellation(); image = full.uiImage
+                .overlay(alignment: .bottom) {
+                    if active, displayedImage != nil {
+                        if let message = animationFailure ?? failure, !(usingLocalCopy && localMedia.image != nil) {
+                            HStack(spacing: 12) {
+                                Text(message).font(.caption).lineLimit(2)
+                                Button("Retry") { reload += 1 }.font(.caption.weight(.semibold))
+                            }.padding(.horizontal, 16).padding(.vertical, 10).glassEffect(in: .capsule)
+                                .padding(.horizontal, 24).padding(.bottom, 110)
+                        } else if loadingFull || loadingAnimation {
+                            ProgressView(loadingAnimation ? "Loading animation" : "Loading full resolution")
+                                .font(.caption).tint(.white).padding(.horizontal, 16).padding(.vertical, 10)
+                                .glassEffect(in: .capsule).padding(.bottom, 110).allowsHitTesting(false)
                         }
-                    } catch is CancellationError { } catch { if image == nil { failure = error.localizedDescription } }
+                    }
                 }
-                .task(id: asset.id + asset.cacheRevision + String(active) + String(fullResolution) + String(describing: scenePhase)) {
-                    guard active, scenePhase == .active, asset.isAnimatedImage, !asset.isDeveloped, !asset.isEdited else { return }
-                    do {
-                        let pixels = fullResolution ? min(4096, max(asset.width ?? 2048, asset.height ?? 2048)) : min(2048, Int(max(geometry.size.width, geometry.size.height) * scale))
-                        let animation = try await pipeline.animation(for: asset, pixelSize: pixels)
-                        do {
-                            while let frame = try await animation.next() {
-                                try Task.checkCancellation()
-                                image = frame.image.uiImage
-                                try await Task.sleep(for: .seconds(frame.duration))
-                            }
-                        } catch { await animation.close(); throw error }
-                        await animation.close()
-                    } catch is CancellationError { }
-                    catch { if image == nil { failure = error.localizedDescription } }
+                .task(id: mediaKey + String(reload) + String(zoomed) + String(fullResolution) + String(active) + String(Int(max(geometry.size.width, geometry.size.height) * scale))) {
+                    await loadImage(pixels: Int(max(geometry.size.width, geometry.size.height) * scale))
                 }
-        }.accessibilityLabel(asset.displayName).onChange(of: active) { _, value in if !value { zoomed = false } }
+                .task(id: mediaKey + String(reload) + String(active) + String(fullResolution) + String(describing: scenePhase)) {
+                    await playAnimation(pixels: Int(max(geometry.size.width, geometry.size.height) * scale))
+                }
+        }.accessibilityLabel(asset.displayName)
+            .onChange(of: active) { _, value in if !value { zoomed = false; localMedia.cancel() } }
+            .onChange(of: localMedia.image) { _, _ in
+                // A Photos edit during an asynchronous image request invalidates
+                // the proven match; it must not replace the server version.
+                if let photo = matchedLocalPhoto, DevicePhotos.modificationDate(for: photo.id) != photo.modified {
+                    usingLocalCopy = false; localMedia.cancel()
+                }
+            }
+            .onChange(of: matchedLocalPhoto) { _, _ in usingLocalCopy = false; localMedia.cancel() }
+            .onDisappear { localMedia.cancel() }
     }
+    private func loadImage(pixels: Int) async {
+        let loadID = UUID(); imageLoadID = loadID
+        failure = nil; loadingFull = false; usingLocalCopy = false; localMedia.cancel()
+        defer { if imageLoadID == loadID { loadingFull = false } }
+        do {
+            let preview = try await pipeline.image(for: asset, size: .preview, pixelSize: pixels)
+            try Task.checkCancellation()
+            if !active || animatedRevision != mediaKey { image = preview.uiImage }
+            // Keep the viewport preview visible while preparing detail for pinch-to-zoom.
+            if active && !asset.isAnimatedImage && (fullResolution || zoomed) {
+                loadingFull = true
+                let full = try await pipeline.image(for: asset, size: .fullsize, pixelSize: fullResolution ? min(8192, max(asset.width ?? 4096, asset.height ?? 4096)) : min(4096, pixels * 2))
+                try Task.checkCancellation(); image = full.uiImage
+            }
+        } catch is CancellationError { }
+        catch {
+            guard !Task.isCancelled, imageLoadID == loadID, animatedRevision != mediaKey else { return }
+            failure = error.localizedDescription
+            if active, let networkError = error as? URLError, networkError.code != .cancelled,
+               asset.hasKnownEditState, !asset.isDeveloped, !asset.isEdited, !asset.isAnimatedImage,
+               let photo = matchedLocalPhoto, DevicePhotos.modificationDate(for: photo.id) == photo.modified {
+                usingLocalCopy = true
+                localMedia.load(photo, full: true, network: false)
+            }
+        }
+    }
+    private func playAnimation(pixels: Int) async {
+        let loadID = UUID(); animationLoadID = loadID
+        animationFailure = nil; loadingAnimation = false
+        defer { if animationLoadID == loadID { loadingAnimation = false } }
+        guard active, scenePhase == .active, asset.hasKnownEditState, asset.isAnimatedImage, !asset.isDeveloped, !asset.isEdited else { return }
+        loadingAnimation = true
+        do {
+            let size = fullResolution ? min(4096, max(asset.width ?? 2048, asset.height ?? 2048)) : min(2048, pixels)
+            let animation = try await pipeline.animation(for: asset, pixelSize: size)
+            do {
+                while let frame = try await animation.next() {
+                    try Task.checkCancellation()
+                    animatedRevision = mediaKey; loadingAnimation = false; failure = nil
+                    image = frame.image.uiImage
+                    try await Task.sleep(for: .seconds(frame.duration))
+                }
+            } catch { await animation.close(); throw error }
+            await animation.close()
+        } catch is CancellationError { }
+        catch {
+            guard !Task.isCancelled, animationLoadID == loadID else { return }
+            animationFailure = error.localizedDescription
+            if image == nil { failure = error.localizedDescription }
+        }
+    }
+
 }
 
 struct ZoomablePhoto: UIViewRepresentable {
@@ -121,6 +187,7 @@ struct ZoomablePhoto: UIViewRepresentable {
     let imageView = UIImageView()
     let ocrOverlay = OCRSelectionOverlay()
     private var lastSize = CGSize.zero
+    private var lastImageRatio: CGFloat = 0
     override init(frame: CGRect) {
         super.init(frame: frame)
         minimumZoomScale = 1; maximumZoomScale = 5
@@ -134,9 +201,11 @@ struct ZoomablePhoto: UIViewRepresentable {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
     override func layoutSubviews() {
         super.layoutSubviews()
-        if bounds.size != lastSize || imageView.bounds == .zero {
+        guard let image = imageView.image, image.size.width > 0, image.size.height > 0 else { return }
+        let imageRatio = image.size.width / image.size.height
+        if bounds.size != lastSize || imageView.bounds == .zero || abs(imageRatio - lastImageRatio) > 0.0001 {
             lastSize = bounds.size; zoomScale = 1
-            guard let image = imageView.image, image.size.width > 0, image.size.height > 0 else { return }
+            lastImageRatio = imageRatio
             let scale = min(bounds.width / image.size.width, bounds.height / image.size.height)
             imageView.frame = CGRect(origin: .zero, size: CGSize(width: image.size.width * scale, height: image.size.height * scale))
             contentSize = imageView.frame.size
