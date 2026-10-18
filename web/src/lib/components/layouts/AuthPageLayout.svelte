@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Card, CardBody, CardHeader, Heading, immichLogo, Logo, VStack } from '@immich/ui';
+  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
+  import { Card, CardBody, CardHeader, Heading, immichLogo, VStack } from '@immich/ui';
   import type { Snippet } from 'svelte';
   interface Props {
     title?: string;
@@ -17,7 +18,7 @@
       <img
         src={immichLogo}
         class="mx-auto mb-2 h-full max-w-(--breakpoint-md) overflow-hidden antialiased"
-        alt="Immich logo"
+        alt="Ilyich logo"
       />
       <div
         class="absolute inset-s-0 top-0 h-[99%] w-full bg-transparent backdrop-blur-[200px] dark:bg-immich-dark-bg/20"

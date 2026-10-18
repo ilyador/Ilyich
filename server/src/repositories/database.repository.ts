@@ -222,7 +222,7 @@ export class DatabaseRepository {
     }>`SELECT column_name as "columnName" FROM information_schema.columns WHERE table_name = ${table}`.execute(this.db);
     if (rows.length === 0) {
       this.logger.warn(
-        `Table ${table} does not exist, skipping reindexing. This is only normal if this is a new Immich instance.`,
+        `Table ${table} does not exist, skipping reindexing. This is only normal if this is a new Ilyich instance.`,
       );
       return;
     }
@@ -402,7 +402,7 @@ export class DatabaseRepository {
         error instanceof Error ? error.message.match(/previously executed migration (.+) is missing/u) : null;
       if (missing) {
         throw new Error(
-          `Migration "${missing[1]}" was already applied to this database but is not in this version of Immich (${serverVersion}). ` +
+          `Migration "${missing[1]}" was already applied to this database but is not in this version of Ilyich (${serverVersion}). ` +
             `This usually means the database was migrated by a newer version. Downgrades are not supported.`,
           { cause: error },
         );

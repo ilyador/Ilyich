@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import { goto } from '$app/navigation';
   import { OpenQueryParam } from '$lib/constants';
   import Portal from '$lib/elements/Portal.svelte';
@@ -9,7 +10,7 @@
   import { handleError } from '$lib/utils/handle-error';
   import { getButtonVisibility } from '$lib/utils/purchase-utils';
   import { updateMyPreferences } from '@immich/sdk';
-  import { Button, Icon, IconButton, Logo, modalManager, SupporterBadge } from '@immich/ui';
+  import { Button, Icon, IconButton, modalManager, SupporterBadge, Text } from '@immich/ui';
   import { mdiClose, mdiInformationOutline } from '@mdi/js';
   import { t } from 'svelte-i18n';
   import { SvelteDate } from 'svelte/reactivity';
@@ -76,7 +77,12 @@
       class="mt-2 w-full"
       type="button"
     >
-      <SupporterBadge size="small" effect="always" />
+      <SupporterBadge size="small" effect="always">
+        <div class="flex items-center gap-2">
+          <Logo size="tiny" variant="icon" />
+          <Text fontWeight="normal" color="secondary" size="small">{$t('supporter')}</Text>
+        </div>
+      </SupporterBadge>
     </button>
   {:else if !authManager.isPurchased && showBuyButton && getAccountAge() > 14}
     <button

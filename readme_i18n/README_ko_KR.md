@@ -9,14 +9,15 @@
 </p>
 
 <p align="center">
-<img src="../design/immich-logo-stacked-light.svg" width="300" title="Login With Custom URL">
+<img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
 </p>
+<h1 align="center">Ilyich</h1>
 <h3 align="center">고성능 자체 호스팅 사진 및 동영상 관리 솔루션</h3>
 <br/>
-<a href="https://immich.app">
-<img src="../design/immich-screenshots.png" title="메인 스크린샷">
-</a>
-<br/>
+
+
+> Ilyich is a fork of [Immich](https://github.com/immich-app/immich). See the [English README](../README.md) for current fork features and branch policy. This translated overview describes the upstream base; its documentation, demo and community links refer to the upstream project.
+
 <p align="center">
 
 <a href="../README.md">English</a>
@@ -112,7 +113,7 @@
 
 ## 리포지터리 활동
 
-![활동](https://repobeats.axiom.co/api/embed/9e86d9dc3ddd137161f2f6d2e758d7863b1789cb.svg "Repobeats analytics image")
+[Ilyich repository activity](https://github.com/ilyador/Ilyich/activity)
 
 ## 스타 기록
 
@@ -125,6 +126,8 @@
 </a>
 
 ## 기여자
+
+Upstream attribution: [Immich contributors](https://github.com/immich-app/immich/graphs/contributors).
 
 <a href="https://github.com/alextran1502/immich/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=immich-app/immich" width="100%"/>

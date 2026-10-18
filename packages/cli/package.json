@@ -1,7 +1,7 @@
 {
   "name": "@immich/cli",
   "version": "3.3.5",
-  "description": "Command Line Interface (CLI) for Immich",
+  "description": "Command Line Interface (CLI) for Ilyich",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/immich-app/immich.git",

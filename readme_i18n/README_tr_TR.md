@@ -9,14 +9,15 @@
 </p>
 
 <p align="center">
-<img src="../design/immich-logo-stacked-light.svg" width="300" title="Login With Custom URL">
+<img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
 </p>
-<h3 align="center">Immich - Yüksek performanslı, kendine ait barındırılan fotoğraf ve video yedekleme çözümü</h3>
+<h1 align="center">Ilyich</h1>
+<h3 align="center">Ilyich - Yüksek performanslı, kendine ait barındırılan fotoğraf ve video yedekleme çözümü</h3>
 <br/>
-<a href="https://immich.app">
-<img src="../design/immich-screenshots.png" title="Main Screenshot">
-</a>
-<br/>
+
+
+> Ilyich is a fork of [Immich](https://github.com/immich-app/immich). See the [English README](../README.md) for current fork features and branch policy. This translated overview describes the upstream base; its documentation, demo and community links refer to the upstream project.
+
 <p align="center">
   <a href="../README.md">English</a>
   <a href="README_ca_ES.md">Català</a>

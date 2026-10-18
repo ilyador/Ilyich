@@ -579,7 +579,7 @@
     },
     "/admin/database-backups/start-restore": {
       "post": {
-        "description": "Put Immich into maintenance mode to restore a backup (Immich must not be configured)",
+        "description": "Put Ilyich into maintenance mode to restore a backup (Ilyich must not be configured)",
         "operationId": "startDatabaseRestoreFlow",
         "parameters": [],
         "responses": {
@@ -1007,7 +1007,7 @@
     },
     "/admin/maintenance": {
       "post": {
-        "description": "Put Immich into or take it out of maintenance mode",
+        "description": "Put Ilyich into or take it out of maintenance mode",
         "operationId": "setMaintenanceMode",
         "parameters": [],
         "requestBody": {
@@ -13348,7 +13348,7 @@
     },
     "/server/statistics": {
       "get": {
-        "description": "Retrieve statistics about the entire Immich instance such as asset counts.",
+        "description": "Retrieve statistics about the entire Ilyich instance such as asset counts.",
         "operationId": "getServerStatistics",
         "parameters": [],
         "responses": {
@@ -16223,7 +16223,7 @@
             "name": "orderBy",
             "required": false,
             "in": "query",
-            "description": "Date to group and order assets by (takenAt for date taken, createdAt for date added to Immich)",
+            "description": "Date to group and order assets by (takenAt for date taken, createdAt for date added to Ilyich)",
             "schema": {
               "$ref": "#/components/schemas/AssetOrderBy"
             }
@@ -16422,7 +16422,7 @@
             "name": "orderBy",
             "required": false,
             "in": "query",
-            "description": "Date to group and order assets by (takenAt for date taken, createdAt for date added to Immich)",
+            "description": "Date to group and order assets by (takenAt for date taken, createdAt for date added to Ilyich)",
             "schema": {
               "$ref": "#/components/schemas/AssetOrderBy"
             }
@@ -18209,8 +18209,8 @@
     }
   },
   "info": {
-    "title": "Immich",
-    "description": "Immich API",
+    "title": "Ilyich",
+    "description": "Ilyich API",
     "version": "3.3.5",
     "contact": {}
   },
@@ -18225,11 +18225,11 @@
     },
     {
       "name": "API keys",
-      "description": "An api key can be used to programmatically access the Immich API."
+      "description": "An api key can be used to programmatically access the Ilyich API."
     },
     {
       "name": "Assets",
-      "description": "An asset is an image or video that has been uploaded to Immich."
+      "description": "An asset is an image or video that has been uploaded to Ilyich."
     },
     {
       "name": "Asset files",
@@ -18261,7 +18261,7 @@
     },
     {
       "name": "Database Backups (admin)",
-      "description": "Manage backups of the Immich database."
+      "description": "Manage backups of the Ilyich database."
     },
     {
       "name": "Deprecated",
@@ -18293,7 +18293,7 @@
     },
     {
       "name": "Maintenance (admin)",
-      "description": "Maintenance mode allows you to put Immich in a read-only state to perform various operations."
+      "description": "Maintenance mode allows you to put Ilyich in a read-only state to perform various operations."
     },
     {
       "name": "Map",
@@ -18305,7 +18305,7 @@
     },
     {
       "name": "Notifications",
-      "description": "A notification is a specialized message sent to users to inform them of important events. Currently, these notifications are only shown in the Immich web application."
+      "description": "A notification is a specialized message sent to users to inform them of important events. Currently, these notifications are only shown in the Ilyich web application."
     },
     {
       "name": "Notifications (admin)",
@@ -20468,7 +20468,7 @@
             "type": "string"
           },
           "baseDimensions": {
-            "description": "Dimensions of the published base image before Immich edits",
+            "description": "Dimensions of the published base image before Ilyich edits",
             "properties": {
               "height": {
                 "exclusiveMinimum": true,
@@ -21220,7 +21220,7 @@
             "type": "string"
           },
           "createdAt": {
-            "description": "The UTC timestamp when the asset was originally uploaded to Immich.",
+            "description": "The UTC timestamp when the asset was originally uploaded to Ilyich.",
             "format": "date-time",
             "type": "string"
           },
@@ -31004,7 +31004,7 @@
             "type": "string"
           },
           "createdAt": {
-            "description": "Uploaded to Immich at",
+            "description": "Uploaded to Ilyich at",
             "example": "2024-01-01T00:00:00.000Z",
             "format": "date-time",
             "nullable": true,
@@ -31152,7 +31152,7 @@
             "type": "string"
           },
           "createdAt": {
-            "description": "Uploaded to Immich at",
+            "description": "Uploaded to Ilyich at",
             "example": "2024-01-01T00:00:00.000Z",
             "format": "date-time",
             "nullable": true,
@@ -32464,7 +32464,7 @@
             "type": "array"
           },
           "createdAt": {
-            "description": "Array of UTC timestamps when each asset was originally uploaded to Immich",
+            "description": "Array of UTC timestamps when each asset was originally uploaded to Ilyich",
             "items": {
               "type": "string"
             },

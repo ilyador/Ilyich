@@ -1,22 +1,38 @@
-<p align="center"> 
-  <br/>
-  <a href="https://opensource.org/license/agpl-v3"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg?color=3F51B5&style=for-the-badge&label=License&logoColor=000000&labelColor=ececec" alt="License: AGPLv3"></a>
-  <a href="https://discord.immich.app">
-    <img src="https://img.shields.io/discord/979116623879368755.svg?label=Discord&logo=Discord&style=for-the-badge&logoColor=000000&labelColor=ececec" alt="Discord"/>
-  </a>
-  <br/>
-  <br/>
+<p align="center">
+  <img src="design/immich-logo.svg" width="120" alt="Ilyich icon">
 </p>
 
-<p align="center">
-<img src="design/immich-logo-stacked-light.svg" width="300" title="Login With Custom URL">
-</p>
-<h3 align="center">High performance self-hosted photo and video management solution</h3>
-<br/>
-<a href="https://immich.app">
-<img src="design/immich-screenshots.png" title="Main Screenshot">
-</a>
-<br/>
+# Ilyich
+
+Ilyich is a personal fork of [Immich](https://github.com/immich-app/immich), a self-hosted photo and video library. It keeps the upstream foundation and combines custom work for the web app and mobile app.
+
+## Development branches
+
+- **[`dev`](https://github.com/ilyador/Ilyich/tree/dev)** is the integrated version for the computer and phone. It combines Lightcraft rendering from originals and XMP sidecars with a preview cache, natural-language search and result verification, the existing OCR functionality, and Ilyich branding.
+- **[`main`](https://github.com/ilyador/Ilyich/tree/main)** is an exact mirror of the selected official upstream release, currently [`v3.3.3`](https://github.com/immich-app/immich/releases/tag/v3.3.3). It contains no fork changes and advances only to an official release tag, never to the upstream development branch or a moving release-branch tip.
+- **Feature branches** preserve focused work before it is integrated into `dev`.
+
+Use `dev` when building or running Ilyich. Technical package names, API identifiers, storage paths and mobile bundle IDs retain their upstream names for compatibility.
+
+## Custom features
+
+- **Lightcraft previews:** render supported Lightroom adjustments from the original image and its XMP sidecar, then cache the generated preview. See the [XMP sidecar notes](docs/docs/features/xmp-sidecars.md).
+- **Natural-language search:** describe what you are looking for and use the integrated verification stage to check candidate results.
+- **OCR:** retain the existing text recognition and search support alongside the custom search workflow.
+
+## Project links
+
+- [Source and branches](https://github.com/ilyador/Ilyich)
+- [Issues](https://github.com/ilyador/Ilyich/issues)
+- [Web development](web/README.md)
+- [Mobile source](mobile)
+- [Upstream installation and administration documentation](https://docs.immich.app/)
+
+The upstream documentation describes the shared foundation. Custom behavior is maintained in this fork. Keep a separate backup of your photos and videos.
+
+## Translated overviews
+
+The translated overviews describe the upstream base. This README is the reference for Ilyich features and branch policy.
 
 <p align="center">
   <a href="readme_i18n/README_ca_ES.md">Català</a>
@@ -41,85 +57,6 @@
   <a href="readme_i18n/README_ml_IN.md">മലയാളം</a>
 </p>
 
+## License and attribution
 
-> [!WARNING]
-> ⚠️ Always follow [3-2-1](https://www.backblaze.com/blog/the-3-2-1-backup-strategy/) backup plan for your precious photos and videos!
-> 
- 
-
-> [!NOTE]
-> You can find the main documentation, including installation guides, at https://immich.app/.
-
-## Links
-
-- [Documentation](https://docs.immich.app/)
-- [About](https://docs.immich.app/overview/introduction)
-- [Installation](https://docs.immich.app/install/requirements)
-- [Roadmap](https://immich.app/roadmap)
-- [Demo](#demo)
-- [Features](#features)
-- [Translations](https://docs.immich.app/developer/translations)
-- [Contributing](https://docs.immich.app/overview/support-the-project)
-
-## Demo
-
-Access the demo [here](https://demo.immich.app). For the mobile app, you can use `https://demo.immich.app` for the `Server Endpoint URL`.
-
-### Login credentials
-
-| Email           | Password |
-| --------------- | -------- |
-| demo@immich.app | demo     |
-
-## Features
-
-| Features                                     | Mobile | Web |
-| :------------------------------------------- | ------ | --- |
-| Upload and view videos and photos            | Yes    | Yes |
-| Auto backup when the app is opened           | Yes    | N/A |
-| Prevent duplication of assets                | Yes    | Yes |
-| Selective album(s) for backup                | Yes    | N/A |
-| Download photos and videos to local device   | Yes    | Yes |
-| Multi-user support                           | Yes    | Yes |
-| Album and Shared albums                      | Yes    | Yes |
-| Scrubbable/draggable scrollbar               | Yes    | Yes |
-| Support raw formats                          | Yes    | Yes |
-| Metadata view (EXIF, map)                    | Yes    | Yes |
-| Search by metadata, objects, faces, and CLIP | Yes    | Yes |
-| Administrative functions (user management)   | No     | Yes |
-| Background backup                            | Yes    | N/A |
-| Virtual scroll                               | Yes    | Yes |
-| OAuth support                                | Yes    | Yes |
-| API Keys                                     | N/A    | Yes |
-| LivePhoto/MotionPhoto backup and playback    | Yes    | Yes |
-| Support 360 degree image display             | No     | Yes |
-| User-defined storage structure               | Yes    | Yes |
-| Public Sharing                               | Yes    | Yes |
-| Archive and Favorites                        | Yes    | Yes |
-| Global Map                                   | Yes    | Yes |
-| Partner Sharing                              | Yes    | Yes |
-| Facial recognition and clustering            | Yes    | Yes |
-| Memories (x years ago)                       | Yes    | Yes |
-| Offline support                              | Yes    | No  |
-| Read-only gallery                            | Yes    | Yes |
-| Stacked Photos                               | Yes    | Yes |
-| Tags                                         | No     | Yes |
-| Folder View                                  | Yes    | Yes |
-
-## Translations
-
-Read more about translations [here](https://docs.immich.app/developer/translations).
-
-<a href="https://hosted.weblate.org/engage/immich/">
-<img src="https://hosted.weblate.org/widget/immich/immich/multi-auto.svg" alt="Translation status" />
-</a>
-
-## Repository activity
-
-![Activities](https://repobeats.axiom.co/api/embed/9e86d9dc3ddd137161f2f6d2e758d7863b1789cb.svg "Repobeats analytics image")
-
-## Contributors
-
-<a href="https://github.com/immich-app/immich/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=immich-app/immich" width="100%"/>
-</a>
+Ilyich builds on the work of the [Immich contributors](https://github.com/immich-app/immich/graphs/contributors) and uses [Lightcraft](https://github.com/storytold/lightcraft) for supported XMP adjustments. Original copyright and attribution notices are retained. The application is available under the [GNU AGPL v3 license](LICENSE).

@@ -9,14 +9,15 @@
 </p>
 
 <p align="center">
-<img src="../design/immich-logo-stacked-light.svg" width="300" title="Login mit eigener URL">
+<img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
 </p>
-<h3 align="center">Immich - Hoch performante, selbst gehostete Backup-Lösung für Fotos und Videos</h3>
+<h1 align="center">Ilyich</h1>
+<h3 align="center">Ilyich - Hoch performante, selbst gehostete Backup-Lösung für Fotos und Videos</h3>
 <br/>
-<a href="https://immich.app">
-<img src="../design/immich-screenshots.png" title="Haupt-Screenshot">
-</a>
-<br/>
+
+
+> Ilyich is a fork of [Immich](https://github.com/immich-app/immich). See the [English README](../README.md) for current fork features and branch policy. This translated overview describes the upstream base; its documentation, demo and community links refer to the upstream project.
+
 <p align="center">
   <a href="../README.md">English</a>
   <a href="README_ca_ES.md">Català</a>
@@ -51,7 +52,7 @@
 ## Inhalt
 
 - [Offizielle Dokumentation](https://docs.immich.app)
-- [Über Immich](https://docs.immich.app/overview/introduction)
+- [Über Ilyich](https://docs.immich.app/overview/introduction)
 - [Installation](https://docs.immich.app/install/requirements)
 - [Roadmap](https://immich.app/roadmap)
 - [Demo](#demo)
@@ -115,7 +116,7 @@ Mehr zum Thema Übersetzungen kannst du [hier](https://docs.immich.app/developer
 
 ## Repository-Aktivität
 
-![Activities](https://repobeats.axiom.co/api/embed/9e86d9dc3ddd137161f2f6d2e758d7863b1789cb.svg "Repobeats analytics image")
+[Ilyich repository activity](https://github.com/ilyador/Ilyich/activity)
 
 ## Github Sterne
 
@@ -128,6 +129,8 @@ Mehr zum Thema Übersetzungen kannst du [hier](https://docs.immich.app/developer
 </a>
 
 ## Mitwirkende
+
+Upstream attribution: [Immich contributors](https://github.com/immich-app/immich/graphs/contributors).
 
 <a href="https://github.com/alextran1502/immich/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=immich-app/immich" width="100%"/>

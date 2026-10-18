@@ -42,9 +42,9 @@ const List<(String, String)> kWidgetNames = [
 
 const int kMinMonthsToEnableScrubberSnap = 12;
 
-const String kImmichAppStoreLink = "https://apps.apple.com/app/immich/id1613945652";
-const String kImmichPlayStoreLink = "https://play.google.com/store/apps/details?id=app.alextran.immich";
-const String kImmichLatestRelease = "https://github.com/immich-app/immich/releases/latest";
+const String kImmichAppStoreLink = "https://github.com/ilyador/Ilyich/actions/workflows/build-ios-unsigned.yml";
+const String kImmichPlayStoreLink = "https://github.com/ilyador/Ilyich/tree/dev";
+const String kImmichLatestRelease = "https://github.com/ilyador/Ilyich/tree/dev";
 
 const int kPhotoTabIndex = 0;
 const int kSearchTabIndex = 1;

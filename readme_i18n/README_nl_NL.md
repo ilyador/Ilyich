@@ -9,14 +9,15 @@
 </p>
 
 <p align="center">
-<img src="../design/immich-logo-stacked-light.svg" width="300" title="Login met aangepaste URL">
+<img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
 </p>
-<h3 align="center">Immich - Hoogwaardige, self-hosted back-up oplossing voor foto's en video's</h3>
+<h1 align="center">Ilyich</h1>
+<h3 align="center">Ilyich - Hoogwaardige, self-hosted back-up oplossing voor foto's en video's</h3>
 <br/>
-<a href="https://immich.app">
-<img src="../design/immich-screenshots.png" title="Main Screenshot">
-</a>
-<br/>
+
+
+> Ilyich is a fork of [Immich](https://github.com/immich-app/immich). See the [English README](../README.md) for current fork features and branch policy. This translated overview describes the upstream base; its documentation, demo and community links refer to the upstream project.
+
 <p align="center">
   <a href="../README.md">English</a>
   <a href="README_ca_ES.md">Català</a>
@@ -106,7 +107,7 @@ Je kunt [hier](https://docs.immich.app/developer/translations) meer over vertali
 
 ## Repository activiteit
 
-![Activities](https://repobeats.axiom.co/api/embed/9e86d9dc3ddd137161f2f6d2e758d7863b1789cb.svg "Repobeats analytics image")
+[Ilyich repository activity](https://github.com/ilyador/Ilyich/activity)
 
 ## Ster geschiedenis
 
@@ -119,6 +120,8 @@ Je kunt [hier](https://docs.immich.app/developer/translations) meer over vertali
 </a>
 
 ## Contributie-leden
+
+Upstream attribution: [Immich contributors](https://github.com/immich-app/immich/graphs/contributors).
 
 <a href="https://github.com/alextran1502/immich/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=immich-app/immich" width="100%"/>

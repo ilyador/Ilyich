@@ -1,7 +1,7 @@
 {
   "name": "immich-monorepo",
   "version": "3.3.5",
-  "description": "Monorepo for Immich",
+  "description": "Monorepo for Ilyich",
   "type": "module",
   "private": true,
   "scripts": {

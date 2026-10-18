@@ -9,14 +9,15 @@
 </p>
 
 <p align="center">
-<img src="../design/immich-logo-stacked-light.svg" width="300" title="以自訂 URL 登入">
+<img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
 </p>
+<h1 align="center">Ilyich</h1>
 <h3 align="center">高效能的自架照片和影片管理解決方案</h3>
 <br/>
-<a href="https://immich.app">
-<img src="../design/immich-screenshots.png" title="主要螢幕截圖">
-</a>
-<br/>
+
+
+
+> Ilyich is a fork of [Immich](https://github.com/immich-app/immich). See the [English README](../README.md) for current fork features and branch policy. This translated overview describes the upstream base; its documentation, demo and community links refer to the upstream project.
 
 <p align="center">
   <a href="../README.md">English</a>
@@ -62,7 +63,7 @@
 
 ## 線上體驗
 
-請前往 [Demoo 網站](https://demo.immich.app) 立即體驗 Immich。若要在手機 App 試用，請在 `伺服器端點 URL` 欄位輸入 `https://demo.immich.app`。
+請前往 [Demoo 網站](https://demo.immich.app) 立即體驗 Ilyich。若要在手機 App 試用，請在 `伺服器端點 URL` 欄位輸入 `https://demo.immich.app`。
 
 ### 登入資訊
 
@@ -115,7 +116,7 @@
 
 ## 專案活躍度
 
-![專案活躍度](https://repobeats.axiom.co/api/embed/9e86d9dc3ddd137161f2f6d2e758d7863b1789cb.svg "Repobeats 分析圖片")
+[Ilyich repository activity](https://github.com/ilyador/Ilyich/activity)
 
 ## Star 數量歷史紀錄
 
@@ -128,6 +129,8 @@
 </a>
 
 ## 貢獻者
+
+Upstream attribution: [Immich contributors](https://github.com/immich-app/immich/graphs/contributors).
 
 <a href="https://github.com/alextran1502/immich/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=immich-app/immich" width="100%"/>
