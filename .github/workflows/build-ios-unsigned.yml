@@ -112,7 +112,7 @@ jobs:
           test ! -e "$app/embedded.mobileprovision"
           for bundle in "$app" "$app/PlugIns/ShareExtension.appex" "$app/PlugIns/WidgetExtension.appex"; do
             executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")
-            xcrun lipo -verify_arch arm64 "$bundle/$executable"
+            xcrun lipo "$bundle/$executable" -verify_arch arm64
           done
           staging_dir=$(mktemp -d "$RUNNER_TEMP/ios-payload.XXXXXX")
           mkdir -p "$staging_dir/Payload" "$ARTIFACT_DIR"
