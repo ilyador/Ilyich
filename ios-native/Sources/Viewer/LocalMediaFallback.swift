@@ -7,7 +7,7 @@ enum LocalMediaFallback {
 
     @MainActor
     static func photo(after error: Error, asset: Asset, matched: LocalPhoto?, active: Bool, kind: Kind? = nil) -> LocalPhoto? {
-        guard active, let networkError = error as? URLError, networkError.code != .cancelled,
+        guard active, TransportFailure.isDefinite(error),
               asset.hasKnownEditState, !asset.isDeveloped, !asset.isEdited, !asset.isAnimatedImage,
               let photo = matched, isUnchanged(photo) else { return nil }
         switch kind {

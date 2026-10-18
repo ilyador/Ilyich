@@ -45,11 +45,6 @@ struct BackupRemoteAsset: Decodable, Sendable {
     /// Size-only view of `exifInfo`, so this file does not depend on app models.
     private struct ExifSize: Decodable {
         let fileSizeInByte: Int64?
-        private enum CodingKeys: String, CodingKey { case fileSizeInByte }
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            fileSizeInByte = try? c.decodeIfPresent(Int64.self, forKey: .fileSizeInByte)
-        }
     }
 
     private enum CodingKeys: String, CodingKey { case id, ownerId, checksum, isTrashed, livePhotoVideoId, exifInfo }
