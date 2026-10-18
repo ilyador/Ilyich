@@ -40,6 +40,7 @@ struct LibraryView: View {
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Namespace private var glass
 
     private enum Shelf { case root, people, albums, more, settings }
@@ -57,7 +58,7 @@ struct LibraryView: View {
                           topInset: geometry.safeAreaInsets.top + headerHeight,
                           bottomInset: geometry.safeAreaInsets.bottom + (showPlaces ? geometry.size.height * 0.4 : 90),
                           onDensityChange: { columns = $0 }, onOpenLocal: { searchFocused = false; viewingLocal = $0 },
-                          memories: visibleMemories, memoryLaneHeight: visibleMemories.isEmpty ? 0 : min(memoryLaneHeight, 190),
+                          memories: visibleMemories, memoryLaneHeight: visibleMemories.isEmpty ? 0 : dynamicTypeSize.isAccessibilitySize ? memoryLaneHeight : min(memoryLaneHeight, 190),
                           onOpenMemory: { searchFocused = false; playingMemory = $0 }) { asset in
                     searchFocused = false; viewingAlbumID = nil; viewing = asset
                 }.ignoresSafeArea()
@@ -215,32 +216,58 @@ struct LibraryView: View {
 
     private var visibleMemories: [Memory] { store.isFiltered || store.isSelecting ? [] : memoryLane.memories }
 
+    private var headingText: some View {
+        let wrapped = dynamicTypeSize.isAccessibilitySize
+        return Text(store.query.isEmpty || store.isSearching ? store.title : "\(store.totalCount.formatted()) matches")
+            .font(.title.bold()).lineLimit(wrapped ? nil : 1).minimumScaleFactor(wrapped ? 1 : 0.75)
+            .fixedSize(horizontal: false, vertical: wrapped)
+            .accessibilityIdentifier("library.heading")
+    }
+
+    @ViewBuilder private var headerTitle: some View {
+        if store.isSelecting && store.canSelectMonth {
+            let wrapped = dynamicTypeSize.isAccessibilitySize
+            Menu {
+                Button("Select this month", systemImage: "checkmark.circle") { store.selectMonth(true) }
+                Button("Deselect this month", systemImage: "circle") { store.selectMonth(false) }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(store.title).font(.title.bold()).lineLimit(wrapped ? nil : 1).minimumScaleFactor(wrapped ? 1 : 0.75)
+                        .fixedSize(horizontal: false, vertical: wrapped)
+                        .accessibilityIdentifier("library.heading")
+                    if store.isSelectingGroup { ProgressView() }
+                    else { Image(systemName: "chevron.down").font(.caption.weight(.semibold)) }
+                }.frame(minHeight: 44)
+            }.disabled(store.isSelectingGroup).accessibilityLabel("Selection for \(store.title)")
+        } else {
+            headingText
+        }
+    }
+
+    @ViewBuilder private var headerControls: some View {
+        Button(store.isSelecting ? "Done" : "Select") {
+            store.isSelecting.toggle(); if !store.isSelecting { store.selected = [] }
+        }.buttonStyle(.glass).controlSize(.large).tint(store.isSelecting ? Color.cyan : Color.primary).accessibilityIdentifier("library.select")
+        if !store.isSelecting {
+            Button { screen = .settings } label: {
+                Text(String(session.name.prefix(1)).uppercased()).font(.headline).frame(width: 44, height: 44)
+            }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle).accessibilityLabel("Account and settings")
+        }
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
-                if store.isSelecting && store.canSelectMonth {
-                    Menu {
-                        Button("Select this month", systemImage: "checkmark.circle") { store.selectMonth(true) }
-                        Button("Deselect this month", systemImage: "circle") { store.selectMonth(false) }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(store.title).font(.title.bold()).lineLimit(1).minimumScaleFactor(0.75)
-                            if store.isSelectingGroup { ProgressView() }
-                            else { Image(systemName: "chevron.down").font(.caption.weight(.semibold)) }
-                        }.frame(minHeight: 44)
-                    }.disabled(store.isSelectingGroup).accessibilityLabel("Selection for \(store.title)")
-                } else {
-                    Text(store.query.isEmpty || store.isSearching ? store.title : "\(store.totalCount.formatted()) matches")
-                        .font(.title.bold()).lineLimit(1).minimumScaleFactor(0.75)
+            if dynamicTypeSize.isAccessibilitySize {
+                headerTitle.frame(maxWidth: .infinity, alignment: .leading)
+                HStack(alignment: .center) {
+                    Spacer(minLength: 8)
+                    headerControls
                 }
-                Spacer(minLength: 8)
-                Button(store.isSelecting ? "Done" : "Select") {
-                    store.isSelecting.toggle(); if !store.isSelecting { store.selected = [] }
-                }.buttonStyle(.glass).tint(store.isSelecting ? Color.cyan : Color.primary).accessibilityIdentifier("library.select")
-                if !store.isSelecting {
-                    Button { screen = .settings } label: {
-                        Text(String(session.name.prefix(1)).uppercased()).font(.headline).frame(width: 44, height: 44)
-                    }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .circle).accessibilityLabel("Account and settings")
+            } else {
+                HStack(alignment: .center) {
+                    headerTitle
+                    Spacer(minLength: 8)
+                    headerControls
                 }
             }
             if store.isFiltered {

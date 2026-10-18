@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import WidgetKit
 
 struct NetworkSettingsView: View {
     var api: APIClient? = nil
@@ -115,6 +116,7 @@ struct NetworkSettingsView: View {
             let configuration = try NetworkConfiguration(customHeaders: values, alternateEndpoints: addresses, automaticallySwitchEndpoints: switchEndpoints).validated()
             if let api { try await api.updateNetworkConfiguration(configuration) }
             else { try NetworkConfigurationStore.save(configuration, server: server) }
+            WidgetCenter.shared.reloadAllTimelines()
             dismiss()
         } catch { failure = .init(error) }
     }

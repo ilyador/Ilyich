@@ -77,6 +77,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         data=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
     def do_GET(self):
         url=urllib.parse.urlsplit(self.path);path=url.path.removeprefix('/api');q=urllib.parse.parse_qs(url.query)
+        if path.startswith('/assets/') and path.endswith('/original'):
+            # Deliberately stream slowly so the UI test can cancel a real in-flight export.
+            import time
+            data=test_image(path)
+            self.send_response(200);self.send_header('Content-Type','image/png');self.send_header('Content-Length',str(len(data)))
+            self.send_header('Content-Disposition','attachment; filename="fixture-original.png"');self.end_headers()
+            step=max(1,(len(data)+29)//30)
+            try:
+                for start in range(0,len(data),step):
+                    self.wfile.write(data[start:start+step]);self.wfile.flush();time.sleep(0.1)
+            except (BrokenPipeError,ConnectionResetError): pass
+            return
         if path.endswith('/thumbnail'):
             data=test_image(path);self.send_response(200);self.send_header('Content-Type','image/png');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','max-age=3600');self.end_headers();self.wfile.write(data);return
         if path=='/timeline/buckets':return self.send(BUCKETS)

@@ -2,6 +2,7 @@ import SwiftUI
 import RealityKit
 import UIKit
 import simd
+import Metal
 
 /// A virtual RealityKit scene. No AR session, camera feed, or location permission.
 struct PlacesGlobeView: View {
@@ -48,7 +49,7 @@ private struct GlobeSurface: UIViewRepresentable {
     func updateUIView(_ view: ARView, context: Context) {
         context.coordinator.update(places: places, focus: focus, api: api, pipeline: pipeline, dark: dark, reduceMotion: reduceMotion, active: active, onSelect: onSelect)
     }
-    static func dismantleUIView(_ view: ARView, coordinator: Coordinator) { coordinator.stop(); coordinator.photoMarkers.forEach { $0.cancelImage() }; view.scene.anchors.removeAll() }
+    static func dismantleUIView(_ view: ARView, coordinator: Coordinator) { coordinator.stop(); coordinator.textureTask?.cancel(); coordinator.photoMarkers.forEach { $0.cancelImage() }; view.scene.anchors.removeAll() }
 
     @MainActor final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         weak var view: ARView?
@@ -65,8 +66,7 @@ private struct GlobeSurface: UIViewRepresentable {
         var lastIDs: [String] = []
         var lastFocus: PlaceFocus?
         var night: Bool?
-        var dayTexture: TextureResource?
-        var nightTexture: TextureResource?
+        var textureTask: Task<Void, Never>?
         var selection: ((PlaceCollection) -> Void)?
         var reduceMotion = false
         var active = true
@@ -93,11 +93,6 @@ private struct GlobeSurface: UIViewRepresentable {
             globe.addChild(markerRoot)
             do {
                 earth.model = ModelComponent(mesh: try Self.earthMesh(), materials: [SimpleMaterial(color: .systemBlue, isMetallic: false)])
-                for name in ["EarthDay", "EarthNight"] {
-                    guard let image = UIImage(named: name)?.cgImage else { continue }
-                    let texture = try TextureResource.generate(from: image, options: .init(semantic: .color))
-                    if name == "EarthDay" { dayTexture = texture } else { nightTexture = texture }
-                }
             } catch {
                 // Keep a navigable solid globe if a bundled texture cannot be decoded.
                 earth.model = ModelComponent(mesh: .generateSphere(radius: 1), materials: [SimpleMaterial(color: .systemBlue, isMetallic: false)])
@@ -130,14 +125,16 @@ private struct GlobeSurface: UIViewRepresentable {
             if reduceMotion || !active { stop() }
             if night != dark {
                 night = dark
-                var material = PhysicallyBasedMaterial()
-                material.roughness = .init(floatLiteral: 1)
-                if let texture = dark ? nightTexture : dayTexture {
-                    material.baseColor = .init(tint: .white, texture: .init(texture))
-                    if dark { material.emissiveColor = .init(color: .white, texture: .init(texture)); material.emissiveIntensity = 0.55 }
-                } else { material.baseColor = .init(tint: dark ? .init(red: 0.02, green: 0.04, blue: 0.09, alpha: 1) : .systemBlue) }
-                earth.model?.materials = [material]
-                view?.environment.lighting.intensityExponent = dark ? -2 : 0
+                textureTask?.cancel()
+                applyMaterial(texture: nil, dark: dark)
+                textureTask = Task { [weak self] in
+                    do {
+                        let texture = try await GlobeTextures.texture(dark: dark)
+                        try Task.checkCancellation()
+                        guard let self, self.night == dark else { return }
+                        self.applyMaterial(texture: texture, dark: dark)
+                    } catch { /* Keep the navigable fallback globe if texture loading fails. */ }
+                }
             }
             let identifiers = places.map { "\($0.id):\($0.assetIDs.count):\($0.latitude):\($0.longitude):\($0.assetIDs.first ?? "")" }
             if identifiers != lastIDs {
@@ -161,6 +158,21 @@ private struct GlobeSurface: UIViewRepresentable {
             updatePhotoMarkers()
         }
 
+        private func applyMaterial(texture: TextureResource?, dark: Bool) {
+            light.isEnabled = !dark
+            if dark {
+                // The night map already contains city illumination; daylight lighting washes it out.
+                var material = UnlitMaterial(color: UIColor(red: 0.02, green: 0.04, blue: 0.09, alpha: 1))
+                if let texture { material.color = .init(tint: .white, texture: .init(texture)) }
+                earth.model?.materials = [material]
+            } else {
+                var material = PhysicallyBasedMaterial()
+                material.roughness = .init(floatLiteral: 1)
+                material.baseColor = .init(tint: texture == nil ? .systemBlue : .white, texture: texture.map { .init($0) })
+                earth.model?.materials = [material]
+            }
+        }
+
         private func addMarker(_ place: PlaceCollection, highlighted: Bool = false) {
             let marker = ModelEntity(mesh: .generateSphere(radius: highlighted ? 0.025 : 0.014),
                                      materials: [UnlitMaterial(color: highlighted ? .white : .init(red: 1, green: 0.77, blue: 0.33, alpha: 1))])
@@ -169,15 +181,13 @@ private struct GlobeSurface: UIViewRepresentable {
         }
 
         private func addAtmosphere() {
-            // Thin outer shells make a physical limb halo; face culling keeps the land legible.
-            let layers: [(Float, Float)] = [(1.012, 0.12), (1.028, 0.055), (1.05, 0.02)]
-            for (radius, opacity) in layers {
-                var material = UnlitMaterial(color: UIColor(red: 0.23, green: 0.53, blue: 1, alpha: 1))
-                material.blending = .transparent(opacity: .init(floatLiteral: opacity))
-                material.faceCulling = .front
-                let shell = ModelEntity(mesh: .generateSphere(radius: radius), materials: [material])
-                globe.addChild(shell)
-            }
+            guard let library = MTLCreateSystemDefaultDevice()?.makeDefaultLibrary(), let mesh = earth.model?.mesh,
+                  var material = try? CustomMaterial(surfaceShader: .init(named: "earthAtmosphere", in: library), lightingModel: .unlit) else { return }
+            material.blending = .transparent(opacity: .init(floatLiteral: 1))
+            material.faceCulling = .back
+            let shell = ModelEntity(mesh: mesh, materials: [material])
+            shell.scale = .init(repeating: 1.035)
+            globe.addChild(shell)
         }
 
         private func applyTransform() {
@@ -307,6 +317,18 @@ private struct GlobeSurface: UIViewRepresentable {
             descriptor.textureCoordinates = MeshBuffer(coordinates); descriptor.primitives = .triangles(indices)
             return try MeshResource.generate(from: [descriptor])
         }
+    }
+}
+
+@MainActor private enum GlobeTextures {
+    private static var textures: [Bool: TextureResource] = [:]
+
+    static func texture(dark: Bool) async throws -> TextureResource {
+        if let texture = textures[dark] { return texture }
+        let texture = try await TextureResource(named: dark ? "EarthNight" : "EarthDay", options: .init(semantic: .color))
+        try Task.checkCancellation()
+        textures[dark] = texture
+        return texture
     }
 }
 

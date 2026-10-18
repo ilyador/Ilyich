@@ -39,7 +39,13 @@ struct AssetViewer: View {
     @State private var profilePhoto = false
     @State private var localPhotoActions = false
     @State private var changedLocalCopies: Set<String> = []
+    @State private var transferTask: Task<Void, Never>?
+    @State private var transferID: UUID?
+    @State private var transferLabel = ""
+    @State private var transferProgress: Double?
+    @State private var transferSaving = false
     @AppStorage("viewerTapToNavigate") private var tapToNavigate = false
+    @AppStorage("shareFileType") private var shareFileType = "original"
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
@@ -88,8 +94,17 @@ struct AssetViewer: View {
                     footer
                 }.padding(.horizontal, 16).padding(.vertical, 10)
             }
-            if working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
+            if transferID != nil {
+                VStack(spacing: 12) {
+                    if let transferProgress { ProgressView(value: transferProgress) } else { ProgressView() }
+                    Text(transferSaving ? "Saving to Photos…" : transferLabel).font(.subheadline)
+                    if !transferSaving { Button("Cancel") { cancelTransfer() }.buttonStyle(.glass).accessibilityIdentifier("viewer.cancelTransfer") }
+                }.frame(width: 220).padding(20).glassEffect(in: .rect(cornerRadius: 24))
+                    .accessibilityElement(children: .contain)
+            } else if working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
         }
+        .onChange(of: selectedID) { if !transferSaving { cancelTransfer() } }
+        .onDisappear { if !transferSaving { cancelTransfer() } }
         .preferredColorScheme(.dark)
         .statusBarHidden(!controls)
         .task { features = try? await api.serverFeatures() }
@@ -242,7 +257,7 @@ struct AssetViewer: View {
                     .buttonStyle(.glass)
             }
             HStack(spacing: 0) {
-                viewerButton("Share", symbol: "square.and.arrow.up") { exportAsset(original: false) }
+                viewerButton("Share", symbol: "square.and.arrow.up") { exportAsset(original: shareFileType != "preview") }
                 Spacer()
                 viewerButton(current.isFavorite ? "Remove favorite" : "Favorite", symbol: current.isFavorite ? "heart.fill" : "heart") { toggleFavorite() }.requiresWriteAccess(api)
                     .tint(current.isFavorite ? .red : .primary).disabled(!ownsAsset)
@@ -338,29 +353,62 @@ struct AssetViewer: View {
             }
         }
     }
+    /// Tracked download pipeline for export and Save to Photos only; ordinary mutations keep using `run`.
+    /// `working` stays the shared guard, and `transferID` fences late progress and completions.
+    private func transfer(label: String, _ operation: @escaping @MainActor (UUID, @escaping @Sendable (Double?) -> Void) async throws -> Void) {
+        guard !working else { return }
+        let id = UUID()
+        working = true; transferID = id; transferLabel = label; transferProgress = nil; transferSaving = false
+        let report: @Sendable (Double?) -> Void = { value in
+            Task { @MainActor in if transferID == id { transferProgress = value } }
+        }
+        transferTask = Task {
+            defer { if transferID == id { finishTransfer() } }
+            do { try await operation(id, report) }
+            catch is CancellationError { }
+            catch { if transferID == id, !Task.isCancelled { self.error = error.localizedDescription } }
+        }
+    }
+    private func finishTransfer() {
+        transferTask = nil; transferID = nil; transferProgress = nil; transferSaving = false; working = false
+    }
+    private func cancelTransfer() {
+        guard transferID != nil else { return }
+        transferTask?.cancel()
+        finishTransfer()
+    }
     private func exportAsset(original: Bool) {
         let asset = current
-        run { export = ViewerExport(url: try await api.download(asset: asset, original: original)) }
+        transfer(label: original || asset.isVideo ? "Downloading original…" : "Preparing photo…") { id, report in
+            let file = ViewerExport(url: try await api.download(asset: asset, original: original, progress: report))
+            guard !Task.isCancelled, transferID == id, selectedID == asset.id else { file.removeTemporaryFile(); throw CancellationError() }
+            export = file
+        }
     }
     private func saveToPhotos() {
         let asset = current
-        run {
+        transfer(label: "Downloading…") { id, report in
             guard !api.isReadOnly else { throw ReadOnlyPolicy.ReadOnlyError() }
             let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
             guard status == .authorized || status == .limited else { throw APIError.invalidResponse("Allow Ilyich to add photos in iPhone Settings, then try again.") }
+            try Task.checkCancellation()
+            let live = asset.livePhotoVideoId != nil
             // A Live Photo requires the original matching still/video identifiers.
             // Server-rendered JPEGs cannot substitute for the paired still metadata.
-            let file = ViewerExport(url: try await api.download(asset: asset, original: asset.livePhotoVideoId != nil))
+            let file = ViewerExport(url: try await api.download(asset: asset, original: live, progress: live ? { report($0.map { $0 / 2 }) } : report))
             defer { file.removeTemporaryFile() }
             var motion: ViewerExport?
             defer { motion?.removeTemporaryFile() }
             if let motionID = asset.livePhotoVideoId {
                 let motionAsset = try await api.asset(id: motionID)
-                motion = ViewerExport(url: try await api.download(asset: motionAsset, original: true))
+                try Task.checkCancellation()
+                motion = ViewerExport(url: try await api.download(asset: motionAsset, original: true, progress: { report($0.map { 0.5 + $0 / 2 }) }))
             }
             let motionURL = motion?.url
             try Task.checkCancellation()
+            guard transferID == id else { throw CancellationError() }
             guard !api.isReadOnly else { throw ReadOnlyPolicy.ReadOnlyError() }
+            transferSaving = true
             try await PHPhotoLibrary.shared().performChanges {
                 let creation = PHAssetCreationRequest.forAsset()
                 creation.addResource(with: asset.isVideo ? .video : .photo, fileURL: file.url, options: nil)
@@ -370,9 +418,11 @@ struct AssetViewer: View {
     }
 }
 
-struct ViewerExport: Identifiable, Sendable {
+final class ViewerExport: Identifiable, Sendable {
     let id = UUID()
     let url: URL
+    init(url: URL) { self.url = url }
+    deinit { removeTemporaryFile() }
     func removeTemporaryFile() { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 }
 
