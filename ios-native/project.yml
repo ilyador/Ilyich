@@ -65,6 +65,7 @@ targets:
       - Sources/Backup/SharedSession.swift
       - Sources/Core/NetworkConfiguration.swift
       - Sources/Core/ServerConnection.swift
+      - Sources/Core/WiFiNetworkAccess.swift
       - path: ../mobile/ios/WidgetExtension/widgets
       - ../mobile/ios/WidgetExtension/WidgetBundle.swift
       - ../mobile/ios/WidgetExtension/UIImage+Resize.swift

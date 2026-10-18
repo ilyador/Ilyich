@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 import WidgetKit
 
 struct NetworkSettingsView: View {
@@ -9,6 +10,9 @@ struct NetworkSettingsView: View {
     @State private var headers: [NetworkHeaderRow] = []
     @State private var endpoints: [NetworkEndpointRow] = []
     @State private var switchEndpoints = false
+    @State private var preferredWifiName = ""
+    @State private var localEndpoint = ""
+    @State private var wifiPermissionDenied = false
     @State private var loaded = false
     @State private var busy = false
     @State private var failure: FeatureFailure?
@@ -46,6 +50,16 @@ struct NetworkSettingsView: View {
                 Text("Addresses are tried in this order, then your main server address. Add only addresses for this same server, such as its local network address. These addresses receive your sign-in credentials and custom headers.")
             }
             Section {
+                TextField("Wi-Fi name", text: $preferredWifiName)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField("http://192.168.1.20:2283", text: $localEndpoint)
+                    .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("Use current Wi-Fi name", systemImage: "wifi") { Task { await fillCurrentWifiName() } }
+                    .frame(minHeight: 44)
+            } header: { Text("Preferred home Wi-Fi") } footer: {
+                Text("Enter the Wi-Fi name and local address, or use the current name and allow location access when prompted. The local address is preferred only on that Wi-Fi.")
+            }
+            Section {
                 Label(certificatePresent ? "Client certificate installed" : "No client certificate", systemImage: certificatePresent ? "checkmark.shield" : "lock.shield")
                 Button(certificatePresent ? "Choose replacement certificate" : "Choose certificate") { importing = true }
                 if certificate != nil {
@@ -81,6 +95,11 @@ struct NetworkSettingsView: View {
             }
         }
         .alert("Couldn’t update network settings", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            if wifiPermissionDenied {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            }
             if !loaded { Button("Retry") { Task { await load() } } }
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
@@ -94,6 +113,8 @@ struct NetworkSettingsView: View {
             headers = configuration.customHeaders.sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }.map { .init(name: $0.key, value: $0.value) }
             endpoints = configuration.alternateEndpoints.map { .init(address: $0.absoluteString) }
             switchEndpoints = configuration.automaticallySwitchEndpoints
+            preferredWifiName = configuration.preferredWifiName ?? ""
+            localEndpoint = configuration.localEndpoint?.absoluteString ?? ""
             certificatePresent = try ClientCertificateStore.hasCertificate(server: server)
             loaded = true
         } catch { failure = .init(error) }
@@ -113,7 +134,16 @@ struct NetworkSettingsView: View {
                 guard let url = URL(string: address) else { throw NetworkConfigurationError.invalidAddress }
                 return try ServerAddress.normalized(url)
             }
-            let configuration = try NetworkConfiguration(customHeaders: values, alternateEndpoints: addresses, automaticallySwitchEndpoints: switchEndpoints).validated()
+            let localAddress = localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            let localURL: URL?
+            if localAddress.isEmpty { localURL = nil }
+            else {
+                guard let url = URL(string: localAddress) else { throw NetworkConfigurationError.invalidAddress }
+                localURL = try ServerAddress.normalized(url)
+            }
+            let configuration = try NetworkConfiguration(customHeaders: values, alternateEndpoints: addresses,
+                                                          automaticallySwitchEndpoints: switchEndpoints,
+                                                          preferredWifiName: preferredWifiName, localEndpoint: localURL).validated()
             if let api { try await api.updateNetworkConfiguration(configuration) }
             else { try NetworkConfigurationStore.save(configuration, server: server) }
             WidgetCenter.shared.reloadAllTimelines()
@@ -128,6 +158,23 @@ struct NetworkSettingsView: View {
             try await Task.detached(priority: .userInitiated) { try ClientCertificateStore.importCertificate(data: data, password: password, server: target) }.value
             certificatePresent = true; clearCertificate()
         } catch { failure = .init(error) }
+    }
+    private func fillCurrentWifiName() async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        wifiPermissionDenied = false
+        do {
+            let wifiAccess = WiFiNetworkAccess()
+            guard let name = try await wifiAccess.requestCurrentName(), !name.isEmpty else {
+                wifiPermissionDenied = true
+                throw APIError.invalidResponse("The current Wi-Fi name is unavailable. Enter it manually or check Location Services access.")
+            }
+            preferredWifiName = name
+        } catch {
+            wifiPermissionDenied = true
+            failure = .init(error)
+        }
     }
     private func clearCertificate() { certificate = nil; certificateName = ""; certificatePassword = "" }
 }

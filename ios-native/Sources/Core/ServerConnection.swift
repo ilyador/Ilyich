@@ -47,14 +47,21 @@ actor ServerConnection {
     }
 
     func endpoint() async throws -> URL {
-        guard configuration.automaticallySwitchEndpoints, !configuration.alternateEndpoints.isEmpty else { return primary }
+        let hasLocalPreference = configuration.preferredWifiName != nil && configuration.localEndpoint != nil
+        guard configuration.automaticallySwitchEndpoints,
+              !configuration.alternateEndpoints.isEmpty || hasLocalPreference else { return primary }
         if let selected, selected.expires > Date() { return selected.url }
         if let resolution { return try await resolution.value }
-        let candidates = configuration.candidates(primary: primary)
-        let headers = configuration.customHeaders
+        let configurationSnapshot = configuration
+        let headers = configurationSnapshot.customHeaders
         let session = probeSession
         let currentGeneration = generation
         let task = Task<URL, Error> {
+            let currentWifiName: String?
+            if hasLocalPreference { currentWifiName = await WiFiNetworkAccess.currentNameIfAvailable() }
+            else { currentWifiName = nil }
+            try Task.checkCancellation()
+            let candidates = configurationSnapshot.candidates(primary: primary, currentWifiName: currentWifiName)
             for candidate in candidates {
                 try Task.checkCancellation()
                 do {
