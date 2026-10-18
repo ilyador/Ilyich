@@ -10,8 +10,12 @@ struct LibraryView: View {
     @State private var shelf: Shelf = .root
     @State private var people: [Person] = []
     @State private var albums: [Album] = []
+    @State private var features: ServerFeatures?
     @State private var screen: Screen?
     @State private var viewing: Asset?
+    @State private var viewingLocal: LocalPhoto?
+    @State private var deviceIndex = DeviceTimelineIndex()
+    @State private var backup = BackupCoordinator.shared
     @State private var viewingAlbumID: String?
     @State private var linkedMemoryID: String?
     @State private var activityAlbumID: String?
@@ -39,7 +43,7 @@ struct LibraryView: View {
 
     init(api: APIClient, pipeline: MediaPipeline, session: SessionStore) {
         self.api = api; self.pipeline = pipeline; self.session = session
-        _store = State(initialValue: LibraryStore(api: api))
+        _store = State(initialValue: LibraryStore(api: session.libraryAPI ?? api, includesDevicePhotos: !session.isUITesting))
     }
 
     var body: some View {
@@ -48,7 +52,7 @@ struct LibraryView: View {
                 PhotoGrid(store: store, pipeline: pipeline, columns: max(2, min(6, columns)),
                           topInset: geometry.safeAreaInsets.top + headerHeight,
                           bottomInset: geometry.safeAreaInsets.bottom + (showPlaces ? geometry.size.height * 0.4 : 90),
-                          onDensityChange: { columns = $0 }) { asset in
+                          onDensityChange: { columns = $0 }, onOpenLocal: { searchFocused = false; viewingLocal = $0 }) { asset in
                     searchFocused = false; viewingAlbumID = nil; viewing = asset
                 }.ignoresSafeArea()
                 if store.isLoading && store.totalCount == 0 { ProgressView("Loading library").frame(maxWidth: .infinity, maxHeight: .infinity) }
@@ -91,7 +95,7 @@ struct LibraryView: View {
                   }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 if !shelves && !searchFocused && store.query.isEmpty && !store.buckets.isEmpty {
-                    TimeRail(store: store, pipeline: pipeline)
+                    TimeRail(store: store, pipeline: pipeline, viewportWidth: geometry.size.width)
                         .frame(width: 44).padding(.top, 130).padding(.bottom, showPlaces ? geometry.size.height * 0.42 : 100)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
@@ -105,11 +109,12 @@ struct LibraryView: View {
             }
             .fullScreenCover(item: $viewing) { asset in
                 AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
-                            onUpdated: store.update, onDeleted: { Task { await store.reload() } }, albumID: viewingAlbumID ?? store.timelineFilter.albumID)
+                            onUpdated: store.update, onDeleted: { Task { await store.refreshAfterMutation() } }, albumID: viewingAlbumID ?? store.timelineFilter.albumID)
             }
+            .fullScreenCover(item: $viewingLocal) { LocalPhotoViewer(photo: $0) }
             .sheet(item: $bulkSelection) { selection in
                 NavigationStack {
-                    BulkActionsView(api: api, pipeline: pipeline, assets: selection.assets) {
+                    SelectionActionsView(api: api, pipeline: pipeline, selection: selection) {
                         store.selected = []; store.isSelecting = false
                         Task { await store.refreshAfterMutation() }
                     }
@@ -119,9 +124,11 @@ struct LibraryView: View {
             .alert("Couldn’t complete action", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
                 Button("OK", role: .cancel) { }
             } message: { Text(actionError ?? "") }
-            .confirmationDialog("Move \(store.selected.count) items to Trash?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button("Move to Trash", role: .destructive) { runSelection { ids in try await api.trashAssets(ids: ids) } }
-            } message: { Text("This changes the server library. Photos on your phone are kept.") }
+            .confirmationDialog(features?.trash == false ? "Permanently delete \(store.selected.count) items?" : "Move \(store.selected.count) items to Trash?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button(features?.trash == false ? "Delete permanently" : "Move to Trash", role: .destructive) {
+                    runSelection { ids in try await api.trashAssets(ids: ids, permanently: features?.trash == false) }
+                }
+            } message: { Text(features?.trash == false ? "This cannot be undone. Photos on your phone are kept." : "This changes the server library. Photos on your phone are kept.") }
             .alert("New album", isPresented: $creatingAlbum) {
                 TextField("Album name", text: $albumName)
                 Button("Create") {
@@ -134,6 +141,7 @@ struct LibraryView: View {
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
         .task {
             refreshSharedFiles()
+            if !session.isUITesting { await backup.activate(); refreshDeviceIndex() }
             guard !store.started else { return }; store.started = true
             await store.reload(); await loadShelfData()
         }
@@ -165,7 +173,22 @@ struct LibraryView: View {
         .onReceive(NotificationCenter.default.publisher(for: .ilyichCachesReset)) { notification in
             if notification.userInfo?["scope"] as? String == api.cacheScope { Task { await store.refreshAfterMutation() } }
         }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { refreshSharedFiles() } }
+        .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { notification in
+            guard notification.userInfo?["scope"] as? String == api.cacheScope else { return }
+            Task {
+                if store.query.isEmpty { await store.reload(preservingPosition: true) }
+                if notification.userInfo?["collections"] as? Bool == true { await loadShelfData() }
+                refreshDeviceIndex()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { refreshSharedFiles(); refreshDeviceIndex() }
+            else if phase == .background { deviceIndex.stop() }
+        }
+        .onChange(of: deviceIndex.revision) { _, _ in store.updateDeviceTimeline(deviceIndex.snapshot) }
+        .onChange(of: backup.preferences) { _, _ in refreshDeviceIndex() }
+        .onChange(of: backup.isRunning) { _, running in if !running { refreshDeviceIndex() } }
+        .onDisappear { deviceIndex.stop() }
         .onChange(of: screen) { _, value in if value == nil { refreshSharedFiles() } }
         .onChange(of: viewing) { _, value in if value == nil { refreshSharedFiles() } }
     }
@@ -173,8 +196,21 @@ struct LibraryView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center) {
-                Text(store.query.isEmpty || store.isSearching ? store.title : "\(store.totalCount.formatted()) matches")
-                    .font(.title.bold()).lineLimit(1).minimumScaleFactor(0.75)
+                if store.isSelecting && store.canSelectMonth {
+                    Menu {
+                        Button("Select this month", systemImage: "checkmark.circle") { store.selectMonth(true) }
+                        Button("Deselect this month", systemImage: "circle") { store.selectMonth(false) }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(store.title).font(.title.bold()).lineLimit(1).minimumScaleFactor(0.75)
+                            if store.isSelectingGroup { ProgressView() }
+                            else { Image(systemName: "chevron.down").font(.caption.weight(.semibold)) }
+                        }.frame(minHeight: 44)
+                    }.disabled(store.isSelectingGroup).accessibilityLabel("Selection for \(store.title)")
+                } else {
+                    Text(store.query.isEmpty || store.isSearching ? store.title : "\(store.totalCount.formatted()) matches")
+                        .font(.title.bold()).lineLimit(1).minimumScaleFactor(0.75)
+                }
                 Spacer(minLength: 8)
                 Button(store.isSelecting ? "Done" : "Select") {
                     store.isSelecting.toggle(); if !store.isSelecting { store.selected = [] }
@@ -254,11 +290,19 @@ struct LibraryView: View {
         HStack {
             Text("\(store.selected.count) selected").font(.subheadline.monospacedDigit())
             Spacer()
+            if store.selectedLocalPhotos.isEmpty {
             Button { creatingAlbum = true } label: { Image(systemName: "rectangle.stack.badge.plus").frame(width: 44, height: 44) }.accessibilityLabel("Create album from selection").requiresWriteAccess(api)
             Button { runSelection { ids in try await api.requestVoid(.put, path: "assets", body: SelectionUpdate(ids: ids, isFavorite: true)) } }
-                label: { Image(systemName: "heart").frame(width: 44, height: 44) }.accessibilityLabel("Favorite selected photos").requiresWriteAccess(api)
-            Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel("Move selection to Trash").requiresWriteAccess(api)
-            Button { bulkSelection = BulkSelection(assets: store.selectedAssets) } label: {
+                label: { Image(systemName: "heart").frame(width: 44, height: 44) }.accessibilityLabel("Favorite selected photos").requiresWriteAccess(api).disabled(!ownsSelection)
+            Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel(features?.trash == false ? "Delete selection permanently" : "Move selection to Trash").requiresWriteAccess(api).disabled(features == nil || !ownsSelection)
+            } else {
+                Button {
+                    let localIDs = store.selectedLocalPhotos.map(\.id)
+                    Task { await backup.enqueue(localIDs: localIDs) }
+                } label: { Image(systemName: "icloud.and.arrow.up").frame(width: 44, height: 44) }
+                    .accessibilityLabel("Back up selected phone photos").requiresWriteAccess(api).disabled(backup.isRunning)
+            }
+            Button { bulkSelection = BulkSelection(assets: store.selectedAssets, local: store.selectedLocalPhotos) } label: {
                 Image(systemName: "ellipsis").frame(width: 44, height: 44)
             }.accessibilityLabel("Selection actions")
         }.padding(.horizontal, 14).padding(.vertical, 6).glassEffect().disabled(store.selected.isEmpty || selectionBusy)
@@ -271,8 +315,12 @@ struct LibraryView: View {
             }
             switch shelf {
             case .root:
+                if features?.facialRecognition != false {
                 shelfButton("People", symbol: "person.2", width: 260) { animate { shelf = .people } }
+                }
+                if features?.map != false {
                 shelfButton("Places", symbol: "globe.europe.africa", width: 230) { shelves = false; showPlaces.toggle() }
+                }
                 shelfButton("Albums", symbol: "rectangle.stack", width: 205) { animate { shelf = .albums } }
                 shelfButton("More", symbol: "ellipsis", width: 180) { animate { shelf = .more } }
                 shelfButton("Settings", symbol: "gearshape", width: 155) { shelves = false; screen = .settings }
@@ -293,7 +341,9 @@ struct LibraryView: View {
             case .more:
                 shelfButton("Favorites", symbol: "heart", width: 260) { store.setTimeline(TimelineFilter(isFavorite: true), title: "Favorites"); shelves = false }
                 shelfButton("Archive", symbol: "archivebox", width: 230) { store.setTimeline(TimelineFilter(visibility: .archive), title: "Archive"); shelves = false }
-                shelfButton("Trash", symbol: "trash", width: 205) { store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash"); shelves = false }
+                if features?.trash != false {
+                    shelfButton("Trash", symbol: "trash", width: 205) { store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash"); shelves = false }
+                }
                 shelfButton("Browse more", symbol: "square.grid.2x2", width: 185) { shelves = false; screen = .more }
                 if !shareInbox.batches.isEmpty {
                     shelfButton("Shared files", symbol: "square.and.arrow.down", width: 185) {
@@ -335,7 +385,7 @@ struct LibraryView: View {
         case .people: PeopleView(api: api, pipeline: pipeline) { store.setPerson($0); screen = nil; searchText = "" }
         case .albums: AlbumsView(api: api, pipeline: pipeline) { store.setAlbum($0); screen = nil; searchText = "" }
         case .places: PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace)
-        case .settings: SettingsView(api: api, pipeline: pipeline, onSignOut: { store.stop(); Task { await session.signOut() } })
+        case .settings: SettingsView(api: api, pipeline: pipeline, session: session, onSignOut: { store.stop(); Task { await session.signOut() } })
         case .more: MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { viewing = $0; screen = nil }, onFilter: { filter, title in
             store.setTimeline(filter, title: title); screen = nil
         })
@@ -348,9 +398,14 @@ struct LibraryView: View {
         shareInbox.refresh()
         let ids = Set(shareInbox.batches.map(\.id))
         seenShareBatches.formIntersection(ids)
-        guard !ids.subtracting(seenShareBatches).isEmpty, screen == nil, viewing == nil, bulkSelection == nil else { return }
+        guard !ids.subtracting(seenShareBatches).isEmpty, screen == nil, viewing == nil, viewingLocal == nil, bulkSelection == nil else { return }
         seenShareBatches.formUnion(ids)
         sharedFilesPresented = true
+    }
+    private func refreshDeviceIndex() {
+        guard !session.isUITesting else { return }
+        deviceIndex.configure(scope: api.cacheScope, entities: session.entities,
+                              preferences: backup.preferences, receipts: backup.associations)
     }
     private func errorBanner(_ message: String, retry: @escaping () -> Void) -> some View {
         HStack { Text(message).font(.caption); Spacer(); Button("Retry", action: retry) }
@@ -359,9 +414,13 @@ struct LibraryView: View {
     private func toggleShelves() { searchFocused = false; animate { shelves.toggle(); if !shelves { shelf = .root } } }
     private func animate(_ changes: () -> Void) { withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.88), changes) }
     private func loadShelfData() async {
+        async let featuresResult = try? api.serverFeatures()
         async let peopleResult = try? api.people()
         async let albumResult = try? api.albums()
-        people = await peopleResult?.people ?? []; albums = await albumResult ?? []
+        people = await peopleResult?.people ?? []; albums = await albumResult ?? []; features = await featuresResult
+    }
+    private var ownsSelection: Bool {
+        !store.selectedAssets.isEmpty && store.selectedAssets.allSatisfy { $0.ownerId == api.userID }
     }
     private func runSelection(_ action: @escaping @MainActor ([String]) async throws -> Void) {
         guard !selectionBusy else { return }
@@ -378,4 +437,28 @@ struct LibraryView: View {
 private struct BulkSelection: Identifiable {
     let id = UUID()
     let assets: [Asset]
+    let local: [LocalPhoto]
+}
+
+private struct SelectionActionsView: View {
+    let api: APIClient
+    let pipeline: MediaPipeline
+    let selection: BulkSelection
+    let onChanged: () -> Void
+    var body: some View {
+        if selection.local.isEmpty {
+            BulkActionsView(api: api, pipeline: pipeline, assets: selection.assets, onChanged: onChanged)
+        } else if selection.assets.isEmpty {
+            LocalPhotoActionsView(photos: selection.local, onChanged: onChanged)
+        } else {
+            List {
+                NavigationLink("\(selection.assets.count) server photos") {
+                    BulkActionsView(api: api, pipeline: pipeline, assets: selection.assets, onChanged: onChanged)
+                }
+                NavigationLink("\(selection.local.count) phone photos") {
+                    LocalPhotoActionsView(photos: selection.local, onChanged: onChanged)
+                }
+            }.navigationTitle("Selection actions")
+        }
+    }
 }

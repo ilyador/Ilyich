@@ -10,6 +10,8 @@ import SwiftUI
             Group {
                 if session.isRestoring {
                     ProgressView("Opening Ilyich")
+                } else if session.isSigningOut {
+                    ProgressView("Signing out")
                 } else if let api = session.api, let pipeline = session.pipeline {
                     if session.requiresPasswordChange {
                         NavigationStack {
@@ -28,7 +30,7 @@ import SwiftUI
             .tint(.cyan)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }
-            .onChange(of: scenePhase) { _, phase in if phase == .active { session.validateSession() } }
+            .onChange(of: scenePhase) { _, phase in session.sceneChanged(phase) }
         }
     }
 }

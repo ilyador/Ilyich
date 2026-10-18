@@ -136,7 +136,7 @@ struct SlideshowView: View {
     }
 }
 
-private struct SlideshowStill: View {
+struct SlideshowStill: View {
     let pipeline: MediaPipeline
     let asset: Asset
     let look: String

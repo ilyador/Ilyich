@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum HTTPMethod: String, Sendable { case get = "GET", post = "POST", put = "PUT", patch = "PATCH", delete = "DELETE" }
 
@@ -33,8 +34,10 @@ actor APIClient {
     }
     private let accessToken: String?
     private let session: URLSession
+    private let streamingSession: URLSession
     private let connection: ServerConnection
     private var castAuthorization: CastAuthorization?
+    private var entityStore: EntityStore?
 
     init(baseURL: URL, accessToken: String? = nil, userID: String? = nil, session: URLSession? = nil, networkConfiguration: NetworkConfiguration? = nil) throws {
         self.baseURL = try Self.normalizedBaseURL(baseURL)
@@ -43,11 +46,14 @@ actor APIClient {
         self.connection = try ServerConnection(server: self.baseURL, configuration: networkConfiguration)
         if let session {
             self.session = session
+            self.streamingSession = session
         } else {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.timeoutIntervalForRequest = 75
             configuration.timeoutIntervalForResource = 120
             self.session = URLSession(configuration: configuration, delegate: SameOriginRedirectDelegate(origin: self.baseURL), delegateQueue: nil)
+            configuration.timeoutIntervalForResource = 3_600
+            self.streamingSession = URLSession(configuration: configuration, delegate: SameOriginRedirectDelegate(origin: self.baseURL), delegateQueue: nil)
         }
     }
 
@@ -154,14 +160,33 @@ actor APIClient {
         let payload: TimeBucketPayload = try await request(.get, path: "timeline/bucket", query: filter.queryItems + [.init(name: "timeBucket", value: bucket)])
         return try payload.assets()
     }
-    func asset(id: String) async throws -> Asset { try await request(.get, path: "assets/\(id)") }
+    func attachEntityStore(_ store: EntityStore?) {
+        entityStore = store.flatMap { $0.scope == cacheScope && $0.userID == userID ? $0 : nil }
+    }
+    func syncStatistics() async throws -> EntityStoreStatistics? { try await entityStore?.statistics() }
+    private func canReadOffline(_ error: any Error) -> Bool {
+        error is URLError && (error as? URLError)?.code != .cancelled && !Task.isCancelled
+    }
+    func asset(id: String) async throws -> Asset {
+        do { return try await request(.get, path: "assets/\(id)") }
+        catch { if canReadOffline(error), let cached = try await entityStore?.asset(id: id) { return cached }; throw error }
+    }
     func assetStatistics() async throws -> AssetStatistics { try await request(.get, path: "assets/statistics") }
     func search(_ query: SearchQuery) async throws -> SearchResponse { try await request(.post, path: "search/smart", body: query) }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { try await request(.post, path: "search/metadata", body: query) }
-    func albums() async throws -> [Album] { try await request(.get, path: "albums") }
+    func albums() async throws -> [Album] {
+        do { return try await request(.get, path: "albums") }
+        catch { if canReadOffline(error), let store = entityStore, try await store.isComplete() { return try await store.albums() }; throw error }
+    }
     func album(id: String) async throws -> Album { try await request(.get, path: "albums/\(id)") }
     func people(page: Int = 1, size: Int = 100) async throws -> PeopleResponse {
-        try await request(.get, path: "people", query: [.init(name: "page", value: String(page)), .init(name: "size", value: String(size))])
+        do { return try await request(.get, path: "people", query: [.init(name: "page", value: String(page)), .init(name: "size", value: String(size))]) }
+        catch {
+            guard canReadOffline(error), let store = entityStore, try await store.isComplete() else { throw error }
+            let all = try await store.people(), visible = all.filter { $0.isHidden != true }
+            let safeSize = min(max(size, 1), 1_000), start = min(max(page - 1, 0), visible.count) * min(max(size, 1), 1_000)
+            return PeopleResponse(people: Array(visible.dropFirst(start).prefix(safeSize)), total: all.count, hidden: all.count - visible.count, hasNextPage: start + safeSize < visible.count)
+        }
     }
     func person(id: String) async throws -> Person { try await request(.get, path: "people/\(id)") }
     func mapMarkers() async throws -> [MapMarker] { try await request(.get, path: "map/markers") }
@@ -196,7 +221,10 @@ actor APIClient {
     func duplicates() async throws -> [DuplicateGroup] { try await request(.get, path: "duplicates") }
     func folders() async throws -> [String] { try await request(.get, path: "view/folder/unique-paths") }
     func folderAssets(path: String) async throws -> [Asset] { try await request(.get, path: "view/folder", query: [.init(name: "path", value: path)]) }
-    func assetOCR(id: String) async throws -> [RecognizedText] { try await request(.get, path: "assets/\(id)/ocr") }
+    func assetOCR(id: String) async throws -> [RecognizedText] {
+        do { return try await request(.get, path: "assets/\(id)/ocr") }
+        catch { if canReadOffline(error), let store = entityStore, try await store.isComplete(), try await store.asset(id: id) != nil { return try await store.assetOCR(id: id) }; throw error }
+    }
     func assetAlbums(id: String) async throws -> [Album] { try await request(.get, path: "albums", query: [.init(name: "assetId", value: id)]) }
     func assetEdits(id: String) async throws -> AssetEdits { try await request(.get, path: "assets/\(id)/edits") }
     func saveEdits(id: String, edits: [PhotoEdit]) async throws -> AssetEdits { try await request(.put, path: "assets/\(id)/edits", body: EditSubmission(edits: edits)) }
@@ -316,3 +344,82 @@ private struct CastSessionCreation: Encodable, Sendable {
     let duration = 900
 }
 private struct CastAuthorization: Decodable, Sendable { let id: String; let token: String; let expiresAt: Date? }
+
+
+extension APIClient {
+    /// Only a digest enters the offline database; the actual session remains in Keychain.
+    func syncSessionFingerprint() throws -> String {
+        guard let accessToken, userID != nil else { throw APIError.unauthorized }
+        return SHA256.hash(data: Data(accessToken.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    func acknowledgeSync(_ acks: [String]) async throws {
+        guard !acks.isEmpty else { return }
+        try await requestVoid(.post, path: "sync/ack", body: ["acks": acks])
+    }
+    func consumeSyncStream(reset: Bool, onBatch: @Sendable ([EntitySyncEvent]) async throws -> Void) async throws {
+        let startedAt = Date()
+        var status: Int?
+        do {
+            var request = try await authorizedRequest(path: "sync/stream")
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/jsonlines+json", forHTTPHeaderField: "Accept")
+            request.httpBody = try JSONEncoder().encode(EntitySyncRequest(reset: reset))
+            let (bytes, response) = try await streamingSession.bytes(for: request)
+            status = (response as? HTTPURLResponse)?.statusCode
+            try Self.validate(response)
+            var batch: [EntitySyncEvent] = []
+            var ended = false
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                guard !line.isEmpty else { continue }
+                guard line.utf8.count <= 4 * 1_024 * 1_024, !ended else { throw APIError.invalidResponse("The server returned an invalid sync stream.") }
+                let event: EntitySyncEvent
+                do { event = try JSONDecoder().decode(EntitySyncEvent.self, from: Data(line.utf8)) }
+                catch { throw APIError.invalidResponse("The server returned an unreadable sync record. The last saved batch can be resumed.") }
+                batch.append(event)
+                ended = ["SyncCompleteV1", "SyncResetV1"].contains(event.type)
+                if batch.count == 200 || ended { try await onBatch(batch); batch.removeAll(keepingCapacity: true) }
+            }
+            if !batch.isEmpty { try await onBatch(batch) }
+            guard ended else { throw APIError.invalidResponse("Synchronization was interrupted before completion. It will resume from the last saved batch.") }
+            await DiagnosticsStore.shared.record(method: "POST", path: "sync/stream", statusCode: status, startedAt: startedAt, outcome: .success)
+        } catch {
+            if error is URLError { await connection.invalidate() }
+            await recordFailure(error, method: "POST", path: "sync/stream", status: status, startedAt: startedAt)
+            throw error
+        }
+    }
+    func serverEvents() async throws -> ServerEventConnection {
+        var request = try await authorizedRequest(path: "socket.io/", query: [.init(name: "EIO", value: "4"), .init(name: "transport", value: "websocket")])
+        guard let url = request.url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw APIError.invalidServerURL }
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        request.url = components.url
+        let socket = streamingSession.webSocketTask(with: request)
+        socket.maximumMessageSize = 4 * 1_024 * 1_024
+        let events = AsyncThrowingStream<ServerInvalidation, any Error>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let task = Task {
+                socket.resume()
+                do {
+                    try await withTaskCancellationHandler {
+                        while !Task.isCancelled {
+                            let message = try await socket.receive()
+                            let text: String
+                            switch message { case .string(let value): text = value; case .data(let data): text = String(decoding: data, as: UTF8.self); @unknown default: continue }
+                            switch try SocketEventPacket.parse(text) {
+                            case .open: try await socket.send(.string("40"))
+                            case .ping(let payload): try await socket.send(.string("3" + payload))
+                            case .invalidation(let event): continuation.yield(event)
+                            case .ignore: break
+                            }
+                        }
+                    } onCancel: { socket.cancel(with: .goingAway, reason: nil) }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+                socket.cancel(with: .goingAway, reason: nil)
+            }
+            continuation.onTermination = { _ in task.cancel(); socket.cancel(with: .goingAway, reason: nil) }
+        }
+        return ServerEventConnection(events: events, close: { socket.cancel(with: .goingAway, reason: nil) })
+    }
+}

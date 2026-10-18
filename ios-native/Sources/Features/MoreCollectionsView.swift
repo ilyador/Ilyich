@@ -122,7 +122,9 @@ struct MemoriesView: View {
         }.navigationTitle(savedOnly ? "Saved memories" : "On this day")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Toggle("Saved memories", isOn: $savedOnly).toggleStyle(.button) } }
         .task(id: savedOnly) { await load() }.refreshable { await load() }
-        .fullScreenCover(item: $playingMemory) { memory in SlideshowView(api: api, pipeline: pipeline, assets: memory.assets) }
+        .fullScreenCover(item: $playingMemory) { memory in
+            MemoryPlaybackView(api: api, pipeline: pipeline, memories: memories, initialID: memory.id, onOpenAsset: onOpenAsset)
+        }
         .alert("Couldn’t update memories", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }

@@ -89,6 +89,68 @@ import XCTest
         }
         XCTFail("The library did not settle its search request.")
     }
+
+    func testMonthSelectionResolvesEvictedAssetsAndKeepsRemoteAndLocalIdentitiesSeparate() async throws {
+        let assets = (0..<650).map { Asset(id: "remote-\($0)") }
+        let api = LibraryAPIFixture([], timelineAssets: assets)
+        let store = LibraryStore(api: api, includesDevicePhotos: true)
+        await store.reload()
+        let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
+        store.updateDeviceTimeline(MergedTimeline(photos: [.init(id: "phone-only", date: date), .init(id: "backed-up", date: date)],
+                                                  associations: ["backed-up": "remote-0"]))
+        store.loaded = [:] // The summary survives eviction of its asset records.
+        store.isSelecting = true
+        store.selectMonth(true)
+        try await settleSelection(store)
+        XCTAssertEqual(store.selected.count, 651)
+        XCTAssertEqual(Set(store.selectedAssets.map(\.id)), Set(assets.map(\.id)))
+        XCTAssertEqual(store.selectedLocalPhotos.map(\.id), ["phone-only"])
+        XCTAssertFalse(store.selected.contains("local:backed-up"))
+        store.selectMonth(false)
+        try await settleSelection(store)
+        XCTAssertTrue(store.selected.isEmpty)
+        XCTAssertTrue(store.selectedLocalPhotos.isEmpty)
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testPendingGroupSelectionCannotReappearAfterLeavingSelection() async throws {
+        let api = LibraryAPIFixture([], delayedTimeline: true)
+        let store = LibraryStore(api: api)
+        await store.reload()
+        store.isSelecting = true; store.selectMonth(true)
+        await Task.yield()
+        store.isSelecting = false
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(store.selected.isEmpty)
+        XCTAssertFalse(store.isSelectingGroup)
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testDeduplicationKeepsTheVisiblePhotoAnchoredWhenEarlierRowsDisappear() async throws {
+        let api = LibraryAPIFixture([])
+        let store = LibraryStore(api: api, includesDevicePhotos: true)
+        await store.reload()
+        let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
+        let photos = [LocalPhoto(id: "a", date: date), LocalPhoto(id: "b", date: date.addingTimeInterval(-60))]
+        store.updateDeviceTimeline(MergedTimeline(photos: photos))
+        store.loaded = ["2026-01-01T00:00:00Z": [Asset(id: "timeline-photo")]]
+        store.updateDeviceTimeline(MergedTimeline(photos: photos))
+        store.position = GridPosition(section: "2026-01-01T00:00:00Z", item: 1, offset: 17, assetID: "local:b")
+        store.updateDeviceTimeline(MergedTimeline(photos: photos, associations: ["a": "timeline-photo"]))
+        let position = try XCTUnwrap(store.restorePosition)
+        XCTAssertEqual(store.restoredIndex(for: position)?.item, 0)
+        XCTAssertEqual(position.offset, 17)
+        store.updateDeviceTimeline(MergedTimeline(photos: photos, associations: ["a": "timeline-photo", "b": "timeline-photo"]))
+        XCTAssertEqual(store.restorePosition?.assetID, "timeline-photo")
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    private func settleSelection(_ store: LibraryStore) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while store.isSelectingGroup && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(store.isSelectingGroup)
+        XCTAssertNil(store.error)
+    }
 }
 
 private actor LibraryAPIFixture: LibraryAPI {
@@ -96,11 +158,18 @@ private actor LibraryAPIFixture: LibraryAPI {
     var cursors: [String?] = []
     private var pages: [SearchResponse]
     private let delayed: Bool
-    init(_ pages: [SearchResponse], delayed: Bool = false) { self.pages = pages; self.delayed = delayed }
-    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
-        [.init(timeBucket: "2026-01-01T00:00:00Z", count: 1)]
+    private let timelineAssets: [Asset]
+    private let delayedTimeline: Bool
+    init(_ pages: [SearchResponse], delayed: Bool = false, timelineAssets: [Asset] = [Asset(id: "timeline-photo")], delayedTimeline: Bool = false) {
+        self.pages = pages; self.delayed = delayed; self.timelineAssets = timelineAssets; self.delayedTimeline = delayedTimeline
     }
-    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] { [Asset(id: "timeline-photo")] }
+    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
+        [.init(timeBucket: "2026-01-01T00:00:00Z", count: timelineAssets.count)]
+    }
+    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
+        if delayedTimeline { try await Task.sleep(for: .seconds(3)) }
+        return timelineAssets
+    }
     func search(_ query: SearchQuery) async throws -> SearchResponse {
         cursors.append(query.cursor)
         if delayed { try await Task.sleep(for: .seconds(3)) }

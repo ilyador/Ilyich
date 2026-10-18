@@ -64,6 +64,17 @@ actor MediaPipeline {
         return try await load(identity, request: request, isPrivate: asset.visibility == .locked)
     }
 
+    func animation(for asset: Asset, pixelSize: Int) async throws -> AnimatedImageSource {
+        guard asset.isAnimatedImage, !asset.isDeveloped, !asset.isEdited else { throw APIError.invalidResponse("This photo uses a developed preview.") }
+        let epoch = generation, privateEpoch = privateGeneration
+        let file = try await client.download(asset: asset, original: true)
+        do {
+            try Task.checkCancellation()
+            guard epoch == generation, asset.visibility != .locked || privateEpoch == privateGeneration else { throw CancellationError() }
+            return try AnimatedImageSource(file: file, pixelSize: pixelSize)
+        } catch { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()); throw error }
+    }
+
     func personImage(person: Person, pixelSize: Int) async throws -> PreparedImage {
         let identity = MediaCacheIdentity(scope: client.cacheScope, person: person, pixelSize: pixelSize)
         let request = try await client.authorizedRequest(path: "people/\(person.id)/thumbnail", query: [.init(name: "c", value: identity.revision)])

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Network
 @preconcurrency import Photos
 
@@ -6,7 +7,8 @@ import Network
 /// which can arrive before PhotoKit has returned the request identifier.
 final class PhotoResourceExport: @unchecked Sendable {
     private let lock = NSLock()
-    private let destination: URL
+    private let destination: URL?
+    private var hash = Insecure.SHA1()
     private var output: FileHandle?
     private var requestID: PHAssetResourceDataRequestID?
     private var continuation: CheckedContinuation<Void, any Error>?
@@ -15,7 +17,17 @@ final class PhotoResourceExport: @unchecked Sendable {
     private var monitor: NWPathMonitor?
     private var started = false
 
-    init(destination: URL) { self.destination = destination }
+    init(destination: URL? = nil) { self.destination = destination }
+
+    /// The same streamed resource used by backup, with no temporary export or
+    /// iCloud network request. A cloud-only resource fails for the caller to skip.
+    static func checksum(_ resource: PHAssetResource) async throws -> String {
+        let reader = PhotoResourceExport()
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = false
+        try await reader.write(resource, options: options)
+        return reader.lock.withLock { Data(reader.hash.finalize()).base64EncodedString() }
+    }
 
     func write(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions, allowCellular: Bool = true) async throws {
         try await withTaskCancellationHandler {
@@ -29,11 +41,13 @@ final class PhotoResourceExport: @unchecked Sendable {
     private func begin(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions, allowCellular: Bool,
                        continuation: CheckedContinuation<Void, any Error>) {
         lock.lock()
-        guard !cancelled else { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
+        guard !cancelled, !completed, self.continuation == nil else { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
         self.continuation = continuation
         do {
-            try Data().write(to: destination, options: .completeFileProtectionUntilFirstUserAuthentication)
-            output = try FileHandle(forWritingTo: destination)
+            if let destination {
+                try Data().write(to: destination, options: .completeFileProtectionUntilFirstUserAuthentication)
+                output = try FileHandle(forWritingTo: destination)
+            }
         } catch { lock.unlock(); finish(error); return }
         if options.isNetworkAccessAllowed, !allowCellular {
             let monitor = NWPathMonitor()
@@ -68,7 +82,11 @@ final class PhotoResourceExport: @unchecked Sendable {
     private func append(_ data: Data) {
         lock.lock()
         guard !completed, !cancelled else { lock.unlock(); return }
-        do { try output?.write(contentsOf: data); lock.unlock() }
+        do {
+            if destination == nil { hash.update(data: data) }
+            else { try output?.write(contentsOf: data) }
+            lock.unlock()
+        }
         catch { lock.unlock(); finish(error, cancelRequest: true) }
     }
 
@@ -84,7 +102,7 @@ final class PhotoResourceExport: @unchecked Sendable {
         var result = error
         do { try output?.close() } catch { if result == nil { result = error } }
         output = nil
-        if result != nil { try? FileManager.default.removeItem(at: destination) }
+        if result != nil, let destination { try? FileManager.default.removeItem(at: destination) }
         let continuation = self.continuation
         self.continuation = nil
         let id = requestID

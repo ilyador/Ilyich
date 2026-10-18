@@ -29,6 +29,7 @@ enum SessionKeychain {
          kSecAttrAccessGroup as String: try appGroup]
     }
     static func read() throws -> SavedSession? {
+        guard UserDefaults(suiteName: try appGroup)?.bool(forKey: "session.signedOut") != true else { return nil }
         var query = try query()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -47,13 +48,17 @@ enum SessionKeychain {
             status = SecItemAdd(query.merging(values) { _, new in new } as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw KeychainError(status: status) }
+        UserDefaults(suiteName: try appGroup)?.set(false, forKey: "session.signedOut")
     }
     static func remove() throws {
+        // A failed Keychain deletion must not restore a session in the app or an
+        // extension. A later successful explicit sign-in clears this tombstone.
+        UserDefaults(suiteName: try appGroup)?.set(true, forKey: "session.signedOut")
         let status = SecItemDelete(try query() as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }
         if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try appGroup) {
             try? FileManager.default.removeItem(at: container.appendingPathComponent("WidgetCache"))
         }
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }
     }
     struct KeychainError: LocalizedError {
         let status: OSStatus

@@ -8,7 +8,7 @@ enum LivePhotoPairing {
         try Task.checkCancellation()
         if let paired = existing.livePhotoVideoId {
             guard paired == motionID else {
-                throw BackupError.message("This photo has a different Live Photo video on the server. Its existing pairing was kept; review it before retrying.")
+                throw BackupError.item("This photo has a different Live Photo video on the server. Its existing pairing was kept; review it before retrying.")
             }
             return
         }

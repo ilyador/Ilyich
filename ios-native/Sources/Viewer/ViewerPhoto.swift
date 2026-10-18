@@ -13,6 +13,7 @@ struct ViewerPhoto: View {
     @State private var zoomed = false
     @AppStorage("imageLoadOriginal") private var fullResolution = false
     @Environment(\.displayScale) private var scale
+    @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         GeometryReader { geometry in
             ZStack {
@@ -30,11 +31,27 @@ struct ViewerPhoto: View {
                         let preview = try await pipeline.image(for: asset, size: .preview, pixelSize: pixels)
                         try Task.checkCancellation(); image = preview.uiImage
                         // A full-size source supports real pinch-to-zoom without decoding the entire RAW.
-                        if active && (fullResolution || zoomed) {
+                        if active && !asset.isAnimatedImage && (fullResolution || zoomed) {
                             let full = try await pipeline.image(for: asset, size: .fullsize, pixelSize: fullResolution ? min(8192, max(asset.width ?? 4096, asset.height ?? 4096)) : min(4096, pixels * 2))
                             try Task.checkCancellation(); image = full.uiImage
                         }
                     } catch is CancellationError { } catch { if image == nil { failure = error.localizedDescription } }
+                }
+                .task(id: asset.id + asset.cacheRevision + String(active) + String(fullResolution) + String(describing: scenePhase)) {
+                    guard active, scenePhase == .active, asset.isAnimatedImage, !asset.isDeveloped, !asset.isEdited else { return }
+                    do {
+                        let pixels = fullResolution ? min(4096, max(asset.width ?? 2048, asset.height ?? 2048)) : min(2048, Int(max(geometry.size.width, geometry.size.height) * scale))
+                        let animation = try await pipeline.animation(for: asset, pixelSize: pixels)
+                        do {
+                            while let frame = try await animation.next() {
+                                try Task.checkCancellation()
+                                image = frame.image.uiImage
+                                try await Task.sleep(for: .seconds(frame.duration))
+                            }
+                        } catch { await animation.close(); throw error }
+                        await animation.close()
+                    } catch is CancellationError { }
+                    catch { if image == nil { failure = error.localizedDescription } }
                 }
         }.accessibilityLabel(asset.displayName).onChange(of: active) { _, value in if !value { zoomed = false } }
     }

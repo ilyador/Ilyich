@@ -17,6 +17,12 @@ struct AssetViewer: View {
     @State private var editing = false
     @State private var chooseAlbum = false
     @State private var deleteConfirmation = false
+    @State private var deletePermanently = false
+    @State private var deletionTarget: Asset?
+    @State private var refreshRevision = 0
+    @State private var accessRefreshRevision = -1
+    @State private var locationPresented = false
+    @State private var locationCollection: InfoCollection?
     @State private var error: String?
     @State private var working = false
     @State private var export: ViewerExport?
@@ -46,12 +52,12 @@ struct AssetViewer: View {
 
     private var selectedIndex: Int { assets.firstIndex(where: { $0.id == selectedID }) ?? 0 }
     private var current: Asset { replacements[selectedID] ?? assets[selectedIndex] }
-    private var ownsAsset: Bool { current.ownerId == nil || current.ownerId == api.userID }
+    private var ownsAsset: Bool { current.ownerId != nil && current.ownerId == api.userID }
     private var canEdit: Bool {
-        ownsAsset && current.type == .image && current.livePhotoVideoId == nil && current.exifInfo?.projectionType != "equirectangular" && !["gif", "svg"].contains((current.originalFileName as NSString).pathExtension.lowercased())
+        ownsAsset && current.type == .image && !current.isAnimatedImage && current.livePhotoVideoId == nil && current.exifInfo?.projectionType != "equirectangular" && !["gif", "svg"].contains((current.originalFileName as NSString).pathExtension.lowercased())
     }
 
-    var body: some View {
+    private var canvas: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             TabView(selection: $selectedID) {
@@ -85,15 +91,37 @@ struct AssetViewer: View {
         .task(id: selectedID) {
             playingLive = false
             CastController.shared.select(api: api, asset: current)
-            do {
-                let asset = try await api.asset(id: selectedID)
-                try Task.checkCancellation(); replacements[asset.id] = asset
-            } catch is CancellationError { } catch { self.error = error.localizedDescription }
+        }
+        .task(id: selectedID + "|" + String(refreshRevision)) { await refreshCurrentAsset() }
+        .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { note in
+            guard note.userInfo?["scope"] as? String == api.cacheScope else { return }
+            refreshRevision += 1
+            if note.userInfo?["accessChanged"] as? Bool == true { accessRefreshRevision = refreshRevision }
+        }
+    }
+
+    private var mediaSheets: some View {
+        canvas
+        .sheet(isPresented: $locationPresented) {
+            if let focus = locationFocus {
+                NavigationStack {
+                    PlacesView(api: api, pipeline: pipeline, onSelect: { place in
+                        guard !place.assetIDs.isEmpty else { return }
+                        locationCollection = .init(title: place.title, filter: SearchFilter(or: place.assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) }))
+                    }, focus: focus)
+                    .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { locationPresented = false } } }
+                    .sheet(item: $locationCollection) { collection in NavigationStack { InfoCollectionView(api: api, pipeline: pipeline, collection: collection) } }
+                }
+            }
         }
         .sheet(isPresented: $profilePhoto) { NavigationStack { ProfilePhotoCropView(api: api, pipeline: pipeline, asset: current) } }
         .sheet(isPresented: $castPresented) { CastView(api: api, asset: current) }
         .fullScreenCover(isPresented: $ocrPresented) { OCRPhotoReader(api: api, pipeline: pipeline, asset: current) }
         .sheet(isPresented: $similarPresented) { SimilarPhotosView(api: api, pipeline: pipeline, reference: current) }
+    }
+
+    private var detailSheets: some View {
+        mediaSheets
         .sheet(isPresented: $info) {
             NavigationStack {
                 AssetInfoView(api: api, pipeline: pipeline, asset: current, onUpdated: update)
@@ -117,26 +145,28 @@ struct AssetViewer: View {
         .sheet(item: $export) { item in
             ViewerShareSheet(url: item.url).onDisappear { item.removeTemporaryFile() }
         }
+    }
+
+    var body: some View {
+        detailSheets
         .alert("Couldn’t complete action", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(error ?? "") }
-        .confirmationDialog(current.isTrashed ? "Delete permanently?" : "Move to Trash?", isPresented: $deleteConfirmation, titleVisibility: .visible) {
-            Button(current.isTrashed ? "Delete permanently" : "Move to Trash", role: .destructive) { deleteAsset() }
+        .confirmationDialog(deletePermanently ? "Delete permanently?" : "Move to Trash?", isPresented: $deleteConfirmation, titleVisibility: .visible) {
+            Button(deletePermanently ? "Delete permanently" : "Move to Trash", role: .destructive) { deleteAsset() }
         } message: {
-            Text(current.isTrashed ? "This cannot be undone." : "You can restore this item from Trash. Photos on your phone are kept.")
+            Text(deletePermanently ? "This cannot be undone. Photos on your phone are kept." : "You can restore this item from Trash. Photos on your phone are kept.")
         }
     }
 
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
             viewerButton("Close", symbol: "chevron.down") { dismiss() }
-            VStack(spacing: 3) {
-                if let date = current.localDateTime ?? current.fileCreatedAt {
-                    Text(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, timeZone: TimeZone(secondsFromGMT: 0)!)))
-                        .font(.subheadline.weight(.semibold)).lineLimit(1)
-                }
-                let location = [current.exifInfo?.city, current.exifInfo?.country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
-                if !location.isEmpty { Text(location).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            Group {
+                if locationFocus != nil {
+                    Button { locationPresented = true } label: { headerMetadata }
+                        .buttonStyle(.plain).accessibilityHint("Explore this location on the globe")
+                } else { headerMetadata }
             }.padding(.horizontal, 14).frame(minHeight: 48).frame(maxWidth: .infinity).glassEffect(in: .capsule)
             Menu {
                 Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }.requiresWriteAccess(api)
@@ -159,9 +189,9 @@ struct AssetViewer: View {
                 Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }.requiresWriteAccess(api)
                 Button("Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
                 if ownsAsset {
-                    if current.isTrashed {
+                    if current.isTrashed, features?.trash == true {
                         Button("Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }.requiresWriteAccess(api)
-                    } else {
+                    } else if !current.isTrashed {
                         Button(current.visibility == .archive ? "Unarchive" : "Archive", systemImage: "archivebox") { changeVisibility(current.visibility == .archive ? .timeline : .archive) }.requiresWriteAccess(api)
                         Button(current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") { changeVisibility(current.visibility == .locked ? .timeline : .locked) }.requiresWriteAccess(api)
                     }
@@ -169,6 +199,23 @@ struct AssetViewer: View {
             } label: { Image(systemName: "ellipsis").frame(width: 48, height: 48).glassEffect(in: .circle) }
                 .accessibilityLabel("Photo actions").disabled(working)
         }
+    }
+
+    private var locationFocus: PlaceFocus? {
+        guard let latitude = current.exifInfo?.latitude, let longitude = current.exifInfo?.longitude,
+              latitude.isFinite, longitude.isFinite, (-90...90).contains(latitude), (-180...180).contains(longitude) else { return nil }
+        return .init(latitude: latitude, longitude: longitude, assetID: current.id)
+    }
+    private var headerMetadata: some View {
+        VStack(spacing: 3) {
+            if let date = current.localDateTime ?? current.fileCreatedAt {
+                Text(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, timeZone: TimeZone(secondsFromGMT: 0)!)))
+                    .font(.subheadline.weight(.semibold)).lineLimit(1)
+            }
+            let location = [current.exifInfo?.city, current.exifInfo?.country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+            if !location.isEmpty { Text(location).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            else if locationFocus != nil { Label("Photo location", systemImage: "globe.europe.africa").font(.caption).foregroundStyle(.secondary) }
+        }.frame(maxWidth: .infinity, minHeight: 48).contentShape(.capsule)
     }
 
     private var footer: some View {
@@ -190,7 +237,7 @@ struct AssetViewer: View {
                 }
                 if ownsAsset {
                     Spacer()
-                    viewerButton("Delete", symbol: "trash") { deleteConfirmation = true }.requiresWriteAccess(api)
+                    viewerButton("Delete", symbol: "trash") { requestDeletion() }.requiresWriteAccess(api)
                 }
             }.disabled(working)
         }
@@ -211,10 +258,12 @@ struct AssetViewer: View {
         Task { defer { working = false }; do { try await operation() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
     }
     private func toggleFavorite() {
+        guard ownsAsset else { return }
         let asset = current
         run { update(try await api.updateFavorite(assetID: asset.id, value: !asset.isFavorite)) }
     }
     private func changeVisibility(_ visibility: AssetVisibility) {
+        guard ownsAsset else { return }
         let id = current.id
         run {
             let updated = try await api.updateAsset(id: id, update: .init(visibility: visibility))
@@ -225,13 +274,52 @@ struct AssetViewer: View {
             } else { update(updated) }
         }
     }
-    private func deleteAsset() {
+    private func requestDeletion() {
+        guard ownsAsset else { return }
         let asset = current
-        run { try await api.trashAssets(ids: [asset.id], permanently: asset.isTrashed); onDeleted(); dismiss() }
+        run {
+            let latest = try await api.serverFeatures()
+            guard asset.id == selectedID else { return }
+            features = latest; deletePermanently = asset.isTrashed || !latest.trash
+            deletionTarget = asset; deleteConfirmation = true
+        }
+    }
+    private func deleteAsset() {
+        guard let asset = deletionTarget, asset.ownerId != nil, asset.ownerId == api.userID else { return }
+        let permanently = deletePermanently
+        run { try await api.trashAssets(ids: [asset.id], permanently: permanently); onDeleted(); dismiss() }
     }
     private func restoreAsset() {
+        guard ownsAsset, features?.trash == true else { return }
         let id = current.id
         run { _ = try await api.restoreAssets(ids: [id]); onDeleted(); dismiss() }
+    }
+    private func refreshCurrentAsset() async {
+        let id = selectedID, revision = refreshRevision
+        let previous = current
+        let accessMustBeConfirmed = accessRefreshRevision >= 0 && accessRefreshRevision <= revision
+        do {
+            if revision > 0 { try await Task.sleep(for: .milliseconds(250)) }
+            let asset = try await api.asset(id: id)
+            try Task.checkCancellation()
+            guard selectedID == id, refreshRevision == revision else { return }
+            if (asset.visibility == .locked && previous.visibility != .locked) || (asset.isTrashed && !previous.isTrashed) {
+                onDeleted(); dismiss(); return
+            }
+            replacements[id] = asset
+            accessRefreshRevision = -1
+            if asset != previous { onUpdated(asset) }
+        } catch is CancellationError { }
+        catch {
+            guard selectedID == id, refreshRevision == revision, !Task.isCancelled else { return }
+            switch error {
+            case APIError.forbidden, APIError.notFound, APIError.unauthorized:
+                onDeleted(); dismiss()
+            default:
+                if accessMustBeConfirmed { onDeleted(); dismiss() }
+                else if revision == 0 { self.error = error.localizedDescription }
+            }
+        }
     }
     private func exportAsset(original: Bool) {
         let asset = current

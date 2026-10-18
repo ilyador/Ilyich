@@ -23,7 +23,7 @@ struct AssetInfoView: View {
         self.api = api; self.pipeline = pipeline; self.onUpdated = onUpdated
         _asset = State(initialValue: asset); _caption = State(initialValue: asset.exifInfo?.description ?? "")
     }
-    private var ownsAsset: Bool { asset.ownerId == nil || asset.ownerId == api.userID }
+    private var ownsAsset: Bool { asset.ownerId != nil && asset.ownerId == api.userID }
     var body: some View {
         Form {
             Section {
@@ -188,6 +188,7 @@ private struct MetadataEditor: View {
     @State private var longitude: String
     @State private var error: String?
     @State private var saving = false
+    @State private var pickingLocation = false
     @Environment(\.dismiss) private var dismiss
     init(api: APIClient, asset: Asset, onUpdated: @escaping (Asset) -> Void) {
         self.api = api; self.asset = asset; self.onUpdated = onUpdated
@@ -201,6 +202,7 @@ private struct MetadataEditor: View {
             Section("Location") {
                 TextField("Latitude", text: $latitude).keyboardType(.numbersAndPunctuation)
                 TextField("Longitude", text: $longitude).keyboardType(.numbersAndPunctuation)
+                Button("Choose on map", systemImage: "map") { pickingLocation = true }
             }
             if let error { Text(error).foregroundStyle(.red) }
         }.navigationTitle("Adjust information")
@@ -208,6 +210,17 @@ private struct MetadataEditor: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
                 ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(saving).requiresWriteAccess(api) }
             }.interactiveDismissDisabled(saving)
+            .sheet(isPresented: $pickingLocation) {
+                NavigationStack {
+                    LocationPickerView(api: api, initial: initialCoordinate) { coordinate in
+                        latitude = String(coordinate.latitude); longitude = String(coordinate.longitude)
+                    }
+                }
+            }
+    }
+    private var initialCoordinate: CLLocationCoordinate2D? {
+        guard let latitude = Double(latitude), let longitude = Double(longitude) else { return nil }
+        return CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
     private func save() {
         let lat = Double(latitude), lon = Double(longitude)
@@ -225,13 +238,13 @@ private struct MetadataEditor: View {
     }
 }
 
-private struct InfoCollection: Identifiable {
+struct InfoCollection: Identifiable {
     let id = UUID()
     let title: String
     let filter: SearchFilter
 }
 
-private struct InfoCollectionView: View {
+struct InfoCollectionView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let collection: InfoCollection

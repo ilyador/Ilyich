@@ -7,29 +7,12 @@ struct BackupSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
-                Label(backup.activity, systemImage: backup.isRunning ? "arrow.triangle.2.circlepath" : "icloud.and.arrow.up")
-                if let progress = backup.progress { ProgressView(value: progress).accessibilityLabel("Current file progress") }
-                if backup.totalTransferBytes > 0 {
-                    LabeledContent("Transferred", value: "\(ByteCountFormatter.string(fromByteCount: backup.bytesTransferred, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: backup.totalTransferBytes, countStyle: .file))")
-                }
-                if let rate = backup.transferRate { LabeledContent("Upload speed", value: "\(ByteCountFormatter.string(fromByteCount: rate, countStyle: .file))/s") }
-                LabeledContent("Remaining", value: backup.remaining.formatted())
-                LabeledContent("Confirmed uploads", value: backup.confirmed.formatted())
-                if let error = backup.error { Text(error).foregroundStyle(.red).accessibilityIdentifier("backup.error") }
-                if backup.isRunning {
-                    Button("Pause backup", role: .destructive) { Task { await backup.pause() } }
-                } else {
-                    Button(backup.remaining > 0 ? "Resume backup" : "Back up now") { Task { await backup.start() } }
-                        .disabled(![PHAuthorizationStatus.authorized, .limited].contains(backup.permission) || backup.preferences.includedAlbums.isEmpty)
-                        .requiresWriteAccess()
-                }
-            } header: { Text("Backup") } footer: {
-                Text("Original files stay in Photos. Transfers already started can continue while Ilyich is in the background.")
-            }
+            BackupStatusSection()
 
             if !backup.failures.isEmpty {
                 Section("Uploads needing retry") {
+                    Button("Retry failed uploads") { Task { await backup.start() } }
+                        .disabled(backup.isRunning).requiresWriteAccess()
                     ForEach(backup.failures) { failure in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(failure.filename)
@@ -83,7 +66,7 @@ struct BackupSettingsView: View {
                     Toggle("Use cellular for videos", isOn: $backup.preferences.cellularVideos)
                     Toggle("Download iCloud originals", isOn: $backup.preferences.downloadCloudOriginals)
                 } header: { Text("Transfers") } footer: {
-                    Text("iOS decides when background work can run. Cellular settings apply to uploads and iCloud downloads. With downloads off, unavailable originals pause backup for you to review.")
+                    Text("iOS decides when background work can run. Cellular settings apply to uploads and iCloud downloads. Unavailable originals stay in the retry list while other files continue.")
                 }
                 .disabled(backup.isRunning)
             }
@@ -112,5 +95,35 @@ struct BackupSettingsView: View {
     private func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+}
+
+
+/// Transfer ticks update this small section rather than rebuilding every album picker.
+private struct BackupStatusSection: View {
+    @State private var backup = BackupCoordinator.shared
+    var body: some View {
+    Section {
+        Label(backup.activity, systemImage: backup.isRunning ? "arrow.triangle.2.circlepath" : "icloud.and.arrow.up")
+        if let progress = backup.progress { ProgressView(value: progress).accessibilityLabel("Current file progress") }
+        if backup.totalTransferBytes > 0 {
+            LabeledContent("Transferred", value: "\(ByteCountFormatter.string(fromByteCount: backup.bytesTransferred, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: backup.totalTransferBytes, countStyle: .file))")
+        }
+        if let rate = backup.transferRate { LabeledContent("Upload speed", value: "\(ByteCountFormatter.string(fromByteCount: rate, countStyle: .file))/s") }
+        LabeledContent("Remaining", value: backup.remaining.formatted())
+        if backup.remaining > 0 { NavigationLink("View upload queue") { BackupQueueView() } }
+        LabeledContent("Confirmed uploads", value: backup.confirmed.formatted())
+        if backup.confirmed > 0 { NavigationLink("View confirmed uploads") { BackupQueueView(showCompleted: true) } }
+        if let error = backup.error { Text(error).foregroundStyle(.red).accessibilityIdentifier("backup.error") }
+        if backup.isRunning {
+            Button("Pause backup", role: .destructive) { Task { await backup.pause() } }
+        } else {
+            Button(backup.remaining > 0 ? "Resume backup" : "Back up now") { Task { await backup.start() } }
+                .disabled(![PHAuthorizationStatus.authorized, .limited].contains(backup.permission) || (backup.remaining == 0 && backup.preferences.includedAlbums.isEmpty))
+                .requiresWriteAccess()
+        }
+    } header: { Text("Backup") } footer: {
+        Text("Original files stay in Photos. Transfers already started can continue while Ilyich is in the background.")
+    }
     }
 }

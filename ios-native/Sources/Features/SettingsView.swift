@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     let api: APIClient
     var pipeline: MediaPipeline? = nil
+    var session: SessionStore? = nil
     let onSignOut: () -> Void
     @AppStorage("gridColumns") private var columns = 4
     @AppStorage("appearance") private var appearance = "system"
@@ -42,7 +43,7 @@ struct SettingsView: View {
             Section {
                 NavigationLink { NetworkSettingsView(api: api, server: api.baseURL) } label: { Label("Network", systemImage: "network") }
                 NavigationLink { ServerSettingsView(api: api) } label: { Label("Server", systemImage: "externaldrive.connected.to.line.below") }
-                NavigationLink { DiagnosticsView(api: api, pipeline: pipeline) } label: { Label("Diagnostics", systemImage: "stethoscope") }
+                NavigationLink { DiagnosticsView(api: api, pipeline: pipeline, session: session) } label: { Label("Diagnostics", systemImage: "stethoscope") }
                 NavigationLink { AboutIlyichView() } label: { Label("About", systemImage: "info.circle") }
             }
             Section { Button("Sign out", role: .destructive) { confirmSignOut = true } }
@@ -87,6 +88,7 @@ private struct AccountSettingsView: View {
     @State private var loading = true
     @State private var saving = false
     @State private var saved = false
+    @State private var account: User?
     @State private var failure: FeatureFailure?
     var body: some View {
         Form {
@@ -96,11 +98,13 @@ private struct AccountSettingsView: View {
                 NavigationLink("Change password") { ChangePasswordView(api: api) }
                 NavigationLink("Locked folder PIN") { PINSettingsView(api: api) }
             }
+            if let account { AccountStorageSection(user: account) }
+            if let account, account.quotaSizeInBytes == nil { ServerStorageSection(api: api) }
             if saved { Label("Profile saved", systemImage: "checkmark.circle").foregroundStyle(.secondary) }
         }.navigationTitle("Account").disabled(loading || saving)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(loading || saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).requiresWriteAccess(api) } }
         .task {
-            do { let user = try await api.currentUser(); name = user.name; email = user.email ?? "" } catch { failure = .init(error) }
+            do { let user = try await api.currentUser(); account = user; name = user.name; email = user.email ?? "" } catch { failure = .init(error) }
             loading = false
         }
         .alert("Couldn’t update account", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
@@ -157,6 +161,7 @@ private struct ServerSettingsView: View {
         Form {
             Section("Connection") { LabeledContent("Server", value: api.baseURL.deletingLastPathComponent().absoluteString); if !version.isEmpty { LabeledContent("Version", value: version) } }
             if let stats { Section("Your library") { LabeledContent("Photos", value: stats.images.formatted()); LabeledContent("Videos", value: stats.videos.formatted()); LabeledContent("Total", value: stats.total.formatted()) } }
+            ServerStorageSection(api: api)
         }.navigationTitle("Server")
         .task {
             struct Version: Decodable, Sendable { let major: Int; let minor: Int; let patch: Int }
@@ -188,3 +193,53 @@ private struct AboutIlyichView: View {
         }.navigationTitle("About")
     }
 }
+
+private struct AccountStorageSection: View {
+    let user: User
+    var body: some View {
+        Section("Your storage") {
+            if let used = user.quotaUsageInBytes {
+                LabeledContent("Used", value: storageBytes(used))
+                if let limit = user.quotaSizeInBytes {
+                    ProgressView(value: min(1, max(0, Double(used) / Double(max(1, limit)))))
+                        .accessibilityLabel("Account storage").accessibilityValue("\(storageBytes(used)) of \(storageBytes(limit))")
+                }
+            } else { Text("Your server has not reported account usage.").foregroundStyle(.secondary) }
+            if let limit = user.quotaSizeInBytes { LabeledContent("Account limit", value: storageBytes(limit)) }
+            else { LabeledContent("Account limit", value: "Unlimited") }
+        }
+    }
+}
+
+private struct ServerStorageSection: View {
+    let api: APIClient
+    @State private var storage: Storage?
+    @State private var failure: String?
+    @State private var loading = false
+    private struct Storage: Decodable, Sendable {
+        let diskSizeRaw: Int64
+        let diskUseRaw: Int64
+        let diskAvailableRaw: Int64
+    }
+    var body: some View {
+        Section("Server storage") {
+            if let storage {
+                ProgressView(value: min(1, max(0, Double(storage.diskUseRaw) / Double(max(1, storage.diskSizeRaw)))))
+                    .accessibilityLabel("Server storage").accessibilityValue("\(storageBytes(storage.diskUseRaw)) of \(storageBytes(storage.diskSizeRaw))")
+                LabeledContent("Used", value: storageBytes(storage.diskUseRaw))
+                LabeledContent("Available", value: storageBytes(storage.diskAvailableRaw))
+                LabeledContent("Total", value: storageBytes(storage.diskSizeRaw))
+            }
+            if let failure { Text(failure).font(.footnote).foregroundStyle(.secondary); Button("Retry storage details") { Task { await load() } }.disabled(loading) }
+            if loading { ProgressView() }
+        }.task { await load() }
+    }
+    private func load() async {
+        guard !loading else { return }; loading = true; defer { loading = false }
+        do { storage = try await api.request(.get, path: "server/storage"); failure = nil }
+        catch is CancellationError { }
+        catch APIError.forbidden { failure = "Server storage information is unavailable for this account." }
+        catch { failure = error.localizedDescription }
+    }
+}
+private func storageBytes(_ value: Int64) -> String { ByteCountFormatter.string(fromByteCount: max(0, value), countStyle: .file) }

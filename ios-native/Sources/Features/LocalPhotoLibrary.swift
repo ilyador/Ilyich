@@ -12,10 +12,24 @@ struct LocalPhoto: Identifiable, Hashable, Sendable {
     let video: Bool
     let live: Bool
     let duration: Double
+    let width: Int
+    let height: Int
+    let isFavorite: Bool
+    let latitude: Double?
+    let longitude: Double?
     var title: String { date?.formatted(date: .abbreviated, time: .shortened) ?? (video ? "Video" : "Photo") }
     init(_ asset: PHAsset) {
         id = asset.localIdentifier; date = asset.creationDate; modified = asset.modificationDate
         video = asset.mediaType == .video; live = asset.mediaSubtypes.contains(.photoLive); duration = asset.duration
+        width = asset.pixelWidth; height = asset.pixelHeight; isFavorite = asset.isFavorite
+        latitude = asset.location?.coordinate.latitude; longitude = asset.location?.coordinate.longitude
+    }
+    init(id: String, date: Date?, modified: Date? = nil, video: Bool = false, live: Bool = false,
+         duration: Double = 0, width: Int = 0, height: Int = 0, isFavorite: Bool = false,
+         latitude: Double? = nil, longitude: Double? = nil) {
+        self.id = id; self.date = date; self.modified = modified; self.video = video; self.live = live
+        self.duration = duration; self.width = width; self.height = height; self.isFavorite = isFavorite
+        self.latitude = latitude; self.longitude = longitude
     }
 }
 
@@ -133,6 +147,9 @@ struct LocalPhotoThumbnail: View {
 
 struct LocalPhotoViewer: View {
     let photo: LocalPhoto
+    var onChanged: (() -> Void)? = nil
+    @State private var showActions = false
+    @State private var actionPhotos: [LocalPhoto] = []
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var media = LocalPhotoMedia()
@@ -158,12 +175,26 @@ struct LocalPhotoViewer: View {
             }.navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Photo actions", systemImage: "ellipsis") {
+                        if let current = PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject { actionPhotos = [LocalPhoto(current)]; showActions = true }
+                    }
+                }
                 if photo.live { ToolbarItem(placement: .topBarTrailing) { Toggle("Live Photo", isOn: $motion).toggleStyle(.button) } }
             }
         }.preferredColorScheme(.dark)
         .task(id: "\(photo.id)|\(network)|\(motion)|\(retry)") { media.load(photo, full: true, network: network, motion: motion) }
         .onChange(of: scenePhase) { _, phase in if phase != .active { media.player?.pause() } }
         .onDisappear { media.cancel() }
+        .sheet(isPresented: $showActions) {
+            NavigationStack {
+                LocalPhotoActionsView(photos: actionPhotos) {
+                    onChanged?()
+                    if PHAsset.fetchAssets(withLocalIdentifiers: [photo.id], options: nil).firstObject == nil { dismiss() }
+                    else { retry += 1 }
+                }
+            }
+        }
     }
 }
 
