@@ -38,6 +38,9 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(asset.localDateTime, APIDate.parse("2026-02-01T05:00:00Z"))
         XCTAssertEqual(asset.cacheRevision, "edited-2")
         XCTAssertEqual(asset.aspectRatio, 1.5)
+        XCTAssertFalse(asset.hasKnownEditState)
+        let restored = try APIJSON.decoder().decode(Asset.self, from: APIJSON.encoder().encode(asset))
+        XCTAssertFalse(restored.hasKnownEditState, "Caching a timeline summary must not invent edit metadata.")
         let malformed = valid.replacingOccurrences(of: #""ratio":[1.5]"#, with: #""ratio":[]"#)
         XCTAssertThrowsError(try APIJSON.decoder().decode(TimeBucketPayload.self, from: Data(malformed.utf8)).assets())
     }
@@ -83,6 +86,7 @@ final class CoreTests: XCTestCase {
         let data = Data(#"{"id":"photo","type":"IMAGE","isEdited":false,"isDeveloped":true,"mediaRevision":"xmp-7","duration":null,"width":6000,"height":4000,"originalFileName":"DSC_0632.NEF","fileCreatedAt":"2024-10-19T13:48:55.000Z"}"#.utf8)
         let asset = try APIJSON.decoder().decode(Asset.self, from: data)
         XCTAssertTrue(asset.isDeveloped)
+        XCTAssertTrue(asset.hasKnownEditState)
         XCTAssertFalse(asset.isEdited)
         XCTAssertEqual(asset.aspectRatio, 1.5)
         XCTAssertEqual(asset.cacheRevision, "xmp-7")

@@ -1,10 +1,10 @@
 import XCTest
 
 final class LibraryTests: XCTestCase {
-    @MainActor private func launch(appearance: String = "light") -> XCUIApplication {
+    @MainActor private func launch(appearance: String = "light", extraArguments: [String] = []) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["--ui-testing", "--ui-testing-library", "-appearance", appearance]
+        app.launchArguments = ["--ui-testing", "--ui-testing-library", "-appearance", appearance] + extraArguments
         app.launch()
         XCTAssertTrue(app.collectionViews["library.grid"].waitForExistence(timeout: 15))
         return app
@@ -108,6 +108,65 @@ final class LibraryTests: XCTestCase {
         app.buttons["library.select"].tap()
         app.collectionViews["library.grid"].cells.firstMatch.tap()
         XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
+    }
+    @MainActor func testMemoryLanePlaybackAdvancesClosesAndLeavesLibrarySelectable() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        let card = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Maya Memory One")).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 15), "The fixture's first memory must appear in the library memory lane.")
+        XCTAssertEqual(card.label, "Maya Memory One, 3 photos")
+        requireHittable(card, in: app)
+        card.tap()
+
+        XCTAssertTrue(app.staticTexts["1 of 3"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Close memories"].exists)
+        let chevron = app.buttons["memories.nextPhoto"]
+        XCTAssertTrue(chevron.waitForExistence(timeout: 10))
+        requireHittable(chevron, in: app)
+        chevron.tap()
+        XCTAssertTrue(app.staticTexts["2 of 3"].waitForExistence(timeout: 5))
+        capture(app, "Memory playback")
+
+        let nextMemory = app.buttons["Next memory"]
+        requireHittable(nextMemory, in: app)
+        nextMemory.tap()
+        XCTAssertTrue(app.staticTexts["1 of 2"].waitForExistence(timeout: 5), "Next memory must open the second synthetic memory.")
+
+        let close = app.buttons["Close memories"]
+        requireHittable(close, in: app)
+        close.tap()
+        let select = app.buttons["library.select"]
+        requireHittable(select, in: app)
+        select.tap()
+        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 5))
+        grid.cells.firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
+        requireHittable(select, in: app)
+        select.tap()
+        XCTAssertFalse(app.staticTexts["1 selected"].waitForExistence(timeout: 2))
+    }
+    @MainActor func testDarkInteractiveEarthIsAvailableForCapture() {
+        let app = launch(appearance: "dark")
+        app.buttons["library.shelves"].tap(); app.buttons["Places"].tap()
+        XCTAssertTrue(app.otherElements["Interactive Earth"].waitForExistence(timeout: 15))
+        capture(app, "Places — dark Interactive Earth")
+        app.buttons["Close globe"].tap()
+        XCTAssertTrue(app.textFields["library.search"].isHittable)
+    }
+    @MainActor func testAccessibilityTextKeepsLibraryAndGlobeControlsTappable() {
+        let app = launch(extraArguments: ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
+        for identifier in ["library.select", "library.shelves"] { requireHittable(app.buttons[identifier], in: app) }
+        capture(app, "Library — accessibility text")
+        app.buttons["library.shelves"].tap()
+        let places = app.buttons["Places"]
+        requireHittable(places, in: app)
+        places.tap()
+        XCTAssertTrue(app.otherElements["Interactive Earth"].waitForExistence(timeout: 15))
+        let close = app.buttons["Close globe"]
+        requireHittable(close, in: app)
+        capture(app, "Places — accessibility text")
+        close.tap()
+        requireHittable(app.textFields["library.search"], in: app)
     }
     @MainActor func testLargeLibraryScrollingMetrics() {
         let app = launch(); let grid = app.collectionViews["library.grid"]

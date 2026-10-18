@@ -55,23 +55,17 @@ struct PlacesView: View {
     @State private var startDate = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
     @State private var endDate = Date()
     @State private var showingDates = false
+    @State private var showingLocations = false
     var body: some View {
         GeometryReader { geometry in
             if mapEnabled == false {
                 FeatureEmpty(title: "Maps are turned off", symbol: "globe", description: "Enable maps on your server to browse photo locations.")
             } else if compact {
                 PlacesGlobeView(places: places, focus: selected?.focus ?? focus, compact: true, api: api, pipeline: pipeline, onSelect: { selected = $0; onSelect($0) })
-                    .overlay(alignment: .bottom) {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 10) {
-                                ForEach(places.prefix(20)) { place in
-                                    Button { selected = place; onSelect(place) } label: {
-                                        VStack(spacing: 3) { Text(place.title).font(.subheadline.weight(.semibold)); Text(place.assetIDs.count.formatted()).font(.caption).foregroundStyle(.secondary) }
-                                            .padding(.horizontal, 16).padding(.vertical, 10)
-                                    }.buttonStyle(.glass)
-                                }
-                            }.padding(16)
-                        }
+                    .overlay(alignment: .bottomTrailing) {
+                        Button("All locations", systemImage: "list.bullet") { showingLocations = true }
+                            .font(.subheadline).buttonStyle(.glass).foregroundStyle(.primary)
+                            .padding(16).disabled(loading || places.isEmpty)
                     }
                     .overlay { if loading { ProgressView() } }
             } else {
@@ -133,6 +127,13 @@ struct PlacesView: View {
             }.presentationDetents([.medium])
         }
         .sheet(item: $mapPlace) { place in NavigationStack { PlaceMapDetail(place: place, onSelect: onSelect) } }
+        .sheet(isPresented: $showingLocations) {
+            NavigationStack {
+                PlacesListView(places: places, api: api, pipeline: pipeline) { place in
+                    selected = place; showingLocations = false; onSelect(place)
+                }
+            }
+        }
         .alert("Couldn’t load places", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
@@ -167,6 +168,31 @@ struct PlacesView: View {
         } catch is CancellationError { } catch {
             if generation == requestGeneration { places = []; selected = nil; failure = .init(error) }
         }
+    }
+}
+
+private struct PlacesListView: View {
+    let places: [PlaceCollection]
+    let api: APIClient
+    let pipeline: MediaPipeline
+    let onSelect: (PlaceCollection) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    var body: some View {
+        List {
+            ForEach(places.filter { query.isEmpty || $0.title.localizedStandardContains(query) || ($0.country?.localizedStandardContains(query) == true) }) { place in
+                Button { onSelect(place) } label: {
+                    HStack(spacing: 14) {
+                        FeatureThumbnail(api: api, pipeline: pipeline, assetID: place.assetIDs.first).frame(width: 48, height: 48).clipShape(.rect(cornerRadius: 10))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(place.title).font(.headline).foregroundStyle(.primary)
+                            Text([place.country, "\(place.assetIDs.count.formatted()) items"].compactMap { $0 }.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }.padding(.vertical, 4)
+                }.accessibilityElement(children: .combine)
+            }
+        }.navigationTitle("Locations").searchable(text: $query, prompt: "Find a location")
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
     }
 }
 

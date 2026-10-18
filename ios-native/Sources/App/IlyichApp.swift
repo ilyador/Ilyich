@@ -27,7 +27,7 @@ import SwiftUI
                     SignInView(session: session)
                 }
             }
-            .tint(.cyan)
+            .tint(.primary)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }
             .onChange(of: scenePhase) { _, phase in session.sceneChanged(phase) }

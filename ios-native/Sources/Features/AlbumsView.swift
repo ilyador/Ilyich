@@ -127,6 +127,9 @@ private struct AlbumEditor: View {
                 if album != nil { Picker("Photo order", selection: $order) { Text("Newest first").tag("desc"); Text("Oldest first").tag("asc") }.disabled(!canEdit).requiresWriteAccess(api) }
             }
             if let album = current {
+                Section {
+                    AlbumUploadStatusView(albumID: album.id) { Task { await refreshAlbum() } }
+                }
                 if canEdit {
                     Section("Photos") {
                         NavigationLink("Add photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .add, onSaved: didUpdate) }.requiresWriteAccess(api)
@@ -178,6 +181,10 @@ private struct AlbumEditor: View {
         } catch { failure = .init(error) }
     }
     private func didUpdate(_ updated: Album) { latest = updated; onSaved(updated) }
+    private func refreshAlbum() async {
+        guard let album else { return }
+        do { didUpdate(try await api.album(id: album.id)) } catch is CancellationError { } catch { failure = .init(error) }
+    }
     private func delete() async {
         guard let album else { return }
         busy = true; defer { busy = false }

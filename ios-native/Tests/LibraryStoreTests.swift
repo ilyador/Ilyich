@@ -105,6 +105,7 @@ import XCTest
         XCTAssertEqual(store.selected.count, 651)
         XCTAssertEqual(Set(store.selectedAssets.map(\.id)), Set(assets.map(\.id)))
         XCTAssertEqual(store.selectedLocalPhotos.map(\.id), ["phone-only"])
+        XCTAssertEqual(Set(store.selectedDevicePhotos.map(\.id)), ["phone-only", "backed-up"])
         XCTAssertFalse(store.selected.contains("local:backed-up"))
         store.selectMonth(false)
         try await settleSelection(store)

@@ -42,6 +42,7 @@ private struct GlobeSurface: UIViewRepresentable {
         context.coordinator.cameraDistance = compact ? 2.6 : 3.2
         context.coordinator.setUp(view)
         view.onLayout = { [weak coordinator = context.coordinator] in coordinator?.updatePhotoMarkers() }
+        view.registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: GlobeARView, _: UITraitCollection) in view.onLayout?() }
         return view
     }
     func updateUIView(_ view: ARView, context: Context) {
@@ -59,6 +60,8 @@ private struct GlobeSurface: UIViewRepresentable {
         let markerRoot = Entity()
         var places: [PlaceCollection] = []
         var markers: [(Entity, PlaceCollection)] = []
+        private var markerSizes: [String: CGSize] = [:]
+        private var markerMetricsContext = ""
         var lastIDs: [String] = []
         var lastFocus: PlaceFocus?
         var night: Bool?
@@ -136,10 +139,10 @@ private struct GlobeSurface: UIViewRepresentable {
                 earth.model?.materials = [material]
                 view?.environment.lighting.intensityExponent = dark ? -2 : 0
             }
-            let identifiers = places.map { "\($0.id):\($0.assetIDs.count)" }
+            let identifiers = places.map { "\($0.id):\($0.assetIDs.count):\($0.latitude):\($0.longitude):\($0.assetIDs.first ?? "")" }
             if identifiers != lastIDs {
                 self.places = places; lastIDs = identifiers
-                markerRoot.children.removeAll(); markers.removeAll(); lastFocus = nil
+                markerRoot.children.removeAll(); markers.removeAll(); markerSizes.removeAll(); lastFocus = nil
                 // Keep rendering bounded; the complete accessible list remains available.
                 for place in places.prefix(300) { addMarker(place) }
             }
@@ -226,6 +229,8 @@ private struct GlobeSurface: UIViewRepresentable {
             }
             var placed: [CGRect] = []
             var visible: [(CGPoint, PlaceCollection)] = []
+            let metricsContext = "\(view.traitCollection.preferredContentSizeCategory.rawValue)|\(Int(view.bounds.width))"
+            if metricsContext != markerMetricsContext { markerSizes.removeAll(); markerMetricsContext = metricsContext }
             let ordered = markers.sorted { left, right in
                 if left.1.id.hasPrefix("focused-") { return true }
                 if right.1.id.hasPrefix("focused-") { return false }
@@ -234,8 +239,10 @@ private struct GlobeSurface: UIViewRepresentable {
             for (entity, place) in ordered {
                 let world = entity.position(relativeTo: nil)
                 guard simd_dot(world, camera.position - world) > 0.12, let point = view.project(world) else { continue }
-                let width: CGFloat = min(190, max(126, CGFloat(place.title.count) * 7 + 72))
-                let frame = CGRect(x: point.x - width / 2, y: point.y - 30, width: width, height: 54)
+                let key = place.id
+                let size = markerSizes[key] ?? GlobePhotoMarker.fittingSize(title: place.title, traits: view.traitCollection, availableWidth: view.bounds.width - 12)
+                markerSizes[key] = size
+                let frame = CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height)
                 guard view.bounds.insetBy(dx: 6, dy: 6).contains(frame), !placed.contains(where: { $0.insetBy(dx: -8, dy: -10).intersects(frame) }) else { continue }
                 placed.append(frame); visible.append((point, place))
                 if placed.count == photoMarkers.count { break }
@@ -328,15 +335,30 @@ private struct GlobeSurface: UIViewRepresentable {
         thumbnail.backgroundColor = .secondarySystemFill
         nameLabel.font = .preferredFont(forTextStyle: .subheadline); nameLabel.textColor = .label
         countLabel.font = .preferredFont(forTextStyle: .caption2); countLabel.textColor = .secondaryLabel
+        nameLabel.adjustsFontForContentSizeCategory = true; countLabel.adjustsFontForContentSizeCategory = true
+        nameLabel.lineBreakMode = .byTruncatingTail
         for view in [thumbnail, nameLabel, countLabel] { view.isUserInteractionEnabled = false; addSubview(view) }
         layer.shadowColor = UIColor.black.cgColor; layer.shadowOpacity = 0.18; layer.shadowRadius = 8; layer.shadowOffset = CGSize(width: 0, height: 4)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     override func layoutSubviews() {
         super.layoutSubviews(); backdrop.frame = bounds
-        thumbnail.frame = CGRect(x: 9, y: 9, width: 36, height: 36)
-        nameLabel.frame = CGRect(x: 54, y: 8, width: bounds.width - 65, height: 22)
-        countLabel.frame = CGRect(x: 54, y: 30, width: bounds.width - 65, height: 15)
+        nameLabel.numberOfLines = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ? 2 : 1
+        let edge = min(52, bounds.height - 18), textX = edge + 18
+        thumbnail.frame = CGRect(x: 9, y: (bounds.height - edge) / 2, width: edge, height: edge)
+        let countHeight = ceil(countLabel.font.lineHeight)
+        nameLabel.frame = CGRect(x: textX, y: 8, width: bounds.width - textX - 12, height: bounds.height - countHeight - 18)
+        countLabel.frame = CGRect(x: textX, y: bounds.height - countHeight - 8, width: bounds.width - textX - 12, height: countHeight)
+        backdrop.layer.cornerRadius = min(30, bounds.height / 2)
+    }
+    static func fittingSize(title: String, traits: UITraitCollection, availableWidth: CGFloat) -> CGSize {
+        let name = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits)
+        let count = UIFont.preferredFont(forTextStyle: .caption2, compatibleWith: traits)
+        let lines: CGFloat = traits.preferredContentSizeCategory.isAccessibilityCategory ? 2 : 1
+        let height = max(54, ceil(name.lineHeight * lines + count.lineHeight + 18))
+        let textWidth = (title as NSString).size(withAttributes: [.font: name]).width
+        let width = min(availableWidth, min(lines == 2 ? 340 : 240, max(142, textWidth + min(52, height - 18) + 30)))
+        return .init(width: width, height: height)
     }
     func configure(place: PlaceCollection, api: APIClient, pipeline: MediaPipeline, cache: GlobeMarkerImageCache) {
         self.place = place; nameLabel.text = place.title; countLabel.text = place.assetIDs.count.formatted()

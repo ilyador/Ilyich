@@ -18,8 +18,7 @@ settings:
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
 packages:
   GoogleCast:
-    url: https://github.com/googlecast/google-cast-ios-sdk
-    exactVersion: 4.8.6
+    path: Packages/GoogleCast
 targets:
   Ilyich:
     type: application

@@ -10,12 +10,16 @@ struct PhotoGrid: UIViewRepresentable {
     let bottomInset: CGFloat
     var onDensityChange: ((Int) -> Void)? = nil
     var onOpenLocal: ((LocalPhoto) -> Void)? = nil
+    var memories: [Memory] = []
+    var memoryLaneHeight: CGFloat = 0
+    var onOpenMemory: ((Memory) -> Void)? = nil
     let onOpen: (Asset) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> UICollectionView {
         let layout = VirtualPhotoLayout()
         layout.columns = columns
+        layout.headerHeight = memoryLaneHeight
         let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
         view.backgroundColor = .systemBackground
         view.contentInsetAdjustmentBehavior = .never
@@ -23,6 +27,7 @@ struct PhotoGrid: UIViewRepresentable {
         view.alwaysBounceVertical = true
         view.accessibilityIdentifier = "library.grid"
         view.register(PhotoCell.self, forCellWithReuseIdentifier: "photo")
+        view.register(MemoryLaneHeader.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader, withReuseIdentifier: "memories")
         view.dataSource = context.coordinator
         view.delegate = context.coordinator
         view.prefetchDataSource = context.coordinator
@@ -43,6 +48,12 @@ struct PhotoGrid: UIViewRepresentable {
         let sections = store.sections
         let reset = coordinator.resetID != store.resetID
         if let layout = view.collectionViewLayout as? VirtualPhotoLayout {
+            if layout.headerHeight != memoryLaneHeight {
+                let delta = memoryLaneHeight - layout.headerHeight
+                let wasScrolled = view.contentOffset.y > -view.contentInset.top + 1
+                layout.headerHeight = memoryLaneHeight; layout.invalidateLayout(); view.layoutIfNeeded()
+                if wasScrolled { view.contentOffset.y += delta }
+            }
             if layout.columns != columns {
                 let anchor = view.indexPathsForVisibleItems.min()
                 layout.columns = columns; layout.invalidateLayout(); view.layoutIfNeeded()
@@ -69,6 +80,9 @@ struct PhotoGrid: UIViewRepresentable {
             }
         }
         coordinator.revision = store.revision; coordinator.selection = store.selected; coordinator.selecting = store.isSelecting
+        for header in view.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionHeader) {
+            (header as? MemoryLaneHeader)?.configure(pipeline: pipeline, memories: memories) { onOpenMemory?($0) }
+        }
         if let target = store.scrollTarget, target != coordinator.lastScrollTarget,
            let section = sections.firstIndex(where: { $0.id == target }), sections[section].count > 0 {
             coordinator.lastScrollTarget = target
@@ -92,6 +106,11 @@ struct PhotoGrid: UIViewRepresentable {
             let cell = view.dequeueReusableCell(withReuseIdentifier: "photo", for: indexPath) as! PhotoCell
             configure(cell, at: indexPath)
             return cell
+        }
+        func collectionView(_ view: UICollectionView, viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath) -> UICollectionReusableView {
+            let header = view.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "memories", for: indexPath) as! MemoryLaneHeader
+            header.configure(pipeline: parent.pipeline, memories: parent.memories) { [weak self] memory in self?.parent.onOpenMemory?(memory) }
+            return header
         }
         func configure(_ cell: PhotoCell, at index: IndexPath) {
             let entry = parent.store.entry(section: index.section, item: index.item)
@@ -151,6 +170,7 @@ struct PhotoGrid: UIViewRepresentable {
 /// The layout computes attributes only for visible rows, not for every photo in the library.
 @MainActor final class VirtualPhotoLayout: UICollectionViewLayout {
     var columns = 4
+    var headerHeight: CGFloat = 0
     private var sectionOffsets: [CGFloat] = []
     private var sectionCounts: [Int] = []
     private var edge: CGFloat = 1
@@ -159,7 +179,7 @@ struct PhotoGrid: UIViewRepresentable {
         super.prepare()
         guard let collectionView else { return }
         edge = max(1, (collectionView.bounds.width - CGFloat(columns - 1)) / CGFloat(columns))
-        sectionOffsets = []; sectionCounts = []; totalHeight = 0
+        sectionOffsets = []; sectionCounts = []; totalHeight = collectionView.numberOfSections > 0 ? headerHeight : 0
         for section in 0..<collectionView.numberOfSections {
             let count = collectionView.numberOfItems(inSection: section)
             sectionOffsets.append(totalHeight); sectionCounts.append(count)
@@ -169,6 +189,9 @@ struct PhotoGrid: UIViewRepresentable {
     override var collectionViewContentSize: CGSize { CGSize(width: collectionView?.bounds.width ?? 0, height: totalHeight) }
     override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
         var result: [UICollectionViewLayoutAttributes] = []
+        if let header = layoutAttributesForSupplementaryView(ofKind: UICollectionView.elementKindSectionHeader, at: IndexPath(item: 0, section: 0)), header.frame.intersects(rect) {
+            result.append(header)
+        }
         for section in sectionOffsets.indices {
             let top = sectionOffsets[section]
             let bottom = section + 1 < sectionOffsets.count ? sectionOffsets[section + 1] : totalHeight
@@ -182,6 +205,13 @@ struct PhotoGrid: UIViewRepresentable {
             }
         }
         return result
+    }
+    override func layoutAttributesForSupplementaryView(ofKind elementKind: String, at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+        guard elementKind == UICollectionView.elementKindSectionHeader, indexPath.section == 0,
+              !sectionOffsets.isEmpty, headerHeight > 0 else { return nil }
+        let attributes = UICollectionViewLayoutAttributes(forSupplementaryViewOfKind: elementKind, with: indexPath)
+        attributes.frame = CGRect(x: 0, y: 0, width: collectionView?.bounds.width ?? 0, height: headerHeight)
+        return attributes
     }
     override func layoutAttributesForItem(at index: IndexPath) -> UICollectionViewLayoutAttributes? {
         guard sectionOffsets.indices.contains(index.section), index.item < sectionCounts[index.section] else { return nil }
