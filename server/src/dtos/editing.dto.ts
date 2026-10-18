@@ -130,7 +130,7 @@ const AssetEditsResponseSchema = z
     baseDimensions: z
       .object({ width: z.int().positive(), height: z.int().positive() })
       .optional()
-      .describe('Dimensions of the published base image before Immich edits'),
+      .describe('Dimensions of the published base image before Ilyich edits'),
   })
   .meta({ id: 'AssetEditsResponseDto' });
 

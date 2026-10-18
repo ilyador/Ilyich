@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import { copyToClipboard } from '#lib/utils.ts';
   import {
     Card,
@@ -9,7 +10,6 @@
     Icon,
     IconButton,
     Link,
-    Logo,
     Text,
     VStack,
   } from '@immich/ui';

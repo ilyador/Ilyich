@@ -111,7 +111,7 @@ describe(DatabaseService.name, () => {
         ]);
 
         await expect(sut.onBootstrap()).rejects.toThrow(
-          `The ${extensionName} extension version is ${versionBelowRange}, but Immich only supports ${extensionRange}`,
+          `The ${extensionName} extension version is ${versionBelowRange}, but Ilyich only supports ${extensionRange}`,
         );
 
         expect(mocks.database.runMigrations).not.toHaveBeenCalled();
@@ -231,7 +231,7 @@ describe(DatabaseService.name, () => {
         ]);
 
         await expect(sut.onBootstrap()).rejects.toThrow(
-          `The ${extensionName} extension version is ${versionAboveRange}, but Immich only supports`,
+          `The ${extensionName} extension version is ${versionAboveRange}, but Ilyich only supports`,
         );
 
         expect(mocks.database.updateVectorExtension).not.toHaveBeenCalled();

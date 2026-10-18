@@ -20,6 +20,7 @@ import 'package:immich_mobile/widgets/common/app_bar_dialog/app_bar_profile_info
 import 'package:immich_mobile/widgets/common/app_bar_dialog/app_bar_server_info.dart';
 import 'package:immich_mobile/widgets/common/confirm_dialog.dart';
 import 'package:immich_mobile/widgets/common/immich_logo.dart';
+import 'package:immich_mobile/widgets/common/immich_title_text.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -53,14 +54,11 @@ class ImmichAppBarDialog extends HookConsumerWidget {
               onPressed: () => ContextHelper(context).pop(),
               icon: Icon(Icons.close, size: 20, color: context.colorScheme.onSurfaceVariant),
             ),
-            Align(
+            const Align(
               alignment: Alignment.center,
               child: Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Image.asset(
-                  context.isDarkTheme ? 'assets/immich-text-dark.png' : 'assets/immich-text-light.png',
-                  height: 16,
-                ),
+                padding: EdgeInsets.only(bottom: 4),
+                child: ImmichTitleText(fontSize: 20),
               ),
             ),
           ],
@@ -200,7 +198,7 @@ class ImmichAppBarDialog extends HookConsumerWidget {
               onTap: () {
                 ContextHelper(context).pop();
                 unawaited(
-                  launchUrl(Uri.parse('https://github.com/immich-app/immich'), mode: LaunchMode.externalApplication),
+                  launchUrl(Uri.parse('https://github.com/ilyador/Ilyich'), mode: LaunchMode.externalApplication),
                 );
               },
               child: Text(context.t.profile_drawer_github, style: context.textTheme.bodySmall),

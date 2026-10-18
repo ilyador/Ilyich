@@ -35,7 +35,7 @@ export const load = (async ({ fetch, url }) => {
   return {
     error,
     meta: {
-      title: 'Immich',
+      title: 'Ilyich',
     },
   };
 }) satisfies LayoutLoad;

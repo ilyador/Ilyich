@@ -133,14 +133,14 @@ ARG BUILD_SOURCE_REF
 ARG BUILD_SOURCE_COMMIT
 
 ENV IMMICH_BUILD=${BUILD_ID}
-ENV IMMICH_BUILD_URL=https://github.com/immich-app/immich/actions/runs/${BUILD_ID}
+ENV IMMICH_BUILD_URL=https://github.com/ilyador/Ilyich/actions/runs/${BUILD_ID}
 ENV IMMICH_BUILD_IMAGE=${BUILD_IMAGE}
-ENV IMMICH_BUILD_IMAGE_URL=https://github.com/immich-app/immich/pkgs/container/immich-server
-ENV IMMICH_REPOSITORY=immich-app/immich
-ENV IMMICH_REPOSITORY_URL=https://github.com/immich-app/immich
+ENV IMMICH_BUILD_IMAGE_URL=https://github.com/ilyador/Ilyich
+ENV IMMICH_REPOSITORY=ilyador/Ilyich
+ENV IMMICH_REPOSITORY_URL=https://github.com/ilyador/Ilyich
 ENV IMMICH_SOURCE_REF=${BUILD_SOURCE_REF}
 ENV IMMICH_SOURCE_COMMIT=${BUILD_SOURCE_COMMIT}
-ENV IMMICH_SOURCE_URL=https://github.com/immich-app/immich/commit/${BUILD_SOURCE_COMMIT}
+ENV IMMICH_SOURCE_URL=https://github.com/ilyador/Ilyich/commit/${BUILD_SOURCE_COMMIT}
 
 COPY --from=ghcr.io/futo-org/backups/restic-proxy:v1.11.2@sha256:a88252d884d22a55749f45dd39a2458c6391ca3e4d3b0d9e0c2246786cf923be /usr/local/bin/restic-proxy /usr/local/bin/restic-proxy
 COPY --from=ghcr.io/futo-org/restic:sha-1e904f0@sha256:501bb3e696bd78db0d89ae4e5c51b6993b9cb3f88e657020777dba49226169bc /usr/bin/restic /usr/local/bin/restic

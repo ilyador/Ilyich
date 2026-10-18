@@ -24,7 +24,7 @@ const TimeBucketQueryBaseSchema = z
       'Sort order for assets within time buckets (ASC for oldest first, DESC for newest first)',
     ),
     orderBy: AssetOrderBySchema.optional().describe(
-      'Date to group and order assets by (takenAt for date taken, createdAt for date added to Immich)',
+      'Date to group and order assets by (takenAt for date taken, createdAt for date added to Ilyich)',
     ),
     visibility: AssetVisibilitySchema.optional().describe(
       'Filter by asset visibility status (ARCHIVE, TIMELINE, HIDDEN, LOCKED)',
@@ -93,7 +93,7 @@ const TimeBucketAssetResponseSchema = z
       .describe('Array of BlurHash strings for generating asset previews (base64 encoded)'),
     createdAt: z
       .array(z.string())
-      .describe('Array of UTC timestamps when each asset was originally uploaded to Immich'),
+      .describe('Array of UTC timestamps when each asset was originally uploaded to Ilyich'),
     fileCreatedAt: z.array(z.string()).describe('Array of file creation timestamps in UTC'),
     localOffsetHours: z
       .array(z.number().meta({ format: 'double' }))

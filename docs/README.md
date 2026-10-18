@@ -1,4 +1,6 @@
-# Website
+# Ilyich documentation
+
+This documentation retains the upstream technical guides and presents the Ilyich fork. External demo, download and community links point to the upstream project. Fork features and branch policy are documented in the [repository README](../README.md).
 
 This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
 

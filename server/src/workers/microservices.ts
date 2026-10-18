@@ -28,7 +28,7 @@ export async function bootstrap() {
 
   await (host ? app.listen(0, host) : app.listen(0));
 
-  logger.log(`Immich Microservices is running [v${serverVersion}] [${environment}] `);
+  logger.log(`Ilyich Microservices is running [v${serverVersion}] [${environment}] `);
 }
 
 if (!isMainThread) {

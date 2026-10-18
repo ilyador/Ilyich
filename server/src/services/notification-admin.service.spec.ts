@@ -61,7 +61,7 @@ describe(NotificationService.name, () => {
       });
       expect(mocks.email.sendEmail).toHaveBeenCalledWith(
         expect.objectContaining({
-          subject: 'Test email from Immich',
+          subject: 'Test email from Ilyich',
           smtp: smtpTransport.notifications.smtp.transport,
         }),
       );
@@ -81,7 +81,7 @@ describe(NotificationService.name, () => {
       });
       expect(mocks.email.sendEmail).toHaveBeenCalledWith(
         expect.objectContaining({
-          subject: 'Test email from Immich',
+          subject: 'Test email from Ilyich',
           smtp: smtpTransport.notifications.smtp.transport,
         }),
       );
@@ -102,7 +102,7 @@ describe(NotificationService.name, () => {
       });
       expect(mocks.email.sendEmail).toHaveBeenCalledWith(
         expect.objectContaining({
-          subject: 'Test email from Immich',
+          subject: 'Test email from Ilyich',
           smtp: smtpTransport.notifications.smtp.transport,
           replyTo: 'demo@immich.app',
         }),

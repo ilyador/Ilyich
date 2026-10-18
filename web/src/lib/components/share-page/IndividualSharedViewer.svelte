@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import type { Action } from '#lib/components/asset-viewer/actions/action.ts';
   import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
   import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';
@@ -16,7 +17,7 @@
   import { handleError } from '#lib/utils/handle-error.ts';
   import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import { getAssetInfo, type SharedLinkResponseDto } from '@immich/sdk';
-  import { IconButton, Logo, toastManager } from '@immich/ui';
+  import { IconButton, toastManager } from '@immich/ui';
   import { mdiDownload, mdiFileImagePlusOutline, mdiSelectAll } from '@mdi/js';
   import { t } from 'svelte-i18n';
   import { goto } from '$app/navigation';

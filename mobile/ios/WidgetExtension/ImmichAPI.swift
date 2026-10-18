@@ -22,10 +22,10 @@ extension WidgetError: LocalizedError {
   public var errorDescription: String? {
     switch self {
     case .noLogin:
-      return "Login to Immich"
+      return "Login to Ilyich"
 
     case .fetchFailed:
-      return "Unable to connect to Immich"
+      return "Unable to connect to Ilyich"
 
     case .albumNotFound:
       return "Album not found"
