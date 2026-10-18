@@ -18,10 +18,7 @@ struct LibraryView: View {
     @State private var backup = BackupCoordinator.shared
     @State private var viewingAlbumID: String?
     @State private var linkedMemoryID: String?
-    @State private var memoryLane = MemoryLaneStore()
-    @State private var playingMemory: Memory?
     @State private var pendingPhotoDestination: PhotoDestination?
-    @ScaledMetric(relativeTo: .subheadline) private var memoryLaneHeight = 132.0
     @State private var activityAlbumID: String?
     @State private var showPlaces = false
     @State private var places: [PlaceCollection] = []
@@ -57,9 +54,7 @@ struct LibraryView: View {
                 PhotoGrid(store: store, pipeline: pipeline, columns: max(2, min(6, columns)),
                           topInset: geometry.safeAreaInsets.top + headerHeight,
                           bottomInset: geometry.safeAreaInsets.bottom + (showPlaces ? geometry.size.height * 0.4 : 90),
-                          onDensityChange: { columns = $0 }, onOpenLocal: { searchFocused = false; viewingLocal = $0 },
-                          memories: visibleMemories, memoryLaneHeight: visibleMemories.isEmpty ? 0 : dynamicTypeSize.isAccessibilitySize ? memoryLaneHeight : min(memoryLaneHeight, 190),
-                          onOpenMemory: { searchFocused = false; playingMemory = $0 }) { asset in
+                          onDensityChange: { columns = $0 }, onOpenLocal: { searchFocused = false; viewingLocal = $0 }) { asset in
                     searchFocused = false; viewingAlbumID = nil; viewing = asset
                 }.ignoresSafeArea()
                 if store.isLoading && store.totalCount == 0 { ProgressView("Loading library").frame(maxWidth: .infinity, maxHeight: .infinity) }
@@ -76,9 +71,6 @@ struct LibraryView: View {
                         if let error = store.error { errorBanner(error, retry: store.retryCurrent) }
                         if !store.bucketErrors.isEmpty {
                             errorBanner("Some photos couldn’t load.", retry: store.retryFailedBuckets)
-                        }
-                        if !store.isFiltered && !store.isSelecting && memoryLane.error != nil {
-                            errorBanner("Memories couldn’t load.") { Task { await memoryLane.load(api: api, force: true) } }
                         }
                         Spacer(minLength: 0)
                         if showPlaces {
@@ -122,10 +114,6 @@ struct LibraryView: View {
                             onUpdated: store.update, onDeleted: { Task { await store.refreshAfterMutation() } }, albumID: viewingAlbumID ?? store.timelineFilter.albumID,
                             matchedLocalPhotos: store.matchingDevicePhotos)
             }
-            .fullScreenCover(item: $playingMemory, onDismiss: finishPhotoNavigation) { memory in
-                MemoryPlaybackView(api: api, pipeline: pipeline, memories: memoryLane.memories, initialID: memory.id,
-                                   onNavigate: requestPhotoNavigation)
-            }
             .fullScreenCover(item: $viewingLocal) { LocalPhotoViewer(photo: $0) }
             .sheet(item: $bulkSelection) { selection in
                 NavigationStack {
@@ -158,8 +146,7 @@ struct LibraryView: View {
             refreshSharedFiles()
             if !session.isUITesting { await backup.activate(); refreshDeviceIndex() }
             guard !store.started else { return }; store.started = true
-            async let memories: Void = memoryLane.load(api: api)
-            await store.reload(); await loadShelfData(); await memories
+            await store.reload(); await loadShelfData()
         }
         .task(id: session.pendingLink) {
             guard let link = session.pendingLink else { return }
@@ -194,13 +181,13 @@ struct LibraryView: View {
             Task {
                 if store.query.isEmpty { await store.reload(preservingPosition: true) }
                 if notification.userInfo?["collections"] as? Bool == true {
-                    await loadShelfData(); await memoryLane.load(api: api, force: true)
+                    await loadShelfData()
                 }
                 refreshDeviceIndex()
             }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { refreshSharedFiles(); refreshDeviceIndex(); Task { await memoryLane.load(api: api) } }
+            if phase == .active { refreshSharedFiles(); refreshDeviceIndex() }
             else if phase == .background { deviceIndex.stop() }
         }
         .onChange(of: deviceIndex.revision) { _, _ in store.updateDeviceTimeline(deviceIndex.snapshot) }
@@ -209,12 +196,8 @@ struct LibraryView: View {
         .onDisappear { deviceIndex.stop() }
         .onChange(of: screen) { _, value in if value == nil { refreshSharedFiles() } }
         .onChange(of: viewing) { _, value in if value == nil { refreshSharedFiles() } }
-        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
-            Task { await memoryLane.load(api: api, force: true) }
-        }
     }
 
-    private var visibleMemories: [Memory] { store.isFiltered || store.isSelecting ? [] : memoryLane.memories }
 
     private var headingText: some View {
         let wrapped = dynamicTypeSize.isAccessibilitySize
@@ -247,7 +230,8 @@ struct LibraryView: View {
     @ViewBuilder private var headerControls: some View {
         Button(store.isSelecting ? "Done" : "Select") {
             store.isSelecting.toggle(); if !store.isSelecting { store.selected = [] }
-        }.buttonStyle(.glass).controlSize(.large).tint(store.isSelecting ? Color.cyan : Color.primary).accessibilityIdentifier("library.select")
+        }.buttonStyle(.glass).controlSize(.large).tint(store.isSelecting ? Color.cyan : Color.primary)
+            .accessibilityIdentifier("library.select")
         if !store.isSelecting {
             Button { screen = .settings } label: {
                 Text(String(session.name.prefix(1)).uppercased()).font(.headline).frame(width: 44, height: 44)
@@ -449,13 +433,13 @@ struct LibraryView: View {
         store.setPlace(assetIDs: place.assetIDs, title: place.title); searchText = ""; screen = nil
     }
     private func requestPhotoNavigation(_ destination: PhotoDestination) {
-        let dismissing = screen != nil || playingMemory != nil
+        let dismissing = screen != nil
         pendingPhotoDestination = destination
-        screen = nil; playingMemory = nil
+        screen = nil
         if !dismissing { finishPhotoNavigation() }
     }
     private func finishPhotoNavigation() {
-        guard screen == nil, playingMemory == nil else { return }
+        guard screen == nil else { return }
         guard let destination = pendingPhotoDestination else { refreshSharedFiles(); return }
         pendingPhotoDestination = nil
         switch destination {
@@ -468,7 +452,7 @@ struct LibraryView: View {
         let ids = Set(shareInbox.batches.map(\.id))
         seenShareBatches.formIntersection(ids)
         guard !ids.subtracting(seenShareBatches).isEmpty, screen == nil, viewing == nil, viewingLocal == nil,
-              playingMemory == nil, pendingPhotoDestination == nil, bulkSelection == nil else { return }
+              pendingPhotoDestination == nil, bulkSelection == nil else { return }
         seenShareBatches.formUnion(ids)
         sharedFilesPresented = true
     }

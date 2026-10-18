@@ -20,6 +20,10 @@ struct BulkActionsView: View {
     @State private var features: ServerFeatures?
     private var ids: [String] { assets.map(\.id) }
     @State private var featuresFailure: String?
+    @State private var photosSaving = false
+    @State private var photosCommitting = false
+    @State private var photosSaved = 0
+    @State private var photosOutcome: String?
     private var owned: Bool {
         guard let userID = api.userID, !assets.isEmpty else { return false }
         return assets.allSatisfy { $0.ownerId == userID }
@@ -34,11 +38,16 @@ struct BulkActionsView: View {
             albumSection
             if owned { organizeSection }
             if let failure { Section { Text(failure).foregroundStyle(.red) } }
+            if let photosOutcome, !busy { Section { Text(photosOutcome) } }
             if busy {
                 Section {
                     HStack {
                         if let shareFraction { ProgressView(value: shareFraction).frame(width: 60) } else { ProgressView() }
-                        Text(progress > 0 ? "Prepared \(progress) of \(assets.count)" : "Working…")
+                        if photosSaving {
+                            Text("Saved \(photosSaved) of \(assets.count)" + (photosCommitting ? " · Saving to Photos…" : ""))
+                        } else {
+                            Text(progress > 0 ? "Prepared \(progress) of \(assets.count)" : "Working…")
+                        }
                     }
                 }
             }
@@ -47,7 +56,7 @@ struct BulkActionsView: View {
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         .disabled(busy)
         .overlay(alignment: .bottom) {
-            if busy { Button("Cancel") { operation?.cancel() }.buttonStyle(.glass).padding().disabled(false) }
+            if busy { Button(photosCommitting ? "Saving to Photos" : "Cancel") { operation?.cancel() }.buttonStyle(.glass).padding().disabled(photosCommitting) }
         }
         .task { albums = (try? await api.albums()) ?? []; await loadFeatures() }
         .onDisappear { operation?.cancel() }
@@ -67,9 +76,10 @@ struct BulkActionsView: View {
                 Picker("Photo quality", selection: $shareFileType) { Text("Original").tag("original"); Text("Displayed").tag("preview") }
             }
             Button("Share files", systemImage: "square.and.arrow.up") { prepareShare(original: shareFileType != "preview") }
+            Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos(original: shareFileType != "preview") }.requiresWriteAccess(api)
             Button("Create shared link", systemImage: "link") { publicLink = true }.requiresWriteAccess(api)
         } header: { Text("Share") } footer: {
-            if !assets.allSatisfy(\.isVideo) { Text("Displayed keeps the edits you see. Videos are always shared as originals.") }
+            if !assets.allSatisfy(\.isVideo) { Text("Displayed keeps the edits you see. Videos use originals. Saving a Live Photo keeps its original photo and motion.") }
         }
     }
     private var albumSection: some View {
@@ -121,6 +131,42 @@ struct BulkActionsView: View {
             catch is CancellationError { } catch { failure = error.localizedDescription }
         }
     }
+    private func saveToPhotos(original: Bool) {
+        guard !busy, !assets.isEmpty else { return }
+        busy = true; failure = nil; photosOutcome = nil; progress = 0
+        photosSaving = true; photosCommitting = false; photosSaved = 0
+        let token = UUID(); shareToken = token; shareFraction = 0
+        let total = assets.count
+        operation = Task {
+            defer {
+                busy = false; photosSaving = false; photosCommitting = false
+                if shareToken == token { shareToken = nil; shareFraction = nil }
+            }
+            do {
+                try await PhotoLibrarySave.requestPermission(api: api)
+                for asset in assets {
+                    try Task.checkCancellation()
+                    let completed = photosSaved
+                    try await PhotoLibrarySave.save(asset, api: api, original: original, progress: { fraction in
+                        guard let fraction else { return }
+                        Task { @MainActor in if shareToken == token { shareFraction = (Double(completed) + fraction) / Double(total) } }
+                    }, beforeCommit: { photosCommitting = true })
+                    photosCommitting = false
+                    photosSaved += 1
+                    shareFraction = Double(photosSaved) / Double(total)
+                }
+                photosOutcome = "Saved \(photosSaved) of \(total) to Photos."
+            } catch {
+                photosCommitting = false
+                if error is CancellationError || Task.isCancelled {
+                    photosOutcome = "Cancelled. Saved \(photosSaved) of \(total) to Photos."
+                } else {
+                    failure = error.localizedDescription
+                    photosOutcome = "Stopped. Saved \(photosSaved) of \(total) to Photos. Saving again may create duplicates."
+                }
+            }
+        }
+    }
     private func prepareShare(original: Bool) {
         guard !busy, !assets.isEmpty else { return }
         busy = true; failure = nil; progress = 0
@@ -144,7 +190,7 @@ struct BulkActionsView: View {
                 try Task.checkCancellation(); share = BulkExport(files: files)
             } catch {
                 BulkExport(files: files).clean()
-                if !(error is CancellationError) { failure = error.localizedDescription }
+                if !(error is CancellationError), !Task.isCancelled { failure = error.localizedDescription }
             }
         }
     }

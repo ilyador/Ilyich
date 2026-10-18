@@ -392,31 +392,10 @@ struct AssetViewer: View {
     private func saveToPhotos() {
         let asset = current
         transfer(label: "Downloading…") { id, report in
-            guard !api.isReadOnly else { throw ReadOnlyPolicy.ReadOnlyError() }
-            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-            guard status == .authorized || status == .limited else { throw APIError.invalidResponse("Allow Ilyich to add photos in iPhone Settings, then try again.") }
-            try Task.checkCancellation()
-            let live = asset.livePhotoVideoId != nil
-            // A Live Photo requires the original matching still/video identifiers.
-            // Server-rendered JPEGs cannot substitute for the paired still metadata.
-            let file = ViewerExport(url: try await api.download(asset: asset, original: live, progress: live ? { report($0.map { $0 / 2 }) } : report))
-            defer { file.removeTemporaryFile() }
-            var motion: ViewerExport?
-            defer { motion?.removeTemporaryFile() }
-            if let motionID = asset.livePhotoVideoId {
-                let motionAsset = try await api.asset(id: motionID)
-                try Task.checkCancellation()
-                motion = ViewerExport(url: try await api.download(asset: motionAsset, original: true, progress: { report($0.map { 0.5 + $0 / 2 }) }))
-            }
-            let motionURL = motion?.url
-            try Task.checkCancellation()
-            guard transferID == id else { throw CancellationError() }
-            guard !api.isReadOnly else { throw ReadOnlyPolicy.ReadOnlyError() }
-            transferSaving = true
-            try await PHPhotoLibrary.shared().performChanges {
-                let creation = PHAssetCreationRequest.forAsset()
-                creation.addResource(with: asset.isVideo ? .video : .photo, fileURL: file.url, options: nil)
-                if let motionURL { creation.addResource(with: .pairedVideo, fileURL: motionURL, options: nil) }
+            try await PhotoLibrarySave.requestPermission(api: api)
+            try await PhotoLibrarySave.save(asset, api: api, original: false, progress: report) {
+                guard transferID == id else { throw CancellationError() }
+                transferSaving = true
             }
         }
     }
