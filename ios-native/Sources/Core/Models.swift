@@ -81,6 +81,8 @@ struct User: Codable, Hashable, Identifiable, Sendable {
     let name: String
     let email: String?
     let profileImagePath: String?
+    var quotaSizeInBytes: Int64? = nil
+    var quotaUsageInBytes: Int64? = nil
 }
 
 enum AssetKind: String, Codable, Sendable {

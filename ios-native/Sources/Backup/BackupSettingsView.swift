@@ -22,6 +22,7 @@ struct BackupSettingsView: View {
                 } else {
                     Button(backup.remaining > 0 ? "Resume backup" : "Back up now") { Task { await backup.start() } }
                         .disabled(![PHAuthorizationStatus.authorized, .limited].contains(backup.permission) || backup.preferences.includedAlbums.isEmpty)
+                        .requiresWriteAccess()
                 }
             } header: { Text("Backup") } footer: {
                 Text("Original files stay in Photos. Transfers already started can continue while Ilyich is in the background.")
@@ -57,6 +58,7 @@ struct BackupSettingsView: View {
                 }
                 Section("Albums") {
                     Toggle("Sync albums to server", isOn: $backup.preferences.syncAlbums).disabled(backup.isRunning)
+                        .requiresWriteAccess()
                     ForEach(backup.albums) { album in
                         Picker(selection: Binding(get: { selection(for: album.id) }, set: { setSelection($0, for: album.id) })) {
                             Text("Off").tag(0)
@@ -74,6 +76,7 @@ struct BackupSettingsView: View {
                 }
                 Section {
                     Toggle("Automatic backup", isOn: $backup.preferences.automatic)
+                        .requiresWriteAccess()
                     Toggle("Only while charging", isOn: $backup.preferences.requireCharging)
                     Stepper("Wait \(backup.preferences.triggerDelay) seconds", value: $backup.preferences.triggerDelay, in: 0...3600, step: 30)
                     Toggle("Use cellular for photos", isOn: $backup.preferences.cellularPhotos)

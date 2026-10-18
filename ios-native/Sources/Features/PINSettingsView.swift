@@ -29,11 +29,11 @@ struct PINSettingsView: View {
                 Section(configured ? "New PIN" : "Set a PIN") {
                     SecureField("6-digit PIN", text: $newPIN).keyboardType(.numberPad)
                     SecureField("Confirm PIN", text: $confirmation).keyboardType(.numberPad)
-                    Button(configured ? "Change PIN" : "Set PIN") { Task { await save() } }.disabled(!authorized || !newPINValid || busy)
+                    Button(configured ? "Change PIN" : "Set PIN") { Task { await save() } }.disabled(!authorized || !newPINValid || busy).requiresWriteAccess(api)
                 }
                 Section {
                     Button("Disable biometric unlock on this phone") { LockedPINStore.remove(for: api); message = "Use your PIN the next time you unlock your folder." }
-                    if configured { Button("Remove PIN", role: .destructive) { confirmReset = true }.disabled(!authorized || busy) }
+                    if configured { Button("Remove PIN", role: .destructive) { confirmReset = true }.disabled(!authorized || busy).requiresWriteAccess(api) }
                 } footer: { Text("Changing or removing your PIN clears biometric unlock on this phone. Your locked photos remain in your library.") }
                 if let message { Text(message).foregroundStyle(.secondary) }
             }
@@ -41,7 +41,7 @@ struct PINSettingsView: View {
         .task { do { status = try await api.authStatus() } catch { failure = .init(error) } }
         .onDisappear { clear() }
         .confirmationDialog("Remove your locked folder PIN?", isPresented: $confirmReset, titleVisibility: .visible) {
-            Button("Remove PIN", role: .destructive) { Task { await reset() } }
+            Button("Remove PIN", role: .destructive) { Task { await reset() } }.requiresWriteAccess(api)
         } message: { Text("All elevated sessions will be locked. You can set a new PIN when you next open the locked folder.") }
         .alert("Couldn’t update PIN", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }

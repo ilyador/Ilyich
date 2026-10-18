@@ -12,7 +12,7 @@ final class CastController: NSObject, ObservableObject, @preconcurrency GCKSessi
     @Published var error: String?
     private var api: APIClient?
     private var desiredAsset: Asset?
-    private var loadedAssetID: String?
+    @Published private(set) var currentAssetID: String?
     private var operation: Task<Void, Never>?
     private var request: GCKRequest?
     private let manager: GCKSessionManager
@@ -34,7 +34,7 @@ final class CastController: NSObject, ObservableObject, @preconcurrency GCKSessi
         if let previous = self.api, previous.cacheScope != api.cacheScope { disconnect() }
         self.api = api
         desiredAsset = asset
-        if connected && (start || loadedAssetID != nil) { load() }
+        if connected && (start || currentAssetID != nil) { load() }
     }
 
     func retry() { load(force: true) }
@@ -42,12 +42,14 @@ final class CastController: NSObject, ObservableObject, @preconcurrency GCKSessi
     func disconnect() {
         operation?.cancel(); operation = nil; request?.delegate = nil; request = nil
         manager.endSessionAndStopCasting(true)
-        loadedAssetID = nil; loading = false
-        let previous = api
-        Task { await previous?.revokeCastAuthorization() }
+        currentAssetID = nil; loading = false
         connected = false
     }
-    func signOut() { disconnect(); api = nil; desiredAsset = nil; error = nil }
+    func signOut() {
+        let previous = api
+        disconnect(); api = nil; desiredAsset = nil; error = nil
+        Task { await previous?.revokeCastAuthorization() }
+    }
 
     private func updateConnection() {
         connected = manager.currentCastSession?.connectionState == .connected
@@ -55,7 +57,7 @@ final class CastController: NSObject, ObservableObject, @preconcurrency GCKSessi
     }
     private func load(force: Bool = false) {
         guard connected, let api, let asset = desiredAsset,
-              force || loadedAssetID != asset.id else { return }
+              force || currentAssetID != asset.id else { return }
         operation?.cancel(); request?.delegate = nil; request = nil
         loading = true; error = nil
         operation = Task { [weak self] in
@@ -73,7 +75,7 @@ final class CastController: NSObject, ObservableObject, @preconcurrency GCKSessi
                 let data = GCKMediaLoadRequestDataBuilder()
                 data.mediaInformation = information.build()
                 data.autoplay = true
-                self.loadedAssetID = asset.id
+                self.currentAssetID = asset.id
                 let request = client.loadMedia(with: data.build())
                 self.request = request; request.delegate = self
             } catch is CancellationError { }
@@ -89,9 +91,7 @@ final class CastController: NSObject, ObservableObject, @preconcurrency GCKSessi
     }
     func sessionManager(_ sessionManager: GCKSessionManager, didEnd session: GCKCastSession, withError error: Error?) {
         operation?.cancel(); request?.delegate = nil; request = nil
-        loadedAssetID = nil; loading = false; updateConnection()
-        let previous = api
-        Task { await previous?.revokeCastAuthorization() }
+        currentAssetID = nil; loading = false; updateConnection()
         if error != nil { self.error = "The Cast connection ended. Reconnect to your device and try again." }
     }
     func sessionManager(_ sessionManager: GCKSessionManager, didFailToStart session: GCKCastSession, withError error: Error) {
@@ -104,7 +104,7 @@ final class CastController: NSObject, ObservableObject, @preconcurrency GCKSessi
     }
     func request(_ request: GCKRequest, didFailWithError error: GCKError) {
         guard self.request === request else { return }
-        loading = false; loadedAssetID = nil
+        loading = false; currentAssetID = nil
         self.error = "The Cast device couldn’t open this media. It must reach your server directly; proxy-only headers and client certificates cannot be forwarded to the receiver. Check the server address or try another item."
     }
 }

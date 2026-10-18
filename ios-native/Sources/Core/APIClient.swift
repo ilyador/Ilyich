@@ -27,6 +27,10 @@ actor APIClient {
     nonisolated let userID: String?
     private nonisolated let anonymousScope = UUID().uuidString
     nonisolated var cacheScope: String { baseURL.absoluteString + "|" + (userID ?? anonymousScope) }
+    nonisolated var isReadOnly: Bool { userID.map { ReadOnlyPolicy.isEnabled(server: baseURL, userID: $0) } ?? false }
+    nonisolated func setReadOnly(_ enabled: Bool) {
+        if let userID { ReadOnlyPolicy.setEnabled(enabled, server: baseURL, userID: userID) }
+    }
     private let accessToken: String?
     private let session: URLSession
     private let connection: ServerConnection
@@ -84,19 +88,35 @@ actor APIClient {
     }
 
     private func perform(_ method: HTTPMethod, path: String, query: [URLQueryItem] = [], body: Data? = nil) async throws -> Data {
-        try Task.checkCancellation()
-        var request = try await authorizedRequest(path: path, query: query)
-        request.httpMethod = method.rawValue
-        request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let data: Data
-        let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
-        catch { await connection.invalidate(); throw error }
-        try Self.validate(response)
-        try Task.checkCancellation()
-        return data
+        let startedAt = Date()
+        var status: Int?
+        do {
+            try Task.checkCancellation()
+            try ReadOnlyPolicy.check(enabled: isReadOnly, method: method.rawValue, path: path)
+            var request = try await authorizedRequest(path: path, query: query)
+            try ReadOnlyPolicy.check(enabled: isReadOnly, method: method.rawValue, path: path)
+            request.httpMethod = method.rawValue
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+            let (data, response) = try await session.data(for: request)
+            status = (response as? HTTPURLResponse)?.statusCode
+            try Self.validate(response)
+            try Task.checkCancellation()
+            await DiagnosticsStore.shared.record(method: method.rawValue, path: path, statusCode: status, startedAt: startedAt, outcome: .success)
+            return data
+        } catch {
+            if error is URLError { await connection.invalidate() }
+            await recordFailure(error, method: method.rawValue, path: path, status: status, startedAt: startedAt)
+            throw error
+        }
+    }
+    private func recordFailure(_ error: any Error, method: String, path: String, status: Int?, startedAt: Date) async {
+        let outcome: DiagnosticOutcome
+        if error is ReadOnlyPolicy.ReadOnlyError { outcome = .blocked }
+        else if error is CancellationError || (error as? URLError)?.code == .cancelled { outcome = .cancelled }
+        else { outcome = .failed }
+        await DiagnosticsStore.shared.record(method: method, path: path, statusCode: status, startedAt: startedAt, outcome: outcome)
     }
 
     nonisolated static func validate(_ response: URLResponse) throws {
@@ -187,14 +207,25 @@ actor APIClient {
         try await perform(.get, path: "users/\(userID)/profile-image")
     }
     func uploadProfileImage(jpeg: Data) async throws {
-        let boundary = "Ilyich-" + UUID().uuidString
-        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"profile-picture.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".utf8)
-        body.append(jpeg); body.append(Data("\r\n--\(boundary)--\r\n".utf8))
-        var request = try await authorizedRequest(path: "users/profile-image")
-        request.httpMethod = "POST"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        let (_, response) = try await session.upload(for: request, from: body)
-        try Self.validate(response)
+        let startedAt = Date()
+        var status: Int?
+        do {
+            try ReadOnlyPolicy.check(enabled: isReadOnly, method: "POST", path: "users/profile-image")
+            let boundary = "Ilyich-" + UUID().uuidString
+            var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"profile-picture.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".utf8)
+            body.append(jpeg); body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+            var request = try await authorizedRequest(path: "users/profile-image")
+            try ReadOnlyPolicy.check(enabled: isReadOnly, method: "POST", path: "users/profile-image")
+            request.httpMethod = "POST"
+            request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            let (_, response) = try await session.upload(for: request, from: body)
+            status = (response as? HTTPURLResponse)?.statusCode
+            try Self.validate(response)
+            await DiagnosticsStore.shared.record(method: "POST", path: "users/profile-image", statusCode: status, startedAt: startedAt, outcome: .success)
+        } catch {
+            await recordFailure(error, method: "POST", path: "users/profile-image", status: status, startedAt: startedAt)
+            throw error
+        }
     }
 
     func prepareCast(asset: Asset) async throws -> CastMedia {
@@ -210,7 +241,8 @@ actor APIClient {
         mediaRequest.httpMethod = "HEAD"
         let (_, response) = try await session.data(for: mediaRequest)
         try Self.validate(response)
-        guard let mime = response.mimeType, var parts = URLComponents(url: try await connection.request(path: path, query: query).url!, resolvingAgainstBaseURL: false) else {
+        let castRequest = try await connection.request(path: path, query: query)
+        guard let mime = response.mimeType, let castURL = castRequest.url, var parts = URLComponents(url: castURL, resolvingAgainstBaseURL: false) else {
             throw APIError.invalidResponse("The server did not identify this media type for casting.")
         }
         parts.queryItems = (parts.queryItems ?? []) + [.init(name: "sessionKey", value: authorization.token)]

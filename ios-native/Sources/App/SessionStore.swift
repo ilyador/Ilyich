@@ -85,6 +85,7 @@ import WidgetKit
             let previousPipeline = pipeline
             api = nil; pipeline = nil; name = ""; requiresPasswordChange = false; pendingLink = nil
             await previousPipeline?.removeAll()
+            await DiagnosticsStore.shared.clear()
             if let previous { await TimelineCache.shared.removeAll(scope: previous.cacheScope) }
             try? await previous?.logout()
         } catch { self.error = error.localizedDescription }

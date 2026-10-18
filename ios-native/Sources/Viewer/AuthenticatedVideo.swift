@@ -11,10 +11,12 @@ struct AuthenticatedVideo: View {
     @State private var transport: AuthenticatedVideoTransport?
     @State private var error: String?
     @State private var attempt = 0
+    @State private var loadedKey: String?
     @AppStorage("viewerAutoPlayVideo") private var autoPlay = true
     @AppStorage("viewerLoopVideo") private var loop = true
     @AppStorage("viewerLoadOriginalVideo") private var original = false
     @AppStorage("viewerMuteVideo") private var muted = false
+    private var requestKey: String { assetID + String(attempt) + String(original) }
     var body: some View {
         ZStack {
             Color.black
@@ -25,13 +27,17 @@ struct AuthenticatedVideo: View {
                 actions: { Button("Retry") { attempt += 1 } }
             } else { ProgressView().tint(.white) }
         }
-        .task(id: assetID + String(attempt) + String(original)) {
+        .task(id: requestKey + String(active)) {
             guard active else { return }
+            if let transport, loadedKey == requestKey {
+                if autoPlay || onEnded != nil { transport.player.play() }
+                return
+            }
             do {
                 let request = try await api.authorizedRequest(path: "assets/\(assetID)/" + (original ? "original" : "video/playback"))
                 try Task.checkCancellation()
                 let newTransport = try AuthenticatedVideoTransport(request: request, server: api.baseURL)
-                transport?.close(); transport = newTransport
+                transport?.close(); transport = newTransport; loadedKey = requestKey
                 newTransport.onFailure = { [weak newTransport] message in
                     guard let newTransport, transport === newTransport else { return }
                     self.error = message; transport?.close(); transport = nil
@@ -41,10 +47,9 @@ struct AuthenticatedVideo: View {
             } catch is CancellationError { } catch { self.error = error.localizedDescription }
         }
         .onChange(of: active) { _, active in
-            if active { if transport == nil { attempt += 1 } else if autoPlay || onEnded != nil { transport?.player.play() } }
-            else { transport?.player.pause() }
+            if !active { transport?.player.pause() }
         }
-        .onDisappear { transport?.close(); transport = nil }
+        .onDisappear { transport?.close(); transport = nil; loadedKey = nil }
         .onChange(of: muted) { _, value in transport?.player.isMuted = value }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard active, let item = notification.object as? AVPlayerItem, item === transport?.player.currentItem else { return }

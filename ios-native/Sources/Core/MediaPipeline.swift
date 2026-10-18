@@ -20,14 +20,18 @@ actor MediaPipeline {
         let task: Task<PreparedImage, Error>
         var waiters: Set<UUID>
         let generation: UUID
+        let privateGeneration: UUID?
     }
     private let client: APIClient
     private let session: URLSession
+    private let privateSession: URLSession
     private let byteCache: URLCache
     private let limiter = ImageWorkLimiter()
     private let decoded = NSCache<NSString, CachedImage>()
     private var flights: [MediaCacheIdentity: Flight] = [:]
     private var generation = UUID()
+    private var privateGeneration = UUID()
+    private var privateKeys = Set<MediaCacheIdentity>()
 
     init(client: APIClient, memoryLimit: Int = 80 * 1024 * 1024, diskLimit: Int = 300 * 1024 * 1024) {
         self.client = client
@@ -41,17 +45,23 @@ actor MediaPipeline {
         configuration.httpMaximumConnectionsPerHost = 6
         configuration.timeoutIntervalForRequest = 45
         session = URLSession(configuration: configuration, delegate: SameOriginRedirectDelegate(origin: client.baseURL), delegateQueue: nil)
+        let ephemeral = URLSessionConfiguration.ephemeral
+        ephemeral.urlCache = nil; ephemeral.httpCookieStorage = nil
+        ephemeral.requestCachePolicy = .reloadIgnoringLocalCacheData
+        privateSession = URLSession(configuration: ephemeral, delegate: SameOriginRedirectDelegate(origin: client.baseURL), delegateQueue: nil)
         decoded.totalCostLimit = memoryLimit
         decoded.countLimit = 300
     }
 
     func image(for asset: Asset, size: MediaSize = .thumbnail, pixelSize: Int, edited: Bool = true) async throws -> PreparedImage {
+        let privacyToken = privateGeneration
         let identity = MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: size, pixelSize: pixelSize, edited: edited)
         let request = try await client.authorizedRequest(path: "assets/\(asset.id)/thumbnail", query: [
             .init(name: "size", value: size.rawValue), .init(name: "edited", value: String(edited)),
             .init(name: "c", value: asset.cacheRevision)
         ])
-        return try await load(identity, request: request)
+        guard asset.visibility != .locked || privacyToken == privateGeneration else { throw CancellationError() }
+        return try await load(identity, request: request, isPrivate: asset.visibility == .locked)
     }
 
     func personImage(person: Person, pixelSize: Int) async throws -> PreparedImage {
@@ -60,7 +70,11 @@ actor MediaPipeline {
         return try await load(identity, request: request)
     }
 
-    private func load(_ key: MediaCacheIdentity, request: URLRequest) async throws -> PreparedImage {
+    private func load(_ key: MediaCacheIdentity, request: URLRequest, isPrivate: Bool = false) async throws -> PreparedImage {
+        if isPrivate {
+            privateKeys.insert(key)
+            byteCache.removeCachedResponse(for: request)
+        }
         let waiter = UUID()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
@@ -69,7 +83,7 @@ actor MediaPipeline {
             if var existing = flights[key] {
                 existing.waiters.insert(waiter); flights[key] = existing; flight = existing
             } else {
-                let session = self.session
+                let session = isPrivate ? self.privateSession : self.session
                 let limiter = self.limiter
                 let task = Task.detached(priority: .userInitiated) {
                     try await limiter.acquire()
@@ -87,13 +101,13 @@ actor MediaPipeline {
                         throw error
                     }
                 }
-                flight = Flight(task: task, waiters: [waiter], generation: generation)
+                flight = Flight(task: task, waiters: [waiter], generation: generation, privateGeneration: isPrivate ? privateGeneration : nil)
                 flights[key] = flight
             }
             defer { release(key, waiter: waiter) }
             let image = try await flight.task.value
             try Task.checkCancellation()
-            guard flight.generation == generation else { throw CancellationError() }
+            guard flight.generation == generation, flight.privateGeneration == nil || flight.privateGeneration == privateGeneration else { throw CancellationError() }
             decoded.setObject(CachedImage(image), forKey: key.stableKey as NSString, cost: image.byteCost)
             return image
         } onCancel: {
@@ -111,7 +125,17 @@ actor MediaPipeline {
         }
     }
 
+    func removePrivate() {
+        privateGeneration = UUID()
+        for key in privateKeys {
+            flights.removeValue(forKey: key)?.task.cancel()
+            decoded.removeObject(forKey: key.stableKey as NSString)
+        }
+        privateKeys.removeAll()
+    }
+
     func removeAll() {
+        removePrivate()
         generation = UUID()
         for flight in flights.values { flight.task.cancel() }
         flights.removeAll()
@@ -119,6 +143,10 @@ actor MediaPipeline {
         byteCache.removeAllCachedResponses()
     }
 
+    func cacheUsage() -> MediaCacheUsage {
+        MediaCacheUsage(memoryBytes: byteCache.currentMemoryUsage, diskBytes: byteCache.currentDiskUsage,
+                        pendingLoads: flights.count, decodedMemoryLimit: decoded.totalCostLimit)
+    }
     func trimMemory() { decoded.removeAllObjects() }
 
     private nonisolated static func downsample(_ data: Data, pixelSize: Int) throws -> PreparedImage {
@@ -133,4 +161,11 @@ actor MediaPipeline {
         }
         return PreparedImage(cgImage: cgImage)
     }
+}
+
+struct MediaCacheUsage: Sendable {
+    let memoryBytes: Int
+    let diskBytes: Int
+    let pendingLoads: Int
+    let decodedMemoryLimit: Int
 }

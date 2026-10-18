@@ -9,6 +9,7 @@ struct AssetViewer: View {
     let onUpdated: (Asset) -> Void
     let onDeleted: () -> Void
     let albumID: String?
+    @ObservedObject private var cast = CastController.shared
     @State private var selectedID: String
     @State private var replacements: [String: Asset] = [:]
     @State private var controls = true
@@ -25,6 +26,9 @@ struct AssetViewer: View {
     @State private var showStack = false
     @State private var albumActivity = false
     @State private var castPresented = false
+    @State private var ocrPresented = false
+    @State private var similarPresented = false
+    @State private var features: ServerFeatures?
     @State private var profilePhoto = false
     @AppStorage("viewerTapToNavigate") private var tapToNavigate = false
     @Environment(\.dismiss) private var dismiss
@@ -56,9 +60,9 @@ struct AssetViewer: View {
                     Group {
                         if abs(index - selectedIndex) <= 1 {
                             if asset.isVideo {
-                                AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id)
+                                AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !(cast.connected && cast.currentAssetID == asset.id))
                             } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
-                                AuthenticatedVideo(api: api, assetID: videoID, active: true, onEnded: { playingLive = false })
+                                AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false })
                             } else {
                                 ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() })
                             }
@@ -77,6 +81,7 @@ struct AssetViewer: View {
         }
         .preferredColorScheme(.dark)
         .statusBarHidden(!controls)
+        .task { features = try? await api.serverFeatures() }
         .task(id: selectedID) {
             playingLive = false
             CastController.shared.select(api: api, asset: current)
@@ -87,6 +92,8 @@ struct AssetViewer: View {
         }
         .sheet(isPresented: $profilePhoto) { NavigationStack { ProfilePhotoCropView(api: api, pipeline: pipeline, asset: current) } }
         .sheet(isPresented: $castPresented) { CastView(api: api, asset: current) }
+        .fullScreenCover(isPresented: $ocrPresented) { OCRPhotoReader(api: api, pipeline: pipeline, asset: current) }
+        .sheet(isPresented: $similarPresented) { SimilarPhotosView(api: api, pipeline: pipeline, reference: current) }
         .sheet(isPresented: $info) {
             NavigationStack {
                 AssetInfoView(api: api, pipeline: pipeline, asset: current, onUpdated: update)
@@ -132,29 +139,31 @@ struct AssetViewer: View {
                 if !location.isEmpty { Text(location).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
             }.padding(.horizontal, 14).frame(minHeight: 48).frame(maxWidth: .infinity).glassEffect(in: .capsule)
             Menu {
-                Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }
+                Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }.requiresWriteAccess(api)
                 Button("Slideshow", systemImage: "play.rectangle") { slideshow = true }
                 Button("Cast", systemImage: "tv") { castPresented = true }
-                if !current.isVideo { Button("Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true } }
-                Button("Create shared link", systemImage: "link") { sharedLink = true }
+                if features?.ocr == true, current.type == .image { Button("Select text", systemImage: "text.viewfinder") { ocrPresented = true } }
+                if features?.smartSearch == true { Button("Find similar photos", systemImage: "photo.on.rectangle.angled") { similarPresented = true } }
+                if !current.isVideo { Button("Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true }.requiresWriteAccess(api) }
+                Button("Create shared link", systemImage: "link") { sharedLink = true }.requiresWriteAccess(api)
                 if let stack = current.stack { Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { showStack = true } }
                 if let albumID {
                     Button("Comments and likes", systemImage: "bubble") { albumActivity = true }
                     Button("Set album cover", systemImage: "photo.on.rectangle.angled") {
                         let id = current.id
                         run { let _: Album = try await api.request(.patch, path: "albums/\(albumID)", body: ["albumThumbnailAssetId": id]) }
-                    }
+                    }.requiresWriteAccess(api)
                 }
                 Button("Share displayed version", systemImage: "square.and.arrow.up") { exportAsset(original: false) }
                 Button("Download original", systemImage: "arrow.down.document") { exportAsset(original: true) }
-                Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }
+                Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }.requiresWriteAccess(api)
                 Button("Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
                 if ownsAsset {
                     if current.isTrashed {
-                        Button("Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }
+                        Button("Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }.requiresWriteAccess(api)
                     } else {
-                        Button(current.visibility == .archive ? "Unarchive" : "Archive", systemImage: "archivebox") { changeVisibility(current.visibility == .archive ? .timeline : .archive) }
-                        Button(current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") { changeVisibility(current.visibility == .locked ? .timeline : .locked) }
+                        Button(current.visibility == .archive ? "Unarchive" : "Archive", systemImage: "archivebox") { changeVisibility(current.visibility == .archive ? .timeline : .archive) }.requiresWriteAccess(api)
+                        Button(current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") { changeVisibility(current.visibility == .locked ? .timeline : .locked) }.requiresWriteAccess(api)
                     }
                 }
             } label: { Image(systemName: "ellipsis").frame(width: 48, height: 48).glassEffect(in: .circle) }
@@ -171,17 +180,17 @@ struct AssetViewer: View {
             HStack(spacing: 0) {
                 viewerButton("Share", symbol: "square.and.arrow.up") { exportAsset(original: false) }
                 Spacer()
-                viewerButton(current.isFavorite ? "Remove favorite" : "Favorite", symbol: current.isFavorite ? "heart.fill" : "heart") { toggleFavorite() }
+                viewerButton(current.isFavorite ? "Remove favorite" : "Favorite", symbol: current.isFavorite ? "heart.fill" : "heart") { toggleFavorite() }.requiresWriteAccess(api)
                     .tint(current.isFavorite ? .red : .primary).disabled(!ownsAsset)
                 Spacer()
                 viewerButton("Info", symbol: "info.circle") { info = true }
                 if canEdit {
                     Spacer()
-                    viewerButton("Edit", symbol: "slider.horizontal.3") { editing = true }
+                    viewerButton("Edit", symbol: "slider.horizontal.3") { editing = true }.requiresWriteAccess(api)
                 }
                 if ownsAsset {
                     Spacer()
-                    viewerButton("Delete", symbol: "trash") { deleteConfirmation = true }
+                    viewerButton("Delete", symbol: "trash") { deleteConfirmation = true }.requiresWriteAccess(api)
                 }
             }.disabled(working)
         }
@@ -207,7 +216,14 @@ struct AssetViewer: View {
     }
     private func changeVisibility(_ visibility: AssetVisibility) {
         let id = current.id
-        run { update(try await api.updateAsset(id: id, update: .init(visibility: visibility))) }
+        run {
+            let updated = try await api.updateAsset(id: id, update: .init(visibility: visibility))
+            if visibility == .locked {
+                await pipeline.removeAll()
+                await TimelineCache.shared.removeAll(scope: api.cacheScope)
+                onDeleted(); dismiss()
+            } else { update(updated) }
+        }
     }
     private func deleteAsset() {
         let asset = current
@@ -224,13 +240,26 @@ struct AssetViewer: View {
     private func saveToPhotos() {
         let asset = current
         run {
+            guard !api.isReadOnly else { throw ReadOnlyPolicy.ReadOnlyError() }
             let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
             guard status == .authorized || status == .limited else { throw APIError.invalidResponse("Allow Ilyich to add photos in iPhone Settings, then try again.") }
-            let file = ViewerExport(url: try await api.download(asset: asset))
+            // A Live Photo requires the original matching still/video identifiers.
+            // Server-rendered JPEGs cannot substitute for the paired still metadata.
+            let file = ViewerExport(url: try await api.download(asset: asset, original: asset.livePhotoVideoId != nil))
             defer { file.removeTemporaryFile() }
+            var motion: ViewerExport?
+            defer { motion?.removeTemporaryFile() }
+            if let motionID = asset.livePhotoVideoId {
+                let motionAsset = try await api.asset(id: motionID)
+                motion = ViewerExport(url: try await api.download(asset: motionAsset, original: true))
+            }
+            let motionURL = motion?.url
+            try Task.checkCancellation()
+            guard !api.isReadOnly else { throw ReadOnlyPolicy.ReadOnlyError() }
             try await PHPhotoLibrary.shared().performChanges {
                 let creation = PHAssetCreationRequest.forAsset()
                 creation.addResource(with: asset.isVideo ? .video : .photo, fileURL: file.url, options: nil)
+                if let motionURL { creation.addResource(with: .pairedVideo, fileURL: motionURL, options: nil) }
             }
         }
     }

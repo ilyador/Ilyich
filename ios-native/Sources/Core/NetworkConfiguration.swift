@@ -15,7 +15,7 @@ struct NetworkConfiguration: Codable, Equatable, Sendable {
             guard !name.isEmpty, name.unicodeScalars.allSatisfy(tokenCharacters.contains),
                   !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
                   names.insert(name.lowercased()).inserted else { throw NetworkConfigurationError.invalidHeader }
-            guard !["host", "content-length", "connection", "transfer-encoding", "authorization"].contains(name.lowercased()) else {
+            guard !["host", "content-length", "connection", "transfer-encoding", "x-immich-user-token", "x-immich-session-token"].contains(name.lowercased()) else {
                 throw NetworkConfigurationError.reservedHeader(name)
             }
         }

@@ -49,6 +49,9 @@ final class CoreTests: XCTestCase {
         XCTAssertNotEqual(base, MediaCacheIdentity(scope: "other-server|alice", asset: asset, size: .preview, pixelSize: 1200))
         XCTAssertNotEqual(base, MediaCacheIdentity(scope: "server|alice", asset: asset, size: .fullsize, pixelSize: 1200))
         XCTAssertNotEqual(base, MediaCacheIdentity(scope: "server|alice", asset: asset, size: .preview, pixelSize: 300))
+        asset.visibility = .locked
+        XCTAssertNotEqual(base, MediaCacheIdentity(scope: "server|alice", asset: asset, size: .preview, pixelSize: 1200))
+        asset.visibility = .timeline
         asset.mediaRevision = "two"
         XCTAssertNotEqual(base, MediaCacheIdentity(scope: "server|alice", asset: asset, size: .preview, pixelSize: 1200))
     }
@@ -142,8 +145,22 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(request.url?.absoluteString, "https://photos.example/prefix/api/assets/photo/thumbnail")
         XCTAssertEqual(request.value(forHTTPHeaderField: "CF-Access-Client-Id"), "opaque-value")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer session")
-        for headers in [["X-Key": "line\r\nbreak"], ["X-Key": "one", "x-key": "two"], ["Host": "elsewhere"], ["Authorization": "override"]] {
+        let proxyClient = try APIClient(baseURL: primary, accessToken: "session", networkConfiguration: .init(customHeaders: ["Authorization": "Basic proxy-value"]))
+        let proxyRequest = try await proxyClient.authorizedRequest(path: "assets/photo/thumbnail")
+        XCTAssertEqual(proxyRequest.value(forHTTPHeaderField: "Authorization"), "Basic proxy-value")
+        XCTAssertEqual(proxyRequest.value(forHTTPHeaderField: "x-immich-user-token"), "session")
+        for headers in [["X-Key": "line\r\nbreak"], ["X-Key": "one", "x-key": "two"], ["Host": "elsewhere"], ["x-immich-user-token": "override"]] {
             XCTAssertThrowsError(try NetworkConfiguration(customHeaders: headers).validated())
+        }
+    }
+
+    func testReadOnlyKeepsSearchAndAuthenticationWhileBlockingLibraryMutations() {
+        for route in ["search/smart", "search/metadata", "auth/session/unlock", "auth/logout"] {
+            XCTAssertTrue(ReadOnlyPolicy.permits(method: "POST", path: route))
+        }
+        XCTAssertTrue(ReadOnlyPolicy.permits(method: "GET", path: "assets/photo/thumbnail"))
+        for (method, route) in [("POST", "assets"), ("PUT", "assets/photo"), ("DELETE", "assets"), ("PATCH", "albums/album"), ("POST", "users/profile-image")] {
+            XCTAssertFalse(ReadOnlyPolicy.permits(method: method, path: route))
         }
     }
 

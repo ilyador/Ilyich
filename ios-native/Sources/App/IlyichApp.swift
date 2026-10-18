@@ -13,7 +13,7 @@ import SwiftUI
                 } else if let api = session.api, let pipeline = session.pipeline {
                     if session.requiresPasswordChange {
                         NavigationStack {
-                            ChangePasswordView(api: api, onChanged: { Task { await session.signOut() } })
+                            RequiredPasswordChange(api: api, onChanged: { Task { await session.signOut() } })
                                 .toolbar { ToolbarItem(placement: .cancellationAction) {
                                     Button("Sign out") { Task { await session.signOut() } }
                                 } }
@@ -30,5 +30,28 @@ import SwiftUI
             .onOpenURL { session.open($0) }
             .onChange(of: scenePhase) { _, phase in if phase == .active { session.validateSession() } }
         }
+    }
+}
+
+private struct RequiredPasswordChange: View {
+    let api: APIClient
+    let onChanged: () -> Void
+    @State private var readOnly = false
+
+    var body: some View {
+        ChangePasswordView(api: api, onChanged: onChanged)
+            .safeAreaInset(edge: .top) {
+                if readOnly {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Your server requires a new password. Turn off Read-only mode to save it.")
+                            .font(.subheadline)
+                        Button("Turn off Read-only mode") {
+                            api.setReadOnly(false)
+                            readOnly = false
+                        }.buttonStyle(.bordered)
+                    }.padding().frame(maxWidth: .infinity, alignment: .leading).background(.regularMaterial)
+                }
+            }
+            .onAppear { readOnly = api.isReadOnly }
     }
 }
