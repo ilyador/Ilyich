@@ -49,10 +49,6 @@ jobs:
           sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
           [[ "$sdk_version" == 27.* ]] || { echo "Expected iOS 27 SDK, found $sdk_version"; exit 1; }
           echo "Using iOS SDK $sdk_version"
-          if ! xcrun --sdk iphoneos metal --version; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun --sdk iphoneos metal --version
 
       - name: Install pinned XcodeGen
         run: |
@@ -128,9 +124,16 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Ilyich-native-test-results
-          path: |
-            ${{ runner.temp }}/Ilyich-native.xcresult
-            ${{ runner.temp }}/ilyich-native-test-attachments
+          path: ${{ runner.temp }}/Ilyich-native.xcresult
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload test screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Ilyich-native-test-attachments
+          path: ${{ runner.temp }}/ilyich-native-test-attachments
           if-no-files-found: warn
           retention-days: 7
 

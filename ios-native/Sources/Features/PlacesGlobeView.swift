@@ -2,7 +2,6 @@ import SwiftUI
 import RealityKit
 import UIKit
 import simd
-import Metal
 
 /// A virtual RealityKit scene. No AR session, camera feed, or location permission.
 struct PlacesGlobeView: View {
@@ -101,7 +100,6 @@ private struct GlobeSurface: UIViewRepresentable {
             light.light.intensity = 2800
             light.look(at: .zero, from: [3, 2, 4], relativeTo: nil)
             anchor.addChild(light)
-            addAtmosphere()
             view.scene.addAnchor(anchor)
             let pan = UIPanGestureRecognizer(target: self, action: #selector(pan(_:)))
             pan.maximumNumberOfTouches = 1; pan.delegate = self
@@ -178,16 +176,6 @@ private struct GlobeSurface: UIViewRepresentable {
                                      materials: [UnlitMaterial(color: highlighted ? .white : .init(red: 1, green: 0.77, blue: 0.33, alpha: 1))])
             marker.position = Self.position(latitude: place.latitude, longitude: place.longitude) * 1.015
             markerRoot.addChild(marker); markers.append((marker, place))
-        }
-
-        private func addAtmosphere() {
-            guard let library = MTLCreateSystemDefaultDevice()?.makeDefaultLibrary(), let mesh = earth.model?.mesh,
-                  var material = try? CustomMaterial(surfaceShader: .init(named: "earthAtmosphere", in: library), lightingModel: .unlit) else { return }
-            material.blending = .transparent(opacity: .init(floatLiteral: 1))
-            material.faceCulling = .back
-            let shell = ModelEntity(mesh: mesh, materials: [material])
-            shell.scale = .init(repeating: 1.035)
-            globe.addChild(shell)
         }
 
         private func applyTransform() {
