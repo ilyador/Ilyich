@@ -150,7 +150,7 @@ flutter:
           weight: 600
 flutter_launcher_icons:
   image_path_android: 'assets/immich-logo.png'
-  adaptive_icon_background: '#ffffff'
+  adaptive_icon_background: '#c6092a'
   adaptive_icon_foreground: 'assets/immich-logo-android-adaptive-icon.png'
   image_path_ios: 'assets/immich-logo-w-bg.png'
   android: 'ic_launcher'

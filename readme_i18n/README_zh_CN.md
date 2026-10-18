@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-<img src="../design/immich-logo.svg" width="120" alt="Ilyich icon">
+<img src="../design/ilyich-logo.png" width="120" alt="Ilyich icon">
 </p>
 <h1 align="center">Ilyich</h1>
 <h3 align="center">高性能的照片和视频自托管解决方案</h3>
