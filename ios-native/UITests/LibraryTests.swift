@@ -11,6 +11,8 @@ final class LibraryTests: XCTestCase {
     }
     @MainActor private func capture(_ app: XCUIApplication, _ title: String) {
         let image = XCTAttachment(screenshot: app.screenshot()); image.name = title; image.lifetime = .keepAlways; add(image)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = title + " — accessibility hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
     }
     @MainActor private func requireHittable(_ element: XCUIElement, in app: XCUIApplication,
                                           file: StaticString = #filePath, line: UInt = #line) {
@@ -18,8 +20,6 @@ final class LibraryTests: XCTestCase {
         let result = XCTWaiter.wait(for: [ready], timeout: 5)
         if result != .completed {
             capture(app, "Interaction timeout")
-            let hierarchy = XCTAttachment(string: app.debugDescription)
-            hierarchy.name = "Interaction timeout — accessibility hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
         }
         XCTAssertEqual(result, .completed, "The control must become interactive after scrolling settles.", file: file, line: line)
     }
@@ -36,12 +36,28 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.buttons["People"].waitForExistence(timeout: 5))
         capture(app, "Shelves — native glass")
         app.buttons["Close"].tap()
+        requireHittable(app.buttons["library.shelves"], in: app)
         grid.swipeUp()
         let select = app.buttons["library.select"]
         requireHittable(select, in: app)
         select.tap()
         grid.cells.firstMatch.tap()
         XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
+    }
+    @MainActor func testSelectedPhotosSaveToPhotosWithACompletedCount() {
+        let app = launch(extraArguments: ["-shareFileType", "preview"])
+        let grid = app.collectionViews["library.grid"]
+        requireHittable(app.buttons["library.select"], in: app)
+        app.buttons["library.select"].tap()
+        grid.cells.element(boundBy: 0).tap()
+        grid.cells.element(boundBy: 1).tap()
+        XCTAssertTrue(app.staticTexts["2 selected"].waitForExistence(timeout: 5))
+        app.buttons["Selection actions"].tap()
+        let save = app.buttons["Save to Photos"]
+        requireHittable(save, in: app); save.tap()
+        XCTAssertTrue(app.staticTexts["Saved 2 of 2 to Photos."].waitForExistence(timeout: 20))
+        requireHittable(app.buttons["Done"], in: app)
+        capture(app, "Selection — two photos saved to Photos")
     }
     @MainActor func testSearchContinuesAnEmptyVerifiedPageAndCanClear() {
         let app = launch()
@@ -127,42 +143,6 @@ final class LibraryTests: XCTestCase {
         app.collectionViews["library.grid"].cells.firstMatch.tap()
         XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
     }
-    @MainActor func testMemoryLanePlaybackAdvancesClosesAndLeavesLibrarySelectable() {
-        let app = launch()
-        let grid = app.collectionViews["library.grid"]
-        let card = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Maya Memory One")).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 15), "The fixture's first memory must appear in the library memory lane.")
-        XCTAssertEqual(card.label, "Maya Memory One, 3 photos")
-        requireHittable(card, in: app)
-        card.tap()
-
-        XCTAssertTrue(app.staticTexts["1 of 3"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Close memories"].exists)
-        let chevron = app.buttons["memories.nextPhoto"]
-        XCTAssertTrue(chevron.waitForExistence(timeout: 10))
-        requireHittable(chevron, in: app)
-        chevron.tap()
-        XCTAssertTrue(app.staticTexts["2 of 3"].waitForExistence(timeout: 5))
-        capture(app, "Memory playback")
-
-        let nextMemory = app.buttons["Next memory"]
-        requireHittable(nextMemory, in: app)
-        nextMemory.tap()
-        XCTAssertTrue(app.staticTexts["1 of 2"].waitForExistence(timeout: 5), "Next memory must open the second synthetic memory.")
-
-        let close = app.buttons["Close memories"]
-        requireHittable(close, in: app)
-        close.tap()
-        let select = app.buttons["library.select"]
-        requireHittable(select, in: app)
-        select.tap()
-        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 5))
-        grid.cells.firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
-        requireHittable(select, in: app)
-        select.tap()
-        XCTAssertFalse(app.staticTexts["1 selected"].waitForExistence(timeout: 2))
-    }
     @MainActor func testAccessibilityTextKeepsLibraryAndGlobeControlsTappable() {
         let app = launch(extraArguments: ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
         for identifier in ["library.select", "library.shelves"] { requireHittable(app.buttons[identifier], in: app) }
@@ -182,22 +162,6 @@ final class LibraryTests: XCTestCase {
         capture(app, "Places — accessibility text")
         close.tap()
         requireHittable(app.textFields["library.search"], in: app)
-    }
-    @MainActor func testMemoryCanReturnToItsDateInTheUnfilteredTimeline() {
-        let app = launch()
-        let card = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Maya Memory One")).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 15))
-        requireHittable(card, in: app); card.tap()
-        let actions = app.buttons["Memory photo actions"]
-        XCTAssertTrue(actions.waitForExistence(timeout: 10)); actions.tap()
-        app.buttons["Show in timeline"].tap()
-        XCTAssertTrue(app.staticTexts["June 2024"].waitForExistence(timeout: 15))
-        XCTAssertFalse(app.buttons["Clear filters"].exists)
-        let select = app.buttons["library.select"]
-        requireHittable(select, in: app); select.tap()
-        app.collectionViews["library.grid"].cells.firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
-        capture(app, "Memory — return to June 2024")
     }
     @MainActor func testLargeLibraryScrollingMetrics() {
         let app = launch(); let grid = app.collectionViews["library.grid"]

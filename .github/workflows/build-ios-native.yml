@@ -99,6 +99,8 @@ jobs:
           fixture_pid=$!
           trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
           xcrun simctl bootstatus "$SIMULATOR_ID" -b
+          # This disposable simulator saves only synthetic fixture images.
+          xcrun simctl privacy "$SIMULATOR_ID" grant photos-add app.alextran.immich
           xcodebuild test \
             -project Ilyich.xcodeproj -scheme Ilyich -configuration Debug \
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
