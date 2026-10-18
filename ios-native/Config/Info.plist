@@ -50,7 +50,12 @@
     <key>NSFaceIDUsageDescription</key>
     <string>Use Face ID to unlock your locked folder.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Use your location when you choose where a photo was taken.</string>
+    <string>Use your location when you choose where a photo was taken or ask Ilyich to read your current Wi-Fi name for local server connections.</string>
+    <key>NSLocationTemporaryUsageDescriptionDictionary</key>
+    <dict>
+        <key>WiFiNetworkName</key>
+        <string>Precise location access is needed only when you ask Ilyich to read the connected Wi-Fi name for a local server address.</string>
+    </dict>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

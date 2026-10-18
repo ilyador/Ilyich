@@ -82,6 +82,15 @@ final class CoreTests: XCTestCase {
         }
     }
 
+    func testTransportFailureClassificationAcceptsOnlyDefiniteNetworkFailures() {
+        XCTAssertTrue(TransportFailure.isDefinite(URLError(.notConnectedToInternet)))
+        XCTAssertTrue(TransportFailure.isDefinite(NetworkConfigurationError.unavailable))
+        XCTAssertFalse(TransportFailure.isDefinite(URLError(.cancelled)))
+        XCTAssertFalse(TransportFailure.isDefinite(CancellationError()))
+        XCTAssertFalse(TransportFailure.isDefinite(NetworkConfigurationError.invalidAddress))
+        XCTAssertFalse(TransportFailure.isDefinite(APIError.forbidden))
+    }
+
     func testAssetDecodeKeepsLightcraftDistinctFromImmichEdits() throws {
         let data = Data(#"{"id":"photo","type":"IMAGE","isEdited":false,"isDeveloped":true,"mediaRevision":"xmp-7","duration":null,"width":6000,"height":4000,"originalFileName":"DSC_0632.NEF","fileCreatedAt":"2024-10-19T13:48:55.000Z"}"#.utf8)
         let asset = try APIJSON.decoder().decode(Asset.self, from: data)
@@ -155,6 +164,26 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(proxyRequest.value(forHTTPHeaderField: "x-immich-user-token"), "session")
         for headers in [["X-Key": "line\r\nbreak"], ["X-Key": "one", "x-key": "two"], ["Host": "elsewhere"], ["x-immich-user-token": "override"]] {
             XCTAssertThrowsError(try NetworkConfiguration(customHeaders: headers).validated())
+        }
+    }
+
+    func testPreferredWiFiAddressIsFirstOnlyOnExactMatchAndOldConfigurationDecodes() throws {
+        let primary = URL(string: "https://photos.example/api")!
+        let local = URL(string: "http://192.168.1.20:2283")!
+        let alternate = URL(string: "https://backup.example/api")!
+        let oldConfiguration = Data(#"{"customHeaders":{},"alternateEndpoints":["https://backup.example/api"],"automaticallySwitchEndpoints":true}"#.utf8)
+        let decoded = try JSONDecoder().decode(NetworkConfiguration.self, from: oldConfiguration)
+        XCTAssertNil(decoded.preferredWifiName)
+        XCTAssertNil(decoded.localEndpoint)
+        XCTAssertEqual(decoded.candidates(primary: primary).map(\.absoluteString), [alternate.absoluteString, primary.absoluteString])
+
+        let configured = try NetworkConfiguration(alternateEndpoints: [alternate], automaticallySwitchEndpoints: true,
+                                                   preferredWifiName: "Home", localEndpoint: local).validated()
+        XCTAssertEqual(configured.candidates(primary: primary, currentWifiName: "Home").map(\.absoluteString),
+                       ["http://192.168.1.20:2283/api", alternate.absoluteString, primary.absoluteString])
+        for unavailableOrDifferent in [nil, "home", "Office"] as [String?] {
+            XCTAssertEqual(configured.candidates(primary: primary, currentWifiName: unavailableOrDifferent).map(\.absoluteString),
+                           [alternate.absoluteString, primary.absoluteString])
         }
     }
 

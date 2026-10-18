@@ -6,9 +6,14 @@ struct NetworkConfiguration: Codable, Equatable, Sendable {
     var customHeaders: [String: String] = [:]
     var alternateEndpoints: [URL] = []
     var automaticallySwitchEndpoints = false
+    var preferredWifiName: String?
+    var localEndpoint: URL?
 
     func validated() throws -> Self {
         var result = self
+        result.preferredWifiName = preferredWifiName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.preferredWifiName?.isEmpty == true { result.preferredWifiName = nil }
+        if let localEndpoint { result.localEndpoint = try ServerAddress.normalized(localEndpoint) }
         var names = Set<String>()
         let tokenCharacters = CharacterSet(charactersIn: "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
         for (name, value) in customHeaders {
@@ -25,9 +30,17 @@ struct NetworkConfiguration: Codable, Equatable, Sendable {
         return result
     }
 
-    func candidates(primary: URL) -> [URL] {
+    func candidates(primary: URL, currentWifiName: String? = nil) -> [URL] {
         guard automaticallySwitchEndpoints else { return [primary] }
-        return alternateEndpoints + (alternateEndpoints.contains(primary) ? [] : [primary])
+        var result: [URL] = []
+        if preferredWifiName == currentWifiName, let preferredWifiName, !preferredWifiName.isEmpty,
+           let localEndpoint {
+            result.append(localEndpoint)
+        }
+        result += alternateEndpoints
+        if !result.contains(primary) { result.append(primary) }
+        var seen = Set<URL>()
+        return result.filter { seen.insert($0).inserted }
     }
 }
 
@@ -43,6 +56,15 @@ enum NetworkConfigurationError: LocalizedError {
         case .incorrectCertificatePassword: "The certificate password is incorrect, or the PKCS#12 file is damaged."
         case .unavailable: "None of the configured server addresses could be reached. Check your connection and try again."
         }
+    }
+}
+
+enum TransportFailure {
+    /// A definite, non-cancelled transport failure, including every configured endpoint being unreachable.
+    static func isDefinite(_ error: any Error) -> Bool {
+        if let urlError = error as? URLError { return urlError.code != .cancelled }
+        if case .unavailable? = error as? NetworkConfigurationError { return true }
+        return false
     }
 }
 
