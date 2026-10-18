@@ -68,6 +68,8 @@ struct AssetViewer: View {
         ownsAsset && current.type == .image && !current.isAnimatedImage && current.livePhotoVideoId == nil && current.exifInfo?.projectionType != "equirectangular" && !["gif", "svg"].contains((current.originalFileName as NSString).pathExtension.lowercased())
     }
 
+    private func matchedLocalCopy(for asset: Asset) -> LocalPhoto? { changedLocalCopies.contains(asset.id) ? nil : matchedLocalPhotos[asset.id] }
+
     private var canvas: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -77,11 +79,13 @@ struct AssetViewer: View {
                     Group {
                         if abs(index - selectedIndex) <= 1 {
                             if asset.isVideo {
-                                AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !(cast.connected && cast.currentAssetID == asset.id))
+                                AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !(cast.connected && cast.currentAssetID == asset.id),
+                                                   sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset))
                             } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
-                                AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false })
+                                AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false },
+                                                   sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), isLivePhotoMotion: true)
                             } else {
-                                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() }, matchedLocalPhoto: changedLocalCopies.contains(asset.id) ? nil : matchedLocalPhotos[asset.id])
+                                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() }, matchedLocalPhoto: matchedLocalCopy(for: asset))
                             }
                         } else { Color.black }
                     }.tag(asset.id)
