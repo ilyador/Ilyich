@@ -9,6 +9,7 @@ actor EntityStore {
     nonisolated let userID: String
     private let database: EntityDatabase
     private var generation = UUID()
+    private static let cachedServerFeaturesKey = "cache.serverFeatures.v1"
 
     init(scope: String, userID: String, directory: URL? = nil) throws {
         self.scope = scope; self.userID = userID
@@ -31,6 +32,15 @@ actor EntityStore {
         var counts: [String: Int] = [:]
         for row in try database.query("SELECT kind,count(*) FROM entities GROUP BY kind") { if let kind = row[0], let count = row[1].flatMap(Int.init) { counts[kind] = count } }
         return try EntityStoreStatistics(counts: counts, lastSync: lastSyncDate(), isComplete: isComplete())
+    }
+    func persistCachedServerFeatures(_ features: ServerFeatures) throws {
+        let data = try APIJSON.encoder().encode(features)
+        guard let value = String(data: data, encoding: .utf8) else { throw invalidSync() }
+        try setMetadata(Self.cachedServerFeaturesKey, value)
+    }
+    func cachedServerFeatures() throws -> ServerFeatures? {
+        guard let value = try metadata(Self.cachedServerFeaturesKey) else { return nil }
+        return try APIJSON.decoder().decode(ServerFeatures.self, from: Data(value.utf8))
     }
     /// Access changes survive a later stream failure, allowing the UI to discard
     /// stale media even when the overall sync did not return a success summary.
@@ -185,23 +195,83 @@ actor EntityStore {
     }
     func albums() throws -> [Album] {
         try database.query("SELECT payload FROM entities WHERE kind='album' ORDER BY json_extract(payload,'$.name') COLLATE NOCASE").compactMap { row in
-            guard let text = row[0] else { return nil }
-            var object = try JSONDecoder().decode([String: EntityJSON].self, from: Data(text.utf8))
-            guard let id = object["id"]?.string else { throw invalidSync() }
-            let count = try database.query("SELECT count(*) FROM entities WHERE kind='albumAsset' AND json_extract(payload,'$.albumId')=?", [id]).first?[0].flatMap(Int.init) ?? 0
-            let users = try database.query("SELECT u.payload,r.payload FROM entities r JOIN entities u ON u.kind='user' AND u.id=json_extract(r.payload,'$.userId') WHERE r.kind='albumUser' AND json_extract(r.payload,'$.albumId')=?", [id]).compactMap { row -> EntityJSON? in
-                guard let user = row[0], let relation = row[1] else { return nil }
-                let r = try JSONDecoder().decode([String: EntityJSON].self, from: Data(relation.utf8))
-                return .object(["user": try JSONDecoder().decode(EntityJSON.self, from: Data(user.utf8)), "role": r["role"] ?? .string("viewer")])
-            }
-            object["albumName"] = object["name"]; object["albumThumbnailAssetId"] = object["thumbnailAssetId"]
-            object["assetCount"] = .integer(Int64(count)); object["shared"] = .bool(users.count > 1); object["albumUsers"] = .array(users)
-            return try APIJSON.decoder().decode(Album.self, from: JSONEncoder().encode(object))
+            try row[0].map { try albumFromPayload($0) }
         }
+    }
+    func album(id: String) throws -> Album? {
+        guard let text = try database.query("SELECT payload FROM entities WHERE kind='album' AND id=?", [id]).first?[0] else { return nil }
+        return try albumFromPayload(text)
+    }
+    private func albumFromPayload(_ text: String) throws -> Album {
+        var object = try JSONDecoder().decode([String: EntityJSON].self, from: Data(text.utf8))
+        guard let id = object["id"]?.string else { throw invalidSync() }
+        let count = try database.query("SELECT count(*) FROM entities WHERE kind='albumAsset' AND json_extract(payload,'$.albumId')=?", [id]).first?[0].flatMap(Int.init) ?? 0
+        let users = try database.query("SELECT u.payload,r.payload FROM entities r JOIN entities u ON u.kind='user' AND u.id=json_extract(r.payload,'$.userId') WHERE r.kind='albumUser' AND json_extract(r.payload,'$.albumId')=?", [id]).compactMap { row -> EntityJSON? in
+            guard let user = row[0], let relation = row[1] else { return nil }
+            let r = try JSONDecoder().decode([String: EntityJSON].self, from: Data(relation.utf8))
+            return .object(["user": try JSONDecoder().decode(EntityJSON.self, from: Data(user.utf8)), "role": r["role"] ?? .string("viewer")])
+        }
+        object["albumName"] = object["name"]; object["albumThumbnailAssetId"] = object["thumbnailAssetId"]
+        object["assetCount"] = .integer(Int64(count)); object["shared"] = .bool(users.count > 1); object["albumUsers"] = .array(users)
+        return try APIJSON.decoder().decode(Album.self, from: JSONEncoder().encode(object))
+    }
+    func person(id: String) throws -> Person? {
+        try entityData(kind: "person", id: id).map { try APIJSON.decoder().decode(Person.self, from: $0) }
     }
     func people() throws -> [Person] {
         try database.query("SELECT payload FROM entities WHERE kind='person' ORDER BY json_extract(payload,'$.name') COLLATE NOCASE").compactMap { row in
             try row[0].map { try APIJSON.decoder().decode(Person.self, from: Data($0.utf8)) }
+        }
+    }
+
+    /// Mirrors GET /map/markers from the synchronized asset, EXIF, partner, and
+    /// album rows. Projection stays limited to the six marker fields.
+    func mapMarkers(_ query: MapMarkerQuery) throws -> [MapMarker] {
+        var conditions = [
+            "a.kind='asset'", "e.kind='exif'", "json_extract(e.payload,'$.assetId')=a.id",
+            "json_extract(e.payload,'$.latitude') IS NOT NULL", "json_extract(e.payload,'$.longitude') IS NOT NULL",
+            "json_extract(a.payload,'$.deletedAt') IS NULL"
+        ]
+        var arguments: [String?] = []
+        if query.isArchived == true {
+            conditions.append("(json_extract(a.payload,'$.visibility')='timeline' OR (json_extract(a.payload,'$.ownerId')=? AND json_extract(a.payload,'$.visibility')='archive'))")
+            arguments.append(userID)
+        } else {
+            conditions.append("json_extract(a.payload,'$.visibility')='timeline'")
+        }
+        if let favorite = query.isFavorite {
+            conditions.append("json_extract(a.payload,'$.isFavorite')=CAST(? AS INTEGER)")
+            arguments.append(favorite ? "1" : "0")
+        }
+        if let date = query.fileCreatedAfter {
+            conditions.append("julianday(json_extract(a.payload,'$.fileCreatedAt'))>=julianday(?)")
+            arguments.append(date.ISO8601Format())
+        }
+        if let date = query.fileCreatedBefore {
+            conditions.append("julianday(json_extract(a.payload,'$.fileCreatedAt'))<=julianday(?)")
+            arguments.append(date.ISO8601Format())
+        }
+        var scopes = ["json_extract(a.payload,'$.ownerId')=?"]
+        arguments.append(userID)
+        if query.withPartners {
+            scopes.append("EXISTS(SELECT 1 FROM entities p JOIN entities u ON u.kind='user' AND u.id=json_extract(p.payload,'$.sharedById') WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedById')=json_extract(a.payload,'$.ownerId') AND json_extract(p.payload,'$.sharedWithId')=? AND json_extract(u.payload,'$.deletedAt') IS NULL)")
+            arguments.append(userID)
+        }
+        if query.withSharedAlbums {
+            scopes.append("EXISTS(SELECT 1 FROM entities r JOIN entities m ON m.kind='albumUser' AND json_extract(m.payload,'$.albumId')=json_extract(r.payload,'$.albumId') AND json_extract(m.payload,'$.userId')=? JOIN entities b ON b.kind='album' AND b.id=json_extract(r.payload,'$.albumId') WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.assetId')=a.id AND json_extract(b.payload,'$.deletedAt') IS NULL)")
+            arguments.append(userID)
+        }
+        conditions.append("(" + scopes.joined(separator: " OR ") + ")")
+        let rows = try database.query("""
+        SELECT a.id,json_extract(e.payload,'$.latitude'),json_extract(e.payload,'$.longitude'),
+               json_extract(e.payload,'$.city'),json_extract(e.payload,'$.state'),json_extract(e.payload,'$.country')
+        FROM entities a JOIN entities e ON e.kind='exif' AND json_extract(e.payload,'$.assetId')=a.id
+        WHERE \(conditions.joined(separator: " AND "))
+        ORDER BY julianday(json_extract(a.payload,'$.fileCreatedAt')) DESC,a.id
+        """, arguments)
+        return rows.compactMap { row in
+            guard let id = row[0], let latitude = row[1].flatMap(Double.init), let longitude = row[2].flatMap(Double.init) else { return nil }
+            return MapMarker(id: id, lat: latitude, lon: longitude, city: row[3], state: row[4], country: row[5])
         }
     }
 

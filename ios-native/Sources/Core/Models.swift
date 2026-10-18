@@ -44,7 +44,7 @@ struct LoginResponse: Codable, Sendable {
     let isOnboarded: Bool?
 }
 
-struct ServerFeatures: Decodable, Sendable {
+struct ServerFeatures: Codable, Sendable {
     let passwordLogin: Bool
     let oauth: Bool
     let smartSearch: Bool
@@ -55,6 +55,25 @@ struct ServerFeatures: Decodable, Sendable {
     let trash: Bool
     let sidecar: Bool
     let realtimeTranscoding: Bool
+}
+
+struct MapMarkerQuery: Hashable, Sendable {
+    var withPartners = false
+    var withSharedAlbums = false
+    var isArchived: Bool? = nil
+    var isFavorite: Bool? = nil
+    var fileCreatedAfter: Date? = nil
+    var fileCreatedBefore: Date? = nil
+
+    var queryItems: [URLQueryItem] {
+        var items = [URLQueryItem(name: "withPartners", value: String(withPartners)),
+                     URLQueryItem(name: "withSharedAlbums", value: String(withSharedAlbums))]
+        if let isArchived { items.append(.init(name: "isArchived", value: String(isArchived))) }
+        if let isFavorite { items.append(.init(name: "isFavorite", value: String(isFavorite))) }
+        if let fileCreatedAfter { items.append(.init(name: "fileCreatedAfter", value: fileCreatedAfter.ISO8601Format())) }
+        if let fileCreatedBefore { items.append(.init(name: "fileCreatedBefore", value: fileCreatedBefore.ISO8601Format())) }
+        return items
+    }
 }
 
 struct ServerConfig: Decodable, Sendable {

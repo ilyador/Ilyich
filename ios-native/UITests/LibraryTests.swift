@@ -143,9 +143,18 @@ final class LibraryTests: XCTestCase {
         app.collectionViews["library.grid"].cells.firstMatch.tap()
         XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
     }
-    @MainActor func testAccessibilityTextKeepsLibraryAndGlobeControlsTappable() {
-        let app = launch(extraArguments: ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
+    @MainActor func testAccessibilityTextKeepsDayHeadersAndLibraryControlsTappable() {
+        let app = launch(extraArguments: ["-timelineGrouping", "day", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
         for identifier in ["library.select", "library.shelves"] { requireHittable(app.buttons[identifier], in: app) }
+        let grid = app.collectionViews["library.grid"]
+        let dayHeader = app.descendants(matching: .any).matching(identifier: "library.dayHeader").firstMatch
+        XCTAssertTrue(dayHeader.waitForExistence(timeout: 15))
+        XCTAssertTrue(dayHeader.isHittable)
+        XCTAssertLessThan(dayHeader.frame.minY, grid.cells.firstMatch.frame.minY)
+        grid.cells.firstMatch.tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 10))
+        app.buttons["Close"].tap()
+        requireHittable(app.buttons["library.select"], in: app)
         let heading = app.staticTexts["library.heading"]
         XCTAssertTrue(heading.exists)
         XCTAssertEqual(heading.label, "December 2026")
@@ -162,6 +171,9 @@ final class LibraryTests: XCTestCase {
         capture(app, "Places — accessibility text")
         close.tap()
         requireHittable(app.textFields["library.search"], in: app)
+        app.buttons["library.select"].tap()
+        grid.cells.firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
     }
     @MainActor func testLargeLibraryScrollingMetrics() {
         let app = launch(); let grid = app.collectionViews["library.grid"]

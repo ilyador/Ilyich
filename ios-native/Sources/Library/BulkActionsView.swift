@@ -35,9 +35,6 @@ struct BulkActionsView: View {
 
     var body: some View {
         List {
-            shareSection
-            if !allLocked { albumSection }
-            if owned { organizeSection }
             if let failure { Section { Text(failure).foregroundStyle(.red) } }
             if let photosOutcome, !busy { Section { Text(photosOutcome) } }
             if busy {
@@ -52,6 +49,9 @@ struct BulkActionsView: View {
                     }
                 }
             }
+            shareSection
+            if !allLocked { albumSection }
+            if owned { organizeSection }
         }
         .navigationTitle("\(assets.count) selected").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
@@ -151,6 +151,8 @@ struct BulkActionsView: View {
             }
             do {
                 try await PhotoLibrarySave.requestPermission(api: api)
+                await TransferNotifications.started(id: token, kind: "Save to Photos", total: total)
+                try Task.checkCancellation()
                 for asset in assets {
                     try Task.checkCancellation()
                     let completed = photosSaved
@@ -163,11 +165,17 @@ struct BulkActionsView: View {
                     shareFraction = Double(photosSaved) / Double(total)
                 }
                 photosOutcome = "Saved \(photosSaved) of \(total) to Photos."
+                await TransferNotifications.finished(id: token, kind: "Save to Photos", total: total, completed: photosSaved, failed: 0)
+                if Task.isCancelled { TransferNotifications.cancel(id: token) }
             } catch {
                 photosCommitting = false
                 if error is CancellationError || Task.isCancelled {
+                    TransferNotifications.cancel(id: token)
                     photosOutcome = "Cancelled. Saved \(photosSaved) of \(total) to Photos."
                 } else {
+                    await TransferNotifications.finished(id: token, kind: "Save to Photos", total: total,
+                                                         completed: photosSaved, failed: total - photosSaved)
+                    if Task.isCancelled { TransferNotifications.cancel(id: token) }
                     failure = error.localizedDescription
                     photosOutcome = "Stopped. Saved \(photosSaved) of \(total) to Photos. Saving again may create duplicates."
                 }
@@ -183,6 +191,7 @@ struct BulkActionsView: View {
             defer { busy = false; if shareToken == token { shareToken = nil; shareFraction = nil } }
             var files: [URL] = []
             do {
+                await TransferNotifications.started(id: token, kind: "Download", total: assets.count)
                 for asset in assets {
                     try Task.checkCancellation()
                     let completed = Double(files.count)
@@ -195,9 +204,17 @@ struct BulkActionsView: View {
                     shareFraction = Double(files.count) / total
                 }
                 try Task.checkCancellation(); share = BulkExport(files: files)
+                await TransferNotifications.finished(id: token, kind: "Download", total: assets.count, completed: files.count, failed: 0)
+                if Task.isCancelled { TransferNotifications.cancel(id: token) }
             } catch {
                 BulkExport(files: files).clean()
-                if !(error is CancellationError), !Task.isCancelled { failure = error.localizedDescription }
+                if error is CancellationError || Task.isCancelled { TransferNotifications.cancel(id: token) }
+                else {
+                    await TransferNotifications.finished(id: token, kind: "Download", total: assets.count,
+                                                         completed: files.count, failed: assets.count - files.count)
+                    if Task.isCancelled { TransferNotifications.cancel(id: token) }
+                    failure = error.localizedDescription
+                }
             }
         }
     }
