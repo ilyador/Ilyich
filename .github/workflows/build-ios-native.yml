@@ -1,12 +1,6 @@
 name: Build and test native Ilyich iOS
 
 on:
-  push:
-    branches: [dev, feature/native-ios-liquid-glass]
-    paths:
-      - 'ios-native/**'
-      - 'mobile/ios/WidgetExtension/**'
-      - '.github/workflows/build-ios-native.yml'
   workflow_dispatch:
     inputs:
       version:
