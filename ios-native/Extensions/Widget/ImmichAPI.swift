@@ -107,23 +107,22 @@ final class ImmichAPI: @unchecked Sendable {
   let saved: SavedSession
   var scope: String { saved.scope }
   private let network: URLSession
+  private let connection: ServerConnection
 
   init() async throws {
     guard let saved = try SessionKeychain.read() else { throw WidgetError.noLogin }
     self.saved = saved
+    connection = try ServerConnection(server: saved.server)
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = 30
-    network = URLSession(configuration: configuration, delegate: WidgetRedirectDelegate(), delegateQueue: nil)
+    network = URLSession(configuration: configuration, delegate: SameOriginRedirectDelegate(origin: saved.server), delegateQueue: nil)
   }
 
   private func request(_ path: String, query: [URLQueryItem] = [], body: Data? = nil) async throws -> Data {
     guard let current = try SessionKeychain.read(), current.scope == saved.scope, current.token == saved.token else { throw WidgetError.noLogin }
-    var url = URLComponents(url: saved.server.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
-    if !query.isEmpty { url.queryItems = query }
-    var request = URLRequest(url: url.url!)
+    var request = try await connection.request(path: path, query: query, token: saved.token)
     request.httpMethod = body == nil ? "GET" : "POST"
     request.httpBody = body
-    request.setValue("Bearer \(saved.token)", forHTTPHeaderField: "Authorization")
     if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
     let (data, response) = try await network.data(for: request)
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw WidgetError.fetchFailed }
@@ -150,13 +149,6 @@ final class ImmichAPI: @unchecked Sendable {
             kCGImageSourceCreateThumbnailWithTransform: true,
           ] as CFDictionary) else { throw FetchError.invalidImage }
     return UIImage(cgImage: thumbnail)
-  }
-}
-
-private final class WidgetRedirectDelegate: NSObject, URLSessionTaskDelegate {
-  func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                  newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-    completionHandler(nil)
   }
 }
 

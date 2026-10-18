@@ -24,6 +24,8 @@ struct AssetViewer: View {
     @State private var sharedLink = false
     @State private var showStack = false
     @State private var albumActivity = false
+    @State private var castPresented = false
+    @State private var profilePhoto = false
     @AppStorage("viewerTapToNavigate") private var tapToNavigate = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -77,11 +79,14 @@ struct AssetViewer: View {
         .statusBarHidden(!controls)
         .task(id: selectedID) {
             playingLive = false
+            CastController.shared.select(api: api, asset: current)
             do {
                 let asset = try await api.asset(id: selectedID)
                 try Task.checkCancellation(); replacements[asset.id] = asset
             } catch is CancellationError { } catch { self.error = error.localizedDescription }
         }
+        .sheet(isPresented: $profilePhoto) { NavigationStack { ProfilePhotoCropView(api: api, pipeline: pipeline, asset: current) } }
+        .sheet(isPresented: $castPresented) { CastView(api: api, asset: current) }
         .sheet(isPresented: $info) {
             NavigationStack {
                 AssetInfoView(api: api, pipeline: pipeline, asset: current, onUpdated: update)
@@ -129,6 +134,8 @@ struct AssetViewer: View {
             Menu {
                 Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }
                 Button("Slideshow", systemImage: "play.rectangle") { slideshow = true }
+                Button("Cast", systemImage: "tv") { castPresented = true }
+                if !current.isVideo { Button("Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true } }
                 Button("Create shared link", systemImage: "link") { sharedLink = true }
                 if let stack = current.stack { Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { showStack = true } }
                 if let albumID {

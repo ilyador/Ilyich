@@ -16,6 +16,10 @@ settings:
     TARGETED_DEVICE_FAMILY: '1'
     SUPPORTS_MACCATALYST: NO
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+packages:
+  GoogleCast:
+    url: https://github.com/googlecast/google-cast-ios-sdk
+    exactVersion: 4.8.6
 targets:
   Ilyich:
     type: application
@@ -24,6 +28,8 @@ targets:
       - Sources
       - Assets.xcassets
     dependencies:
+      - package: GoogleCast
+        product: GoogleCastDynamic
       - target: ShareExtension
       - target: WidgetExtension
     settings:
@@ -40,6 +46,8 @@ targets:
       - path: Extensions/Share
         excludes: [Info.plist]
       - Sources/Backup/SharedSession.swift
+      - Sources/Core/NetworkConfiguration.swift
+      - Sources/Core/ServerConnection.swift
       - Sources/Backup/UploadBody.swift
     settings:
       base:
@@ -55,6 +63,8 @@ targets:
       - path: Extensions/Widget
         excludes: [Info.plist]
       - Sources/Backup/SharedSession.swift
+      - Sources/Core/NetworkConfiguration.swift
+      - Sources/Core/ServerConnection.swift
       - path: ../mobile/ios/WidgetExtension/widgets
       - ../mobile/ios/WidgetExtension/WidgetBundle.swift
       - ../mobile/ios/WidgetExtension/UIImage+Resize.swift

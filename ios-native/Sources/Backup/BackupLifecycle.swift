@@ -1,6 +1,7 @@
 import BackgroundTasks
 import Photos
 import UIKit
+import Network
 
 /// iOS chooses background execution times. A processing window discovers and
 /// prepares a file, then hands its transfer to the system URLSession daemon.
@@ -11,6 +12,7 @@ import UIKit
     private var observing = false
     private var delayedStart: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
+    private let network = NWPathMonitor()
 
     func register() {
         guard !registered else { return }
@@ -21,6 +23,8 @@ import UIKit
             }
         }
         UIDevice.current.isBatteryMonitoringEnabled = true
+        network.pathUpdateHandler = { _ in Task { @MainActor in self.foregroundChanged() } }
+        network.start(queue: DispatchQueue(label: "app.ilyich.backup-network"))
         for name in [UIDevice.batteryStateDidChangeNotification, ProcessInfo.thermalStateDidChangeNotification,
                      UIApplication.didBecomeActiveNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in

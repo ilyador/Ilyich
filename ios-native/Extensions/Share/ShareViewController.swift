@@ -35,6 +35,7 @@ import UniformTypeIdentifiers
         ])
         do {
             guard let saved = try SessionKeychain.read() else { throw ShareError("Open Ilyich and sign in before uploading.") }
+            guard saved.requiresPasswordChange != true else { throw ShareError("Open Ilyich and change your account password before uploading.") }
             message.text = "Upload to \(saved.name) on \(saved.server.host() ?? "your server")."
         } catch { message.text = error.localizedDescription; uploadButton.isEnabled = false }
     }
@@ -84,7 +85,8 @@ import UniformTypeIdentifiers
                 throw ShareError("Include the original photo for \(sidecar.filename) so its edits are preserved.")
             }
         }
-        let network = URLSession(configuration: .ephemeral, delegate: ShareRedirectDelegate(), delegateQueue: nil)
+        let connection = try ServerConnection(server: saved.server)
+        let network = URLSession(configuration: .ephemeral, delegate: ShareRedirectDelegate(server: saved.server), delegateQueue: nil)
         defer { network.invalidateAndCancel() }
         for (index, file) in images.enumerated() {
             try Task.checkCancellation()
@@ -94,7 +96,7 @@ import UniformTypeIdentifiers
             message.text = "Uploading \(index + 1) of \(images.count): \(file.filename)"
             let checksum = try await Task.detached(priority: .utility) { try UploadBody.checksum(file.url) }.value
             let checkBody = try JSONEncoder().encode(UploadCheck(assets: [.init(id: file.filename, checksum: checksum)]))
-            let checkRequest = request(saved, path: "assets/bulk-upload-check", contentType: "application/json")
+            let checkRequest = try await request(saved, connection: connection, path: "assets/bulk-upload-check", contentType: "application/json")
             let (checkData, checkResponse) = try await network.upload(for: checkRequest, from: checkBody)
             try validate(checkResponse)
             let checked = try JSONDecoder().decode(UploadCheckResponse.self, from: checkData).results.first { $0.id == file.filename }
@@ -111,7 +113,7 @@ import UniformTypeIdentifiers
                 let fields = ["fileCreatedAt": (dates.creationDate ?? Date()).ISO8601Format(),
                               "fileModifiedAt": (dates.contentModificationDate ?? Date()).ISO8601Format()]
                 try await Task.detached(priority: .utility) { try UploadBody.write(to: body, boundary: boundary, fields: fields, asset: file, sidecar: sidecar) }.value
-                let uploadRequest = request(saved, path: "assets", contentType: "multipart/form-data; boundary=\(boundary)")
+                let uploadRequest = try await request(saved, connection: connection, path: "assets", contentType: "multipart/form-data; boundary=\(boundary)")
                 let (data, response) = try await network.upload(for: uploadRequest, fromFile: body)
                 try validate(response)
                 let receipt = try JSONDecoder().decode(UploadReceipt.self, from: data)
@@ -125,10 +127,17 @@ import UniformTypeIdentifiers
         message.text = "\(images.count) \(images.count == 1 ? "file is" : "files are") backed up in Ilyich."
     }
 
-    private func request(_ saved: SavedSession, path: String, contentType: String) -> URLRequest {
-        var request = URLRequest(url: saved.server.appendingPathComponent(path))
+    private func request(_ saved: SavedSession, connection: ServerConnection, path: String, contentType: String) async throws -> URLRequest {
+        try Task.checkCancellation()
+        guard let current = try SessionKeychain.read(), current.scope == saved.scope, current.token == saved.token,
+              current.requiresPasswordChange != true else {
+            throw ShareError("Your sign-in changed. Open Ilyich before uploading again.")
+        }
+        var request = try await connection.request(path: path, token: saved.token)
+        guard let latest = try SessionKeychain.read(), latest.scope == saved.scope, latest.token == saved.token else {
+            throw ShareError("Your sign-in changed. Open Ilyich before uploading again.")
+        }
         request.httpMethod = "POST"
-        request.setValue("Bearer \(saved.token)", forHTTPHeaderField: "Authorization")
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         return request
     }
@@ -146,15 +155,36 @@ import UniformTypeIdentifiers
     }
 
     private func copy(_ provider: NSItemProvider, to directory: URL) async throws -> UploadFile {
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            let file: UploadFile = try await withCheckedThrowingContinuation { continuation in
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                    do {
+                        if let error { throw error }
+                        guard let url = item as? URL, url.isFileURL else { throw ShareError("The source app did not provide a local file.") }
+                        let access = url.startAccessingSecurityScopedResource()
+                        defer { if access { url.stopAccessingSecurityScopedResource() } }
+                        let target = directory.appendingPathComponent(UUID().uuidString)
+                        try FileManager.default.copyItem(at: url, to: target)
+                        continuation.resume(returning: UploadFile(url: target, filename: url.lastPathComponent,
+                            contentType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"))
+                    } catch { continuation.resume(throwing: error) }
+                }
+            }
+            try Task.checkCancellation()
+            return file
+        }
         guard let type = provider.registeredTypeIdentifiers.first(where: { identifier in
             guard let type = UTType(identifier) else { return false }
             return type.conforms(to: .image) || type.conforms(to: .movie)
         }) ?? provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .data) == true }) else {
             throw ShareError("This shared item does not contain an image, video, or original file.")
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            provider.loadFileRepresentation(forTypeIdentifier: type) { url, error in
+        let loading = ShareRepresentationRequest()
+        let file: UploadFile = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let progress = provider.loadFileRepresentation(forTypeIdentifier: type) { url, error in
                 do {
+                    try loading.checkCancellation()
                     if let error { throw error }
                     guard let url else { throw ShareError("The source app did not provide this file. Try sharing it again.") }
                     let target = directory.appendingPathComponent(UUID().uuidString)
@@ -162,14 +192,41 @@ import UniformTypeIdentifiers
                     continuation.resume(returning: UploadFile(url: target, filename: url.lastPathComponent,
                                                               contentType: UTType(type)?.preferredMIMEType ?? "application/octet-stream"))
                 } catch { continuation.resume(throwing: error) }
+                }
+                loading.attach(progress)
             }
-        }
+        } onCancel: { loading.cancel() }
+        try Task.checkCancellation()
+        return file
     }
 }
 
 private struct ShareError: LocalizedError { let errorDescription: String?; init(_ text: String) { errorDescription = text } }
 
+private final class ShareRepresentationRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var progress: Progress?
+    private var cancelled = false
+    func attach(_ progress: Progress) {
+        let shouldCancel = lock.withLock { self.progress = progress; return cancelled }
+        if shouldCancel { progress.cancel() }
+    }
+    func cancel() {
+        let progress = lock.withLock { cancelled = true; return self.progress }
+        progress?.cancel()
+    }
+    func checkCancellation() throws {
+        if lock.withLock({ cancelled }) { throw CancellationError() }
+    }
+}
+
 private final class ShareRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    let server: URL
+    init(server: URL) { self.server = server }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        ClientCertificateStore.respond(to: challenge, server: server, requestURL: task.originalRequest?.url, completion: completionHandler)
+    }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         completionHandler(nil)
