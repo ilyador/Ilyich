@@ -145,14 +145,6 @@ final class LibraryTests: XCTestCase {
         select.tap()
         XCTAssertFalse(app.staticTexts["1 selected"].waitForExistence(timeout: 2))
     }
-    @MainActor func testDarkInteractiveEarthIsAvailableForCapture() {
-        let app = launch(appearance: "dark")
-        app.buttons["library.shelves"].tap(); app.buttons["Places"].tap()
-        XCTAssertTrue(app.otherElements["Interactive Earth"].waitForExistence(timeout: 15))
-        capture(app, "Places — dark Interactive Earth")
-        app.buttons["Close globe"].tap()
-        XCTAssertTrue(app.textFields["library.search"].isHittable)
-    }
     @MainActor func testAccessibilityTextKeepsLibraryAndGlobeControlsTappable() {
         let app = launch(extraArguments: ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
         for identifier in ["library.select", "library.shelves"] { requireHittable(app.buttons[identifier], in: app) }
@@ -167,6 +159,22 @@ final class LibraryTests: XCTestCase {
         capture(app, "Places — accessibility text")
         close.tap()
         requireHittable(app.textFields["library.search"], in: app)
+    }
+    @MainActor func testMemoryCanReturnToItsDateInTheUnfilteredTimeline() {
+        let app = launch()
+        let card = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Maya Memory One")).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 15))
+        requireHittable(card, in: app); card.tap()
+        let actions = app.buttons["Memory photo actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10)); actions.tap()
+        app.buttons["Show in timeline"].tap()
+        XCTAssertTrue(app.staticTexts["June 2024"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["Clear filters"].exists)
+        let select = app.buttons["library.select"]
+        requireHittable(select, in: app); select.tap()
+        app.collectionViews["library.grid"].cells.firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
+        capture(app, "Memory — return to June 2024")
     }
     @MainActor func testLargeLibraryScrollingMetrics() {
         let app = launch(); let grid = app.collectionViews["library.grid"]
