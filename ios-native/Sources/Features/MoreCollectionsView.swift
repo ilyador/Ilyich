@@ -7,6 +7,10 @@ struct MoreCollectionsView: View {
     let onFilter: (TimelineFilter, String) -> Void
     var body: some View {
         List {
+            Section("On your device") {
+                NavigationLink { LocalLibraryView() } label: { Label("On this phone", systemImage: "iphone") }
+                NavigationLink { FreeUpSpaceView() } label: { Label("Free up space", systemImage: "internaldrive") }
+            }
             Section {
                 Button { var filter = TimelineFilter(); filter.isFavorite = true; onFilter(filter, "Favorites") } label: { Label("Favorites", systemImage: "heart") }
                 NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .videos, onOpenAsset: onOpenAsset) } label: { Label("Videos", systemImage: "video") }

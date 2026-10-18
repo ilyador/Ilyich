@@ -30,6 +30,10 @@ struct SignInView: View {
                                 .keyboardType(.URL).textContentType(.URL).focused($focused, equals: .server)
                                 .accessibilityIdentifier("signIn.serverURL")
                         }
+                        if let url = URL(string: server), let normalized = try? APIClient.normalizedBaseURL(url) {
+                            NavigationLink("Network settings") { NetworkSettingsView(server: normalized) }
+                                .font(.subheadline)
+                        }
                         if features?.passwordLogin != false {
                         field("Email") {
                             TextField("Email", text: $email).keyboardType(.emailAddress).textContentType(.username)

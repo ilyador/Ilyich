@@ -87,6 +87,10 @@ struct PhotoGrid: UIViewRepresentable {
                            selecting: parent.store.isSelecting,
                            month: index.item == 0 && sections.indices.contains(index.section) ? sections[index.section].title : nil)
             if asset == nil { parent.store.requestBucket(index.section) }
+            if sections.indices.contains(index.section), sections[index.section].id == "results",
+               index.item >= max(0, sections[index.section].count - 12) {
+                Task { [weak self] in self?.parent.store.loadMore() }
+            }
         }
         func collectionView(_ view: UICollectionView, didSelectItemAt indexPath: IndexPath) {
             guard let asset = parent.store.asset(section: indexPath.section, item: indexPath.item) else { return }
@@ -101,10 +105,17 @@ struct PhotoGrid: UIViewRepresentable {
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             guard let collection, let first = collection.indexPathsForVisibleItems.min() else { return }
             parent.store.visibleSection(first.section)
+            parent.store.navigation.section = first.section
+            parent.store.navigation.item = first.item
             if sections.indices.contains(first.section), let attributes = collection.layoutAttributesForItem(at: first) {
                 parent.store.position = GridPosition(section: sections[first.section].id, item: first.item, offset: collection.contentOffset.y - attributes.frame.minY)
             }
         }
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { parent.store.navigation.isScrolling = true }
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { parent.store.navigation.isScrolling = false }
+        }
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { parent.store.navigation.isScrolling = false }
         @objc func refresh(_ sender: UIRefreshControl) {
             Task { await parent.store.reload(); sender.endRefreshing() }
         }

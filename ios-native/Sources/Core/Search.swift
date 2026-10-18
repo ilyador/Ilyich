@@ -17,6 +17,24 @@ struct OCRFilter: Codable, Hashable, Sendable { var matches: String }
 struct BoolFilter: Codable, Hashable, Sendable { var eq: Bool }
 struct IDFilter: Codable, Hashable, Sendable { var eq: String?; var ne: String? }
 struct SearchIDAlternative: Codable, Hashable, Sendable { var id: IDFilter }
+struct PatternFilter: Codable, Hashable, Sendable {
+    var like: String
+    static func containing(_ text: String) -> Self {
+        .init(like: "%" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%")
+    }
+}
+struct RatingFilter: Codable, Hashable, Sendable {
+    var eq: Int?
+    private enum CodingKeys: String, CodingKey { case eq }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(eq, forKey: .eq)
+    }
+}
+enum SearchMode: String, CaseIterable, Identifiable, Sendable {
+    case context = "Photo content", filename = "Filename", description = "Description", ocr = "Text in photos"
+    var id: Self { self }
+}
 
 struct SearchFilter: Codable, Hashable, Sendable {
     var id: IDFilter?
@@ -31,10 +49,32 @@ struct SearchFilter: Codable, Hashable, Sendable {
     var isFavorite: BoolFilter?
     var ocr: OCRFilter?
     var or: [SearchIDAlternative]?
+    var state: StringFilter?
+    var make: StringFilter?
+    var model: StringFilter?
+    var originalFileName: PatternFilter?
+    var description: PatternFilter?
+    var rating: RatingFilter?
+    var hasAlbums: BoolFilter?
+    var tagIds: IDsFilter?
+
+    func matching(_ text: String, mode: SearchMode) -> Self {
+        var filter = self
+        guard !text.isEmpty else { return filter }
+        switch mode {
+        case .context: break
+        case .filename: filter.originalFileName = .containing(text)
+        case .description: filter.description = .containing(text)
+        case .ocr: filter.ocr = OCRFilter(matches: text)
+        }
+        return filter
+    }
 }
 
 struct SearchQuery: Encodable, Sendable {
-    var query: String
+    var query: String?
+    var queryAssetId: String?
+    var language: String? = Locale.current.language.languageCode?.identifier
     var filter = SearchFilter()
     var cursor: String?
     var size = 10

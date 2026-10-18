@@ -22,21 +22,6 @@ enum APIError: Error, LocalizedError, Sendable {
     }
 }
 
-/// Prevent an authenticated request from following a redirect to a different server.
-final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
-    let origin: URL
-    init(origin: URL) { self.origin = origin }
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        guard let url = request.url, Self.sameOrigin(origin, url) else { completionHandler(nil); return }
-        completionHandler(request)
-    }
-    static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
-        func port(_ url: URL) -> Int { url.port ?? (url.scheme?.lowercased() == "https" ? 443 : 80) }
-        return a.scheme?.lowercased() == b.scheme?.lowercased() && a.host?.lowercased() == b.host?.lowercased() && port(a) == port(b)
-    }
-}
-
 actor APIClient {
     nonisolated let baseURL: URL
     nonisolated let userID: String?
@@ -44,11 +29,14 @@ actor APIClient {
     nonisolated var cacheScope: String { baseURL.absoluteString + "|" + (userID ?? anonymousScope) }
     private let accessToken: String?
     private let session: URLSession
+    private let connection: ServerConnection
+    private var castAuthorization: CastAuthorization?
 
-    init(baseURL: URL, accessToken: String? = nil, userID: String? = nil, session: URLSession? = nil) throws {
+    init(baseURL: URL, accessToken: String? = nil, userID: String? = nil, session: URLSession? = nil, networkConfiguration: NetworkConfiguration? = nil) throws {
         self.baseURL = try Self.normalizedBaseURL(baseURL)
         self.accessToken = accessToken
         self.userID = userID
+        self.connection = try ServerConnection(server: self.baseURL, configuration: networkConfiguration)
         if let session {
             self.session = session
         } else {
@@ -60,41 +48,21 @@ actor APIClient {
     }
 
     nonisolated static func normalizedBaseURL(_ input: URL) throws -> URL {
-        guard var parts = URLComponents(url: input, resolvingAgainstBaseURL: false),
-              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil,
-              parts.query == nil, parts.fragment == nil else { throw APIError.invalidServerURL }
-        parts.scheme = scheme
-        var path = parts.path
-        while path.hasSuffix("/") { path.removeLast() }
-        if !path.hasSuffix("/api") { path += "/api" }
-        parts.path = path
-        guard let url = parts.url else { throw APIError.invalidServerURL }
-        return url
+        do { return try ServerAddress.normalized(input) }
+        catch { throw APIError.invalidServerURL }
     }
 
     func url(path: String, query: [URLQueryItem] = []) throws -> URL {
-        guard !path.contains("://"), !path.contains("?"), !path.contains("#"),
-              !path.split(separator: "/").contains(".."), !path.hasPrefix("//") else { throw APIError.invalidServerURL }
-        let relative = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard var parts = URLComponents(url: baseURL.appendingPathComponent(relative), resolvingAgainstBaseURL: false) else {
-            throw APIError.invalidServerURL
-        }
-        if !query.isEmpty {
-            parts.queryItems = query
-            // Express treats raw '+' as a space; preserve base64 revisions and literal search text.
-            parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-        }
-        guard let url = parts.url else { throw APIError.invalidServerURL }
-        return url
+        do { return try ServerAddress.url(base: baseURL, path: path, query: query) }
+        catch { throw APIError.invalidServerURL }
     }
 
-    func authorizedRequest(path: String, query: [URLQueryItem] = []) throws -> URLRequest {
-        var request = URLRequest(url: try url(path: path, query: query))
-        request.setValue("Ilyich/3.3.3 (iOS)", forHTTPHeaderField: "User-Agent")
-        if let accessToken { request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization") }
-        return request
+    func authorizedRequest(path: String, query: [URLQueryItem] = []) async throws -> URLRequest {
+        try await connection.request(path: path, query: query, token: accessToken)
     }
+    func networkConfiguration() async -> NetworkConfiguration { await connection.settings() }
+    func updateNetworkConfiguration(_ configuration: NetworkConfiguration) async throws { try await connection.update(configuration) }
+    func activeEndpoint() async throws -> URL { try await connection.endpoint() }
 
     func request<T: Decodable & Sendable>(_ method: HTTPMethod, path: String, query: [URLQueryItem] = []) async throws -> T {
         let data = try await perform(method, path: path, query: query)
@@ -117,12 +85,15 @@ actor APIClient {
 
     private func perform(_ method: HTTPMethod, path: String, query: [URLQueryItem] = [], body: Data? = nil) async throws -> Data {
         try Task.checkCancellation()
-        var request = try authorizedRequest(path: path, query: query)
+        var request = try await authorizedRequest(path: path, query: query)
         request.httpMethod = method.rawValue
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch { await connection.invalidate(); throw error }
         try Self.validate(response)
         try Task.checkCancellation()
         return data
@@ -212,13 +183,55 @@ actor APIClient {
     func removeEdits(id: String) async throws { try await requestVoid(.delete, path: "assets/\(id)/edits") }
     func updateRating(id: String, rating: Int?) async throws -> Asset { try await request(.put, path: "assets/\(id)", body: RatingUpdate(rating: rating)) }
 
+    func profileImage(userID: String) async throws -> Data {
+        try await perform(.get, path: "users/\(userID)/profile-image")
+    }
+    func uploadProfileImage(jpeg: Data) async throws {
+        let boundary = "Ilyich-" + UUID().uuidString
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"profile-picture.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".utf8)
+        body.append(jpeg); body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        var request = try await authorizedRequest(path: "users/profile-image")
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        let (_, response) = try await session.upload(for: request, from: body)
+        try Self.validate(response)
+    }
+
+    func prepareCast(asset: Asset) async throws -> CastMedia {
+        let authorization: CastAuthorization
+        if let saved = castAuthorization, let expiry = saved.expiresAt, expiry > Date().addingTimeInterval(10) { authorization = saved }
+        else {
+            authorization = try await request(.post, path: "sessions", body: CastSessionCreation())
+            castAuthorization = authorization
+        }
+        let path = "assets/\(asset.id)/" + (asset.isVideo ? "video/playback" : "thumbnail")
+        let query: [URLQueryItem] = asset.isVideo ? [] : [.init(name: "size", value: "fullsize"), .init(name: "edited", value: "true"), .init(name: "c", value: asset.cacheRevision)]
+        var mediaRequest = try await authorizedRequest(path: path, query: query)
+        mediaRequest.httpMethod = "HEAD"
+        let (_, response) = try await session.data(for: mediaRequest)
+        try Self.validate(response)
+        guard let mime = response.mimeType, var parts = URLComponents(url: try await connection.request(path: path, query: query).url!, resolvingAgainstBaseURL: false) else {
+            throw APIError.invalidResponse("The server did not identify this media type for casting.")
+        }
+        parts.queryItems = (parts.queryItems ?? []) + [.init(name: "sessionKey", value: authorization.token)]
+        parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        guard let url = parts.url else { throw APIError.invalidServerURL }
+        return CastMedia(url: url, contentType: mime)
+    }
+    func revokeCastAuthorization() async {
+        guard let authorization = castAuthorization else { return }
+        castAuthorization = nil
+        try? await requestVoid(.delete, path: "sessions/\(authorization.id)")
+    }
+
     /// Download only on explicit export/share. Keep large originals out of memory.
     func download(asset: Asset, original: Bool = false) async throws -> URL {
         let useOriginal = original || asset.isVideo
         let path = "assets/\(asset.id)/" + (useOriginal ? "original" : "thumbnail")
         var query = [URLQueryItem(name: "edited", value: useOriginal ? "false" : "true"), .init(name: "c", value: asset.cacheRevision)]
         if !useOriginal { query.append(.init(name: "size", value: "fullsize")) }
-        let (temporaryURL, response) = try await session.download(for: authorizedRequest(path: path, query: query))
+        let downloadRequest = try await authorizedRequest(path: path, query: query)
+        let (temporaryURL, response) = try await session.download(for: downloadRequest)
         try Self.validate(response)
         try Task.checkCancellation()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -263,3 +276,11 @@ struct SharedLinkCreation: Encodable, Sendable {
     var allowUpload = false
     var showMetadata = false
 }
+
+struct CastMedia: Sendable { let url: URL; let contentType: String }
+private struct CastSessionCreation: Encodable, Sendable {
+    let deviceType = "Cast"
+    let deviceOS = "Google Cast"
+    let duration = 900
+}
+private struct CastAuthorization: Decodable, Sendable { let id: String; let token: String; let expiresAt: Date? }

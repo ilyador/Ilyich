@@ -46,7 +46,8 @@ import WidgetKit
     }
 
     private func connect(_ saved: SavedSession) throws {
-        let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID)
+        let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID,
+                                   networkConfiguration: isUITesting ? NetworkConfiguration() : nil)
         api = client
         pipeline = MediaPipeline(client: client)
         name = saved.name
@@ -73,12 +74,14 @@ import WidgetKit
 
     func signOut() async {
         validationTask?.cancel()
+        CastController.shared.signOut()
         do {
             await BackupCoordinator.shared.disconnect()
             if !isUITesting { try SessionKeychain.remove() }
             if !isUITesting { WidgetCenter.shared.reloadAllTimelines() }
             let previous = api
             if let previous { LockedPINStore.remove(for: previous) }
+            if let previous, !isUITesting { try NetworkConfigurationStore.remove(server: previous.baseURL) }
             let previousPipeline = pipeline
             api = nil; pipeline = nil; name = ""; requiresPasswordChange = false; pendingLink = nil
             await previousPipeline?.removeAll()

@@ -65,7 +65,7 @@ final class CoreTests: XCTestCase {
     }
 
     func testOpaqueSessionTokenStaysInAuthorizationHeaderAndErrorsStayDistinct() async throws {
-        let client = try APIClient(baseURL: URL(string: "https://photos.example")!, accessToken: "opaque.not-a-jwt", userID: "alice")
+        let client = try APIClient(baseURL: URL(string: "https://photos.example")!, accessToken: "opaque.not-a-jwt", userID: "alice", networkConfiguration: .init())
         let request = try await client.authorizedRequest(path: "assets/photo/thumbnail", query: [.init(name: "c", value: "revision+with/slash")])
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer opaque.not-a-jwt")
         XCTAssertFalse(try XCTUnwrap(request.url).absoluteString.contains("opaque.not-a-jwt"))
@@ -124,4 +124,27 @@ final class CoreTests: XCTestCase {
             XCTAssertNil(HTTPContentRange(header))
         }
     }
+    func testClearingRatingSendsNullRatherThanOmittingTheUpdate() throws {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: APIJSON.encoder().encode(RatingUpdate(rating: nil))) as? [String: Any])
+        XCTAssertTrue(object["rating"] is NSNull)
+    }
+
+    func testNetworkHeadersAndOrderedEndpointsPreserveProxyAuthentication() async throws {
+        let primary = URL(string: "https://photos.example/prefix/api")!
+        var settings = NetworkConfiguration(customHeaders: ["CF-Access-Client-Id": "opaque-value"],
+                                            alternateEndpoints: [URL(string: "http://192.168.1.2:2283")!, primary],
+                                            automaticallySwitchEndpoints: true)
+        settings = try settings.validated()
+        XCTAssertEqual(settings.candidates(primary: primary).map(\.absoluteString), ["http://192.168.1.2:2283/api", primary.absoluteString])
+        settings.automaticallySwitchEndpoints = false
+        let client = try APIClient(baseURL: primary, accessToken: "session", networkConfiguration: settings)
+        let request = try await client.authorizedRequest(path: "assets/photo/thumbnail")
+        XCTAssertEqual(request.url?.absoluteString, "https://photos.example/prefix/api/assets/photo/thumbnail")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "CF-Access-Client-Id"), "opaque-value")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer session")
+        for headers in [["X-Key": "line\r\nbreak"], ["X-Key": "one", "x-key": "two"], ["Host": "elsewhere"], ["Authorization": "override"]] {
+            XCTAssertThrowsError(try NetworkConfiguration(customHeaders: headers).validated())
+        }
+    }
+
 }

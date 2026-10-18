@@ -38,11 +38,15 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Connect to your Ilyich server on your local network.</string>
+    <string>Connect to your Ilyich server and discover Cast devices on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array><string>_googlecast._tcp</string><string>_CC1AD845._googlecast._tcp</string></array>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>Choose device albums to view and back up to your Ilyich server.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>Save photos and videos from Ilyich to your photo library.</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Use Face ID to unlock your locked folder.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

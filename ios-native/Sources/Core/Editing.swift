@@ -4,6 +4,15 @@ struct RecognizedText: Decodable, Identifiable, Sendable {
     let id: String
     let text: String
     let textScore: Double
+    let boxScore: Double
+    let x1: Double
+    let x2: Double
+    let x3: Double
+    let x4: Double
+    let y1: Double
+    let y2: Double
+    let y3: Double
+    let y4: Double
 }
 
 struct PixelDimensions: Codable, Equatable, Sendable {
