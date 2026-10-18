@@ -46,9 +46,18 @@ enum AssetType: String, Codable {
 struct Asset: Codable {
   let id: String
   let type: AssetType
+  var memoryID: String? = nil
+
+  private enum CodingKeys: String, CodingKey {
+    case id, type
+  }
 
   var deepLink: URL? {
-    return URL(string: "immich://asset?id=\(id)")
+    var components = URLComponents()
+    components.scheme = "immich"
+    components.host = memoryID == nil ? "asset" : "memory"
+    components.queryItems = [URLQueryItem(name: "id", value: memoryID ?? id)]
+    return components.url
   }
 }
 
@@ -135,7 +144,16 @@ final class ImmichAPI: @unchecked Sendable {
   }
   func fetchMemory(for date: Date) async throws -> [MemoryResult] {
     let day = date.formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day().dateSeparator(.dash))
-    return try JSONDecoder().decode([MemoryResult].self, from: await request("memories", query: [.init(name: "for", value: day)]))
+    let memories = try JSONDecoder().decode([MemoryResult].self, from: await request("memories", query: [.init(name: "for", value: day)]))
+    return memories.map { memory in
+      var annotated = memory
+      annotated.assets = memory.assets.map { asset in
+        var asset = asset
+        asset.memoryID = memory.id
+        return asset
+      }
+      return annotated
+    }
   }
   func fetchAlbums() async throws -> [Album] {
     try JSONDecoder().decode([Album].self, from: await request("albums"))

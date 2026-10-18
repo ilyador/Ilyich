@@ -12,6 +12,9 @@ struct BulkActionsView: View {
     @State private var failure: String?
     @State private var busy = false
     @State private var progress = 0
+    @State private var shareFraction: Double?
+    @State private var shareToken: UUID?
+    @AppStorage("shareFileType") private var shareFileType = "original"
     @State private var operation: Task<Void, Never>?
     @State private var confirmTrash = false
     @State private var features: ServerFeatures?
@@ -31,7 +34,14 @@ struct BulkActionsView: View {
             albumSection
             if owned { organizeSection }
             if let failure { Section { Text(failure).foregroundStyle(.red) } }
-            if busy { Section { HStack { ProgressView(); Text(progress > 0 ? "Prepared \(progress) of \(assets.count)" : "Working…") } } }
+            if busy {
+                Section {
+                    HStack {
+                        if let shareFraction { ProgressView(value: shareFraction).frame(width: 60) } else { ProgressView() }
+                        Text(progress > 0 ? "Prepared \(progress) of \(assets.count)" : "Working…")
+                    }
+                }
+            }
         }
         .navigationTitle("\(assets.count) selected").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
@@ -52,10 +62,14 @@ struct BulkActionsView: View {
         } message: { Text(features?.trash == false ? "This cannot be undone." : "Photos on your phone are kept.") }
     }
     private var shareSection: some View {
-        Section("Share") {
-            Button("Share displayed versions", systemImage: "square.and.arrow.up") { prepareShare(original: false) }
-            Button("Share originals", systemImage: "doc") { prepareShare(original: true) }
+        Section {
+            if !assets.allSatisfy(\.isVideo) {
+                Picker("Photo quality", selection: $shareFileType) { Text("Original").tag("original"); Text("Displayed").tag("preview") }
+            }
+            Button("Share files", systemImage: "square.and.arrow.up") { prepareShare(original: shareFileType != "preview") }
             Button("Create shared link", systemImage: "link") { publicLink = true }.requiresWriteAccess(api)
+        } header: { Text("Share") } footer: {
+            if !assets.allSatisfy(\.isVideo) { Text("Displayed keeps the edits you see. Videos are always shared as originals.") }
         }
     }
     private var albumSection: some View {
@@ -108,14 +122,24 @@ struct BulkActionsView: View {
         }
     }
     private func prepareShare(original: Bool) {
+        guard !busy, !assets.isEmpty else { return }
         busy = true; failure = nil; progress = 0
+        let token = UUID(); shareToken = token; shareFraction = nil
+        let total = Double(assets.count)
         operation = Task {
-            defer { busy = false }
+            defer { busy = false; if shareToken == token { shareToken = nil; shareFraction = nil } }
             var files: [URL] = []
             do {
                 for asset in assets {
                     try Task.checkCancellation()
-                    files.append(try await api.download(asset: asset, original: original)); progress += 1
+                    let completed = Double(files.count)
+                    let file = try await api.download(asset: asset, original: original) { fraction in
+                        guard let fraction else { return }
+                        Task { @MainActor in if shareToken == token { shareFraction = (completed + fraction) / total } }
+                    }
+                    guard !Task.isCancelled else { BulkExport(files: [file]).clean(); throw CancellationError() }
+                    files.append(file); progress += 1
+                    shareFraction = Double(files.count) / total
                 }
                 try Task.checkCancellation(); share = BulkExport(files: files)
             } catch {
@@ -131,9 +155,11 @@ struct SelectionUpdate: Encodable, Sendable {
     var isFavorite: Bool?
     var visibility: AssetVisibility?
 }
-private struct BulkExport: Identifiable {
+private final class BulkExport: Identifiable {
     let id = UUID()
     let files: [URL]
+    init(files: [URL]) { self.files = files }
+    deinit { clean() }
     func clean() { for file in files { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) } }
 }
 private struct BulkShareSheet: UIViewControllerRepresentable {

@@ -93,6 +93,24 @@ final class LibraryTests: XCTestCase {
             XCTAssertEqual(XCTWaiter.wait(for: [interactive], timeout: 5), .completed)
         }
     }
+    @MainActor func testCancellingOriginalExportLeavesTheViewerUsable() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 15))
+        grid.cells.firstMatch.tap()
+        let actions = app.buttons["Photo actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10)); actions.tap()
+        app.buttons["Download original"].tap()
+        let cancel = app.buttons["viewer.cancelTransfer"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        requireHittable(cancel, in: app); cancel.tap()
+        XCTAssertFalse(cancel.exists)
+        requireHittable(actions, in: app)
+        app.buttons["Close"].tap()
+        XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 5))
+        grid.cells.element(boundBy: 1).tap()
+        XCTAssertTrue(app.buttons["Photo actions"].waitForExistence(timeout: 10))
+    }
     @MainActor func testDarkGlobeSupportsDragAndPinchWithoutBlockingLibrary() {
         let app = launch(appearance: "dark")
         capture(app, "Library — dark native glass")
@@ -148,6 +166,11 @@ final class LibraryTests: XCTestCase {
     @MainActor func testAccessibilityTextKeepsLibraryAndGlobeControlsTappable() {
         let app = launch(extraArguments: ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
         for identifier in ["library.select", "library.shelves"] { requireHittable(app.buttons[identifier], in: app) }
+        let heading = app.staticTexts["library.heading"]
+        XCTAssertTrue(heading.exists)
+        XCTAssertEqual(heading.label, "December 2026")
+        XCTAssertLessThanOrEqual(heading.frame.maxY, app.buttons["library.select"].frame.minY,
+                                 "At accessibility text sizes, the date needs its own full-width row.")
         capture(app, "Library — accessibility text")
         app.buttons["library.shelves"].tap()
         let places = app.buttons["Places"]
