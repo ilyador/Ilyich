@@ -4,12 +4,13 @@ Audit date: 2026-10-18. Scope: the 53 explicit incumbent mobile feature groups i
 
 **Done** means the listed behavior has a concrete source implementation. **Partial** names an implemented flow and specific missing behavior. **Missing** means the incumbent feature has no equivalent implementation beyond a limited prerequisite. All rows still require relevant UI/device verification; a compiler pass is not a functional pass.
 
-Source status: **37 done, 16 partial, 0 missing**. These are source-audit labels, not a completion percentage or runtime verification result. Collection-grid bulk actions are implemented for media categories and folders; other collection grids remain outside that coverage.
+Source status: **38 done, 15 partial, 0 missing**. These are source-audit labels, not a completion percentage or runtime verification result. Collection-grid bulk actions are implemented for media categories and folders; other collection grids remain outside that coverage.
 
 ## Verification evidence
 
 - Earlier source snapshots passed Swift 6 strict-concurrency typechecking against the Mac Catalyst SDK with real UIKit, PhotoKit, RealityKit and Google Cast headers, along with selected pure checks and XCTest suites. These results do not establish the current tree.
-- Xcode 27 CI at `0a16` failed compiling `LocalPhotoActionsView`; the current source has no successful iOS build result. A main-actor boundary fix is in progress. iPhone UI, extension and device runtime flows remain unverified.
+- Xcode 27 / iPhone 15 Pro on iOS 27 CI at `5de680abc` compiled successfully: 62 unit tests and 11 of 12 UI tests passed. Select remained inaccessible after closing Shelves and scrolling; the foreground-layer fix awaits CI verification. Release packaging was skipped after that failure.
+- The current memory-to-timeline navigation passes all 11 executable LibraryStore checks and Swift 6 strict-concurrency source typechecking against Mac Catalyst headers. Its new iOS UI test has not run yet; those checks do not replace simulator or device validation.
 - Current UI tests cover sign-in and fixture-backed library interactions. PhotoKit permissions/cloud resources, true background upload, biometrics, Cast hardware, share/widgets and native visual fidelity have not been verified end to end.
 - No deletion test has run on user photos. Cleanup uses durable backup receipts and fresh remote/local/account checks, and retains unverified/edited/auxiliary variants.
 
@@ -125,7 +126,7 @@ Source status: **37 done, 16 partial, 0 missing**. These are source-audit labels
 
 | Incumbent ID | Source status | Native evidence and remaining behavior |
 |---|---|---|
-| `memories` | Partial | [MoreCollectionsView.swift](Sources/Features/MoreCollectionsView.swift), [MemoryLane.swift](Sources/Library/MemoryLane.swift), [MemoryPlaybackView.swift](Sources/Features/MemoryPlaybackView.swift), [AppLink.swift](Sources/App/AppLink.swift) — Today/saved memory list, title/date, save toggle, main-timeline memory lane and specific memory deep links exist. MemoryPlaybackView provides manual photo/memory navigation, progress, replay and a finite epilogue, separately from slideshow preferences. Open-in-timeline navigation to a memory's date remains absent. |
+| `memories` | Done | [MoreCollectionsView.swift](Sources/Features/MoreCollectionsView.swift), [MemoryLane.swift](Sources/Library/MemoryLane.swift), [MemoryPlaybackView.swift](Sources/Features/MemoryPlaybackView.swift), [AppLink.swift](Sources/App/AppLink.swift) — Today/saved memory list, title/date, save toggle, main-timeline memory lane and specific memory deep links exist. MemoryPlaybackView provides manual photo/memory navigation, progress, replay and a finite epilogue, separately from slideshow preferences. Show in timeline closes the story and its presenting sheet before locating the photo/date in the main library; repeat navigation and cancellation by a newer scope/scroll intent have executable store tests. The on-day list uses the same preference-aware offline fallback as the memory lane. Native presentation and date-jump UI tests remain pending. |
 | `slideshow` | Done | [SlideshowView.swift](Sources/Features/SlideshowView.swift), [AssetViewer.swift](Sources/Viewer/AssetViewer.swift) — Timing/repeat/direction/shuffle/look, pause/progress/previous/next and video-end advancement exist. Viewer uses its supplied loaded window; continuous whole-collection loading is not implemented. |
 
 ### Widgets, deep links and platform integration
