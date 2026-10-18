@@ -91,6 +91,27 @@ final class EntitySyncTests: XCTestCase {
         let albums = try await store.albums()
         XCTAssertTrue(albums.isEmpty)
     }
+    func testPartnersReadBothDirectionsScopedToUserAndHonorDeleteAndDirection() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root), epoch = await store.epoch()
+        func user(_ id: String) throws -> EntitySyncEvent {
+            try event("UserV1", #"{"id":"\#(id)","name":"\#(id.capitalized)","email":"\#(id)@example.com","deletedAt":null}"#, ack: "UserV1|\(id)")
+        }
+        _ = try await store.apply([
+            user("alice"), user("bob"), user("carol"), user("dave"),
+            event("PartnerV1", #"{"sharedById":"bob","sharedWithId":"alice","inTimeline":true}"#, ack: "P|1"),
+            event("PartnerV1", #"{"sharedById":"alice","sharedWithId":"carol","inTimeline":false}"#, ack: "P|2"),
+            event("PartnerV1", #"{"sharedById":"dave","sharedWithId":"bob","inTimeline":true}"#, ack: "P|3")
+        ], epoch: epoch)
+        let with = try await store.partners(direction: "shared-with"), by = try await store.partners(direction: "shared-by")
+        XCTAssertEqual(with.map(\.id), ["bob"]); XCTAssertEqual(with.first?.email, "bob@example.com"); XCTAssertEqual(with.first?.inTimeline, true)
+        XCTAssertEqual(by.map(\.id), ["carol"]); XCTAssertEqual(by.first?.inTimeline, false)
+        do { _ = try await store.partners(direction: "all"); XCTFail("Unknown direction must be rejected") } catch { }
+        _ = try await store.apply([event("PartnerDeleteV1", #"{"sharedById":"bob","sharedWithId":"alice"}"#, ack: "P|4")], epoch: epoch)
+        let afterDelete = try await store.partners(direction: "shared-with")
+        XCTAssertTrue(afterDelete.isEmpty)
+    }
     func testLockedTransitionPurgesMetadataAndCannotBeRepopulatedByLaterExif() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -225,7 +246,7 @@ extension EntitySyncTests {
         defer { session.invalidateAndCancel() }
         let api = try APIClient(baseURL: URL(string: "https://sync-test.invalid")!, accessToken: "test-session", userID: "alice", session: session, networkConfiguration: .init())
         let store = try EntityStore(scope: api.cacheScope, userID: "alice", directory: root)
-        let fingerprint = try api.syncSessionFingerprint()
+        let fingerprint = try await api.syncSessionFingerprint()
         let needsReset = try await store.prepare(sessionFingerprint: fingerprint)
         XCTAssertTrue(needsReset)
         let epoch = await store.epoch()
