@@ -66,7 +66,7 @@ struct LockedFolderView: View {
         Group {
             if unlocked && scenePhase == .active {
                 ScrollView {
-                    FeatureAssetGrid(pipeline: pipeline, assets: assets) { viewing = $0 }
+                    SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: { viewing = $0 }, onChanged: reloadAfterBulkChange)
                     if !busy && assets.isEmpty { FeatureEmpty(title: "Your locked folder is empty", symbol: "lock", description: "Move private photos here from your library.") }
                     if busy { ProgressView().padding(24) }
                     if nextBucket < buckets.count { Button("Load more") { Task { await loadNext() } }.padding() }
@@ -154,6 +154,14 @@ struct LockedFolderView: View {
             let page = try await api.timeBucket(buckets[0].timeBucket, filter: filter)
             guard requestGeneration == generation else { return }
             assets = page; nextBucket = 1
+        }
+    }
+    /// A bulk action finishing after relock/expiry must not reload (and thereby re-show) the folder.
+    private func reloadAfterBulkChange() {
+        guard unlocked, scenePhase == .active else { return }
+        Task {
+            guard unlocked, scenePhase == .active else { return }
+            do { try await loadUnlocked() } catch { failure = .init(error) }
         }
     }
     private func loadNext() async {

@@ -30,12 +30,13 @@ struct BulkActionsView: View {
     }
     private var favorites: Bool { assets.allSatisfy(\.isFavorite) }
     private var archived: Bool { assets.allSatisfy { $0.visibility == .archive } }
+    private var allLocked: Bool { !assets.isEmpty && assets.allSatisfy { $0.visibility == .locked } }
     private var writableAlbums: [Album] { albums.filter { $0.albumUsers?.contains(where: { $0.user.id == api.userID && ["owner", "editor"].contains($0.role) }) == true } }
 
     var body: some View {
         List {
             shareSection
-            albumSection
+            if !allLocked { albumSection }
             if owned { organizeSection }
             if let failure { Section { Text(failure).foregroundStyle(.red) } }
             if let photosOutcome, !busy { Section { Text(photosOutcome) } }
@@ -58,7 +59,7 @@ struct BulkActionsView: View {
         .overlay(alignment: .bottom) {
             if busy { Button(photosCommitting ? "Saving to Photos" : "Cancel") { operation?.cancel() }.buttonStyle(.glass).padding().disabled(photosCommitting) }
         }
-        .task { albums = (try? await api.albums()) ?? []; await loadFeatures() }
+        .task { if !allLocked { albums = (try? await api.albums()) ?? [] }; await loadFeatures() }
         .onDisappear { operation?.cancel() }
         .sheet(item: $share, onDismiss: { share?.clean(); share = nil }) { item in
             BulkShareSheet(urls: item.files).onDisappear { item.clean() }
@@ -77,7 +78,7 @@ struct BulkActionsView: View {
             }
             Button("Share files", systemImage: "square.and.arrow.up") { prepareShare(original: shareFileType != "preview") }
             Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos(original: shareFileType != "preview") }.requiresWriteAccess(api)
-            Button("Create shared link", systemImage: "link") { publicLink = true }.requiresWriteAccess(api)
+            if !allLocked { Button("Create shared link", systemImage: "link") { publicLink = true }.requiresWriteAccess(api) }
         } header: { Text("Share") } footer: {
             if !assets.allSatisfy(\.isVideo) { Text("Displayed keeps the edits you see. Videos use originals. Saving a Live Photo keeps its original photo and motion.") }
         }
@@ -91,10 +92,14 @@ struct BulkActionsView: View {
     }
     private var organizeSection: some View {
         Section("Organize") {
-            Button(favorites ? "Remove favorites" : "Favorite", systemImage: "heart") { update(.init(ids: ids, isFavorite: !favorites)) }
-            Button(archived ? "Unarchive" : "Archive", systemImage: "archivebox") { update(.init(ids: ids, visibility: archived ? .timeline : .archive)) }
-            Button("Move to Locked Folder", systemImage: "lock") { update(.init(ids: ids, visibility: .locked)) }
-            if assets.count > 1 { Button("Stack photos", systemImage: "square.stack.3d.up", action: stack) }
+            if allLocked {
+                Button("Move to Timeline", systemImage: "lock.open") { update(.init(ids: ids, visibility: .timeline)) }
+            } else {
+                Button(favorites ? "Remove favorites" : "Favorite", systemImage: "heart") { update(.init(ids: ids, isFavorite: !favorites)) }
+                Button(archived ? "Unarchive" : "Archive", systemImage: "archivebox") { update(.init(ids: ids, visibility: archived ? .timeline : .archive)) }
+                Button("Move to Locked Folder", systemImage: "lock") { update(.init(ids: ids, visibility: .locked)) }
+            }
+            if assets.count > 1 && !allLocked { Button("Stack photos", systemImage: "square.stack.3d.up", action: stack) }
             Button(features?.trash == false ? "Delete permanently" : "Move to Trash", systemImage: "trash", role: .destructive) { confirmTrash = true }
                 .disabled(features == nil)
             if features == nil, let featuresFailure {
@@ -120,6 +125,8 @@ struct BulkActionsView: View {
         try await api.requestVoid(.put, path: "assets", body: body)
         if body.visibility == .locked {
             await pipeline.removeAll()
+            await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        } else if body.visibility == .timeline {
             await TimelineCache.shared.removeAll(scope: api.cacheScope)
         }
     } }
