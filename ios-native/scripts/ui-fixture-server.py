@@ -35,16 +35,16 @@ def memories():
     # Current-date windows keep the fixture valid whenever the UI test runs.
     now = datetime.datetime.now(datetime.timezone.utc)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    specs = [('00000000-0000-4000-8000-0000000000a1', 'Maya Memory One', 3, range(0, 3)),
-             ('00000000-0000-4000-8000-0000000000a2', 'Maya Memory Two', 1, range(3, 5))]
+    specs = [('00000000-0000-4000-8000-0000000000a1', 'Maya Memory One', '2024-06-01', range(0, 3)),
+             ('00000000-0000-4000-8000-0000000000a2', 'Maya Memory Two', '2025-10-01', range(3, 5))]
     result = []
-    for identifier, name, years, indexes in specs:
-        at = now.replace(year=now.year - years) if not (now.month == 2 and now.day == 29) else now.replace(year=now.year - years, day=28)
+    for identifier, name, date, indexes in specs:
+        at = datetime.datetime.fromisoformat(date).replace(tzinfo=datetime.timezone.utc)
         result.append({'id': identifier, 'type': 'on_this_day', 'ownerId': OWNER, 'isSaved': False,
                        'memoryAt': iso(at), 'showAt': iso(start), 'hideAt': iso(start + datetime.timedelta(days=1)),
                        'createdAt': iso(start), 'updatedAt': iso(start), 'seenAt': None,
                        'data': {'year': at.year, 'personId': PERSON['id'], 'personName': name},
-                       'assets': [asset(i) for i in indexes]})
+                       'assets': [asset(i, date) for i in indexes]})
     return result
 
 def bucket(date):

@@ -111,7 +111,7 @@ struct TimeRail: View {
     private func choose(_ index: Int, year: Int? = nil) {
         guard buckets.indices.contains(index) else { return }
         selected = index; yearSelection = year; expanded = true; visible = true
-        store.scrollTarget = buckets[index].id; store.requestBucket(index)
+        store.scrollToBucket(index)
     }
     private func scheduleDismiss(delay: Duration = .milliseconds(800)) {
         dismissTask?.cancel()

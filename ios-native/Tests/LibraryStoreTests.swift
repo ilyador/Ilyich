@@ -146,6 +146,102 @@ import XCTest
         store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
+    private static let june = "2025-06-01T00:00:00Z"
+    private func datedFixture(slow: Set<String> = []) throws -> LibraryAPIFixture {
+        let early = try XCTUnwrap(APIDate.parse("2025-06-02T12:00:00Z"))
+        let late = try XCTUnwrap(APIDate.parse("2025-06-20T12:00:00Z"))
+        return LibraryAPIFixture([], bucketAssets: [
+            "2026-03-01T00:00:00Z": [Asset(id: "march")],
+            "2026-02-01T00:00:00Z": [Asset(id: "february")],
+            Self.june: [Asset(id: "early", fileCreatedAt: early, localDateTime: early), Asset(id: "late", fileCreatedAt: late, localDateTime: late)],
+        ], slowBuckets: slow)
+    }
+
+    private func until(_ message: String, _ condition: () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail(message)
+    }
+
+    func testRepeatedRailJumpsToTheSameMonthAreDistinctRequests() async throws {
+        let api = try datedFixture()
+        let store = LibraryStore(api: api)
+        await store.reload()
+        store.scrollToBucket(1)
+        let first = try XCTUnwrap(store.scrollRequest)
+        store.scrollToBucket(1)
+        let second = try XCTUnwrap(store.scrollRequest)
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertEqual(first.position, second.position)
+        XCTAssertEqual(first.position.section, "2026-02-01T00:00:00Z")
+        XCTAssertEqual(first.position.item, 0)
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testShowInTimelineLoadsTheUnloadedMonthAndFindsTheAsset() async throws {
+        let api = try datedFixture()
+        let store = LibraryStore(api: api)
+        store.setTimeline(TimelineFilter(isFavorite: true), title: "Favorites")
+        store.selected = ["other"]; store.isSelecting = true
+        let date = try XCTUnwrap(APIDate.parse("2025-06-20T12:00:00Z"))
+        store.showInTimeline(Asset(id: "late", fileCreatedAt: date, localDateTime: date))
+        XCTAssertNil(store.filterTitle)
+        XCTAssertTrue(store.selected.isEmpty)
+        XCTAssertFalse(store.isSelecting)
+        try await until("The date navigation never published a scroll request.") { store.scrollRequest != nil }
+        let request = try XCTUnwrap(store.scrollRequest)
+        XCTAssertEqual(request.position.section, Self.june)
+        XCTAssertEqual(request.position.assetID, "late")
+        XCTAssertEqual(store.loaded[Self.june]?.map(\.id), ["early", "late"])
+        XCTAssertEqual(store.restoredIndex(for: request.position)?.section, 2)
+        XCTAssertEqual(store.restoredIndex(for: request.position)?.item, 1)
+        XCTAssertNil(store.error)
+
+        // A missing asset falls back to the nearest capture date in the same month.
+        let near = try XCTUnwrap(APIDate.parse("2025-06-19T00:00:00Z"))
+        store.showInTimeline(Asset(id: "elsewhere", fileCreatedAt: near))
+        try await until("The fallback navigation never published.") { store.scrollRequest != nil }
+        XCTAssertEqual(store.scrollRequest?.position.assetID, "late")
+        XCTAssertNotEqual(store.scrollRequest?.id, request.id)
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testScopeChangeOrStopPreventsAnOldDateNavigationFromPublishing() async throws {
+        let api = try datedFixture(slow: [Self.june])
+        let store = LibraryStore(api: api)
+        let date = try XCTUnwrap(APIDate.parse("2025-06-20T12:00:00Z"))
+        let asset = Asset(id: "late", fileCreatedAt: date, localDateTime: date)
+        store.showInTimeline(asset)
+        try await until("The target month was never requested.") { await api.bucketCalls.contains(Self.june) }
+        store.setTimeline(TimelineFilter(isFavorite: true), title: "Favorites")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(store.scrollRequest)
+
+        store.showInTimeline(asset)
+        try await until("The target month was never requested again.") { await api.bucketCalls.filter { $0 == Self.june }.count >= 2 }
+        store.stop()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(store.scrollRequest)
+        await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testRailJumpSupersedesPendingDateNavigation() async throws {
+        let api = try datedFixture(slow: [Self.june])
+        let store = LibraryStore(api: api)
+        let date = try XCTUnwrap(APIDate.parse("2025-06-20T12:00:00Z"))
+        store.showInTimeline(Asset(id: "late", localDateTime: date))
+        try await until("The target month was never requested.") { await api.bucketCalls.contains(Self.june) }
+        store.scrollToBucket(0)
+        let request = try XCTUnwrap(store.scrollRequest)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(store.scrollRequest, request)
+        XCTAssertEqual(request.position.section, "2026-03-01T00:00:00Z")
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
     private func settleSelection(_ store: LibraryStore) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while store.isSelectingGroup && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
@@ -161,14 +257,22 @@ private actor LibraryAPIFixture: LibraryAPI {
     private let delayed: Bool
     private let timelineAssets: [Asset]
     private let delayedTimeline: Bool
-    init(_ pages: [SearchResponse], delayed: Bool = false, timelineAssets: [Asset] = [Asset(id: "timeline-photo")], delayedTimeline: Bool = false) {
+    private let bucketAssets: [String: [Asset]]
+    private let slowBuckets: Set<String>
+    var bucketCalls: [String] = []
+    init(_ pages: [SearchResponse], delayed: Bool = false, timelineAssets: [Asset] = [Asset(id: "timeline-photo")], delayedTimeline: Bool = false,
+         bucketAssets: [String: [Asset]] = [:], slowBuckets: Set<String> = []) {
         self.pages = pages; self.delayed = delayed; self.timelineAssets = timelineAssets; self.delayedTimeline = delayedTimeline
+        self.bucketAssets = bucketAssets; self.slowBuckets = slowBuckets
     }
     func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
-        [.init(timeBucket: "2026-01-01T00:00:00Z", count: timelineAssets.count)]
+        if !bucketAssets.isEmpty { return bucketAssets.keys.sorted(by: >).map { .init(timeBucket: $0, count: bucketAssets[$0]?.count ?? 0) } }
+        return [.init(timeBucket: "2026-01-01T00:00:00Z", count: timelineAssets.count)]
     }
     func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
-        if delayedTimeline { try await Task.sleep(for: .seconds(3)) }
+        bucketCalls.append(bucket)
+        if delayedTimeline || slowBuckets.contains(bucket) { try await Task.sleep(for: .seconds(3)) }
+        if let assets = bucketAssets[bucket] { return assets }
         return timelineAssets
     }
     func search(_ query: SearchQuery) async throws -> SearchResponse {

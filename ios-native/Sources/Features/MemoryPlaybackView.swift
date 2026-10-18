@@ -8,7 +8,7 @@ struct MemoryPlaybackView: View {
     let pipeline: MediaPipeline
     let memories: [Memory]
     var initialID: String? = nil
-    let onOpenAsset: (Asset) -> Void
+    let onNavigate: (PhotoDestination) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var cursor = MemoryCursor()
@@ -50,7 +50,12 @@ struct MemoryPlaybackView: View {
                             if let date = asset.fileCreatedAt { Text(date, format: .dateTime.year().month(.wide).day()).font(.headline) }
                         }
                         Spacer(minLength: 12)
-                        Button("Open photo", systemImage: "arrow.up.right.square") { dismiss(); onOpenAsset(asset) }.labelStyle(.iconOnly).frame(width: 44, height: 44)
+                        Menu {
+                            Button("Open photo", systemImage: "arrow.up.right.square") { onNavigate(.viewer(asset)) }
+                            Button("Show in timeline", systemImage: "calendar") { onNavigate(.timeline(asset)) }
+                        } label: {
+                            Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                        }.accessibilityLabel("Memory photo actions")
                     }
                     GlassEffectContainer { HStack(spacing: 30) {
                         Button("Previous memory", systemImage: "chevron.up") { cursor.previousMemory(counts: counts) }.labelStyle(.iconOnly).disabled(cursor.memory == 0)

@@ -20,7 +20,7 @@ struct LibraryView: View {
     @State private var linkedMemoryID: String?
     @State private var memoryLane = MemoryLaneStore()
     @State private var playingMemory: Memory?
-    @State private var pendingMemoryAsset: Asset?
+    @State private var pendingPhotoDestination: PhotoDestination?
     @ScaledMetric(relativeTo: .subheadline) private var memoryLaneHeight = 132.0
     @State private var activityAlbumID: String?
     @State private var showPlaces = false
@@ -102,15 +102,15 @@ struct LibraryView: View {
                             .accessibilityLabel("Open shelves").accessibilityIdentifier("library.shelves")
                     }
                   }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                }.zIndex(1)
                 if !shelves && !searchFocused && store.query.isEmpty && !store.buckets.isEmpty {
                     TimeRail(store: store, pipeline: pipeline, viewportWidth: geometry.size.width)
                         .frame(width: 44).padding(.top, 130).padding(.bottom, showPlaces ? geometry.size.height * 0.42 : 100)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .frame(maxWidth: .infinity, alignment: .trailing).zIndex(2)
                 }
             }
             .background(Color(.systemBackground))
-            .sheet(item: $screen) { destination in
+            .sheet(item: $screen, onDismiss: finishPhotoNavigation) { destination in
                 NavigationStack {
                     destinationView(destination)
                         .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { screen = nil } } }
@@ -121,13 +121,9 @@ struct LibraryView: View {
                             onUpdated: store.update, onDeleted: { Task { await store.refreshAfterMutation() } }, albumID: viewingAlbumID ?? store.timelineFilter.albumID,
                             matchedLocalPhotos: store.matchingDevicePhotos)
             }
-            .fullScreenCover(item: $playingMemory, onDismiss: {
-                if let asset = pendingMemoryAsset { pendingMemoryAsset = nil; viewingAlbumID = nil; viewing = asset }
-                else { refreshSharedFiles() }
-            }) { memory in
-                MemoryPlaybackView(api: api, pipeline: pipeline, memories: memoryLane.memories, initialID: memory.id) { asset in
-                    pendingMemoryAsset = asset; playingMemory = nil
-                }
+            .fullScreenCover(item: $playingMemory, onDismiss: finishPhotoNavigation) { memory in
+                MemoryPlaybackView(api: api, pipeline: pipeline, memories: memoryLane.memories, initialID: memory.id,
+                                   onNavigate: requestPhotoNavigation)
             }
             .fullScreenCover(item: $viewingLocal) { LocalPhotoViewer(photo: $0) }
             .sheet(item: $bulkSelection) { selection in
@@ -405,7 +401,9 @@ struct LibraryView: View {
 
     @ViewBuilder private func destinationView(_ destination: Screen) -> some View {
         switch destination {
-        case .memories: MemoriesView(api: api, pipeline: pipeline, onOpenAsset: { viewingAlbumID = nil; viewing = $0; screen = nil }, initialID: linkedMemoryID)
+        case .memories: MemoriesView(api: api, pipeline: pipeline,
+                                    onOpenAsset: { requestPhotoNavigation(.viewer($0)) },
+                                    onShowInTimeline: { requestPhotoNavigation(.timeline($0)) }, initialID: linkedMemoryID)
         case .activity:
             if let activityAlbumID { AlbumActivityView(api: api, albumID: activityAlbumID) }
         case .searchOptions: SearchOptionsView(api: api, mode: store.searchMode, filter: store.searchFilter) { mode, filter in
@@ -415,20 +413,35 @@ struct LibraryView: View {
         case .albums: AlbumsView(api: api, pipeline: pipeline) { store.setAlbum($0); screen = nil; searchText = "" }
         case .places: PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace)
         case .settings: SettingsView(api: api, pipeline: pipeline, session: session, onSignOut: { store.stop(); Task { await session.signOut() } })
-        case .more: MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { viewing = $0; screen = nil }, onFilter: { filter, title in
+        case .more: MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { requestPhotoNavigation(.viewer($0)) }, onFilter: { filter, title in
             store.setTimeline(filter, title: title); screen = nil
-        })
+        }, onShowInTimeline: { requestPhotoNavigation(.timeline($0)) })
         }
     }
     private func selectPlace(_ place: PlaceCollection) {
         store.setPlace(assetIDs: place.assetIDs, title: place.title); searchText = ""; screen = nil
+    }
+    private func requestPhotoNavigation(_ destination: PhotoDestination) {
+        let dismissing = screen != nil || playingMemory != nil
+        pendingPhotoDestination = destination
+        screen = nil; playingMemory = nil
+        if !dismissing { finishPhotoNavigation() }
+    }
+    private func finishPhotoNavigation() {
+        guard screen == nil, playingMemory == nil else { return }
+        guard let destination = pendingPhotoDestination else { refreshSharedFiles(); return }
+        pendingPhotoDestination = nil
+        switch destination {
+        case .viewer(let asset): viewingAlbumID = nil; viewing = asset
+        case .timeline(let asset): searchText = ""; store.showInTimeline(asset)
+        }
     }
     private func refreshSharedFiles() {
         shareInbox.refresh()
         let ids = Set(shareInbox.batches.map(\.id))
         seenShareBatches.formIntersection(ids)
         guard !ids.subtracting(seenShareBatches).isEmpty, screen == nil, viewing == nil, viewingLocal == nil,
-              playingMemory == nil, bulkSelection == nil else { return }
+              playingMemory == nil, pendingPhotoDestination == nil, bulkSelection == nil else { return }
         seenShareBatches.formUnion(ids)
         sharedFilesPresented = true
     }

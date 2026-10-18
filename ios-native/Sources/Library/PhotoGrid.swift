@@ -55,7 +55,7 @@ struct PhotoGrid: UIViewRepresentable {
                 if wasScrolled { view.contentOffset.y += delta }
             }
             if layout.columns != columns {
-                let anchor = view.indexPathsForVisibleItems.min()
+                let anchor = coordinator.firstVisiblePhoto()
                 layout.columns = columns; layout.invalidateLayout(); view.layoutIfNeeded()
                 if let anchor, let frame = layout.layoutAttributesForItem(at: anchor)?.frame {
                     view.setContentOffset(CGPoint(x: 0, y: frame.minY - topInset), animated: false)
@@ -83,10 +83,10 @@ struct PhotoGrid: UIViewRepresentable {
         for header in view.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionHeader) {
             (header as? MemoryLaneHeader)?.configure(pipeline: pipeline, memories: memories) { onOpenMemory?($0) }
         }
-        if let target = store.scrollTarget, target != coordinator.lastScrollTarget,
-           let section = sections.firstIndex(where: { $0.id == target }), sections[section].count > 0 {
-            coordinator.lastScrollTarget = target
-            view.scrollToItem(at: IndexPath(item: 0, section: section), at: .top, animated: false)
+        if let request = store.scrollRequest, request.id != coordinator.lastScrollRequest,
+           let index = store.restoredIndex(for: request.position) {
+            coordinator.lastScrollRequest = request.id
+            view.scrollToItem(at: IndexPath(item: index.item, section: index.section), at: .top, animated: false)
         }
     }
 
@@ -98,7 +98,7 @@ struct PhotoGrid: UIViewRepresentable {
         var revision = -1
         var selection: Set<String> = []
         var selecting = false
-        var lastScrollTarget: String?
+        var lastScrollRequest: UUID?
         init(_ parent: PhotoGrid) { self.parent = parent }
         func numberOfSections(in collectionView: UICollectionView) -> Int { sections.count }
         func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { sections[section].count }
@@ -146,7 +146,7 @@ struct PhotoGrid: UIViewRepresentable {
             for section in Set(paths.map(\.section)) { parent.store.requestBucket(section) }
         }
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard let collection, let first = collection.indexPathsForVisibleItems.min() else { return }
+            guard let collection, let first = firstVisiblePhoto() else { return }
             parent.store.visibleSection(first.section)
             parent.store.navigation.section = first.section
             parent.store.navigation.item = first.item
@@ -156,7 +156,19 @@ struct PhotoGrid: UIViewRepresentable {
                                                      assetID: parent.store.entry(section: first.section, item: first.item)?.id)
             }
         }
-        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { parent.store.navigation.isScrolling = true }
+        func firstVisiblePhoto() -> IndexPath? {
+            guard let collection else { return nil }
+            let top = collection.contentOffset.y + collection.adjustedContentInset.top
+            let bottom = collection.contentOffset.y + collection.bounds.height - collection.adjustedContentInset.bottom
+            return collection.indexPathsForVisibleItems.filter { index in
+                guard let frame = collection.layoutAttributesForItem(at: index)?.frame else { return false }
+                return frame.maxY > top && frame.minY < bottom
+            }.min()
+        }
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            parent.store.cancelPendingNavigation()
+            parent.store.navigation.isScrolling = true
+        }
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
             if !decelerate { parent.store.navigation.isScrolling = false }
         }

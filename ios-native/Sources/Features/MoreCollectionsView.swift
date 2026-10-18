@@ -5,6 +5,7 @@ struct MoreCollectionsView: View {
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
     let onFilter: (TimelineFilter, String) -> Void
+    let onShowInTimeline: (Asset) -> Void
     var body: some View {
         List {
             Section("On your device") {
@@ -24,7 +25,7 @@ struct MoreCollectionsView: View {
                 NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .videos, onOpenAsset: onOpenAsset) } label: { Label("Videos", systemImage: "video") }
                 NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .motion, onOpenAsset: onOpenAsset) } label: { Label("Motion", systemImage: "livephoto") }
                 NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .developed, onOpenAsset: onOpenAsset) } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
-                NavigationLink { MemoriesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset) } label: { Label("On this day", systemImage: "clock.arrow.circlepath") }
+                NavigationLink { MemoriesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset, onShowInTimeline: onShowInTimeline) } label: { Label("On this day", systemImage: "clock.arrow.circlepath") }
             }
             Section("Shared") {
                 NavigationLink { PartnersView(api: api, onFilter: onFilter) } label: { Label("Partners", systemImage: "person.2") }
@@ -108,11 +109,13 @@ struct MemoriesView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
+    let onShowInTimeline: (Asset) -> Void
     var initialID: String? = nil
     @State private var openedInitial = false
     @State private var memories: [Memory] = []
     @State private var savedOnly = false
     @State private var playingMemory: Memory?
+    @State private var pendingDestination: PhotoDestination?
     @State private var loading = true
     @State private var failure: FeatureFailure?
     var body: some View {
@@ -135,8 +138,17 @@ struct MemoriesView: View {
         }.navigationTitle(savedOnly ? "Saved memories" : "On this day")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Toggle("Saved memories", isOn: $savedOnly).toggleStyle(.button) } }
         .task(id: savedOnly) { await load() }.refreshable { await load() }
-        .fullScreenCover(item: $playingMemory) { memory in
-            MemoryPlaybackView(api: api, pipeline: pipeline, memories: memories, initialID: memory.id, onOpenAsset: onOpenAsset)
+        .fullScreenCover(item: $playingMemory, onDismiss: {
+            guard let destination = pendingDestination else { return }
+            pendingDestination = nil
+            switch destination {
+            case .viewer(let asset): onOpenAsset(asset)
+            case .timeline(let asset): onShowInTimeline(asset)
+            }
+        }) { memory in
+            MemoryPlaybackView(api: api, pipeline: pipeline, memories: memories, initialID: memory.id) { destination in
+                pendingDestination = destination; playingMemory = nil
+            }
         }
         .alert("Couldn’t update memories", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
@@ -148,14 +160,14 @@ struct MemoriesView: View {
     }
     private func load() async {
         loading = true; defer { loading = false }
-        let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd"; formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.calendar = Calendar(identifier: .gregorian)
-        let query = savedOnly ? [URLQueryItem(name: "isSaved", value: "true")] : [.init(name: "for", value: formatter.string(from: Date()))]
         do {
             if let initialID, !openedInitial {
                 let memory: Memory = try await api.request(.get, path: "memories/\(initialID)")
                 try Task.checkCancellation()
                 memories = [memory]; playingMemory = memory; openedInitial = true
-            } else { memories = try await api.request(.get, path: "memories", query: query) }
+            } else if savedOnly {
+                memories = try await api.request(.get, path: "memories", query: [.init(name: "isSaved", value: "true")])
+            } else { memories = try await api.memories() }
         } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func toggleSaved(_ memory: Memory) async {

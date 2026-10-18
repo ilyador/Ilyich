@@ -12,6 +12,11 @@ struct GridPosition: Equatable {
     let offset: Double
     var assetID: String? = nil
 }
+/// One explicit request for the grid to scroll. A fresh ID makes repeating the same target work.
+struct ScrollRequest: Equatable {
+    let id = UUID()
+    let position: GridPosition
+}
 @MainActor @Observable final class TimelinePosition {
     var section = 0
     var item = 0
@@ -49,7 +54,7 @@ extension APIClient: LibraryAPI {}
     var hasMore = false
     var revision = 0
     var resetID = UUID()
-    var scrollTarget: String?
+    var scrollRequest: ScrollRequest?
     var restorePosition: GridPosition?
     var selected: Set<String> = [] { didSet {
         selectedRecords = selectedRecords.filter { selected.contains($0.key) }
@@ -74,6 +79,7 @@ extension APIClient: LibraryAPI {}
     private var retryBatch: (cursor: String?, prefix: [Asset])?
     private var requests: [String: Task<Void, Never>] = [:]
     private var queryTask: Task<Void, Never>?
+    @ObservationIgnored private var navigationTask: Task<Void, Never>?
     private var generation = UUID()
     private var recentBuckets: [String] = []
     private var usesMetadata = false
@@ -282,6 +288,66 @@ extension APIClient: LibraryAPI {}
         if index > 0 { requestBucket(index - 1) }
     }
 
+    /// Rail jump: the section already exists, so only its data and a fresh scroll request are needed.
+    func scrollToBucket(_ index: Int) {
+        guard !showingResults, buckets.indices.contains(index) else { return }
+        cancelPendingNavigation()
+        requestBucket(index)
+        scrollRequest = ScrollRequest(position: GridPosition(section: buckets[index].id, item: 0, offset: 0))
+    }
+
+    func cancelPendingNavigation() {
+        navigationTask?.cancel(); navigationTask = nil; scrollRequest = nil
+    }
+
+    /// Leaves any filter, search or selection, then scrolls the normal timeline to the asset's
+    /// month. Bucket IDs hold local wall dates as UTC components, so the month is matched in UTC.
+    func showInTimeline(_ asset: Asset) {
+        let reuseTimeline = !isFiltered && !showingResults && !buckets.isEmpty
+        let saved = originalTimeline
+        beginScopeChange()
+        timelineFilter = TimelineFilter(); searchFilter = SearchFilter()
+        filterTitle = nil; query = ""; results = []; showingResults = false; usesMetadata = false; searchMode = .context
+        originalTimeline = nil; scrollRequest = nil
+        let restoreSaved = !reuseTimeline && saved?.0.buckets.isEmpty == false
+        if restoreSaved, let saved {
+            remoteBuckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2
+            recentBuckets = remoteBuckets.map(\.id).filter { loaded[$0] != nil }
+            cachedBuckets = Set(loaded.keys)
+            updateSections(); resetID = UUID(); revision += 1
+        }
+        let date = asset.localDateTime ?? asset.fileCreatedAt
+        navigationTask = Task {
+            if !reuseTimeline && !restoreSaved { await reload() }
+            guard !Task.isCancelled, error == nil else { return }
+            let current = generation
+            guard let date, let index = nearestBucket(to: date) else {
+                error = "Couldn't find this photo's date in the timeline."; return
+            }
+            let bucket = buckets[index].id
+            requestBucket(index)
+            await requests[bucket]?.value
+            guard !Task.isCancelled, generation == current else { return }
+            guard bucketErrors[bucket] == nil else {
+                error = "Couldn't load photos for that date."; return
+            }
+            let entries = mergesDevicePhotos ? merged[bucket] ?? [] : (loaded[bucket] ?? []).map { LibraryEntry.remote($0) }
+            let distance = { (entry: LibraryEntry) in abs(entry.date.timeIntervalSince(date)) }
+            guard let target = entries.first(where: { $0.id == asset.id }) ?? entries.min(by: { distance($0) < distance($1) }),
+                  let item = entries.firstIndex(where: { $0.id == target.id }) else {
+                error = "Couldn't load photos for that date."; return
+            }
+            scrollRequest = ScrollRequest(position: GridPosition(section: bucket, item: item, offset: 0, assetID: target.id))
+        }
+    }
+
+    private func nearestBucket(to date: Date) -> Int? {
+        let month = MergedTimeline.monthKey(date)
+        if let exact = buckets.firstIndex(where: { $0.id.hasPrefix(month) }) { return exact }
+        return buckets.indices.compactMap { index in buckets[index].date.map { (index, abs($0.timeIntervalSince(date))) } }
+            .min { $0.1 < $1.1 }?.0
+    }
+
     func retryFailedBuckets() { bucketErrors = [:]; revision += 1 }
 
     func setPerson(_ person: Person) {
@@ -457,7 +523,7 @@ extension APIClient: LibraryAPI {}
 
     private func cancelRequests() { requests.values.forEach { $0.cancel() }; requests = [:] }
     func stop() {
-        cancelRequests(); queryTask?.cancel(); groupSelectionTask?.cancel(); isSelectingGroup = false
+        cancelRequests(); queryTask?.cancel(); cancelPendingNavigation(); groupSelectionTask?.cancel(); isSelectingGroup = false
         generation = UUID(); searchGeneration = UUID()
     }
     private func beginScopeChange() {
