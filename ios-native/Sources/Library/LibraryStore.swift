@@ -195,6 +195,29 @@ extension APIClient: LibraryAPI {}
 
     var canSelectMonth: Bool { !showingResults && buckets.indices.contains(navigation.section) }
 
+    /// Up to two most common places (city, else country) among already loaded assets.
+    func placeSummary(for assets: [Asset]) -> String? {
+        var counts: [String: Int] = [:]
+        for asset in assets {
+            guard let exif = asset.exifInfo else { continue }
+            let city = exif.city?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let country = exif.country?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let name = city.isEmpty ? country : city
+            if !name.isEmpty { counts[name, default: 0] += 1 }
+        }
+        let ranked = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+        return ranked.isEmpty ? nil : ranked.prefix(2).map(\.key).joined(separator: " · ")
+    }
+    /// Place summary for one loaded month section; nil until that month has loaded.
+    func placeSummary(section: Int) -> String? {
+        guard !showingResults, buckets.indices.contains(section), let assets = loaded[buckets[section].id] else { return nil }
+        return placeSummary(for: assets)
+    }
+    /// Search/filter results when showing them, otherwise the month under the viewport.
+    var currentPlaceSummary: String? {
+        showingResults ? placeSummary(for: results) : placeSummary(section: navigation.section)
+    }
+
     func entry(section: Int, item: Int) -> LibraryEntry? {
         if mergesDevicePhotos, buckets.indices.contains(section) {
             let key = buckets[section].id
