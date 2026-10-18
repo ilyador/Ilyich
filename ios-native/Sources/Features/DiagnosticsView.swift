@@ -15,7 +15,6 @@ struct DiagnosticsView: View {
     @State private var confirmReset = false
     @State private var resetMessage: String?
     @State private var confirmMetadataReset = false
-    @State private var metadataResetMessage: String?
     var body: some View {
         Form {
             Section("App") {
@@ -38,7 +37,6 @@ struct DiagnosticsView: View {
                     if let message = session.syncError { Text(message).font(.footnote).foregroundStyle(.secondary) }
                     Button("Sync now", systemImage: "arrow.triangle.2.circlepath") { session.startSync() }.disabled(session.isSyncing)
                     Button("Reset local library metadata", systemImage: "arrow.counterclockwise", role: .destructive) { confirmMetadataReset = true }.disabled(session.isSyncing)
-                    if let metadataResetMessage { Text(metadataResetMessage).font(.footnote).foregroundStyle(.secondary) }
                 }
                 if let statistics = syncStatistics {
                     if let date = statistics.lastSync { LabeledContent("Last completed sync") { Text(date, format: .dateTime.year().month().day().hour().minute()).multilineTextAlignment(.trailing) } }
@@ -132,9 +130,7 @@ struct DiagnosticsView: View {
     }
     private func resetLibraryMetadata() async {
         guard let session else { return }
-        metadataResetMessage = nil
-        let resetRequested = await session.resetLibraryMetadata()
-        if resetRequested { metadataResetMessage = "Rebuilding library metadata from the server." }
+        await session.resetLibraryMetadata()
         await refresh()
     }
 }
