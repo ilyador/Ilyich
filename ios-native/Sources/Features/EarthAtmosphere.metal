@@ -1,4 +1,7 @@
+#include <metal_stdlib>
 #include <RealityKit/RealityKit.h>
+
+using namespace metal;
 
 [[visible]] void earthAtmosphere(realitykit::surface_parameters parameters) {
     auto geometry = parameters.geometry();
