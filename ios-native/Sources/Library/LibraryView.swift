@@ -45,6 +45,7 @@ struct LibraryView: View {
     @State private var seenShareBatches = Set<UUID>()
     @AppStorage("gridColumns") private var columns = 4
     @AppStorage("appearance") private var appearance = "system"
+    @AppStorage("timelineStorageIndicator") private var storageIndicator = true
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -62,7 +63,7 @@ struct LibraryView: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                PhotoGrid(store: store, pipeline: pipeline, columns: max(2, min(6, columns)),
+                PhotoGrid(store: store, pipeline: pipeline, columns: max(2, min(6, columns)), showsStorageIndicator: storageIndicator,
                           topInset: geometry.safeAreaInsets.top + headerHeight,
                           bottomInset: geometry.safeAreaInsets.bottom + (showPlaces ? geometry.size.height * 0.4 : 90),
                           onDensityChange: { columns = $0 }, onOpenLocal: { searchFocused = false; viewingLocal = $0 }) { asset in
