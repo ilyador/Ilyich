@@ -48,7 +48,21 @@ import UIKit
             return
         }
         do {
-            if let saved = try await Task.detached(priority: .userInitiated, operation: { try SessionKeychain.read() }).value {
+            if var saved = try await Task.detached(priority: .userInitiated, operation: { try SessionKeychain.read() }).value {
+                // Earlier native builds persisted the server flag without the
+                // administrator exemption. Repair it without changing credentials.
+                if saved.requiresPasswordChange == true {
+                    let configuration = URLSessionConfiguration.ephemeral
+                    configuration.timeoutIntervalForRequest = 4
+                    configuration.timeoutIntervalForResource = 6
+                    let checkSession = URLSession(configuration: configuration, delegate: SameOriginRedirectDelegate(origin: saved.server), delegateQueue: nil)
+                    defer { checkSession.invalidateAndCancel() }
+                    let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID, session: checkSession)
+                    if let user = try? await client.currentUser(), user.isAdmin == true {
+                        saved.requiresPasswordChange = false
+                        try? SessionKeychain.save(saved)
+                    }
+                }
                 try connect(saved)
             }
         } catch { self.error = error.localizedDescription }
@@ -64,7 +78,7 @@ import UIKit
     func acceptLogin(_ result: LoginResponse, server: URL) throws {
         guard !isSigningOut else { throw APIError.invalidResponse("Sign-out is still finishing. Try signing in again in a moment.") }
         let saved = SavedSession(server: server, token: result.accessToken, userID: result.userId, name: result.name,
-                                 requiresPasswordChange: result.shouldChangePassword)
+                                 requiresPasswordChange: result.requiresPasswordChange)
         if !isUITesting { try SessionKeychain.save(saved) }
         if !isUITesting { WidgetCenter.shared.reloadAllTimelines() }
         try connect(saved)

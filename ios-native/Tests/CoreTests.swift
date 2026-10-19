@@ -4,6 +4,24 @@ import XCTest
 
 @MainActor
 final class CoreTests: XCTestCase {
+    func testPasswordChangeRequirementPreservesAdministratorExemption() throws {
+        for (isAdmin, shouldChangePassword, expected) in [(true, true, false), (true, false, false), (false, true, true), (false, false, false)] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "accessToken": "test-token", "userId": "test-user", "userEmail": "test@example.com", "name": "Test",
+                "isAdmin": isAdmin, "shouldChangePassword": shouldChangePassword,
+            ])
+            let login = try APIJSON.decoder().decode(LoginResponse.self, from: data)
+            XCTAssertEqual(login.requiresPasswordChange, expected)
+        }
+    }
+
+    func testCurrentUserRetainsAdministratorStatusWithoutRequiringItForSharedUsers() throws {
+        let admin = try APIJSON.decoder().decode(User.self, from: Data(#"{"id":"test-user","name":"Test","isAdmin":true}"#.utf8))
+        XCTAssertEqual(admin.isAdmin, true)
+        let sharedUser = try APIJSON.decoder().decode(User.self, from: Data(#"{"id":"shared-user","name":"Shared"}"#.utf8))
+        XCTAssertNil(sharedUser.isAdmin)
+    }
+
     func testStructuredSearchPreservesNaturalLanguageAndUsesCursorContract() throws {
         var query = SearchQuery(query: "me wearing a red hat in Amsterdam")
         query.cursor = "server-owned-next-token"

@@ -42,6 +42,9 @@ struct LoginResponse: Codable, Sendable {
     let shouldChangePassword: Bool
     let profileImagePath: String?
     let isOnboarded: Bool?
+
+    // Match the existing mobile login flow: administrators are exempt.
+    var requiresPasswordChange: Bool { shouldChangePassword && !isAdmin }
 }
 
 struct ServerFeatures: Codable, Sendable {
@@ -100,6 +103,7 @@ struct User: Codable, Hashable, Identifiable, Sendable {
     let name: String
     let email: String?
     let profileImagePath: String?
+    var isAdmin: Bool? = nil
     var quotaSizeInBytes: Int64? = nil
     var quotaUsageInBytes: Int64? = nil
 }
