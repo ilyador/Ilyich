@@ -29,4 +29,23 @@ final class MediaPipelineTests: XCTestCase {
         XCTAssertNotNil(pipeline.cachedImage(for: kept, pixelSize: 8), "And in memory.")
         XCTAssertNotNil(pipeline.latestImage(assetID: "kept", size: .thumbnail))
     }
+
+    /// Photos about to scroll in reach memory from disk, so they draw in their first frame.
+    func testPrefetchedThumbnailsReachMemory() async throws {
+        let api = try APIClient(baseURL: XCTUnwrap(URL(string: "https://media.example")), accessToken: "media-session",
+                                userID: "media-" + UUID().uuidString)
+        let pipeline = MediaPipeline(client: api)
+        addTeardownBlock { await pipeline.removeAll() }
+        let png = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).pngData { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        }
+        let asset = Asset(id: "ahead")
+        await ThumbnailStore(scope: api.cacheScope).store(png, assetID: asset.id, revision: asset.cacheRevision)
+
+        pipeline.prefetchThumbnails([asset], pixelSize: 8)
+
+        let deadline = Date().addingTimeInterval(5)
+        while pipeline.cachedImage(for: asset, pixelSize: 8) == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertNotNil(pipeline.cachedImage(for: asset, pixelSize: 8))
+    }
 }

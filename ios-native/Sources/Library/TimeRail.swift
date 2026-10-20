@@ -111,7 +111,7 @@ struct TimeRail: View {
                 switch value.phase {
                 case .began:
                     Haptics.grabbed()
-                    isScrubbing = true
+                    isScrubbing = true; store.navigation.isScrubbing = true
                     rest = TimeRailRest()
                     _ = rest.move(to: y, at: now)
                     // The lens and the column open first, showing the month under the finger, and
@@ -128,12 +128,12 @@ struct TimeRail: View {
                     guard let shown = rest.move(to: y, at: now) else { holdMoves(height: height); return }
                     follow(shown, height: height)
                 case .ended:
-                    isScrubbing = false
+                    isScrubbing = false; store.navigation.isScrubbing = false
                     rest.end(); restTask?.cancel(); restTask = nil
                     // Lifting the finger closes it sooner and quicker than the rail fades after scrolling.
                     scheduleDismiss(delay: .milliseconds(400), duration: 0.24)
                 default:
-                    isScrubbing = false
+                    isScrubbing = false; store.navigation.isScrubbing = false
                     rest.end(); restTask?.cancel(); restTask = nil
                     scheduleDismiss(delay: .zero)
                 }
@@ -157,7 +157,7 @@ struct TimeRail: View {
             }
             else if !scrolling && !isScrubbing { scheduleDismiss() }
         }
-        .onDisappear { dismissTask?.cancel() }
+        .onDisappear { dismissTask?.cancel(); store.navigation.isScrubbing = false }
         .environment(\.colorScheme, .dark)
     }
 
