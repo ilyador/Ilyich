@@ -1,16 +1,48 @@
 import SwiftUI
 
+enum SettingsDestination: String {
+    case account, backup, appearance, grid, server, about
+    var symbol: String {
+        switch self {
+        case .account: "person.crop.circle"
+        case .backup: "icloud.and.arrow.up"
+        case .appearance: "circle.lefthalf.filled"
+        case .grid: "square.grid.3x3"
+        case .server: "externaldrive.connected.to.line.below"
+        case .about: "info.circle"
+        }
+    }
+}
+
+struct SettingsDestinationView: View {
+    let api: APIClient
+    let destination: SettingsDestination
+
+    @ViewBuilder var body: some View {
+        switch destination {
+        case .account:
+            AccountSettingsView(api: api)
+        case .backup:
+            BackupSettingsView()
+        case .appearance:
+            Form { AppearanceSettingsSection() }
+                .navigationTitle("Appearance")
+        case .grid:
+            Form { GridSettingsSection() }
+                .navigationTitle("Grid")
+        case .server:
+            ServerSettingsView(api: api)
+        case .about:
+            AboutIlyichView()
+        }
+    }
+}
+
 struct SettingsView: View {
     let api: APIClient
     var pipeline: MediaPipeline? = nil
     var session: SessionStore? = nil
     let onSignOut: () -> Void
-    @AppStorage("gridColumns") private var columns = 4
-    @AppStorage("appearance") private var appearance = "system"
-    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
-    @AppStorage("hapticFeedback") private var haptics = true
-    @AppStorage("timelineStorageIndicator") private var storageIndicator = true
-    @AppStorage("timelineGrouping") private var timelineGrouping = "month"
     @State private var user: User?
     @State private var failure: FeatureFailure?
     @State private var confirmSignOut = false
@@ -19,10 +51,10 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                NavigationLink { AccountSettingsView(api: api) } label: {
+                NavigationLink { SettingsDestinationView(api: api, destination: .account) } label: {
                     Label { VStack(alignment: .leading) { Text(user?.name ?? "Account"); if let email = user?.email { Text(email).font(.caption).foregroundStyle(.secondary) } } } icon: { Image(systemName: "person.crop.circle") }
                 }
-                NavigationLink { BackupSettingsView() } label: { Label("Backup", systemImage: "icloud.and.arrow.up") }
+                NavigationLink { SettingsDestinationView(api: api, destination: .backup) } label: { Label("Backup", systemImage: "icloud.and.arrow.up") }
             }
             Section {
                 Toggle("Read-only mode", isOn: Binding(get: { readOnly }, set: { enabled in
@@ -38,25 +70,16 @@ struct SettingsView: View {
                     }
                 })).disabled(changingMode)
             } footer: { Text("Browse and search without changing photos, albums or account details. Turning this on pauses uploads. Backup stays paused until you start it again.") }
-            Section("Appearance") {
-                Picker("Theme", selection: $appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }
-                Picker("Accent color", selection: $accentName) { ForEach(AppearanceAccent.allCases) { Text($0.title).tag($0.rawValue) } }
-                NavigationLink("Photo and video viewer") { ViewerSettingsView() }
-                NavigationLink("Slideshow") { SlideshowSettingsView() }
-                Picker("Grid", selection: $columns) { ForEach(2...6, id: \.self) { Text("\($0) columns").tag($0) } }
-                Picker("Timeline", selection: $timelineGrouping) {
-                    Text("Month").tag("month")
-                    Text("Day").tag("day")
-                }
-                Toggle("Storage indicators", isOn: $storageIndicator)
-                Toggle("Haptic feedback", isOn: $haptics)
+            Section("Library") {
+                NavigationLink { SettingsDestinationView(api: api, destination: .appearance) } label: { Label("Appearance", systemImage: "circle.lefthalf.filled") }
+                NavigationLink { SettingsDestinationView(api: api, destination: .grid) } label: { Label("Grid", systemImage: "square.grid.3x3") }
             }
             Section {
                 NavigationLink { NetworkSettingsView(api: api, server: api.baseURL) } label: { Label("Network", systemImage: "network") }
                 NavigationLink { NotificationSettingsView() } label: { Label("Notifications", systemImage: "bell") }
-                NavigationLink { ServerSettingsView(api: api) } label: { Label("Server", systemImage: "externaldrive.connected.to.line.below") }
+                NavigationLink { SettingsDestinationView(api: api, destination: .server) } label: { Label("Server", systemImage: "externaldrive.connected.to.line.below") }
                 NavigationLink { DiagnosticsView(api: api, pipeline: pipeline, session: session) } label: { Label("Diagnostics", systemImage: "stethoscope") }
-                NavigationLink { AboutIlyichView() } label: { Label("About", systemImage: "info.circle") }
+                NavigationLink { SettingsDestinationView(api: api, destination: .about) } label: { Label("About", systemImage: "info.circle") }
             }
             Section { Button("Sign out", role: .destructive) { confirmSignOut = true } }
         }.navigationTitle("Settings")
@@ -67,6 +90,45 @@ struct SettingsView: View {
         .alert("Couldn’t load account", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
+    }
+}
+
+private struct AppearanceSettingsSection: View {
+    @AppStorage("appearance") private var appearance = "system"
+    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
+
+    var body: some View {
+        Section("Appearance") {
+            Picker("Theme", selection: $appearance) {
+                Text("System").tag("system")
+                Text("Light").tag("light")
+                Text("Dark").tag("dark")
+            }
+            Picker("Accent color", selection: $accentName) {
+                ForEach(AppearanceAccent.allCases) { Text($0.title).tag($0.rawValue) }
+            }
+            NavigationLink("Photo and video viewer") { ViewerSettingsView() }
+            NavigationLink("Slideshow") { SlideshowSettingsView() }
+        }
+    }
+}
+
+private struct GridSettingsSection: View {
+    @AppStorage("gridColumns") private var columns = 4
+    @AppStorage("timelineGrouping") private var timelineGrouping = "month"
+    @AppStorage("hapticFeedback") private var haptics = true
+
+    var body: some View {
+        Section("Grid") {
+            Picker("Grid", selection: $columns) {
+                ForEach(2...6, id: \.self) { Text("\($0) columns").tag($0) }
+            }
+            Picker("Timeline", selection: $timelineGrouping) {
+                Text("Month").tag("month")
+                Text("Day").tag("day")
+            }
+            Toggle("Haptic feedback", isOn: $haptics)
+        }
     }
 }
 
@@ -204,7 +266,7 @@ private struct AboutIlyichView: View {
             }
             Section("Credits") {
                 Text("Based on Immich. Licensed under the GNU AGPL v3.")
-                Text("Earth imagery: NASA Goddard Space Flight Center; Reto Stöckli and Robert Simmon. City lights: NASA/NOAA and the Defense Meteorological Satellite Program.").font(.footnote).foregroundStyle(.secondary)
+                Text("Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com.").font(.footnote).foregroundStyle(.secondary)
             }
         }.navigationTitle("About")
     }
