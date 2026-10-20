@@ -33,7 +33,7 @@ struct BackupPreferences: Codable, Equatable, Sendable {
     }
 }
 
-private struct BackupTransferNotification: Codable {
+struct BackupTransferNotification: Codable {
     var id: UUID
     var total: Int
     var completed = 0
@@ -41,7 +41,7 @@ private struct BackupTransferNotification: Codable {
     var terminalFailures: Int?
 }
 
-private struct BackupState: Codable {
+struct BackupState: Codable {
     var preferences = BackupPreferences()
     var queue: [String] = []
     var current: PreparedPhoto?

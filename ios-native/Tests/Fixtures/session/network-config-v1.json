@@ -1,0 +1,1 @@
+{"automaticallySwitchEndpoints":true,"preferredWifiName":"Home","localEndpoint":"http:\/\/192.168.1.20:2283\/api","alternateEndpoints":["https:\/\/photos.tailnet-1234.ts.net\/api"],"customHeaders":{"CF-Access-Client-Id":"client.access","CF-Access-Client-Secret":"access-secret"}}

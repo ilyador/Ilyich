@@ -15,8 +15,8 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     static var identifier: String { (Bundle.main.bundleIdentifier ?? "app.alextran.immich") + ".backup" }
     static var shareIdentifier: String { (Bundle.main.bundleIdentifier ?? "app.alextran.immich") + ".share-upload" }
 
-    private struct Descriptor: Codable, Equatable { let id: String; let receipt: URL }
-    private struct Outcome: Codable { let receipt: UploadReceipt?; let error: String?; var httpStatus: Int? }
+    struct Descriptor: Codable, Equatable { let id: String; let receipt: URL }
+    struct Outcome: Codable { let receipt: UploadReceipt?; let error: String?; var httpStatus: Int? }
     private struct TransferError: LocalizedError { let errorDescription: String? }
     private let lock = NSLock()
     private var responses: [Int: Data] = [:]

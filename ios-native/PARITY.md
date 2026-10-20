@@ -236,6 +236,11 @@ Source status: **53 done, 0 partial, 0 missing**. These are source-audit labels,
   - **Tests.** New credential store, storage path and app group layout tests; 178/178 unit tests passed and the Release app and both extensions build.
   - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040056.
   - **Regression.** The full regression passed 178/178 unit tests; of the library UI tests only the long-standing save-to-Photos simulator test failed (the export-cancel test passed this run).
+- Build `3040057` (rebuild milestone C2):
+  - **Shared contracts.** `Sources/Contracts` holds the value types the next milestones build on: the failure taxonomy, authorization snapshot and fencing, LibraryQuery with its presets, month keys and asset revisions, transfer task descriptors and outcomes, device snapshots, thumbnails, feed, navigation and capability types. Nothing uses them yet, so the app behaves the same.
+  - **Today's formats, pinned.** `Sources/Legacy/LegacyFormats.swift` mirrors every persisted format a later milestone imports: backup state (current and oldest shape), receipts, prepared photos, upload outcomes and task descriptors, share manifests and identities, widget metadata (native and Flutter keys), places and fingerprint caches, the thumbnail tree, network configuration and the saved session. `Tests/Fixtures` holds 27 golden files, most written by the production encoders, with real hashed file names.
+  - **Test support.** A test clock, a stub server (routes, gates, delays, Immich and proxy error bodies) and a fixture loader.
+  - **Tests.** 218/218 unit tests passed, 40 of them new; the Release app builds.
 
 - Earlier device build `3040003` at `fa9a49c38` built locally, was checksum verified, and iLoader reported **Operation completed** for its Wi-Fi replacement. It fixes the administrator password-change exemption and sign-in layout. It predates the current library/globe fixes; installation of the new preview is tracked separately.
 - PhotoKit permission transitions/cloud resources, true background uploads, biometrics, Cast hardware, share/widgets and signed-device performance remain unverified end to end. No deletion test has run on user photos. Cleanup retains unverified/edited/auxiliary variants.

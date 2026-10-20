@@ -1,0 +1,5 @@
+{
+  "widget_auth_token" : "flutter-session-token",
+  "widget_custom_headers" : "{\"CF-Access-Client-Id\":\"client.access\",\"CF-Access-Client-Secret\":\"access-secret\"}",
+  "widget_server_url" : "https:\/\/photos.example.org\/api"
+}
