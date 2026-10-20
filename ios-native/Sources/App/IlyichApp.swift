@@ -6,6 +6,8 @@ import SwiftUI
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     init() {
+        // Inert unless launched with -IlyichPerfScenario; then it measures from the first frame.
+        PerfScenarioDriver.arm()
         let session = SessionStore()
         _session = State(initialValue: session)
         BackupLifecycle.shared.setBackgroundPreparation { await session.prepareForBackgroundBackup() }

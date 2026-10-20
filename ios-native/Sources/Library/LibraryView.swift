@@ -325,6 +325,7 @@ struct LibraryView: View {
         .onChange(of: backup.preferences) { _, _ in refreshDeviceIndex() }
         .onChange(of: backup.isRunning) { _, running in if !running { refreshDeviceIndex() } }
         .onDisappear { deviceIndex.stop() }
+        .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session) }
         .onChange(of: screen) { _, value in if value == nil { refreshSharedFiles() } }
         .onChange(of: viewing) { _, value in
             if value == nil { refreshSharedFiles() }

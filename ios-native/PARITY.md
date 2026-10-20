@@ -261,6 +261,30 @@ Source status: **53 done, 0 partial, 0 missing**. These are source-audit labels,
   - **Tests.** New decoder tests check the newest-first order, that an abandoned request never decodes, that prefetches wait behind photos on screen and still reach memory, and that clearing the caches drops queued decodes. A pipeline test checks that prefetched thumbnails reach memory.
   - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040059.
   - **Regression.** 240/240 unit tests and 32/32 library UI tests passed.
+- Build `3040060` (the viewer laid out as Photos, owner request; built from the viewer branch's first commit on top of 3040059):
+  - **Layout.** A back chevron, a title capsule that hugs its text (place, then date and time) and the "…" menu at the top. Share alone, Favorite, Info and Edit in one capsule, and Delete alone at the bottom. Photos and videos fill the screen and never resize when the bars toggle; Immich-only actions moved into the "…" menu in sections, and the black background stays (the owner asked for the layout, and the app is dark throughout).
+  - **Video.** AVKit's controls gave way to a Photos-style pill with play/pause, a scrubber and mute, which hides with the bars; AVKit's extras (skip, speed, AirPlay button) are gone with them.
+  - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040060.
+  - **Regression.** 240/240 unit tests and 33/33 library UI tests passed.
+- Build `3040061` (rebuild milestone C4, measurement):
+  - **The app measures itself.** The roadmap recorded with Instruments over USB, but this phone is reached only over Wi-Fi, where xctrace could not attach. So while a scenario runs, the app records thumbnail latency from bind to first real image by source (memory, memory at another size, disk, network), placeholder binds, hitches from a display link, main-thread hangs from a watchdog, `phys_footprint`, month loads by backend, launch to first content and sync passes, and writes a JSON summary into its container. The OSSignposter names from architecture section 8 are kept for Instruments.
+  - **Scenarios.** `PerfScenarioDriver` ships in Release and is inert unless launched with `-IlyichPerfScenario`: rail-random, rail-sweep, fling, reverse, relaunch-check, memory-warning and background-load. It drives the grid only through the rail and scroll APIs and never writes to the library or the server. `scripts/perf/record.sh` launches a scenario with `devicectl` and fetches its summary; `scripts/perf/summarize.py` prints the table.
+  - **Tests.** Signpost names, argument and seed parsing, a deterministic jump plan, percentiles and the hitch formula; a UI test runs rail-sweep on the simulator and reads its summary.
+  - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040061.
+  - **Regression.** 256/256 unit tests and 34/34 UI tests (library plus the perf scenario) passed.
+  - **Baseline on the phone** (iPhone 15 Pro, Wi-Fi, seed 7, recorded with `scripts/perf/record.sh`; the disk cache was still refilling after the wipes 3040058 stopped, so random jumps still reach the network). Latencies run from a cell's bind to its first real thumbnail.
+
+    | scenario | disk p50 / p95 ms (n) | network p50 / p95 ms (n) | same-frame memory | hitches ms/s | longest hitch ms | peak MB | first content ms |
+    |---|---|---|---|---|---|---|---|
+    | rail-random | 41 / 77 (154) | 152 / 275 (618) | 2.6 % | 95.2 | 67 | 287 | 1019 |
+    | rail-sweep | 11 / 41 (1515) | 87 / 135 (30) | 0 % | 190.3 | 58 | 423 | 1572 |
+    | fling | 6 / 19 (1072) | — | 0 % | 4.2 | 42 | 190 | 1048 |
+    | reverse | 3 / 11 (14) | 189 / 466 (136) | 75 % | 7.5 | 42 | 197 | 816 |
+    | memory-warning | 12 / 47 (2598) | — | 0 % | 105.7 | 58 | 411, then 231 two seconds after the trim | 882 |
+    | background-load | 27 / 67 (772) | — | 1.3 % | 74.6 | 50 | 281 | 1481 |
+    | relaunch-check, 5 launches | 10-67 / 25-97 | — | — | 71-88 (launch window) | 167-175 | 149-161 | 1498, then 773-792 |
+
+    Ordinary scrolling is smooth; scrubbing the rail is not: a sweep spends about a fifth of its frames hitching, and disk hits after rail jumps miss the 50 ms p95 target.
 
 - Earlier device build `3040003` at `fa9a49c38` built locally, was checksum verified, and iLoader reported **Operation completed** for its Wi-Fi replacement. It fixes the administrator password-change exemption and sign-in layout. It predates the current library/globe fixes; installation of the new preview is tracked separately.
 - PhotoKit permission transitions/cloud resources, true background uploads, biometrics, Cast hardware, share/widgets and signed-device performance remain unverified end to end. No deletion test has run on user photos. Cleanup retains unverified/edited/auxiliary variants.

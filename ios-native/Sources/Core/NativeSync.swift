@@ -57,7 +57,7 @@ actor NativeSync {
             return try await synchronization.value
         }
         let current = generation
-        let task = Task { try await self.run(epoch: current) }
+        let task = Task { try await SyncPassProbe.measure { try await self.run(epoch: current) } }
         synchronization = task
         do {
             let value = try await task.value

@@ -652,10 +652,12 @@ struct PhotoGrid: UIViewRepresentable {
     private var identity: String?
     private var mediaID: String?
     /// The cell shows a real thumbnail, not the thumbhash sketch or nothing.
-    private var showsThumbnail = false
+    private(set) var showsThumbnail = false
     /// The thumbnail is neither in memory nor on disk; it downloads once scrolling settles.
     private(set) var waitsForNetwork = false
     private var pending: (asset: Asset, pixels: Int, pipeline: MediaPipeline)?
+    /// Times the bind to the first real thumbnail while a perf scenario runs.
+    private var displayProbe = ThumbDisplayProbe()
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.backgroundColor = UIColor(white: 0.08, alpha: 1)
@@ -692,10 +694,12 @@ struct PhotoGrid: UIViewRepresentable {
     override func prepareForReuse() {
         super.prepareForReuse(); task?.cancel(); task = nil; localMedia?.cancel(); localMedia = nil
         identity = nil; mediaID = nil; image.image = nil; showsThumbnail = false; waitsForNetwork = false; pending = nil
+        displayProbe.reset()
     }
     var needsImage: Bool { identity == nil }
     /// Drops a thumbnail that has not arrived yet; one already shown stays.
     func cancelImage() {
+        displayProbe.abandon()
         if task != nil { task?.cancel(); task = nil; identity = nil }
         if waitsForNetwork { waitsForNetwork = false; identity = nil }
         if let localMedia, localMedia.loading { localMedia.cancel(); self.localMedia = nil; identity = nil }
@@ -715,12 +719,14 @@ struct PhotoGrid: UIViewRepresentable {
                 let prepared = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: pixels)
                 guard !Task.isCancelled, let self, self.identity == key else { return }
                 self.show(prepared.uiImage, thumbnail: true, animated: true)
+                self.displayProbe.displayed(.network)
                 self.task = nil
             } catch is CancellationError {
                 // A shared download can be dropped independently of this cell. Wait for the next chance.
                 if let self, self.identity == key { self.waitsForNetwork = true; self.task = nil }
             } catch {
                 guard let self, self.identity == key else { return }
+                self.displayProbe.failed()
                 self.image.image = UIImage(systemName: "photo.badge.exclamationmark")
                 self.image.tintColor = .secondaryLabel
                 self.showsThumbnail = false
@@ -742,6 +748,7 @@ struct PhotoGrid: UIViewRepresentable {
             badge.text = photo.video ? Self.duration(Int(photo.duration * 1000)) : "LIVE"
             let key = "local:\(photo.id)|\(photo.modified?.timeIntervalSince1970 ?? 0)"
             guard key != identity else { return }
+            displayProbe.reset()
             task?.cancel(); localMedia?.cancel(); identity = key; mediaID = key; image.image = nil
             showsThumbnail = false; waitsForNetwork = false; pending = nil
             let media = LocalPhotoMedia(); localMedia = media
@@ -754,6 +761,7 @@ struct PhotoGrid: UIViewRepresentable {
         guard let asset else {
             task?.cancel(); identity = nil; mediaID = nil; image.image = nil; badge.isHidden = true
             showsThumbnail = false; waitsForNetwork = false; pending = nil
+            displayProbe.awaitMonth()
             accessibilityLabel = "Loading photo"; return
         }
         accessibilityLabel = asset.displayName + (asset.isVideo ? ", video" : "")
@@ -768,9 +776,11 @@ struct PhotoGrid: UIViewRepresentable {
         }
         task?.cancel(); identity = key; waitsForNetwork = false
         pending = (asset, pixels, pipeline)
+        displayProbe.bind()
         // A thumbnail still in memory draws in this frame instead of after an empty one.
         if let cached = pipeline.cachedImage(for: asset, size: .thumbnail, pixelSize: pixels) {
-            show(cached.uiImage, thumbnail: true, animated: false); mediaID = source; task = nil; return
+            show(cached.uiImage, thumbnail: true, animated: false); mediaID = source; task = nil
+            displayProbe.displayed(.memory); return
         }
         // Never an empty brick: a density change keeps the current thumbnail, a recycled cell
         // shows this photo at another size if memory has one, and otherwise its thumbhash sketch.
@@ -781,11 +791,13 @@ struct PhotoGrid: UIViewRepresentable {
                 show(ThumbHashImages.image(for: asset), thumbnail: false, animated: false)
             }
         }
+        if showsThumbnail { displayProbe.displayed(.memoryOther) } else { displayProbe.placeholder(sketch: image.image != nil) }
         mediaID = source
         task = Task { [weak self] in
             if let stored = await pipeline.storedThumbnail(for: asset, pixelSize: pixels) {
                 guard !Task.isCancelled, let self, self.identity == key else { return }
                 self.show(stored.uiImage, thumbnail: true, animated: true)
+                self.displayProbe.displayed(.disk)
                 self.task = nil
                 return
             }
@@ -799,6 +811,7 @@ struct PhotoGrid: UIViewRepresentable {
         guard identity == key else { return }
         withObservationTracking {
             image.image = media.image
+            showsThumbnail = media.image != nil
             if media.image == nil && !media.loading {
                 image.image = UIImage(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark")
                 image.tintColor = .secondaryLabel
