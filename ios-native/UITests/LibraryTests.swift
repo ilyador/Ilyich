@@ -573,17 +573,26 @@ final class LibraryTests: XCTestCase {
         tapPhoto(video)
         let close = app.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
-        // A video can be muted from the viewer, as in Photos, and unmuted again.
+        // As in Photos, play, the scrubber and mute share one pill above the bottom bar.
         let mute = app.buttons["Mute"]
         XCTAssertTrue(mute.waitForExistence(timeout: 5), "A video has a mute button.")
+        let play = app.buttons.matching(NSPredicate(format: "label IN %@", ["Play", "Pause"])).firstMatch
+        XCTAssertTrue(play.waitForExistence(timeout: 5), "A video has a play button.")
+        XCTAssertTrue(app.descendants(matching: .any)["Playback position"].exists, "A video has a scrubber.")
+        let share = app.buttons["Share"]
+        XCTAssertEqual(play.frame.midY, mute.frame.midY, accuracy: 1, "Play and mute sit in one pill.")
+        XCTAssertLessThan(play.frame.maxX, mute.frame.minX)
+        XCTAssertLessThan(mute.frame.maxY, share.frame.minY, "The pill sits above the bottom bar.")
         capture(app, "Viewer — video")
-        // Every round button in the viewer is the same circle as the actions menu.
-        let circle = app.buttons["Photo actions"].frame.size
-        for name in ["Close", "Share", "Info", "Mute", "Delete"] {
-            let size = app.buttons[name].frame.size
-            XCTAssertEqual(size.width, circle.width, accuracy: 0.5, "\(name) is the same size as the actions menu.")
-            XCTAssertEqual(size.height, circle.height, accuracy: 0.5, "\(name) is the same size as the actions menu.")
-        }
+        // A tap on the video puts the bars and the pill away, and another brings them back.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: share)
+        XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 5), .completed, "A tap hides the bars.")
+        capture(app, "Viewer — video, controls hidden")
+        XCTAssertFalse(mute.exists, "A tap hides the pill with the bars.")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        XCTAssertTrue(mute.waitForExistence(timeout: 5), "Another tap brings the pill back.")
+        // A video can be muted from the viewer, as in Photos, and unmuted again.
         mute.tap()
         XCTAssertTrue(app.buttons["Unmute"].waitForExistence(timeout: 5))
         app.buttons["Unmute"].tap()
@@ -593,6 +602,41 @@ final class LibraryTests: XCTestCase {
         // The viewer's own buttons can hide over a video, so check the library is back instead.
         let back = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: app.textFields["library.search"])
         XCTAssertEqual(XCTWaiter.wait(for: [back], timeout: 5), .completed, "A swipe down closes a video, as it does a photo.")
+    }
+    /// The viewer's controls sit where Photos puts them: back, the title and the actions menu along
+    /// the top; Share, one group of Favorite, Info and Edit, and Delete along the bottom. A tap on
+    /// the photo puts them all away and another brings them back.
+    @MainActor func testViewerControlsSitWhereThePhotosAppPutsThem() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 15))
+        tapPhoto(grid.cells.element(boundBy: 1))
+        let close = app.buttons["Close"], actions = app.buttons["Photo actions"]
+        XCTAssertTrue(close.waitForExistence(timeout: 10))
+        let favorite = app.buttons.matching(NSPredicate(format: "label IN %@", ["Favorite", "Remove favorite"])).firstMatch
+        let names = ["Share", "Favorite", "Info", "Edit", "Delete"]
+        let bottom = names.map { $0 == "Favorite" ? favorite : app.buttons[$0] }
+        for (name, button) in zip(names, bottom) { XCTAssertTrue(button.waitForExistence(timeout: 5), "\(name) is in the bottom bar.") }
+        let screen = app.windows.firstMatch.frame
+        XCTAssertEqual(close.frame.midY, actions.frame.midY, accuracy: 1, "Close and the actions menu share the top bar.")
+        XCTAssertLessThan(close.frame.midX, actions.frame.midX)
+        XCTAssertLessThan(close.frame.maxY, screen.height * 0.2)
+        for (name, button) in zip(names, bottom) {
+            XCTAssertEqual(button.frame.midY, bottom[0].frame.midY, accuracy: 1, "\(name) sits in the one bottom bar.")
+        }
+        XCTAssertGreaterThan(bottom[0].frame.minY, screen.height * 0.8)
+        for (left, right) in zip(bottom, bottom.dropFirst()) { XCTAssertLessThan(left.frame.maxX, right.frame.minX) }
+        // Favorite, Info and Edit share one capsule; Share and Delete stand apart from it.
+        XCTAssertLessThan(bottom[2].frame.minX - bottom[1].frame.maxX, bottom[1].frame.minX - bottom[0].frame.maxX)
+        XCTAssertLessThan(bottom[3].frame.minX - bottom[2].frame.maxX, bottom[4].frame.minX - bottom[3].frame.maxX)
+        capture(app, "Viewer — photo")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 5), .completed, "A tap puts the controls away.")
+        XCTAssertFalse(app.buttons["Share"].exists, "A tap puts the bottom bar away too.")
+        capture(app, "Viewer — photo, controls hidden")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "Another tap brings them back.")
     }
     /// The library stays upright when the phone turns. The viewer turns with it, keeps its photo,
     /// still swipes to the photo beside it, and closing it turns the app back upright.

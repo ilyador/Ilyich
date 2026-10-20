@@ -8,6 +8,8 @@ struct ViewerPhoto: View {
     let onTap: (Double) -> Void
     let onDismiss: () -> Void
     var matchedLocalPhoto: LocalPhoto? = nil
+    /// A swipe up at normal size shows the details, as in Photos.
+    var onSwipeUp: (() -> Void)? = nil
     @State private var image: UIImage?
     @State private var failure: String?
     @State private var animationFailure: String?
@@ -30,9 +32,9 @@ struct ViewerPhoto: View {
     private var displayedImage: UIImage? { usingLocalCopy ? (localMedia.image ?? image) : image }
 
     init(pipeline: MediaPipeline, asset: Asset, active: Bool, onTap: @escaping (Double) -> Void,
-         onDismiss: @escaping () -> Void, matchedLocalPhoto: LocalPhoto? = nil) {
+         onDismiss: @escaping () -> Void, matchedLocalPhoto: LocalPhoto? = nil, onSwipeUp: (() -> Void)? = nil) {
         self.pipeline = pipeline; self.asset = asset; self.active = active
-        self.onTap = onTap; self.onDismiss = onDismiss; self.matchedLocalPhoto = matchedLocalPhoto
+        self.onTap = onTap; self.onDismiss = onDismiss; self.matchedLocalPhoto = matchedLocalPhoto; self.onSwipeUp = onSwipeUp
         // A photo seen before opens sharp at once. Otherwise its grid thumbnail stands in, so a
         // slow preview, such as a developed RAW, never opens on an empty page.
         let preview = pipeline.latestImage(assetID: asset.id, size: .preview, revision: asset.cacheRevision)
@@ -44,7 +46,7 @@ struct ViewerPhoto: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                if let image = displayedImage { ZoomablePhoto(image: image, resetZoom: !active, onTap: onTap, onDismiss: onDismiss, onZoom: { zoomed = true }) }
+                if let image = displayedImage { ZoomablePhoto(image: image, resetZoom: !active, onTap: onTap, onDismiss: onDismiss, onZoom: { zoomed = true }, onSwipeUp: onSwipeUp) }
                 else if usingLocalCopy && localMedia.loading { ProgressView().tint(.white) }
                 else if let failure {
                     ContentUnavailableView { Label("Photo couldn’t load", systemImage: "photo.badge.exclamationmark") }
@@ -164,6 +166,7 @@ struct ZoomablePhoto: UIViewRepresentable {
     var recognizedText: [RecognizedText] = []
     var textSelection: Set<String> = []
     var onTextSelection: ((String) -> Void)? = nil
+    var onSwipeUp: (() -> Void)? = nil
     func makeCoordinator() -> Coordinator { Coordinator(onTap: onTap, onDismiss: onDismiss, onZoom: onZoom) }
     func makeUIView(context: Context) -> ZoomPhotoScrollView {
         let view = ZoomPhotoScrollView()
@@ -177,12 +180,15 @@ struct ZoomablePhoto: UIViewRepresentable {
         view.addGestureRecognizer(double); view.addGestureRecognizer(single)
         let swipe = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swipeDown))
         swipe.direction = .down; swipe.delegate = context.coordinator; view.addGestureRecognizer(swipe)
+        let up = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swipeUp))
+        up.direction = .up; up.delegate = context.coordinator; view.addGestureRecognizer(up)
         view.isAccessibilityElement = true
         view.accessibilityLabel = "Photo"
         view.accessibilityHint = "Pinch or double-tap to zoom. Swipe down to close."
         return view
     }
     func updateUIView(_ view: ZoomPhotoScrollView, context: Context) {
+        context.coordinator.onSwipeUp = onSwipeUp
         if view.imageView.image !== image { view.imageView.image = image; view.setNeedsLayout() }
         if resetZoom && view.zoomScale != 1 { view.setZoomScale(1, animated: false) }
         view.ocrOverlay.configure(recognizedText, selection: textSelection, onSelect: onTextSelection)
@@ -193,6 +199,7 @@ struct ZoomablePhoto: UIViewRepresentable {
         let onTap: (Double) -> Void
         let onDismiss: () -> Void
         let onZoom: () -> Void
+        var onSwipeUp: (() -> Void)?
         init(onTap: @escaping (Double) -> Void, onDismiss: @escaping () -> Void, onZoom: @escaping () -> Void) { self.onTap = onTap; self.onDismiss = onDismiss; self.onZoom = onZoom }
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { scroll?.imageView }
         func scrollViewDidZoom(_ scrollView: UIScrollView) { scroll?.centerImage(); if scrollView.zoomScale > 1.05 { onZoom() } }
@@ -202,6 +209,7 @@ struct ZoomablePhoto: UIViewRepresentable {
             onTap(fraction)
         }
         @objc func swipeDown() { if (scroll?.zoomScale ?? 1) <= 1.01 { onDismiss() } }
+        @objc func swipeUp() { if (scroll?.zoomScale ?? 1) <= 1.01 { onSwipeUp?() } }
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool { (scroll?.zoomScale ?? 1) <= 1.01 }
         @objc func doubleTap(_ gesture: UITapGestureRecognizer) {
             guard let scroll else { return }
@@ -225,6 +233,9 @@ struct ZoomablePhoto: UIViewRepresentable {
         minimumZoomScale = 1; maximumZoomScale = 5
         showsHorizontalScrollIndicator = false; showsVerticalScrollIndicator = false
         contentInsetAdjustmentBehavior = .never; bouncesZoom = true
+        // A zoomed photo passes under the viewer's bars without a soft edge drawn over it.
+        topEdgeEffect.isHidden = true; bottomEdgeEffect.isHidden = true
+        leftEdgeEffect.isHidden = true; rightEdgeEffect.isHidden = true
         imageView.contentMode = .scaleAspectFit
         imageView.isUserInteractionEnabled = true
         imageView.addSubview(ocrOverlay)

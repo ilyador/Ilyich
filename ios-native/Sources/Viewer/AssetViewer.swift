@@ -46,7 +46,9 @@ struct AssetViewer: View {
     @State private var transferLabel = ""
     @State private var transferProgress: Double?
     @State private var transferSaving = false
-    @State private var safeArea = EdgeInsets()
+    /// Where the bars leave room for the LIVE badge and the video pill, kept while the bars are hidden.
+    @State private var chromeInsets = EdgeInsets()
+    @State private var playback = VideoPlaybackState()
     @State private var pagePosition: ScrollPosition
     /// Only scrolling moves the selection; offsets that change at rest, such as on first showing
     /// the strip or turning the phone, say nothing about it.
@@ -87,13 +89,7 @@ struct AssetViewer: View {
         ZStack {
             Color.black.ignoresSafeArea()
             pager
-            if controls {
-                VStack {
-                    header
-                    Spacer()
-                    footer
-                }.padding(.horizontal, 16).padding(.vertical, 10)
-            }
+            pageChrome
             if transferID != nil {
                 VStack(spacing: 12) {
                     if let transferProgress { ProgressView(value: transferProgress) } else { ProgressView() }
@@ -103,7 +99,14 @@ struct AssetViewer: View {
                     .accessibilityElement(children: .contain)
             } else if working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
         }
-        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { safeArea = $0 }
+        // The badge and the pill stay where the bars put them while the bars slide away.
+        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in if controls { chromeInsets = insets } }
+        .toolbar { viewerToolbar }
+        .toolbarVisibility(controls ? .visible : .hidden, for: .navigationBar, .bottomBar)
+        .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
+        .navigationBarTitleDisplayMode(.inline)
+        // Monochrome glyphs, as in Photos, whatever the app's accent.
+        .tint(.primary)
         .onChange(of: selectedID) { if !transferSaving { cancelTransfer() } }
         .onDisappear { if !transferSaving { cancelTransfer() } }
         .preferredColorScheme(.dark)
@@ -140,6 +143,8 @@ struct AssetViewer: View {
             }
             .frame(width: proxy.size.width + Self.pageGap, alignment: .leading)
             .scrollIndicators(.hidden)
+            // The bars float over the photo; no soft edge is drawn under them.
+            .scrollEdgeEffectHidden(true, for: .all)
             .scrollTargetBehavior(.paging)
             .scrollPosition($pagePosition, anchor: .leading)
             .onScrollGeometryChange(for: Int.self) { geometry in
@@ -165,12 +170,13 @@ struct AssetViewer: View {
         if abs(index - selectedIndex) <= 1 {
             if asset.isVideo {
                 videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !(cast.connected && cast.currentAssetID == asset.id),
-                                             sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset)))
+                                             sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), playback: playback))
             } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
                 videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false },
                                              sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), isLivePhotoMotion: true))
             } else {
-                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() }, matchedLocalPhoto: matchedLocalCopy(for: asset))
+                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() },
+                            matchedLocalPhoto: matchedLocalCopy(for: asset), onSwipeUp: { info = true })
             }
         } else { Color.black }
     }
@@ -196,7 +202,7 @@ struct AssetViewer: View {
     }
 
     private var mediaSheets: some View {
-        canvas
+        NavigationStack { canvas }
         .sheet(isPresented: $locationPresented) {
             if let focus = locationFocus {
                 NavigationStack {
@@ -273,36 +279,58 @@ struct AssetViewer: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .top, spacing: 12) {
-            viewerButton("Close", symbol: "chevron.down") { dismiss() }
-            Group {
-                if locationFocus != nil {
-                    Button {
-                        if let focus = locationFocus {
-                            if let onExploreLocation { onExploreLocation(focus) }
-                            else { locationPresented = true }
-                        }
-                    } label: { headerMetadata }
-                        .buttonStyle(.plain).accessibilityHint("Explore this location on the globe")
-                } else { headerMetadata }
-            }.padding(.horizontal, 14).frame(minHeight: 48).frame(maxWidth: .infinity).glassEffect(in: .capsule)
-            Menu {
+    /// The bars, laid out as in Photos: back, the title and the actions menu along the top; Share,
+    /// a group of Favorite, Info and Edit, and Delete along the bottom. Glyphs only, in system glass.
+    @ToolbarContentBuilder private var viewerToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button("Close", systemImage: "chevron.left") { dismiss() }
+        }
+        ToolbarItem(placement: .principal) { titleCapsule }
+            .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .topBarTrailing) { actionsMenu }
+        ToolbarItem(placement: .bottomBar) {
+            Button("Share", systemImage: "square.and.arrow.up") { exportAsset(original: shareFileType != "preview") }
+                .disabled(working)
+        }
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+        ToolbarItemGroup(placement: .bottomBar) {
+            Button(current.isFavorite ? "Remove favorite" : "Favorite", systemImage: current.isFavorite ? "heart.fill" : "heart") { toggleFavorite() }
+                .requiresWriteAccess(api).tint(current.isFavorite ? .red : .primary).disabled(!ownsAsset || working)
+            Button("Info", systemImage: "info.circle") { info = true }.disabled(working)
+            if canEdit {
+                Button("Edit", systemImage: "slider.horizontal.3") { editing = true }.requiresWriteAccess(api).disabled(working)
+            }
+        }
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+        if ownsAsset {
+            ToolbarItem(placement: .bottomBar) {
+                Button("Delete", systemImage: "trash") { requestDeletion() }.requiresWriteAccess(api).disabled(working)
+            }
+        }
+    }
+
+    /// Every action that has no button of its own, in sections as in the Photos menu.
+    private var actionsMenu: some View {
+        Menu {
+            Section {
                 Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }.requiresWriteAccess(api)
-                Button("Slideshow", systemImage: "play.rectangle") { slideshow = true }
-                Button("Cast", systemImage: "tv") { castPresented = true }
-                if features?.ocr == true, current.type == .image { Button("Select text", systemImage: "text.viewfinder") { ocrPresented = true } }
-                if features?.smartSearch == true { Button("Find similar photos", systemImage: "photo.on.rectangle.angled") { similarPresented = true } }
-                if !current.isVideo { Button("Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true }.requiresWriteAccess(api) }
                 Button("Create shared link", systemImage: "link") { sharedLink = true }.requiresWriteAccess(api)
-                if let stack = current.stack { Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { showStack = true } }
                 if let albumID {
-                    Button("Comments and likes", systemImage: "bubble") { albumActivity = true }
                     Button("Set album cover", systemImage: "photo.on.rectangle.angled") {
                         let id = current.id
                         run { let _: Album = try await api.request(.patch, path: "albums/\(albumID)", body: ["albumThumbnailAssetId": id]) }
                     }.requiresWriteAccess(api)
+                    Button("Comments and likes", systemImage: "bubble") { albumActivity = true }
                 }
+            }
+            Section {
+                Button("Slideshow", systemImage: "play.rectangle") { slideshow = true }
+                Button("Cast", systemImage: "tv") { castPresented = true }
+                if features?.ocr == true, current.type == .image { Button("Select text", systemImage: "text.viewfinder") { ocrPresented = true } }
+                if features?.smartSearch == true { Button("Find similar photos", systemImage: "photo.on.rectangle.angled") { similarPresented = true } }
+                if let stack = current.stack { Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { showStack = true } }
+            }
+            Section {
                 Button("Share displayed version", systemImage: "square.and.arrow.up") { exportAsset(original: false) }
                 Button("Download original", systemImage: "arrow.down.document") { exportAsset(original: true) }
                 Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }.requiresWriteAccess(api)
@@ -310,7 +338,10 @@ struct AssetViewer: View {
                     Button("On this phone", systemImage: "iphone") { localPhotoActions = true }
                 }
                 Button("Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
-                if ownsAsset {
+                if !current.isVideo { Button("Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true }.requiresWriteAccess(api) }
+            }
+            if ownsAsset {
+                Section {
                     if current.isTrashed, features?.trash == true {
                         Button("Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }.requiresWriteAccess(api)
                     } else if !current.isTrashed {
@@ -318,9 +349,43 @@ struct AssetViewer: View {
                         Button(current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") { changeVisibility(current.visibility == .locked ? .timeline : .locked) }.requiresWriteAccess(api)
                     }
                 }
-            } label: { Image(systemName: "ellipsis").frame(width: 48, height: 48).glassEffect(in: .circle) }
-                .accessibilityLabel("Photo actions").disabled(working)
+            }
+        } label: { Label("Photo actions", systemImage: "ellipsis") }
+            .disabled(working)
+    }
+
+    /// The title hugs its text, as in Photos. Tapping it explores the photo's location.
+    @ViewBuilder private var titleCapsule: some View {
+        if let lines = titleLines {
+            let label = VStack(spacing: 1) {
+                Text(lines.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                if let subtitle = lines.subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            }
+            .padding(.horizontal, 18).frame(minHeight: 44)
+            .accessibilityElement(children: .combine)
+            if let focus = locationFocus {
+                Button { exploreLocation(focus) } label: { label.contentShape(.capsule) }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Explore this location on the globe")
+                    .glassEffect(.regular.interactive(), in: .capsule)
+            } else {
+                label.glassEffect(.regular, in: .capsule)
+            }
         }
+    }
+
+    /// The place over the date and time, or, without a place, the date over the time.
+    private var titleLines: (title: String, subtitle: String?)? {
+        let utc = TimeZone(secondsFromGMT: 0)!
+        let place = [current.exifInfo?.city, current.exifInfo?.country].compactMap { $0 }.first { !$0.isEmpty }
+        guard let date = current.localDateTime ?? current.fileCreatedAt else { return place.map { ($0, nil) } }
+        if let place { return (place, date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, timeZone: utc))) }
+        return (date.formatted(Date.FormatStyle(date: .long, time: .omitted, timeZone: utc)),
+                date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, timeZone: utc)))
+    }
+
+    private func exploreLocation(_ focus: PlaceFocus) {
+        if let onExploreLocation { onExploreLocation(focus) } else { locationPresented = true }
     }
 
     private var locationFocus: PlaceFocus? {
@@ -335,67 +400,65 @@ struct AssetViewer: View {
         guard let focus = pendingLocation else { return }
         pendingLocation = nil; onExploreLocation?(focus)
     }
-    private var headerMetadata: some View {
-        VStack(spacing: 3) {
-            if let date = current.localDateTime ?? current.fileCreatedAt {
-                Text(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, timeZone: TimeZone(secondsFromGMT: 0)!)))
-                    .font(.subheadline.weight(.semibold)).lineLimit(1)
-            }
-            let location = [current.exifInfo?.city, current.exifInfo?.country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
-            if !location.isEmpty { Text(location).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
-            else if locationFocus != nil { Label("Photo location", systemImage: "globe.europe.africa").font(.caption).foregroundStyle(.secondary) }
-        }.frame(maxWidth: .infinity, minHeight: 48).contentShape(.capsule)
-    }
 
-    private var footer: some View {
-        VStack(spacing: 14) {
+    /// What floats over the photo besides the bars: the LIVE badge under the top bar and a video's
+    /// playback pill above the bottom bar. A thumbnail strip would sit between the pill and the bar.
+    private var pageChrome: some View {
+        VStack(spacing: 0) {
             if current.livePhotoVideoId != nil {
-                Button(playingLive ? "Still photo" : "Play Live Photo", systemImage: playingLive ? "photo" : "livephoto") { playingLive.toggle() }
-                    .buttonStyle(.glass)
+                liveBadge.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.top, 6)
             }
-            HStack(spacing: 0) {
-                viewerButton("Share", symbol: "square.and.arrow.up") { exportAsset(original: shareFileType != "preview") }
-                Spacer()
-                viewerButton(current.isFavorite ? "Remove favorite" : "Favorite", symbol: current.isFavorite ? "heart.fill" : "heart") { toggleFavorite() }.requiresWriteAccess(api)
-                    .tint(current.isFavorite ? .red : .primary).disabled(!ownsAsset)
-                Spacer()
-                viewerButton("Info", symbol: "info.circle") { info = true }
-                if current.isVideo {
-                    Spacer()
-                    viewerButton(muteVideo ? "Unmute" : "Mute", symbol: muteVideo ? "speaker.slash.fill" : "speaker.wave.2.fill") { muteVideo.toggle() }
-                }
-                if canEdit {
-                    Spacer()
-                    viewerButton("Edit", symbol: "slider.horizontal.3") { editing = true }.requiresWriteAccess(api)
-                }
-                if ownsAsset {
-                    Spacer()
-                    viewerButton("Delete", symbol: "trash") { requestDeletion() }.requiresWriteAccess(api)
-                }
-            }.disabled(working)
+            Spacer(minLength: 0)
+            if current.isVideo {
+                ViewerVideoControls(playback: playback, visible: controls)
+                    .frame(maxWidth: 520).padding(.horizontal, 24).padding(.bottom, 12)
+            }
         }
+        .padding(chromeInsets)
+        .ignoresSafeArea()
     }
 
-    /// While the viewer's buttons show, the player sits between them so its own controls are never
-    /// covered. The tap that brings up the player controls also puts the viewer's buttons away.
+    /// Plays the Live Photo's motion, from where Photos puts its LIVE badge. Glass ignores the
+    /// opacity around it, so the glass is only a background that hiding swaps for `.identity`; the
+    /// button in front leaves with a fade, which also takes it out of the accessibility tree.
+    private var liveBadge: some View {
+        liveBadgeLabel.hidden()
+            .overlay {
+                if controls {
+                    Button { playingLive.toggle() } label: { liveBadgeLabel.contentShape(.capsule) }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.primary)
+                        .accessibilityLabel(playingLive ? "Still photo" : "Play Live Photo")
+                        .transition(.opacity)
+                }
+            }
+            .background { Color.clear.glassEffect(controls ? .regular : .identity, in: .capsule) }
+    }
+
+    private var liveBadgeLabel: some View {
+        Label("LIVE", systemImage: "livephoto")
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10).frame(height: 28)
+    }
+
+    /// The player draws no controls of its own; the bars and the pill float over the video, which
+    /// fills the screen as a photo does.
     private func videoPage(_ video: AuthenticatedVideo) -> some View {
         video
-            .padding(.top, controls ? safeArea.top + 64 : 0)
-            .padding(.bottom, controls ? safeArea.bottom + (current.livePhotoVideoId != nil ? 122 : 64) : 0)
-            .simultaneousGesture(TapGesture().onEnded { controls.toggle() })
-            // A swipe down closes a video as it does a photo.
-            .gesture(ViewerSwipeDown { dismiss() })
+            .gesture(ViewerTap { toggleControls() })
+            // A swipe down closes a video as it does a photo; a swipe up shows its details.
+            .gesture(ViewerSwipe(direction: .down) { dismiss() })
+            .gesture(ViewerSwipe(direction: .up) { info = true })
     }
 
-    private func viewerButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol) }
-            .buttonStyle(ViewerCircleButtonStyle()).accessibilityLabel(title)
+    private func toggleControls() {
+        withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.25)) { controls.toggle() }
     }
     private func update(_ asset: Asset) { replacements[asset.id] = asset; onUpdated(asset) }
     private func handlePhotoTap(_ horizontalFraction: Double) {
         if tapToNavigate && horizontalFraction < 0.33 && selectedIndex > 0 { showPage(selectedIndex - 1) }
         else if tapToNavigate && horizontalFraction > 0.67 && selectedIndex + 1 < assets.count { showPage(selectedIndex + 1) }
-        else { controls.toggle() }
+        else { toggleControls() }
     }
     private func run(_ operation: @escaping @MainActor () async throws -> Void) {
         guard !working else { return }; working = true
@@ -565,30 +628,35 @@ private struct ViewerAlbumPicker: View {
     }
 }
 
-/// The viewer's round glass buttons, the same 48-pt circle as the actions menu. The system glass
-/// style pads its label, which made these circles 62 pt beside the 48-pt menu.
-private struct ViewerCircleButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var enabled
+/// A tap on a video page, recognized alongside the swipes and the pager, as a UIKit recognizer:
+/// a SwiftUI tap does not reach through the player's surface.
+private struct ViewerTap: UIGestureRecognizerRepresentable {
+    let action: () -> Void
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.title3).foregroundStyle(.tint).opacity(enabled ? 1 : 0.35)
-            .frame(width: 48, height: 48)
-            .glassEffect(.regular.interactive(), in: .circle)
-            .contentShape(.circle)
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> ViewerSwipe.Coordinator { ViewerSwipe.Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UITapGestureRecognizer {
+        let tap = UITapGestureRecognizer()
+        tap.delegate = context.coordinator
+        return tap
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UITapGestureRecognizer, context: Context) {
+        if recognizer.state == .ended { action() }
     }
 }
 
-/// A quick swipe down, recognized alongside the player's own gestures. The player swallows
-/// SwiftUI drags, so without this a video could not be swiped closed like a photo.
-private struct ViewerSwipeDown: UIGestureRecognizerRepresentable {
+/// A quick swipe on a video page, recognized alongside the page's other gestures, so a video closes
+/// and shows its details with the same swipes as a photo.
+private struct ViewerSwipe: UIGestureRecognizerRepresentable {
+    let direction: UISwipeGestureRecognizer.Direction
     let action: () -> Void
 
     func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
 
     func makeUIGestureRecognizer(context: Context) -> UISwipeGestureRecognizer {
         let swipe = UISwipeGestureRecognizer()
-        swipe.direction = .down
+        swipe.direction = direction
         swipe.delegate = context.coordinator
         return swipe
     }
