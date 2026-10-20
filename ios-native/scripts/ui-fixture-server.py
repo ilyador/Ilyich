@@ -127,7 +127,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         url=urllib.parse.urlsplit(self.path);path=url.path.removeprefix('/api');q=urllib.parse.parse_qs(url.query)
         if path.startswith('/assets/') and path.endswith('/original'):
-            # Deliberately stream slowly so the UI test can cancel a real in-flight export.
+            # Deliberately stream slowly, over about 15 s, so the UI test can cancel a real in-flight
+            # export. XCTest takes several seconds to find the cancel button; a 3 s stream finished
+            # first, and the share sheet then covered the viewer.
             import time
             data=test_image(path)
             self.send_response(200);self.send_header('Content-Type','image/png');self.send_header('Content-Length',str(len(data)))
@@ -135,7 +137,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             step=max(1,(len(data)+29)//30)
             try:
                 for start in range(0,len(data),step):
-                    self.wfile.write(data[start:start+step]);self.wfile.flush();time.sleep(0.1)
+                    self.wfile.write(data[start:start+step]);self.wfile.flush();time.sleep(0.5)
             except (BrokenPipeError,ConnectionResetError): pass
             return
         if path.endswith('/thumbnail'):

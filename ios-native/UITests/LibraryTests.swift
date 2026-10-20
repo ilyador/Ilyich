@@ -403,7 +403,9 @@ final class LibraryTests: XCTestCase {
         let save = app.buttons["Save to Photos"]
         requireHittable(save, in: app); save.tap()
         XCTAssertTrue(app.staticTexts["Saved 2 of 2 to Photos."].waitForExistence(timeout: 20))
-        requireHittable(app.buttons["Done"], in: app)
+        // The selection's own Done, also labelled Done, stays under the sheet and is never
+        // hittable, so the sheet's Done is found in its navigation bar.
+        requireHittable(app.navigationBars["2 selected"].buttons["Done"], in: app)
         capture(app, "Selection — two photos saved to Photos")
     }
     @MainActor func testSearchContinuesAnEmptyVerifiedPageAndCanClear() {
