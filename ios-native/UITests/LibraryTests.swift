@@ -171,6 +171,62 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 10), .completed,
                        "A trailing inward and vertical drag should scrub to a different timeline month.")
     }
+    @MainActor func testEverySettingIsReachableFromTheSettingsShelf() {
+        let app = launch()
+        openShelves(app)
+        app.buttons["Settings"].tap()
+        for row in ["Account", "Read-only mode", "Network", "Notifications"] {
+            XCTAssertTrue(app.buttons[row].waitForExistence(timeout: 5), "\(row) has its own row on the Settings shelf.")
+        }
+        // Eleven rows do not fit; holding near the bottom brings the rest.
+        let origin = app.coordinate(withNormalizedOffset: .zero), height = app.frame.height
+        origin.withOffset(CGVector(dx: 120, dy: height * 0.5))
+            .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: 120, dy: height - 70)), withVelocity: .slow, thenHoldForDuration: 2)
+        for row in ["Diagnostics", "About", "Sign out"] {
+            XCTAssertTrue(app.buttons[row].waitForExistence(timeout: 5), "\(row) has its own row on the Settings shelf.")
+        }
+        tapBesideShelves(app)
+        openShelves(app)
+        app.buttons["Settings"].tap()
+        XCTAssertTrue(app.buttons["Read-only mode"].waitForExistence(timeout: 5))
+        app.buttons["Read-only mode"].tap()
+        XCTAssertTrue(app.switches["Read-only mode"].waitForExistence(timeout: 5), "Read-only mode can be turned on and off.")
+        app.buttons["Done"].tap()
+        openShelves(app)
+        app.buttons["Settings"].tap()
+        origin.withOffset(CGVector(dx: 120, dy: height * 0.5))
+            .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: 120, dy: height - 70)), withVelocity: .slow, thenHoldForDuration: 2)
+        let signOut = app.buttons["Sign out"]
+        XCTAssertTrue(signOut.waitForExistence(timeout: 5))
+        signOut.tap()
+        XCTAssertTrue(app.staticTexts["Sign out of Ilyich?"].waitForExistence(timeout: 5), "Signing out asks first.")
+        // Dismissing the question, here by tapping away from it, keeps you signed in.
+        if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() } else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).tap() }
+        XCTAssertFalse(app.staticTexts["Sign out of Ilyich?"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.collectionViews["library.grid"].exists, "Still signed in.")
+    }
+    @MainActor func testReorderingPeopleUpdatesTheShelfAtOnce() {
+        let app = launch(extraArguments: ["--ui-testing-many-people"])
+        openShelves(app)
+        app.buttons["People"].tap()
+        let maya = app.buttons["Maya"], friend = app.buttons["Friend 03"]
+        XCTAssertTrue(maya.waitForExistence(timeout: 10)); XCTAssertTrue(friend.waitForExistence(timeout: 5))
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        // Out past Maya's tip onto the reorder button, and lift.
+        origin.withOffset(CGVector(dx: 100, dy: maya.frame.midY))
+            .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: 290, dy: maya.frame.midY)))
+        XCTAssertTrue(app.buttons["library.reorderDone"].waitForExistence(timeout: 5), "Lifting over the reorder button reorders people.")
+        friend.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: 28, dy: 0))
+            .press(forDuration: 0.3, thenDragTo: maya.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.1)).withOffset(CGVector(dx: 28, dy: 0)),
+                   withVelocity: .slow, thenHoldForDuration: 0.3)
+        XCTAssertLessThan(friend.frame.minY, maya.frame.minY, "The carried person lands where it was dropped, at once.")
+        // The left edge finishes reordering and keeps the shelves out.
+        let y = app.frame.height * 0.55
+        origin.withOffset(CGVector(dx: 160, dy: y)).press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: 4, dy: y)))
+        XCTAssertFalse(app.buttons["library.reorderDone"].waitForExistence(timeout: 2), "The left edge finished reordering.")
+        XCTAssertTrue(maya.exists && friend.exists)
+        XCTAssertLessThan(friend.frame.minY, maya.frame.minY, "The new order shows without reopening the shelves.")
+    }
     @MainActor func testLiftingTheFingerPutsTheShelvesAway() {
         let app = launch(shelvesStayOpen: false)
         XCTAssertTrue(app.collectionViews["library.grid"].cells.firstMatch.waitForExistence(timeout: 15))

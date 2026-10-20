@@ -20,7 +20,7 @@ struct BackupRemoteFile: Codable, Sendable {
     /// Original size reported by the server when the receipt was last verified; nil if unknown.
     var byteCount: Int64? = nil
     func matches(_ asset: BackupRemoteAsset, ownerID: String) -> Bool {
-        asset.id == id && asset.ownerId == ownerID && !asset.isTrashed && asset.checksum == checksum
+        asset.id == id && asset.ownerId == ownerID && !asset.isTrashed && asset.visibility != "locked" && asset.checksum == checksum
     }
 }
 
@@ -30,15 +30,18 @@ struct BackupRemoteAsset: Decodable, Sendable {
     let checksum: String
     let isTrashed: Bool
     let livePhotoVideoId: String?
+    /// A copy in the Locked Folder does not count as a backup that cleanup can rely on.
+    let visibility: String?
     /// Server-reported original size, or nil when missing or invalid.
     let knownByteCount: Int64?
 
-    init(id: String, ownerId: String, checksum: String, isTrashed: Bool, livePhotoVideoId: String?) {
+    init(id: String, ownerId: String, checksum: String, isTrashed: Bool, livePhotoVideoId: String?, visibility: String? = nil) {
         self.id = id
         self.ownerId = ownerId
         self.checksum = checksum
         self.isTrashed = isTrashed
         self.livePhotoVideoId = livePhotoVideoId
+        self.visibility = visibility
         self.knownByteCount = nil
     }
 
@@ -47,7 +50,7 @@ struct BackupRemoteAsset: Decodable, Sendable {
         let fileSizeInByte: Int64?
     }
 
-    private enum CodingKeys: String, CodingKey { case id, ownerId, checksum, isTrashed, livePhotoVideoId, exifInfo }
+    private enum CodingKeys: String, CodingKey { case id, ownerId, checksum, isTrashed, livePhotoVideoId, visibility, exifInfo }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -55,6 +58,7 @@ struct BackupRemoteAsset: Decodable, Sendable {
         checksum = try c.decode(String.self, forKey: .checksum)
         isTrashed = try c.decode(Bool.self, forKey: .isTrashed)
         livePhotoVideoId = try c.decodeIfPresent(String.self, forKey: .livePhotoVideoId)
+        visibility = try c.decodeIfPresent(String.self, forKey: .visibility)
         // Size metadata is optional and must never affect verification.
         let size = (try? c.decodeIfPresent(ExifSize.self, forKey: .exifInfo))?.fileSizeInByte
         knownByteCount = size.flatMap { $0 >= 0 ? $0 : nil }

@@ -76,7 +76,7 @@ struct LocalPhotoActionsView: View {
             _ = try writeSession(); let assets = try fetchAssets(checkRevision: false), value = makeFavorite
             guard assets.allSatisfy({ $0.canPerform(.properties) }) else { throw BackupError.message("Photos does not allow changing one of the selected items.") }
             try Task.checkCancellation(); _ = try writeSession()
-            try await PHPhotoLibrary.shared().performChanges { for asset in assets { PHAssetChangeRequest(for: asset).isFavorite = value } }
+            try await PHPhotoLibrary.shared().performChanges(PhotoChanges.favorite(assets.map(\.localIdentifier), value))
             onChanged(); dismiss()
         } catch is CancellationError { } catch { failure = .init(error) }
     }
@@ -86,7 +86,7 @@ struct LocalPhotoActionsView: View {
             _ = try writeSession(); let assets = try fetchAssets(checkRevision: true)
             guard assets.allSatisfy({ $0.canPerform(.delete) }) else { throw BackupError.message("Photos does not allow removing one of the selected items.") }
             try Task.checkCancellation(); _ = try writeSession()
-            try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets as NSArray) }
+            try await PHPhotoLibrary.shared().performChanges(PhotoChanges.delete(assets.map(\.localIdentifier)))
             onChanged(); dismiss()
         } catch is CancellationError { } catch { failure = .init(error) }
     }

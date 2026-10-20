@@ -109,6 +109,24 @@ import XCTest
         store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
+    func testLibrarySearchesNeverReachTheLockedFolder() async throws {
+        let library = try XCTUnwrap(SearchFilter.library.visibility?.in)
+        XCTAssertEqual(Set(library), ["timeline", "archive"])
+        let api = PlacesAPIFixture(places: [:])
+        let store = LibraryStore(api: api, placesDelay: .zero)
+        XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility, "Searching the library leaves the Locked Folder out.")
+        store.setPerson(Person(id: "maya", name: "Maya", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: nil, isFavorite: nil))
+        XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility, "So does searching a person's photos.")
+        store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash")
+        XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility, "And the trash.")
+        store.setTimeline(TimelineFilter(visibility: .archive), title: "Archive")
+        XCTAssertEqual(store.searchFilter.visibility, StringFilter(eq: "archive"))
+        store.clearFilters()
+        XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility)
+        store.stop()
+        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+    }
+
     func testLightroomIsATimelineOfEveryDevelopedPhoto() async throws {
         let api = PlacesAPIFixture(places: [:])
         let store = LibraryStore(api: api, placesDelay: .zero)

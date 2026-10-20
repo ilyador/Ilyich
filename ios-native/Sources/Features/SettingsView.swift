@@ -1,14 +1,24 @@
 import SwiftUI
 
-enum SettingsDestination: String {
-    case account, backup, appearance, grid, server, about
+enum SettingsDestination: String, CaseIterable {
+    case account, backup, readOnly, appearance, grid, network, notifications, server, diagnostics, about
+    var title: String {
+        switch self {
+        case .readOnly: "Read-only mode"
+        default: rawValue.capitalized
+        }
+    }
     var symbol: String {
         switch self {
         case .account: "person.crop.circle"
         case .backup: "icloud.and.arrow.up"
+        case .readOnly: "pencil.slash"
         case .appearance: "circle.lefthalf.filled"
         case .grid: "square.grid.3x3"
+        case .network: "network"
+        case .notifications: "bell"
         case .server: "externaldrive.connected.to.line.below"
+        case .diagnostics: "stethoscope"
         case .about: "info.circle"
         }
     }
@@ -17,6 +27,8 @@ enum SettingsDestination: String {
 struct SettingsDestinationView: View {
     let api: APIClient
     let destination: SettingsDestination
+    var pipeline: MediaPipeline? = nil
+    var session: SessionStore? = nil
 
     @ViewBuilder var body: some View {
         switch destination {
@@ -24,6 +36,15 @@ struct SettingsDestinationView: View {
             AccountSettingsView(api: api)
         case .backup:
             BackupSettingsView()
+        case .readOnly:
+            Form { ReadOnlySettingsSection(api: api) }
+                .navigationTitle("Read-only mode")
+        case .network:
+            NetworkSettingsView(api: api, server: api.baseURL)
+        case .notifications:
+            NotificationSettingsView()
+        case .diagnostics:
+            DiagnosticsView(api: api, pipeline: pipeline, session: session)
         case .appearance:
             Form { AppearanceSettingsSection() }
                 .navigationTitle("Appearance")
@@ -46,8 +67,6 @@ struct SettingsView: View {
     @State private var user: User?
     @State private var failure: FeatureFailure?
     @State private var confirmSignOut = false
-    @State private var readOnly = false
-    @State private var changingMode = false
     var body: some View {
         Form {
             Section {
@@ -56,20 +75,7 @@ struct SettingsView: View {
                 }
                 NavigationLink { SettingsDestinationView(api: api, destination: .backup) } label: { Label("Backup", systemImage: "icloud.and.arrow.up") }
             }
-            Section {
-                Toggle("Read-only mode", isOn: Binding(get: { readOnly }, set: { enabled in
-                    api.setReadOnly(enabled); readOnly = enabled
-                    if enabled {
-                        changingMode = true
-                        ShareInboxStore.shared.cancel()
-                        Task {
-                            await BackupCoordinator.shared.pause()
-                            await BackgroundUploads.sharing.cancelAll()
-                            changingMode = false
-                        }
-                    }
-                })).disabled(changingMode)
-            } footer: { Text("Browse and search without changing photos, albums or account details. Turning this on pauses uploads. Backup stays paused until you start it again.") }
+            ReadOnlySettingsSection(api: api)
             Section("Library") {
                 NavigationLink { SettingsDestinationView(api: api, destination: .appearance) } label: { Label("Appearance", systemImage: "circle.lefthalf.filled") }
                 NavigationLink { SettingsDestinationView(api: api, destination: .grid) } label: { Label("Grid", systemImage: "square.grid.3x3") }
@@ -83,13 +89,38 @@ struct SettingsView: View {
             }
             Section { Button("Sign out", role: .destructive) { confirmSignOut = true } }
         }.navigationTitle("Settings")
-        .task { readOnly = api.isReadOnly; do { user = try await api.currentUser() } catch { failure = .init(error) } }
+        .task { do { user = try await api.currentUser() } catch { failure = .init(error) } }
         .confirmationDialog("Sign out of Ilyich?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { onSignOut() }
         } message: { Text("Backup will stop on this phone. Photos already on your server are kept.") }
         .alert("Couldn’t load account", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
+    }
+}
+
+/// Read-only mode, shown in Settings and as its own row on the Settings shelf.
+private struct ReadOnlySettingsSection: View {
+    let api: APIClient
+    @State private var readOnly = false
+    @State private var changingMode = false
+
+    var body: some View {
+        Section {
+            Toggle("Read-only mode", isOn: Binding(get: { readOnly }, set: { enabled in
+                api.setReadOnly(enabled); readOnly = enabled
+                if enabled {
+                    changingMode = true
+                    ShareInboxStore.shared.cancel()
+                    Task {
+                        await BackupCoordinator.shared.pause()
+                        await BackgroundUploads.sharing.cancelAll()
+                        changingMode = false
+                    }
+                }
+            })).disabled(changingMode)
+        } footer: { Text("Browse and search without changing photos, albums or account details. Turning this on pauses uploads. Backup stays paused until you start it again.") }
+        .task { readOnly = api.isReadOnly }
     }
 }
 

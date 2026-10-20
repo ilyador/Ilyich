@@ -36,6 +36,12 @@ enum SearchMode: String, CaseIterable, Identifiable, Sendable {
     var id: Self { self }
 }
 
+extension SearchFilter {
+    /// The library as it is browsed: timeline and archive. Saying so explicitly keeps the Locked
+    /// Folder out of searches while it is unlocked, when the server would otherwise include it.
+    static let library = SearchFilter(visibility: StringFilter(in: ["timeline", "archive"]))
+}
+
 struct SearchFilter: Codable, Hashable, Sendable {
     var id: IDFilter?
     var type: StringFilter?

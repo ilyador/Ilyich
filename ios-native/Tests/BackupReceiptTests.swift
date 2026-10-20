@@ -4,14 +4,17 @@ import XCTest
 final class BackupReceiptTests: XCTestCase {
     func testDeletionProofRequiresSameFileOwnerAndLiveAsset() throws {
         let receipt = BackupRemoteFile(id: "asset", checksum: "original-sha1")
-        func asset(id: String = "asset", owner: String = "user", checksum: String = "original-sha1", trashed: Bool = false) -> BackupRemoteAsset {
-            BackupRemoteAsset(id: id, ownerId: owner, checksum: checksum, isTrashed: trashed, livePhotoVideoId: nil)
+        func asset(id: String = "asset", owner: String = "user", checksum: String = "original-sha1", trashed: Bool = false,
+                   visibility: String? = "timeline") -> BackupRemoteAsset {
+            BackupRemoteAsset(id: id, ownerId: owner, checksum: checksum, isTrashed: trashed, livePhotoVideoId: nil, visibility: visibility)
         }
         XCTAssertTrue(receipt.matches(asset(), ownerID: "user"))
         XCTAssertFalse(receipt.matches(asset(id: "replacement"), ownerID: "user"))
         XCTAssertFalse(receipt.matches(asset(owner: "other"), ownerID: "user"))
         XCTAssertFalse(receipt.matches(asset(checksum: "changed-sha1"), ownerID: "user"))
         XCTAssertFalse(receipt.matches(asset(trashed: true), ownerID: "user"))
+        XCTAssertTrue(receipt.matches(asset(visibility: "archive"), ownerID: "user"), "An archived copy is still a backup.")
+        XCTAssertFalse(receipt.matches(asset(visibility: "locked"), ownerID: "user"), "A copy in the Locked Folder is not one cleanup relies on.")
     }
 
     func testOldReceiptsDecodeAndMalformedSizeDoesNotAffectVerification() throws {
