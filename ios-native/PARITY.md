@@ -195,6 +195,31 @@ Source status: **53 done, 0 partial, 0 missing**. These are source-audit labels,
   - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040051.
   - **Regression.** The full regression passed 164/164 unit tests and 27/29 library UI tests (the same two long-standing simulator failures).
   - **On the phone.** Its local index was complete, with places for 202 months, and the build had already counted and kept places for the library and the three filters chosen since installing it.
+- Build `3040052`:
+  - **The rail scrubs with the Earth open.** The rail was drawn above the Earth, but its right-edge pan was switched off whenever the Earth was open, so dragging it did nothing. The pan now stays on; its band already ends where the Earth begins, so the globe keeps its own drags and pinches.
+  - **Not covered.** With a place chosen, the feed is a search result without months, so there is no rail to scrub. Build 3040053 covers it.
+  - **Tests.** A new UI test drags the rail with the Earth open and checks that the feed moves and the Earth stays. With the old gate put back on the Mac it failed as on the phone. It passed with the five Earth UI tests and three rail UI tests.
+  - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040052.
+  - **Regression.** The full regression passed 164/164 unit tests, and the library UI tests failed only the same two long-standing simulator tests.
+- Build `3040053`:
+  - **A chosen place keeps the rail, as a person does.** A place used to be a search over its photos: one list without months, so the rail went away. Now:
+    - A place is a timeline filter over its photos, which the local index lays out by month as it does a person's, so the rail, the months' places and the trips stay.
+    - The server never sees a place filter; its timeline cannot narrow to one and would answer with the whole library. A place's feed and places have their own cache names, apart from the library's.
+    - Until the offline library has synced, or if it stops being complete under a place, the place's photos are found by search as before.
+  - **Tests.**
+    - An index test lays out a place by month from its own photos: a partner's included, deleted and unknown ones left out, with the library itself unchanged.
+    - Store tests check that a chosen place keeps a scrubbable timeline, falls back to search without the offline library, and has its own cache names while the server never sees it.
+    - 53 unit tests passed, with the place, Earth and rail UI flows (the UI fixture has no offline library, so places there still take the search path).
+  - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040053.
+  - **Regression.** The full regression passed 168/168 unit tests, and the library UI tests failed only the same two long-standing simulator tests.
+- Build `3040054`:
+  - **Lightroom shows every developed photo, by month.** The shelf searched the newest photos three pages of 100 at a time and kept the developed ones. On the phone's library the first developed photo is the 1,109th newest, so the shelf came up empty. Now:
+    - Lightroom is a timeline filter of developed photos, as a person is. The offline index lays them out by month, with the rail and the months' places: 20,968 photos over 54 months, the same count as the server.
+    - The server's timeline accepts `isDeveloped` too, for when the offline library is not ready.
+    - A text search within Lightroom keeps to developed photos, reading pages of 500 up to 20,000 photos deep.
+  - **Server.** `GET /timeline/buckets` and `/timeline/bucket` take `isDeveloped`, matched on the published development state; the OpenAPI spec lists it. 305 server tests passed, including a new one. Deployed as `ilyich-server:3.3.3-lightroom-20261020` with `--no-deps` (Postgres and Redis untouched; sidecar renderer unchanged). On the live server: 54 months and 20,968 photos for Lightroom, and the first month's photos match its count.
+  - **Tests.** An index test lays out only developed photos; store tests check Lightroom is a timeline whose server request carries `isDeveloped`, and that a developed search looks past twelve pages of undeveloped photos; the Lightroom UI flow now checks the rail. The UI fixture serves developed-only timelines.
+  - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040054. The phone's offline index holds the same 20,968 developed photos as the server.
 
 - Earlier device build `3040003` at `fa9a49c38` built locally, was checksum verified, and iLoader reported **Operation completed** for its Wi-Fi replacement. It fixes the administrator password-change exemption and sign-in layout. It predates the current library/globe fixes; installation of the new preview is tracked separately.
 - PhotoKit permission transitions/cloud resources, true background uploads, biometrics, Cast hardware, share/widgets and signed-device performance remain unverified end to end. No deletion test has run on user photos. Cleanup retains unverified/edited/auxiliary variants.
