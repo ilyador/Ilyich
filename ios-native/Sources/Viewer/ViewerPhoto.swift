@@ -10,6 +10,8 @@ struct ViewerPhoto: View {
     var matchedLocalPhoto: LocalPhoto? = nil
     /// A swipe up at normal size shows the details, as in Photos.
     var onSwipeUp: (() -> Void)? = nil
+    /// False while the thumbnail strip is scrubbed: the page shows what memory has and loads nothing.
+    var settled = true
     @State private var image: UIImage?
     @State private var failure: String?
     @State private var animationFailure: String?
@@ -32,9 +34,10 @@ struct ViewerPhoto: View {
     private var displayedImage: UIImage? { usingLocalCopy ? (localMedia.image ?? image) : image }
 
     init(pipeline: MediaPipeline, asset: Asset, active: Bool, onTap: @escaping (Double) -> Void,
-         onDismiss: @escaping () -> Void, matchedLocalPhoto: LocalPhoto? = nil, onSwipeUp: (() -> Void)? = nil) {
+         onDismiss: @escaping () -> Void, matchedLocalPhoto: LocalPhoto? = nil, onSwipeUp: (() -> Void)? = nil, settled: Bool = true) {
         self.pipeline = pipeline; self.asset = asset; self.active = active
         self.onTap = onTap; self.onDismiss = onDismiss; self.matchedLocalPhoto = matchedLocalPhoto; self.onSwipeUp = onSwipeUp
+        self.settled = settled
         // A photo seen before opens sharp at once. Otherwise its grid thumbnail stands in, so a
         // slow preview, such as a developed RAW, never opens on an empty page.
         let preview = pipeline.latestImage(assetID: asset.id, size: .preview, revision: asset.cacheRevision)
@@ -81,10 +84,12 @@ struct ViewerPhoto: View {
                     try? await Task.sleep(for: .seconds(0.8))
                     slowPreview = !Task.isCancelled
                 }
-                .task(id: mediaKey + String(reload) + String(zoomed) + String(fullResolution) + String(active) + String(Int(max(geometry.size.width, geometry.size.height) * scale))) {
+                .task(id: mediaKey + String(reload) + String(zoomed) + String(fullResolution) + String(active) + String(settled) + String(Int(max(geometry.size.width, geometry.size.height) * scale))) {
+                    guard settled else { return }
                     await loadImage(pixels: Int(max(geometry.size.width, geometry.size.height) * scale))
                 }
-                .task(id: mediaKey + String(reload) + String(active) + String(fullResolution) + String(describing: scenePhase)) {
+                .task(id: mediaKey + String(reload) + String(active) + String(fullResolution) + String(settled) + String(describing: scenePhase)) {
+                    guard settled else { return }
                     await playAnimation(pixels: Int(max(geometry.size.width, geometry.size.height) * scale))
                 }
         }.accessibilityLabel(asset.displayName)

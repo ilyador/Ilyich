@@ -49,6 +49,8 @@ struct AssetViewer: View {
     /// Where the bars leave room for the LIVE badge and the video pill, kept while the bars are hidden.
     @State private var chromeInsets = EdgeInsets()
     @State private var playback = VideoPlaybackState()
+    /// While the thumbnail strip is scrubbed, pages show what memory has and slow work waits.
+    @State private var stripScrubbing = false
     @State private var pagePosition: ScrollPosition
     /// Only scrolling moves the selection; offsets that change at rest, such as on first showing
     /// the strip or turning the phone, say nothing about it.
@@ -112,12 +114,14 @@ struct AssetViewer: View {
         .preferredColorScheme(.dark)
         .statusBarHidden(!controls)
         .task { features = try? await api.serverFeatures() }
-        .task(id: selectedID) {
-            playingLive = false
+        .onChange(of: selectedID) { playingLive = false }
+        // Scrubbing the strip passes many photos; only the one it stops on is refreshed and cast.
+        .task(id: settledID) {
+            guard settledID != nil else { return }
             CastController.shared.select(api: api, asset: current)
         }
-        .task(id: selectedID + "|" + String(refreshRevision)) { await refreshCurrentAsset() }
-        .task(id: selectedID) { await prefetchNeighbors() }
+        .task(id: (settledID ?? "") + "|" + String(refreshRevision)) { if settledID != nil { await refreshCurrentAsset() } }
+        .task(id: settledID) { if settledID != nil { await prefetchNeighbors() } }
         .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { note in
             guard note.userInfo?["scope"] as? String == api.cacheScope else { return }
             refreshRevision += 1
@@ -126,6 +130,9 @@ struct AssetViewer: View {
     }
 
     private static let pageGap: CGFloat = 20
+
+    /// The selection once the strip lets go of it.
+    private var settledID: String? { stripScrubbing ? nil : selectedID }
 
     /// Photos lie side by side on one paging strip with a black gap between them, as in Photos.
     /// The strip is one gap wider than the screen, so each page is a photo plus the gap after it.
@@ -169,14 +176,14 @@ struct AssetViewer: View {
     @ViewBuilder private func page(index: Int, asset: Asset) -> some View {
         if abs(index - selectedIndex) <= 1 {
             if asset.isVideo {
-                videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !(cast.connected && cast.currentAssetID == asset.id),
+                videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !stripScrubbing && !(cast.connected && cast.currentAssetID == asset.id),
                                              sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), playback: playback))
             } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
                 videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false },
                                              sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), isLivePhotoMotion: true))
             } else {
                 ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() },
-                            matchedLocalPhoto: matchedLocalCopy(for: asset), onSwipeUp: { info = true })
+                            matchedLocalPhoto: matchedLocalCopy(for: asset), onSwipeUp: { info = true }, settled: !stripScrubbing)
             }
         } else { Color.black }
     }
@@ -401,21 +408,42 @@ struct AssetViewer: View {
         pendingLocation = nil; onExploreLocation?(focus)
     }
 
-    /// What floats over the photo besides the bars: the LIVE badge under the top bar and a video's
-    /// playback pill above the bottom bar. A thumbnail strip would sit between the pill and the bar.
+    /// What floats over the photo besides the bars: the LIVE badge under the top bar, and above the
+    /// bottom bar a video's playback pill over the thumbnail strip.
     private var pageChrome: some View {
         VStack(spacing: 0) {
             if current.livePhotoVideoId != nil {
                 liveBadge.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.top, 6)
             }
             Spacer(minLength: 0)
-            if current.isVideo {
-                ViewerVideoControls(playback: playback, visible: controls)
-                    .frame(maxWidth: 520).padding(.horizontal, 24).padding(.bottom, 12)
+            VStack(spacing: 12) {
+                if current.isVideo {
+                    ViewerVideoControls(playback: playback, visible: controls)
+                        .frame(maxWidth: 520).padding(.horizontal, 24)
+                }
+                if assets.count > 1 {
+                    // The strip keeps its room while hidden, so nothing above it moves.
+                    ZStack {
+                        if controls {
+                            ViewerFilmstrip(pipeline: pipeline, assets: assets, replacements: replacements, selectedID: selectedID,
+                                            onSelect: jumpFromStrip, onScrubbingChange: { stripScrubbing = $0 })
+                                .transition(.opacity)
+                        }
+                    }
+                    .frame(height: ViewerFilmstrip.cell.height)
+                }
             }
+            .padding(.bottom, 10)
         }
         .padding(chromeInsets)
         .ignoresSafeArea()
+    }
+
+    /// The strip picked a photo: the pager jumps straight to it, as in Photos.
+    private func jumpFromStrip(_ id: String) {
+        guard id != selectedID, assets.contains(where: { $0.id == id }) else { return }
+        selectedID = id
+        pagePosition.scrollTo(id: id, anchor: .leading)
     }
 
     /// Plays the Live Photo's motion, from where Photos puts its LIVE badge. Glass ignores the
