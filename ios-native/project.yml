@@ -37,6 +37,11 @@ targets:
         product: IlyichShareInbox
       - target: ShareExtension
       - target: WidgetExtension
+    preBuildScripts:
+      # One upload engine at a time: fails the build if a second background session could appear.
+      - name: Check single upload engine
+        script: '"$SRCROOT/scripts/check-single-engine.sh"'
+        basedOnDependencyAnalysis: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.alextran.immich

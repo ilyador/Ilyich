@@ -26,12 +26,7 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
 
     private init(identifier: String) {
         super.init()
-        let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
-        configuration.sharedContainerIdentifier = try? AppGroup.identifier
-        configuration.sessionSendsLaunchEvents = true
-        configuration.isDiscretionary = false
-        configuration.httpMaximumConnectionsPerHost = 2
-        configuration.timeoutIntervalForResource = 7 * 24 * 3600
+        let configuration = TransferSessionConfiguration.make(identifier: identifier)
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
