@@ -41,7 +41,9 @@ struct PlacesView: View {
     let onSelect: (PlaceCollection) -> Void
     var focus: PlaceFocus? = nil
     var compact = false
+    var bottomInset: CGFloat = 0
     @State private var places: [PlaceCollection] = []
+    @State private var lights: GlobePhotoLights?
     @State private var selected: PlaceCollection?
     @State private var loading = true
     @State private var failure: FeatureFailure?
@@ -61,16 +63,16 @@ struct PlacesView: View {
             if mapEnabled == false {
                 FeatureEmpty(title: "Maps are turned off", symbol: "globe", description: "Enable maps on your server to browse photo locations.")
             } else if compact {
-                PlacesGlobeView(places: places, focus: selected?.focus ?? focus, compact: true, api: api, pipeline: pipeline, onSelect: { selected = $0; onSelect($0) })
+                PlacesGlobeView(places: places, lights: lights, focus: globeFocus, compact: true, api: api, pipeline: pipeline, onSelect: { selected = $0; onSelect($0) })
                     .overlay(alignment: .bottomTrailing) {
                         Button("All locations", systemImage: "list.bullet") { showingLocations = true }
                             .font(.subheadline).buttonStyle(.glass).foregroundStyle(.primary)
-                            .padding(16).disabled(loading || places.isEmpty)
+                            .padding(16).padding(.bottom, bottomInset).disabled(loading || places.isEmpty)
                     }
                     .overlay { if loading { ProgressView() } }
             } else {
             ScrollView {
-                PlacesGlobeView(places: places, focus: selected?.focus ?? focus, api: api, pipeline: pipeline, onSelect: { selected = $0 })
+                PlacesGlobeView(places: places, lights: lights, focus: selected?.focus ?? focus, api: api, pipeline: pipeline, onSelect: { selected = $0 })
                     .frame(height: min(geometry.size.height * 0.55, 460)).clipped()
                 if let selected {
                     HStack(spacing: 14) {
@@ -133,11 +135,18 @@ struct PlacesView: View {
                     selected = place; showingLocations = false; onSelect(place)
                 }
             }
+            .presentationDetents([.height(300), .medium])
+            .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+            .presentationDragIndicator(.visible)
         }
         .alert("Couldn’t load places", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
     }
+    private var globeFocus: PlaceFocus? {
+        selected?.focus ?? focus ?? places.first.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
+    }
+
     private func load() async {
         let requestGeneration = UUID(); generation = requestGeneration
         loading = true; failure = nil
@@ -147,7 +156,7 @@ struct PlacesView: View {
             try Task.checkCancellation()
             guard generation == requestGeneration else { return }
             mapEnabled = features.map
-            guard features.map else { places = []; selected = nil; return }
+            guard features.map else { places = []; lights = nil; selected = nil; return }
             var fileCreatedAfter: Date?
             var fileCreatedBefore: Date?
             if dateFilter {
@@ -163,12 +172,17 @@ struct PlacesView: View {
             let markers = try await api.mapMarkers(query)
             try Task.checkCancellation()
             guard generation == requestGeneration else { return }
-            let grouped = await Task.detached(priority: .userInitiated) { PlaceCollection.group(markers) }.value
+            let (grouped, glow) = await Task.detached(priority: .userInitiated) {
+                (PlaceCollection.group(markers), GlobePhotoLights(markers: markers))
+            }.value
             try Task.checkCancellation(); guard generation == requestGeneration else { return }
-            places = grouped
+            places = grouped; lights = glow
             if let previous = selected { selected = places.first { $0.id == previous.id } }
+            else if compact, let assetID = focus?.assetID, let place = places.first(where: { $0.assetIDs.contains(assetID) }) {
+                selected = place; onSelect(place)
+            }
         } catch is CancellationError { } catch {
-            if generation == requestGeneration { places = []; selected = nil; failure = .init(error) }
+            if generation == requestGeneration { places = []; lights = nil; selected = nil; failure = .init(error) }
         }
     }
 }
@@ -193,7 +207,8 @@ private struct PlacesListView: View {
                     }.padding(.vertical, 4)
                 }.accessibilityElement(children: .combine)
             }
-        }.navigationTitle("Locations").searchable(text: $query, prompt: "Find a location")
+        }.accessibilityIdentifier("places.list")
+        .navigationTitle("Locations").searchable(text: $query, prompt: "Find a location")
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
     }
 }

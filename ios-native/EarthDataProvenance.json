@@ -1,0 +1,24 @@
+{
+  "credit": "Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com.",
+  "usage": "Natural Earth data is in the public domain.",
+  "asset": "EarthLand",
+  "sha256": "22c70811482ed8f6ee65922bee439881702b619d57b75ac61b98800e66c827d1",
+  "sources": [
+    {
+      "file": "ne_10m_land.geojson",
+      "source": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_land.geojson",
+      "sourceSha256": "1ac90796408bc6ad6911d69448485d3c4dbf2190370080368a09976e1c9f7416"
+    },
+    {
+      "file": "ne_10m_lakes.geojson",
+      "source": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_lakes.geojson",
+      "sourceSha256": "2d036f53dedec578001c5c30c2959ee7d4eebc1306900fa4367c49929ec8f2d9"
+    },
+    {
+      "file": "ne_10m_roads.geojson",
+      "source": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_roads.geojson",
+      "sourceSha256": "66a0c7b438e92fd124822cc5921cfa11042f48c294ade5e0f03f2c6640fd0248"
+    }
+  ],
+  "processing": "scripts/earth/build_earth_mesh.py ne_10m_land.geojson ne_10m_lakes.geojson ne_10m_roads.geojson 1 EarthLand.bin 0.005 0.01 0.0005 0.01 — polygons simplified to 0.005 degrees, land parts under 0.0005 and lakes under 0.01 square degrees dropped, clipped to one-degree cells and triangulated with GEOS constrained Delaunay (shapely 2.2, GEOS 3.14.1); roads of type Major Highway and Beltway kept as polylines simplified to 0.01 degrees."
+}
