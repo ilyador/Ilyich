@@ -42,8 +42,16 @@ import UIKit
         defer { isRestoring = false }
         guard !isUITesting else {
             #if DEBUG
+            // Each UI test starts at the default density and server order; one test's pinch or
+            // reordered shelf must not leak into the next.
+            UserDefaults.standard.removeObject(forKey: "gridColumns")
+            for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("shelfOrder.") {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
             if ProcessInfo.processInfo.arguments.contains("--ui-testing-library") {
-                do { try connect(SavedSession(server: URL(string: "http://127.0.0.1:18091")!, token: "ui-test-session", userID: "00000000-0000-4000-8000-000000000001", name: "Test library")) }
+                // The fixture serves a long People shelf to this session's own token.
+                let token = ProcessInfo.processInfo.arguments.contains("--ui-testing-many-people") ? "ui-test-many-people" : "ui-test-session"
+                do { try connect(SavedSession(server: URL(string: "http://127.0.0.1:18091")!, token: token, userID: "00000000-0000-4000-8000-000000000001", name: "Test library")) }
                 catch { self.error = error.localizedDescription }
             }
             #endif
