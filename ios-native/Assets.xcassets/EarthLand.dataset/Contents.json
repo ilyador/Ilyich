@@ -1,0 +1,13 @@
+{
+  "data" : [
+    {
+      "filename" : "EarthLand.bin",
+      "idiom" : "universal",
+      "universal-type-identifier" : "public.data"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
