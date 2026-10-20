@@ -430,7 +430,7 @@ struct AssetViewer: View {
                                 .transition(.opacity)
                         }
                     }
-                    .frame(height: ViewerFilmstrip.cell.height)
+                    .frame(height: ViewerFilmstrip.height)
                 }
             }
             .padding(.bottom, 10)

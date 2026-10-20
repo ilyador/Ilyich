@@ -658,9 +658,10 @@ final class LibraryTests: XCTestCase {
         XCTAssertNotNil(shown)
         XCTAssertLessThan(strip.frame.maxY, app.buttons["Share"].frame.minY, "The strip sits above the bottom bar.")
         capture(app, "Viewer — thumbnail strip")
-        // Thumbnails are 21 points wide at 2-point spacing; the third one to the right of the middle.
+        // Thumbnails are 21 points wide at 2-point spacing. The current one is drawn 51 points wide
+        // with 3-point margins, which moves its neighbors 18 points aside: tap the third to the right.
         let middle = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.width / 2, dy: strip.frame.midY))
-        middle.withOffset(CGVector(dx: 3 * 23, dy: 0)).tap()
+        middle.withOffset(CGVector(dx: 3 * 23 + 18, dy: 0)).tap()
         waitForPosition(start + 3, "Tapping a thumbnail jumps to its photo.")
         XCTAssertNotEqual(onScreenPhoto(app), shown, "The pager shows the photo picked in the strip.")
         app.swipeRight()
