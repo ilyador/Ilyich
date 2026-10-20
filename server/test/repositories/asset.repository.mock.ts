@@ -12,6 +12,8 @@ export const newAssetRepositoryMock = (): Mocked<RepositoryInterface<AssetReposi
     unlockProperties: vitest.fn().mockResolvedValue([]),
     upsertJobStatus: vitest.fn(),
     observeImageDevelopmentInput: vitest.fn(),
+    replacePublishedImageDevelopmentInput: vitest.fn().mockResolvedValue(false),
+    recordUnchangedImageGeneration: vitest.fn().mockResolvedValue(false),
     publishImageGeneration: vitest.fn().mockResolvedValue([]),
     replaceFilePath: vitest.fn().mockResolvedValue(true),
     getForCopy: vitest.fn(),

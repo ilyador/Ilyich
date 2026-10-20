@@ -420,13 +420,21 @@ export class MediaService extends BaseService {
         await this.jobRepository.queue(sidecarCheck);
         return JobStatus.Skipped;
       }
-      return await this.publishGeneratedImageSet(asset, generation, {
+      const output = {
         fingerprint,
         files: [...generated.files, ...(edited?.files ?? [])],
         thumbhash: edited?.thumbhash ?? generated.thumbhash,
         base: { ...baseDimensions, isDeveloped: !!developed },
         dimensions: finalDimensions,
-      });
+      };
+      if (await this.recordUnchangedImageSet(asset, output)) {
+        // The staged copies are discarded below. Editor, upload and notification jobs still report success so their
+        // clients hear back; other callers (sidecar checks, regeneration) get no follow-up analysis.
+        return job.name === JobName.AssetEditThumbnailGeneration || job.data.notify || job.data.source === 'upload'
+          ? JobStatus.Success
+          : JobStatus.Skipped;
+      }
+      return await this.publishGeneratedImageSet(asset, generation, output);
     } catch (error) {
       if ((await readFingerprint()) !== fingerprint) {
         await this.jobRepository.queue(sidecarCheck);
@@ -441,6 +449,80 @@ export class MediaService extends BaseService {
         });
       }
     }
+  }
+
+  /**
+   * Re-rendering unchanged inputs (or rendering with an upgraded renderer that produces the same result) usually
+   * reproduces the published files byte for byte. Keeping the published rows then preserves every client cache key
+   * (`asset_file.updateId`, thumbhash) and only the new input fingerprint is recorded.
+   */
+  private async recordUnchangedImageSet(
+    asset: ThumbnailAsset,
+    output: {
+      fingerprint: string;
+      files: UpsertFileOptions[];
+      thumbhash: Buffer;
+      base: { isDeveloped: boolean; width: number; height: number };
+      dimensions: ImageDimensions;
+    },
+  ): Promise<boolean> {
+    const { files, thumbhash, base } = output;
+    const publishedBase = asset.development?.publishedBase;
+    if (
+      // Without a sidecar, publication clears the development state, so it must always run.
+      !asset.sidecarPath ||
+      !publishedBase ||
+      publishedBase.isDeveloped !== base.isDeveloped ||
+      publishedBase.width !== base.width ||
+      publishedBase.height !== base.height ||
+      !asset.thumbhash ||
+      !thumbhash.equals(asset.thumbhash) ||
+      asset.files.length !== files.length
+    ) {
+      return false;
+    }
+
+    const pairs: Array<{ published: ThumbnailAsset['files'][number]; staged: UpsertFileOptions }> = [];
+    for (const staged of files) {
+      const published = asset.files.find((file) => file.type === staged.type && file.isEdited === staged.isEdited);
+      if (
+        !published ||
+        published.isProgressive !== staged.isProgressive ||
+        published.isTransparent !== staged.isTransparent
+      ) {
+        return false;
+      }
+      pairs.push({ published, staged });
+    }
+
+    for (const { published, staged } of pairs) {
+      try {
+        const [before, after] = await Promise.all([
+          this.cryptoRepository.hashFile(published.path),
+          this.cryptoRepository.hashFile(staged.path),
+        ]);
+        if (!before.equals(after)) {
+          return false;
+        }
+      } catch (error) {
+        // A missing or unreadable published file is replaced by the new generation.
+        this.logger.debug(`Could not compare ${published.path} for asset ${asset.id}: ${error}`);
+        return false;
+      }
+    }
+
+    const recorded = await this.assetRepository.recordUnchangedImageGeneration({
+      assetId: asset.id,
+      originalPath: asset.originalPath,
+      sidecarPath: asset.sidecarPath,
+      edits: asset.edits,
+      ...output,
+      files: pairs.map(({ published }) => published),
+    });
+    if (recorded) {
+      this.logger.debug(`Sidecar render for asset ${asset.id} matches its published files; keeping them`);
+    }
+    return recorded;
   }
 
   private async extractImage(originalPath: string, minSize: number) {

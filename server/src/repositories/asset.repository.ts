@@ -79,6 +79,29 @@ export interface PublishImageGeneration {
   };
 }
 
+type ImageGenerationSource = Pick<
+  PublishImageGeneration,
+  'assetId' | 'originalPath' | 'sidecarPath' | 'fingerprint' | 'edits'
+>;
+
+type PublishedImageFile = Pick<
+  Selectable<AssetFileTable>,
+  'id' | 'path' | 'type' | 'isEdited' | 'isProgressive' | 'isTransparent'
+>;
+
+export interface UnchangedImageGeneration extends ImageGenerationSource {
+  // Removing a sidecar clears the development state, which only a normal publication does.
+  sidecarPath: string;
+  fingerprint: string;
+  /** The published rows whose contents the new generation reproduced. */
+  files: PublishedImageFile[];
+  thumbhash: Buffer;
+  base: NonNullable<ImageDevelopmentState['publishedBase']>;
+  dimensions: { width: number; height: number };
+}
+
+const generatedImageTypes = [AssetFileType.Thumbnail, AssetFileType.Preview, AssetFileType.FullSize];
+
 export interface BoundingBox {
   west: number;
   south: number;
@@ -429,52 +452,142 @@ export class AssetRepository {
     );
   }
 
+  /** Moves a verified published fingerprint to the current format without touching the published files. */
+  async replacePublishedImageDevelopmentInput(
+    assetId: string,
+    previous: string,
+    fingerprint: string,
+  ): Promise<boolean> {
+    return this.withAssetLocks([assetId], async (tx) => {
+      const result = await tx
+        .updateTable('asset_job_status')
+        .set({
+          development: sql<ImageDevelopmentState>`jsonb_set(jsonb_set(asset_job_status.development, '{observedInputFingerprint}', to_jsonb(${fingerprint}::text)), '{publishedInputFingerprint}', to_jsonb(${fingerprint}::text))`,
+        })
+        .where('assetId', '=', asUuid(assetId))
+        .where(sql<string>`asset_job_status.development->>'publishedInputFingerprint'`, '=', previous)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) > 0;
+    });
+  }
+
+  /**
+   * Locks the asset and checks that a generation was rendered from its current original, sidecar, observed input
+   * and edits. Returns null when the generation is stale.
+   */
+  private async lockImageGeneration(tx: Kysely<DB>, input: ImageGenerationSource) {
+    const asset = await tx
+      .selectFrom('asset')
+      .select(['id', 'originalPath', 'thumbhash', 'width', 'height'])
+      .where('id', '=', asUuid(input.assetId))
+      .forUpdate()
+      .executeTakeFirst();
+    if (!asset) {
+      return null;
+    }
+    const state = await tx
+      .selectFrom('asset_job_status')
+      .select('development')
+      .where('assetId', '=', asset.id)
+      .forUpdate()
+      .executeTakeFirst();
+    const edits = await tx
+      .selectFrom('asset_edit')
+      .select(['action', 'parameters'])
+      .where('assetId', '=', asset.id)
+      .orderBy('sequence', 'asc')
+      .execute();
+    const sidecar = await tx
+      .selectFrom('asset_file')
+      .select('path')
+      .where('assetId', '=', asset.id)
+      .where('type', '=', AssetFileType.Sidecar)
+      .executeTakeFirst();
+    if (
+      asset.originalPath !== input.originalPath ||
+      (sidecar?.path ?? null) !== input.sidecarPath ||
+      (input.fingerprint === null
+        ? !!state?.development || input.sidecarPath !== null
+        : state?.development?.observedInputFingerprint !== input.fingerprint) ||
+      JSON.stringify(edits) !== JSON.stringify(input.edits)
+    ) {
+      return null;
+    }
+    return { asset, development: state?.development ?? null };
+  }
+
+  /**
+   * Records a current generation whose files reproduce the published ones, leaving those rows, the asset and every
+   * client cache key untouched. Returns false when the published state differs from what was compared, so the
+   * caller can publish normally.
+   */
+  async recordUnchangedImageGeneration(input: UnchangedImageGeneration): Promise<boolean> {
+    return this.db.transaction().execute(async (tx) => {
+      const current = await this.lockImageGeneration(tx, input);
+      const base = current?.development?.publishedBase;
+      if (
+        !current ||
+        !base ||
+        base.isDeveloped !== input.base.isDeveloped ||
+        base.width !== input.base.width ||
+        base.height !== input.base.height ||
+        !current.asset.thumbhash ||
+        !input.thumbhash.equals(current.asset.thumbhash) ||
+        current.asset.width !== input.dimensions.width ||
+        current.asset.height !== input.dimensions.height
+      ) {
+        return false;
+      }
+      const published = await tx
+        .selectFrom('asset_file')
+        .select(['id', 'path', 'type', 'isEdited', 'isProgressive', 'isTransparent'])
+        .where('assetId', '=', current.asset.id)
+        .where('type', 'in', generatedImageTypes)
+        .execute();
+      const isSame =
+        published.length === input.files.length &&
+        published.every((file) =>
+          input.files.some(
+            (expected) =>
+              expected.id === file.id &&
+              expected.path === file.path &&
+              expected.type === file.type &&
+              expected.isEdited === file.isEdited &&
+              expected.isProgressive === file.isProgressive &&
+              expected.isTransparent === file.isTransparent,
+          ),
+        );
+      if (!isSame) {
+        return false;
+      }
+      await tx
+        .updateTable('asset_job_status')
+        .set({
+          development: {
+            observedInputFingerprint: input.fingerprint,
+            publishedInputFingerprint: input.fingerprint,
+            publishedBase: input.base,
+          },
+        })
+        .where('assetId', '=', current.asset.id)
+        .execute();
+      return true;
+    });
+  }
+
   async publishImageGeneration(input: PublishImageGeneration): Promise<string[] | null> {
     return this.db.transaction().execute(async (tx) => {
-      const asset = await tx
-        .selectFrom('asset')
-        .select(['id', 'originalPath'])
-        .where('id', '=', asUuid(input.assetId))
-        .forUpdate()
-        .executeTakeFirst();
-      if (!asset) {
+      const current = await this.lockImageGeneration(tx, input);
+      if (!current) {
         return null;
       }
-      const state = await tx
-        .selectFrom('asset_job_status')
-        .select('development')
-        .where('assetId', '=', asset.id)
-        .forUpdate()
-        .executeTakeFirst();
-      const edits = await tx
-        .selectFrom('asset_edit')
-        .select(['action', 'parameters'])
-        .where('assetId', '=', asset.id)
-        .orderBy('sequence', 'asc')
-        .execute();
-      const sidecar = await tx
-        .selectFrom('asset_file')
-        .select('path')
-        .where('assetId', '=', asset.id)
-        .where('type', '=', AssetFileType.Sidecar)
-        .executeTakeFirst();
-      if (
-        asset.originalPath !== input.originalPath ||
-        (sidecar?.path ?? null) !== input.sidecarPath ||
-        (input.fingerprint === null
-          ? !!state?.development || input.sidecarPath !== null
-          : state?.development?.observedInputFingerprint !== input.fingerprint) ||
-        JSON.stringify(edits) !== JSON.stringify(input.edits)
-      ) {
-        return null;
-      }
+      const { asset } = current;
 
-      const types = [AssetFileType.Thumbnail, AssetFileType.Preview, AssetFileType.FullSize];
       const previous = await tx
         .selectFrom('asset_file')
         .select(['id', 'path', 'type', 'isEdited'])
         .where('assetId', '=', asset.id)
-        .where('type', 'in', types)
+        .where('type', 'in', generatedImageTypes)
         .$if(!!input.editedOnly, (qb) => qb.where('isEdited', '=', true))
         .execute();
       if (input.files.length > 0) {

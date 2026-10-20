@@ -2114,6 +2114,106 @@ describe(MetadataService.name, () => {
       expect(mocks.asset.deleteFile).not.toHaveBeenCalled();
     });
 
+    describe('fingerprints stored before v2', () => {
+      const legacy = 'a'.repeat(64);
+      const sidecarPath = '/photos/photo.xmp';
+      const setup = (development: Partial<ImageDevelopmentState> = {}) => {
+        const asset = forSidecarJob({
+          originalPath: '/photos/photo.nef',
+          files: [{ id: 'sidecar', type: AssetFileType.Sidecar, path: sidecarPath, isEdited: false }],
+          development: {
+            observedInputFingerprint: legacy,
+            publishedInputFingerprint: legacy,
+            publishedBase: { isDeveloped: true, width: 6000, height: 4000 },
+            ...development,
+          },
+        });
+        mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
+        mocks.storage.checkFileExistsStrict.mockResolvedValue(true);
+        return asset;
+      };
+
+      it('adopts the stored value without a render when the photo and XMP reproduce it', async () => {
+        const asset = setup();
+        mocks.media.getLegacyDevelopmentInputFingerprints.mockResolvedValue(['b'.repeat(64), legacy]);
+        mocks.asset.replacePublishedImageDevelopmentInput.mockResolvedValue(true);
+
+        await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBeUndefined();
+
+        const input = { originalPath: asset.originalPath, sidecarPath, image: defaults.image };
+        expect(mocks.media.getDevelopmentInputFingerprint).toHaveBeenCalledExactlyOnceWith(input);
+        expect(mocks.media.getLegacyDevelopmentInputFingerprints).toHaveBeenCalledExactlyOnceWith(input);
+        expect(mocks.asset.replacePublishedImageDevelopmentInput).toHaveBeenCalledExactlyOnceWith(
+          asset.id,
+          legacy,
+          'current-input',
+        );
+        expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+        expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+      });
+
+      it('adopts a verified value even when an older observation was still pending', async () => {
+        const asset = setup({ observedInputFingerprint: 'c'.repeat(64) });
+        mocks.media.getLegacyDevelopmentInputFingerprints.mockResolvedValue([legacy]);
+        mocks.asset.replacePublishedImageDevelopmentInput.mockResolvedValue(true);
+
+        await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBeUndefined();
+
+        expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+      });
+
+      it('renders when the photo or XMP no longer reproduce the stored value', async () => {
+        const asset = setup();
+        mocks.media.getLegacyDevelopmentInputFingerprints.mockResolvedValue(['b'.repeat(64)]);
+
+        await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.asset.replacePublishedImageDevelopmentInput).not.toHaveBeenCalled();
+        expect(mocks.asset.observeImageDevelopmentInput).toHaveBeenCalledExactlyOnceWith(asset.id, 'current-input');
+      });
+
+      it('renders when a concurrent publication replaced the stored value', async () => {
+        const asset = setup();
+        mocks.media.getLegacyDevelopmentInputFingerprints.mockResolvedValue([legacy]);
+        mocks.asset.replacePublishedImageDevelopmentInput.mockResolvedValue(false);
+
+        await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.asset.observeImageDevelopmentInput).toHaveBeenCalledExactlyOnceWith(asset.id, 'current-input');
+      });
+
+      it('keeps the existing failure behaviour when the stored value cannot be verified', async () => {
+        const asset = setup();
+        mocks.media.getLegacyDevelopmentInputFingerprints.mockRejectedValue(new Error('renderer unavailable'));
+
+        await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).rejects.toThrow(
+          'renderer unavailable',
+        );
+
+        expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+        expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+      });
+
+      it('leaves a removed sidecar on the normal cleanup path', async () => {
+        const asset = setup();
+        mocks.storage.checkFileExistsStrict.mockResolvedValue(false);
+
+        await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.media.getLegacyDevelopmentInputFingerprints).not.toHaveBeenCalled();
+        expect(mocks.asset.deleteFile).toHaveBeenCalledWith({ assetId: asset.id, type: AssetFileType.Sidecar });
+      });
+
+      it('does not re-verify current-format fingerprints', async () => {
+        const asset = setup({ observedInputFingerprint: 'current-input', publishedInputFingerprint: 'current-input' });
+
+        await expect(sut.handleSidecarCheck({ id: asset.id, source: 'sidecar' })).resolves.toBeUndefined();
+
+        expect(mocks.media.getLegacyDevelopmentInputFingerprints).not.toHaveBeenCalled();
+        expect(mocks.asset.observeImageDevelopmentInput).not.toHaveBeenCalled();
+      });
+    });
+
     it('should leave ordinary photos on their existing path during periodic sidecar checks', async () => {
       const asset = forSidecarJob();
       mocks.assetJob.getForSidecarCheckJob.mockResolvedValue(asset);
