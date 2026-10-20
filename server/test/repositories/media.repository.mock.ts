@@ -12,6 +12,7 @@ export const newMediaRepositoryMock = (): Mocked<RepositoryInterface<MediaReposi
     extract: vitest.fn().mockResolvedValue(null),
     developImage: vitest.fn().mockResolvedValue(null),
     getDevelopmentInputFingerprint: vitest.fn().mockResolvedValue('development-input'),
+    getLegacyDevelopmentInputFingerprints: vitest.fn().mockResolvedValue([]),
     probe: vitest.fn(),
     probePackets: vitest.fn().mockResolvedValue({
       totalDuration: 0,
