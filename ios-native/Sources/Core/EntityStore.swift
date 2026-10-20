@@ -151,8 +151,8 @@ actor EntityStore {
     func timelineAssets(filter: TimelineFilter = .init(), offset: Int = 0, limit: Int = 200) throws -> [Asset] {
         let (whereSQL, arguments) = timelinePredicate(filter)
         let date = filter.orderBy == "createdAt" ? "createdAt" : "localDateTime"
-        let rows = try database.query("SELECT a.payload FROM entities a WHERE \(whereSQL) ORDER BY julianday(json_extract(a.payload,'$.\(date)')) \(filter.order == "asc" ? "ASC" : "DESC"), a.id LIMIT ? OFFSET ?", arguments + [String(min(max(limit, 1), 2_000)), String(max(offset, 0))])
-        return try rows.compactMap { try $0[0].map { try decodeAsset(Data($0.utf8)) } }
+        let rows = try database.query("\(Self.timelineSelect) WHERE \(whereSQL) ORDER BY julianday(json_extract(a.payload,'$.\(date)')) \(filter.order == "asc" ? "ASC" : "DESC"), a.id LIMIT ? OFFSET ?", arguments + [String(min(max(limit, 1), 2_000)), String(max(offset, 0))])
+        return try decodeTimelineRows(rows)
     }
     func timeBuckets(filter: TimelineFilter = .init()) throws -> [TimeBucket] {
         let (whereSQL, arguments) = timelinePredicate(filter)
@@ -165,9 +165,55 @@ actor EntityStore {
     func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) throws -> [Asset] {
         let (whereSQL, arguments) = timelinePredicate(filter)
         let date = filter.orderBy == "createdAt" ? "createdAt" : "localDateTime"
-        return try database.query("SELECT a.payload FROM entities a WHERE \(whereSQL) AND strftime('%Y-%m',json_extract(a.payload,'$.\(date)'))=? ORDER BY julianday(json_extract(a.payload,'$.\(date)')) \(filter.order == "asc" ? "ASC" : "DESC"),a.id", arguments + [String(bucket.prefix(7))]).compactMap {
-            try $0[0].map { try decodeAsset(Data($0.utf8)) }
+        let rows = try database.query("\(Self.timelineSelect) WHERE \(whereSQL) AND strftime('%Y-%m',json_extract(a.payload,'$.\(date)'))=? ORDER BY julianday(json_extract(a.payload,'$.\(date)')) \(filter.order == "asc" ? "ASC" : "DESC"),a.id", arguments + [String(bucket.prefix(7))])
+        return try decodeTimelineRows(rows)
+    }
+
+    /// Located photos per month and place, for naming months and marking trips on the time rail.
+    func monthPlaces(filter: TimelineFilter = .init()) throws -> [MonthPlaceCount] {
+        let (whereSQL, arguments) = timelinePredicate(filter)
+        let date = filter.orderBy == "createdAt" ? "createdAt" : "localDateTime"
+        return try database.query("""
+        SELECT strftime('%Y-%m-01',json_extract(a.payload,'$.\(date)')),json_extract(e.payload,'$.city'),json_extract(e.payload,'$.country'),count(*)
+        FROM entities a JOIN entities e ON e.kind='exif' AND e.id=a.id
+        WHERE \(whereSQL) AND (json_extract(e.payload,'$.city') IS NOT NULL OR json_extract(e.payload,'$.country') IS NOT NULL)
+        GROUP BY 1,2,3
+        """, arguments).compactMap { row in
+            guard let bucket = row[0], let count = row[3].flatMap(Int.init) else { return nil }
+            return MonthPlaceCount(bucket: bucket, city: row[1], country: row[2], count: count)
         }
+    }
+
+    /// One query brings each photo with its EXIF and the fields the timeline reads from the raw
+    /// record, instead of a query and two JSON passes per photo. A 4,000-photo month matters.
+    private static let timelineSelect = """
+    SELECT a.payload,e.payload,json_extract(a.payload,'$.deletedAt') IS NOT NULL,json_extract(a.payload,'$.stackId') \
+    FROM entities a LEFT JOIN entities e ON e.kind='exif' AND e.id=a.id
+    """
+
+    private func decodeTimelineRows(_ rows: [[String?]]) throws -> [Asset] {
+        let decoder = APIJSON.decoder()
+        var stacks: [String: AssetStack?] = [:]
+        return try rows.compactMap { row in
+            guard let payload = row[0] else { return nil }
+            var asset = try decoder.decode(Asset.self, from: Data(payload.utf8))
+            asset.isTrashed = row[2] == "1"
+            if asset.ownerId != userID { asset.isFavorite = false }
+            if let exif = row[1] { asset.exifInfo = try decoder.decode(ExifInfo.self, from: Data(exif.utf8)) }
+            if let stackID = row[3] {
+                if stacks[stackID] == nil { stacks[stackID] = try stack(id: stackID) }
+                asset.stack = stacks[stackID] ?? nil
+            }
+            return asset
+        }
+    }
+
+    private func stack(id stackID: String) throws -> AssetStack? {
+        guard let data = try entityData(kind: "stack", id: stackID) else { return nil }
+        let stack = try JSONDecoder().decode([String: EntityJSON].self, from: data)
+        guard let primary = stack["primaryAssetId"]?.string else { return nil }
+        let count = try database.query("SELECT count(*) FROM entities WHERE kind='asset' AND json_extract(payload,'$.stackId')=?", [stackID]).first?[0].flatMap(Int.init) ?? 0
+        return .init(id: stackID, primaryAssetId: primary, assetCount: count)
     }
     /// Small identity rows for old Flutter uploads and native uploads alike. The
     /// current server no longer syncs obsolete deviceId/deviceAssetId columns.
@@ -405,10 +451,12 @@ actor EntityStore {
         conditions.append("json_extract(a.payload,'$.deletedAt') IS \(filter.isTrashed == true ? "NOT " : "")NULL")
         if let favorite = filter.isFavorite { conditions.append("json_extract(a.payload,'$.isFavorite')=CAST(? AS INTEGER)"); values.append(favorite ? "1" : "0") }
         if let album = filter.albumID {
-            conditions.append("EXISTS(SELECT 1 FROM entities r WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.assetId')=a.id AND json_extract(r.payload,'$.albumId')=?)"); values.append(album)
+            conditions.append("a.id IN (SELECT json_extract(r.payload,'$.assetId') FROM entities r WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.albumId')=?)"); values.append(album)
         }
         if let person = filter.personID {
-            conditions.append("EXISTS(SELECT 1 FROM entities f WHERE f.kind='face' AND json_extract(f.payload,'$.assetId')=a.id AND json_extract(f.payload,'$.personId')=? AND json_extract(f.payload,'$.deletedAt') IS NULL AND json_extract(f.payload,'$.isVisible')=1)"); values.append(person)
+            // Materialize membership once. Correlating a JSON expression with
+            // the TEXT asset ID defeats SQLite's expression index affinity.
+            conditions.append("a.id IN (SELECT json_extract(f.payload,'$.assetId') FROM entities f WHERE f.kind='face' AND json_extract(f.payload,'$.personId')=? AND json_extract(f.payload,'$.deletedAt') IS NULL AND json_extract(f.payload,'$.isVisible')=1)"); values.append(person)
         }
         if filter.albumID == nil || filter.userID != nil {
             var owners = ["json_extract(a.payload,'$.ownerId')=?"]
@@ -418,7 +466,7 @@ actor EntityStore {
                 values.append(userID)
             }
             if filter.personID != nil {
-                owners.append("EXISTS(SELECT 1 FROM entities r JOIN entities u ON u.kind='albumUser' AND json_extract(u.payload,'$.albumId')=json_extract(r.payload,'$.albumId') AND json_extract(u.payload,'$.userId')=? WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.assetId')=a.id)")
+                owners.append("a.id IN (SELECT json_extract(r.payload,'$.assetId') FROM entities r JOIN entities u ON u.kind='albumUser' AND json_extract(u.payload,'$.albumId')=json_extract(r.payload,'$.albumId') AND json_extract(u.payload,'$.userId')=? WHERE r.kind='albumAsset')")
                 values.append(userID)
             }
             conditions.append("(" + owners.joined(separator: " OR ") + ")")
@@ -448,6 +496,7 @@ private final class EntityDatabase: @unchecked Sendable {
             try execute("CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS acknowledgements(type TEXT PRIMARY KEY,ack TEXT NOT NULL)")
             try execute("CREATE INDEX IF NOT EXISTS entity_asset ON entities(kind,json_extract(payload,'$.assetId'))")
+            try execute("CREATE INDEX IF NOT EXISTS entity_person_asset ON entities(kind,json_extract(payload,'$.personId'),json_extract(payload,'$.assetId'))")
             try execute("CREATE INDEX IF NOT EXISTS entity_album ON entities(kind,json_extract(payload,'$.albumId'))")
             try execute("CREATE INDEX IF NOT EXISTS entity_memory ON entities(kind,json_extract(payload,'$.memoryId'))")
             try execute("CREATE INDEX IF NOT EXISTS asset_stack ON entities(kind,json_extract(payload,'$.stackId'))")
@@ -456,11 +505,19 @@ private final class EntityDatabase: @unchecked Sendable {
         } catch { throw error }
     }
     deinit { sqlite3_close(handle) }
-    func execute(_ sql: String, _ arguments: [String?] = []) throws { _ = try query(sql, arguments) }
-    func query(_ sql: String, _ arguments: [String?] = []) throws -> [[String?]] {
+    func execute(_ sql: String, _ arguments: [String?] = []) throws { _ = try query(sql, arguments, cancellationChecks: false) }
+    func query(_ sql: String, _ arguments: [String?] = [], cancellationChecks: Bool = true) throws -> [[String?]] {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw Self.failure() }
         defer { sqlite3_finalize(statement) }
+        let checksCancellation = cancellationChecks && sqlite3_stmt_readonly(statement) != 0
+        if checksCancellation {
+            try Task.checkCancellation()
+            sqlite3_progress_handler(handle, 1_000, entityDatabaseProgressHandler, nil)
+        }
+        defer {
+            if checksCancellation { sqlite3_progress_handler(handle, 0, nil, nil) }
+        }
         for (offset, value) in arguments.enumerated() {
             let status: Int32
             if let value { status = sqlite3_bind_text(statement, Int32(offset + 1), value, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
@@ -471,7 +528,10 @@ private final class EntityDatabase: @unchecked Sendable {
         while true {
             let status = sqlite3_step(statement)
             if status == SQLITE_DONE { return rows }
-            guard status == SQLITE_ROW else { throw Self.failure() }
+            guard status == SQLITE_ROW else {
+                if status == SQLITE_INTERRUPT && checksCancellation && Task.isCancelled { throw CancellationError() }
+                throw Self.failure()
+            }
             rows.append((0..<sqlite3_column_count(statement)).map { column in
                 guard let pointer = sqlite3_column_text(statement, column) else { return nil }
                 return String(cString: pointer)
@@ -484,4 +544,8 @@ private final class EntityDatabase: @unchecked Sendable {
         catch { try? execute("ROLLBACK"); throw error }
     }
     private static func failure() -> APIError { .invalidResponse("The offline library could not be saved. Free some device storage, then try again.") }
+}
+
+private func entityDatabaseProgressHandler(_ context: UnsafeMutableRawPointer?) -> Int32 {
+    Task.isCancelled ? 1 : 0
 }
