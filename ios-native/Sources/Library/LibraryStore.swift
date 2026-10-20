@@ -75,6 +75,8 @@ private struct FrozenFeed {
     var section = 0
     var item = 0
     var isScrolling = false
+    /// The finger is on the time rail.
+    var isScrubbing = false
 }
 
 protocol LibraryAPI: Sendable {

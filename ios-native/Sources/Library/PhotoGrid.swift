@@ -332,16 +332,20 @@ struct PhotoGrid: UIViewRepresentable {
             guard !parent.store.isReplacingFeed else { return }
             for section in Set(paths.map(\.section)) { parent.store.requestBucket(section) }
             // Photos about to scroll in move from disk to memory, so they draw in their first frame.
-            guard let side = (view.collectionViewLayout as? VirtualPhotoLayout)?.itemSide else { return }
-            let pixels = max(128, Int(side * view.traitCollection.displayScale))
-            let assets = paths.compactMap { parent.store.entry(section: $0.section, item: $0.item)?.remote }
-            let pipeline = parent.pipeline
-            guard !assets.isEmpty else { return }
-            Task.detached(priority: .utility) {
-                for asset in assets where pipeline.cachedImage(for: asset, pixelSize: pixels) == nil {
-                    _ = await pipeline.storedThumbnail(for: asset, pixelSize: pixels)
-                }
-            }
+            guard let pixels = thumbnailPixels(view) else { return }
+            parent.pipeline.prefetchThumbnails(remoteAssets(at: paths), pixelSize: pixels)
+        }
+        func collectionView(_ view: UICollectionView, cancelPrefetchingForItemsAt paths: [IndexPath]) {
+            guard let pixels = thumbnailPixels(view) else { return }
+            parent.pipeline.cancelThumbnailPrefetch(remoteAssets(at: paths), pixelSize: pixels)
+        }
+        /// The pixel size cells decode their thumbnails at.
+        private func thumbnailPixels(_ view: UICollectionView) -> Int? {
+            guard let side = (view.collectionViewLayout as? VirtualPhotoLayout)?.itemSide else { return nil }
+            return max(128, Int(side * view.traitCollection.displayScale))
+        }
+        private func remoteAssets(at paths: [IndexPath]) -> [Asset] {
+            paths.compactMap { parent.store.entry(section: $0.section, item: $0.item)?.remote }
         }
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             publishVisiblePosition()

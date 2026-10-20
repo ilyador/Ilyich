@@ -332,9 +332,9 @@ struct LibraryView: View {
         }
         .onChange(of: viewingLocal) { _, value in session.thumbnailWarmer?.isHeld = value != nil || viewing != nil }
         .onAppear {
-            // Keeping the library's thumbnails offline waits whenever the user scrolls.
+            // Keeping the library's thumbnails offline waits whenever the user scrolls or scrubs.
             let position = store.navigation
-            session.thumbnailWarmer?.isScrolling = { [weak position] in position?.isScrolling ?? false }
+            session.thumbnailWarmer?.isScrolling = { [weak position] in position.map { $0.isScrolling || $0.isScrubbing } ?? false }
         }
         .task {
             // The Earth is built off the main thread a little after launch, so it is ready before
