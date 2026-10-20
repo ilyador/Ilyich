@@ -46,7 +46,10 @@ struct ImageEntry: TimelineEntry {
 
   private static func folder(scope: String) throws -> URL {
     guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try SessionKeychain.appGroup) else { throw WidgetError.noLogin }
-    return container.appendingPathComponent("WidgetCache").appendingPathComponent(scope)
+    // Snapshots cached before widgets kept to timeline photos may show locked ones, so that
+    // cache is dropped rather than read.
+    try? FileManager.default.removeItem(at: container.appendingPathComponent("WidgetCache"))
+    return container.appendingPathComponent("WidgetCache2").appendingPathComponent(scope)
   }
 
   func cache(for key: String) throws {

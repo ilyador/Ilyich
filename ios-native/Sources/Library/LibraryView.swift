@@ -44,6 +44,7 @@ struct LibraryView: View {
     @State private var pendingPlaceFocus: PlaceFocus?
     @State private var actionError: String?
     @State private var confirmDelete = false
+    @State private var confirmSignOut = false
     @State private var albumName = ""
     @State private var creatingAlbum = false
     /// The New album row on the Albums shelf.
@@ -235,6 +236,9 @@ struct LibraryView: View {
                     runSelection { ids in try await api.trashAssets(ids: ids, permanently: features?.trash == false) }
                 }
             } message: { Text(features?.trash == false ? "This cannot be undone. Photos on your phone are kept." : "This changes the server library. Photos on your phone are kept.") }
+            .confirmationDialog("Sign out of Ilyich?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+                Button("Sign out", role: .destructive) { store.stop(); Task { await session.signOut() } }
+            } message: { Text("Backup will stop on this phone. Photos already on your server are kept.") }
             .sheet(item: $albumSharing) { sharing in
                 NavigationStack {
                     switch sharing {
@@ -662,11 +666,12 @@ struct LibraryView: View {
                 add("shared-files", "Shared files", "square.and.arrow.down") { sharedFilesPresented = true }
             }
         case .settings:
-            for destination in [SettingsDestination.account, .backup, .appearance, .grid, .server, .about] {
-                add("settings-" + destination.rawValue, destination.rawValue.capitalized, destination.symbol) {
+            for destination in SettingsDestination.allCases {
+                add("settings-" + destination.rawValue, destination.title, destination.symbol) {
                     settingsDestination = destination; screen = .settings
                 }
             }
+            add("sign-out", "Sign out", "rectangle.portrait.and.arrow.right") { confirmSignOut = true }
         }
         return items
     }
@@ -881,7 +886,7 @@ struct LibraryView: View {
         case .people: PeopleView(api: api, pipeline: pipeline) { store.setPerson($0); screen = nil; searchText = "" }
         case .albums: AlbumsView(api: api, pipeline: pipeline) { store.setAlbum($0); screen = nil; searchText = "" }
         case .settings:
-            if let settingsDestination { SettingsDestinationView(api: api, destination: settingsDestination) }
+            if let settingsDestination { SettingsDestinationView(api: api, destination: settingsDestination, pipeline: pipeline, session: session) }
             else { SettingsView(api: api, pipeline: pipeline, session: session, onSignOut: { store.stop(); Task { await session.signOut() } }) }
         case .more: MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { requestPhotoNavigation(.viewer($0)) }, onFilter: { filter, title in
             store.setTimeline(filter, title: title); screen = nil

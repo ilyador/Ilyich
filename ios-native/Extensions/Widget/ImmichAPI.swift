@@ -66,6 +66,8 @@ struct SearchFilter: Codable {
   var size = 1
   var albumIds: [String] = []
   var isFavorite: Bool? = nil
+  // Timeline photos only: never the Locked Folder, even while it is unlocked, nor the archive.
+  var visibility = "timeline"
 }
 
 struct MemoryResult: Codable {

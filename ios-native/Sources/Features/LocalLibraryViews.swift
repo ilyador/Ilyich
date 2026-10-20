@@ -250,7 +250,7 @@ struct FreeUpSpaceView: View {
                   currentSession.token == originalSession.token else { throw APIError.unauthorized }
             try Task.checkCancellation()
             guard !ReadOnlyPolicy.isEnabled(server: currentSession.server, userID: currentSession.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
-            try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(fetched) }
+            try await PHPhotoLibrary.shared().performChanges(PhotoChanges.delete(Array(requested)))
             photos.removeAll { requested.contains($0.id) }; selection = []; message = "Removed \(requested.count) items from Apple Photos. Your server copies are kept."
         } catch is CancellationError { } catch { failure = .init(error) }
     }

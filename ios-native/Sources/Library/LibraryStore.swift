@@ -160,7 +160,7 @@ extension APIClient: LibraryAPI {}
     /// The rail moves the grid through this directly, at the finger's pace.
     @ObservationIgnored let scroller = GridScroller()
     private(set) var timelineFilter = TimelineFilter()
-    private(set) var searchFilter = SearchFilter()
+    private(set) var searchFilter = SearchFilter.library
     private(set) var searchMode = SearchMode.context
     private var similarAssetID: String?
     private var cursor: String?
@@ -629,7 +629,7 @@ extension APIClient: LibraryAPI {}
         let reuseTimeline = !isFiltered && !showingResults && !buckets.isEmpty
         let saved = originalTimeline
         beginScopeChange()
-        timelineFilter = TimelineFilter(); searchFilter = SearchFilter()
+        timelineFilter = TimelineFilter(); searchFilter = .library
         filterTitle = nil; query = ""; results = []; showingResults = false; usesMetadata = false; searchMode = .context
         originalTimeline = nil; scrollRequest = nil
         let restoreSaved = !reuseTimeline && saved?.0.buckets.isEmpty == false
@@ -684,7 +684,7 @@ extension APIClient: LibraryAPI {}
         rememberOriginal()
         beginScopeChange()
         timelineFilter = TimelineFilter(personID: person.id)
-        searchFilter = SearchFilter(personIds: IDsFilter(all: [person.id]))
+        searchFilter = SearchFilter(personIds: IDsFilter(all: [person.id]), visibility: SearchFilter.library.visibility)
         filterTitle = person.name.isEmpty ? "Person" : person.name
         query = ""; showingResults = false; usesMetadata = false
         scheduleReload()
@@ -695,7 +695,7 @@ extension APIClient: LibraryAPI {}
         beginScopeChange()
         timelineFilter = TimelineFilter(albumID: album.id)
         timelineFilter.order = album.order ?? "desc"
-        searchFilter = SearchFilter(albumIds: IDsFilter(all: [album.id]))
+        searchFilter = SearchFilter(albumIds: IDsFilter(all: [album.id]), visibility: SearchFilter.library.visibility)
         filterTitle = album.albumName; query = ""; showingResults = false; usesMetadata = false
         scheduleReload()
     }
@@ -723,7 +723,7 @@ extension APIClient: LibraryAPI {}
     }
 
     private static func placeSearch(_ assetIDs: [String]) -> SearchFilter {
-        var filter = SearchFilter()
+        var filter = SearchFilter.library
         if assetIDs.count == 1 { filter.id = IDFilter(eq: assetIDs[0]) }
         else { filter.or = assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) } }
         return filter
@@ -750,12 +750,12 @@ extension APIClient: LibraryAPI {}
         rememberOriginal()
         beginScopeChange()
         timelineFilter = filter; filterTitle = title; query = ""; showingResults = false; usesMetadata = false
-        searchFilter = SearchFilter(visibility: filter.visibility.map { StringFilter(eq: $0.rawValue) }, isFavorite: filter.isFavorite.map { BoolFilter(eq: $0) })
+        searchFilter = SearchFilter(visibility: filter.visibility.map { StringFilter(eq: $0.rawValue) } ?? SearchFilter.library.visibility, isFavorite: filter.isFavorite.map { BoolFilter(eq: $0) })
         scheduleReload()
     }
 
     func clearFilters() {
-        beginScopeChange(); timelineFilter = TimelineFilter(); searchFilter = SearchFilter()
+        beginScopeChange(); timelineFilter = TimelineFilter(); searchFilter = .library
         filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false; searchMode = .context
         selected = []; isSelecting = false
         if let saved = originalTimeline {
@@ -793,7 +793,7 @@ extension APIClient: LibraryAPI {}
 
     func findSimilar(to asset: Asset) {
         rememberOriginal(); beginScopeChange()
-        query = ""; searchMode = .context; searchFilter = SearchFilter(); similarAssetID = asset.id
+        query = ""; searchMode = .context; searchFilter = .library; similarAssetID = asset.id
         filterTitle = "Similar photos"; showingResults = true; usesMetadata = true
         queryTask = Task { await loadResults(reset: true) }
     }
