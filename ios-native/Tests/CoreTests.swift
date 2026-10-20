@@ -215,4 +215,22 @@ final class CoreTests: XCTestCase {
         }
     }
 
+    func testRedirectedPhotoRequestKeepsItsTokenAndHeaders() {
+        var original = URLRequest(url: URL(string: "https://photos.example/api/assets/a/thumbnail?size=fullsize")!)
+        original.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        original.setValue("proxy", forHTTPHeaderField: "X-Custom")
+        let target = URLRequest(url: URL(string: "https://photos.example/api/assets/a/thumbnail?size=preview")!)
+        let redirected = SameOriginRedirectDelegate.carryingHeaders(of: original, to: target)
+        XCTAssertEqual(redirected.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        XCTAssertEqual(redirected.value(forHTTPHeaderField: "X-Custom"), "proxy")
+        XCTAssertEqual(redirected.url, target.url)
+    }
+
+    func testOnlyALostRouteMakesTheAppLookForAnotherAddress() {
+        XCTAssertFalse(URLError(.cancelled).meansEndpointUnreachable, "Scrolling cancels requests by the hundred.")
+        XCTAssertFalse(URLError(.badServerResponse).meansEndpointUnreachable)
+        XCTAssertTrue(URLError(.cannotConnectToHost).meansEndpointUnreachable)
+        XCTAssertTrue(URLError(.timedOut).meansEndpointUnreachable)
+    }
+
 }

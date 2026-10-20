@@ -43,7 +43,7 @@ struct SignInView: View {
                                             .frame(minHeight: 44)
                                     }
                                 }
-                            }
+                            }.frame(minHeight: 44)
                             field(symbol: "server.rack") {
                                 TextField("https://photos.example.com", text: $server)
                                     .keyboardType(.URL).textContentType(.URL).focused($focused, equals: .server)
