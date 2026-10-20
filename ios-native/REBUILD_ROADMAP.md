@@ -334,6 +334,7 @@ TransferFailureClassifier implements the table in architecture section 5. JobExe
 - owner and developed are post-filters with a 20k scan budget;
 - a defensive filter drops locked and trash-mismatched items.
 LibraryRepository implements TimelineSource and SearchSource; APIClient's offline fallbacks move into it, used only after a definite transport failure with a complete index. Place identity uses the membership revision. LibraryStore's search builds ServerSearchRequest.
+Every shelf facet must be a predicate that combines with every other one by AND, so N6's stackable filters need no change to the model: album, one or more people, place membership, partner and the More categories (favorites, Lightroom, kinds and the rest). The planner states which combinations the server can serve and which need the index.
 - **Migration:** Place cache keys change; old place files age out.
 - **Tests:**
   - SEARCH-1 unwrapped
@@ -821,6 +822,24 @@ The viewer menu and footer, BulkActionsView, AssetInfoView and ViewerStackView r
 - **Acceptance:**
   - Unit and UI suites pass
   - Device scenarios are no worse than T4
+
+### N6 — Stackable filters and filter pills (owner request, 2026-10-20)
+
+- **Workstreams:** 6, 8. **Depends on:** Q5, F5, N4, F6. **Risk:** medium.
+- **Scope:**
+  - **Filters stack.** Choosing a filter adds a layer instead of replacing the current one. Locations, people, albums and the More categories (favorites, Lightroom, videos and the rest) combine with AND, so a location plus a person shows that person's photos in that location.
+  - **Shelves narrow to the stack.** With a location chosen, People lists only the people in that location's photos. Albums and the Earth's places narrow the same way, counted from the index.
+  - **Pills.** The single filter shelf with its round X becomes a row of pills at the top, one per layer. Each pill has a small X that removes only its layer.
+  - **The rise stays.** Choosing a row keeps today's choreography of the chosen shelf rising, but it lands in the next pill's position and morphs into the pill.
+  - **Clear.** A Clear row at the top of the shelves, above People, removes every filter and closes the Earth if it is open.
+- **Migration:** None.
+- **Tests:**
+  - Stack algebra: adding, removing a middle layer, clearing
+  - People, album and place counts under a stack, from the index
+  - The server plan for combinations the server can serve, and the stated index-only limitation for the rest
+  - UI: a place then a person shows the intersection; removing one pill keeps the others; Clear empties the stack and closes the Earth; the rise lands on and morphs into its pill (checked on recorded frames)
+- **Acceptance:**
+  - On the phone: a location plus a person shows only that person's photos there; People under a location lists only people in it; each pill's X removes only its layer; Clear resets everything; the morph lands on the pill
 
 ### T7 — Scrubbing acceptance gate and scrub-tier decision
 
