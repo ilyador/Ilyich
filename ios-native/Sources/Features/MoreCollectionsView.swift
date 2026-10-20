@@ -6,6 +6,8 @@ struct MoreCollectionsView: View {
     let onOpenAsset: (Asset) -> Void
     let onFilter: (TimelineFilter, String) -> Void
     let onShowInTimeline: (Asset) -> Void
+    let onMetadataFilter: (SearchFilter, String) -> Void
+    let onDevelopedFilter: (SearchFilter, String) -> Void
     var body: some View {
         List {
             Section("On your device") {
@@ -22,9 +24,9 @@ struct MoreCollectionsView: View {
                     onFilter(filter, "Recently added")
                 } label: { Label("Recently added", systemImage: "clock.badge.checkmark") }
                 Button { var filter = TimelineFilter(); filter.isFavorite = true; onFilter(filter, "Favorites") } label: { Label("Favorites", systemImage: "heart") }
-                NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .videos, onOpenAsset: onOpenAsset) } label: { Label("Videos", systemImage: "video") }
-                NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .motion, onOpenAsset: onOpenAsset) } label: { Label("Motion", systemImage: "livephoto") }
-                NavigationLink { MediaCollectionView(api: api, pipeline: pipeline, category: .developed, onOpenAsset: onOpenAsset) } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
+                Button { onMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO"), visibility: StringFilter(eq: "timeline")), "Videos") } label: { Label("Videos", systemImage: "video") }
+                Button { onMetadataFilter(SearchFilter(isMotion: BoolFilter(eq: true), visibility: StringFilter(eq: "timeline")), "Motion") } label: { Label("Motion", systemImage: "livephoto") }
+                Button { onDevelopedFilter(SearchFilter(visibility: StringFilter(eq: "timeline")), "Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
                 NavigationLink { MemoriesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset, onShowInTimeline: onShowInTimeline) } label: { Label("On this day", systemImage: "clock.arrow.circlepath") }
             }
             Section("Shared") {
@@ -39,69 +41,6 @@ struct MoreCollectionsView: View {
                 NavigationLink { TrashView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset) } label: { Label("Trash", systemImage: "trash") }
             }
         }.navigationTitle("More")
-    }
-}
-
-private enum MediaCategory: String { case videos = "Videos", motion = "Motion", developed = "Lightroom" }
-private struct MediaCollectionView: View {
-    let api: APIClient
-    let pipeline: MediaPipeline
-    let category: MediaCategory
-    let onOpenAsset: (Asset) -> Void
-    @State private var assets: [Asset] = []
-    @State private var cursor: String?
-    @State private var page = 1
-    @State private var hasMore = true
-    @State private var loading = false
-    @State private var examined = 0
-    @State private var failure: FeatureFailure?
-    @State private var generation = 0
-    @State private var failedFresh = true
-    @State private var reloadToken = 0
-    @State private var loadedToken = -1
-    var body: some View {
-        ScrollView {
-            if category == .developed { Text("Photos developed from Lightroom XMP sidecars.").font(.subheadline).foregroundStyle(.secondary).padding() }
-            SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: onOpenAsset, onChanged: { reloadToken += 1 })
-            if assets.isEmpty && !loading && !hasMore { FeatureEmpty(title: "No \(category.rawValue.lowercased()) yet", symbol: "photo", description: "Matching photos and videos will appear here.") }
-            if hasMore {
-                Button { Task { await load() } } label: {
-                    if loading { ProgressView() } else { Text(category == .developed ? "Find more developed photos" : "Load more") }
-                }.disabled(loading).padding(24)
-            }
-            if category == .developed && examined > 0 && hasMore { Text("Checked \(examined.formatted()) library items").font(.caption).foregroundStyle(.secondary) }
-        }.navigationTitle(category.rawValue)
-        .task(id: reloadToken) { if assets.isEmpty || loadedToken != reloadToken { loadedToken = reloadToken; await load(fresh: true) } }
-        .refreshable { await load(fresh: true) }
-        .alert("Couldn’t load collection", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("Retry") { Task { await load(fresh: failedFresh) } }; Button("Cancel", role: .cancel) { }
-        } message: { Text(failure?.message ?? "") }
-    }
-    /// A fresh load restarts paging and supersedes any in-flight load; stale results are discarded.
-    private func load(fresh: Bool = false) async {
-        guard fresh || !loading else { return }
-        struct Filter: Encodable, Sendable { var type: StringFilter?; var isMotion: BoolFilter?; var visibility = StringFilter(eq: "timeline") }
-        struct Query: Encodable, Sendable { let filter: Filter; let cursor: String?; let page: Int?; let size = 200; let withExif = true }
-        if fresh { generation += 1 }
-        let current = generation
-        let startCursor = fresh ? nil : cursor, startPage = fresh ? 1 : page
-        loading = true; failure = nil
-        defer { if current == generation { loading = false } }
-        do {
-            var filter = Filter()
-            if category == .videos { filter.type = .init(eq: "VIDEO") }
-            if category == .motion { filter.isMotion = .init(eq: true) }
-            let result: SearchResponse = try await api.request(.post, path: "search/metadata", body: Query(filter: filter, cursor: startCursor, page: startCursor == nil ? startPage : nil))
-            try Task.checkCancellation()
-            guard current == generation else { return }
-            let base = fresh ? [] : assets
-            let known = Set(base.map(\.id))
-            examined = (fresh ? 0 : examined) + result.assets.items.count
-            assets = base + result.assets.items.filter { !known.contains($0.id) && (category != .developed || $0.isDeveloped) }
-            cursor = result.assets.nextCursor
-            page = result.assets.nextPage.flatMap(Int.init) ?? startPage + 1
-            hasMore = result.assets.hasMore
-        } catch is CancellationError { } catch { if current == generation { failedFresh = fresh; failure = .init(error) } }
     }
 }
 
