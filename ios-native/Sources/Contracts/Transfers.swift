@@ -1,0 +1,175 @@
+import Foundation
+import IlyichPlatform
+
+enum TransferLane: String, Hashable, Sendable {
+    /// Backups of phone photos. The run intent gates only this lane.
+    case library
+    /// Files from the Share extension, uploaded once approved.
+    case share
+}
+
+/// What a job uploads.
+enum TransferSource: Hashable, Sendable {
+    case photo(DeviceAssetID)
+    /// An attachment of a share batch, named by its original's file name.
+    case shared(batch: UUID, attachment: String)
+}
+
+enum JobOrigin: String, Hashable, Sendable {
+    case discovery, selection, albumUpload, shareApproval, legacy
+}
+
+enum JobState: String, Hashable, Sendable {
+    case queued, staging, staged, submitting, submitted, finalizing, retryScheduled, waiting, failed
+}
+
+/// Whether the library lane runs: not at all, whenever conditions allow, or because the user asked now.
+enum RunIntent: String, Hashable, Sendable {
+    case paused, automatic, manual
+}
+
+/// A claim on one job. A commit applies only while its lease token still matches.
+struct Lease: Hashable, Sendable {
+    let job: Int64
+    let token: UUID
+    let epoch: AuthorizationEpoch
+}
+
+/// One upload attempt. New attempts are UUIDs; a legacy stage ID or share identity is kept
+/// verbatim, since it already names files and a background task.
+struct AttemptID: Hashable, Sendable, CustomStringConvertible {
+    let rawValue: String
+    init() { rawValue = UUID().uuidString }
+    init(legacy value: String) { rawValue = value }
+    var description: String { rawValue }
+}
+
+/// The two background URLSessions. Their identifiers derive from the bundle identifier, which the
+/// sideloading tool rewrites (on the phone, app.alextran.immich.H4K2MSF2SG), and never change.
+enum TransferSessionID: String, CaseIterable, Hashable, Sendable {
+    case backup
+    case shareUpload = "share-upload"
+
+    var identifier: String { identifier(bundleIdentifier: Bundle.main.bundleIdentifier) }
+    func identifier(bundleIdentifier: String?) -> String { (bundleIdentifier ?? "app.alextran.immich") + "." + rawValue }
+}
+
+/// What a background upload task's taskDescription says about it.
+enum TaskDescriptor: Equatable, Sendable {
+    /// Written from B9: the attempt, the account digest and the outcome file relative to the App Group.
+    case v2(attempt: AttemptID, scope: String, outcome: String)
+    /// Written by every earlier build: the stage ID or share identity, and the outcome file's
+    /// absolute URL under whatever container path was current then.
+    case legacy(id: String, receipt: URL)
+    /// Not written by this app, or unreadable.
+    case foreign
+
+    private struct Version2: Codable {
+        let v: Int
+        let attempt: String
+        let scope: String
+        let outcome: String
+    }
+    private struct Version: Decodable { let v: Int? }
+
+    init(taskDescription: String?) {
+        guard let data = taskDescription?.data(using: .utf8), let version = try? JSONDecoder().decode(Version.self, from: data) else {
+            self = .foreign; return
+        }
+        guard let v = version.v else {
+            if let legacy = try? Legacy.decoder().decode(Legacy.Descriptor.self, from: data) { self = .legacy(id: legacy.id, receipt: legacy.receipt) }
+            else { self = .foreign }
+            return
+        }
+        guard v == 2, let value = try? JSONDecoder().decode(Version2.self, from: data), !value.attempt.isEmpty,
+              Self.isRelative(value.outcome) else { self = .foreign; return }
+        self = .v2(attempt: AttemptID(legacy: value.attempt), scope: value.scope, outcome: value.outcome)
+    }
+
+    /// The text to set as taskDescription. Version 2 is written with sorted keys and plain slashes.
+    var taskDescription: String? {
+        switch self {
+        case .v2(let attempt, let scope, let outcome):
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            return (try? encoder.encode(Version2(v: 2, attempt: attempt.rawValue, scope: scope, outcome: outcome))).map { String(decoding: $0, as: UTF8.self) }
+        case .legacy(let id, let receipt):
+            return (try? JSONEncoder().encode(Legacy.Descriptor(id: id, receipt: receipt))).map { String(decoding: $0, as: UTF8.self) }
+        case .foreign:
+            return nil
+        }
+    }
+
+    /// The attempt the task belongs to. A legacy task is adopted by its stage ID or share identity.
+    var attempt: AttemptID? {
+        switch self {
+        case .v2(let attempt, _, _): attempt
+        case .legacy(let id, _): AttemptID(legacy: id)
+        case .foreign: nil
+        }
+    }
+
+    /// The outcome file, relative to the App Group. A legacy URL is resolved from its Backup or
+    /// ShareInbox component, whatever container path precedes it.
+    var outcomePath: String? {
+        switch self {
+        case .v2(_, _, let outcome): outcome
+        case .legacy(_, let receipt): AppGroupLayout.relativePath(of: receipt)
+        case .foreign: nil
+        }
+    }
+
+    private static func isRelative(_ path: String) -> Bool {
+        !path.isEmpty && !path.hasPrefix("/") && !path.contains("://") && !path.split(separator: "/").contains("..")
+    }
+}
+
+/// An outcome file: the legacy keys, which every build wrote, plus what version 2 adds. A legacy
+/// file has no version and no error domain or code; classify it only by its receipt and status.
+struct OutcomeRecord: Codable, Equatable, Sendable {
+    struct Receipt: Codable, Equatable, Sendable {
+        let id: String
+        /// created or duplicate.
+        let status: String
+    }
+
+    var receipt: Receipt?
+    /// A localized description. Never parse it.
+    var error: String?
+    var httpStatus: Int?
+    var errorDomain: String?
+    var errorCode: Int?
+    /// NSURLErrorBackgroundTaskCancelledReasonKey when iOS cancelled the task.
+    var cancelReason: Int?
+    /// 2 from B9; absent in legacy files.
+    var v: Int?
+}
+
+/// Where the transfer engine is, for the backup screen and notifications.
+enum TransferPhase: Hashable, Sendable {
+    case idle
+    case discovering
+    case running
+    case waiting(WaitReason)
+    case blocked(AccountRestriction)
+}
+
+struct TransferSnapshot: Hashable, Sendable {
+    var intent: RunIntent
+    var phase: TransferPhase
+    var remaining: Int
+    var confirmed: Int
+    var failed: Int
+    /// The current file's progress, from 0 to 1, when known.
+    var fileProgress: Double?
+    var bytesSent: Int64
+    var bytesExpected: Int64
+    var bytesPerSecond: Int64?
+    var lastMessage: String?
+}
+
+enum EnqueueResult: Hashable, Sendable {
+    case queued(Int)
+    case alreadyBackedUp(Int)
+    case refused(AccountRestriction)
+}

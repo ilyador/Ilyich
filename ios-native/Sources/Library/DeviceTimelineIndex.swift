@@ -160,7 +160,7 @@ private enum DeviceTimelineSource {
     }
 }
 
-private actor LocalFingerprintCache {
+actor LocalFingerprintCache {
     struct Fingerprint: Codable, Sendable { let modified: Date?; let checksum: String }
     private let url: URL
     init(scope: String) {

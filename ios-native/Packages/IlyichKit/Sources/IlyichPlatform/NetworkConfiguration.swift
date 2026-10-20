@@ -68,7 +68,18 @@ public enum NetworkConfigurationError: LocalizedError {
     }
 }
 
-public enum TransportFailure {
+/// A request that never got an answer from the server.
+public enum TransportFailure: Error, Equatable, Sendable {
+    /// The network or the server could not be reached.
+    case unreachable(URLError.Code)
+    /// The connection moved to another configured address while the request was out.
+    case endpointChanged
+    /// None of the configured addresses answered.
+    case allEndpointsUnavailable
+    /// iOS cancelled a background transfer, for example when the user force-quit the app. The
+    /// reason is the task's NSURLErrorBackgroundTaskCancelledReasonKey, when it has one.
+    case systemCancelled(reason: Int?)
+
     /// A definite, non-cancelled transport failure, including every configured endpoint being unreachable.
     public static func isDefinite(_ error: any Error) -> Bool {
         if let urlError = error as? URLError { return urlError.code != .cancelled }

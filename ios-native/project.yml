@@ -87,7 +87,12 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
-      - Tests
+      - path: Tests
+        excludes: [Fixtures, "Fixtures/**"]
+      # Golden files, copied as one folder so their paths are kept.
+      - path: Tests/Fixtures
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: Ilyich
     settings:
