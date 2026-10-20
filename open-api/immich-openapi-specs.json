@@ -16185,6 +16185,15 @@
             }
           },
           {
+            "name": "isDeveloped",
+            "required": false,
+            "in": "query",
+            "description": "Filter by Lightroom development (true for photos with developed previews only, false for the rest)",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "isFavorite",
             "required": false,
             "in": "query",
@@ -16381,6 +16390,15 @@
             "schema": {
               "example": "11.075683,49.416711,11.117589,49.454875",
               "type": "string"
+            }
+          },
+          {
+            "name": "isDeveloped",
+            "required": false,
+            "in": "query",
+            "description": "Filter by Lightroom development (true for photos with developed previews only, false for the rest)",
+            "schema": {
+              "type": "boolean"
             }
           },
           {

@@ -47,6 +47,17 @@ describe(TimelineService.name, () => {
         authStub.admin,
       );
     });
+
+    it('should pass the development filter to the repository', async () => {
+      mocks.asset.getTimeBuckets.mockResolvedValue([{ timeBucket: 'bucket', count: 1 }]);
+
+      await sut.getTimeBuckets(authStub.admin, { isDeveloped: true });
+
+      expect(mocks.asset.getTimeBuckets).toHaveBeenCalledWith(
+        { userIds: [authStub.admin.user.id], isDeveloped: true },
+        authStub.admin,
+      );
+    });
   });
 
   describe('getTimeBucket', () => {

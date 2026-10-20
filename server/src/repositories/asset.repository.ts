@@ -125,6 +125,8 @@ interface LivePhotoSearchOptions {
 
 interface AssetBuilderOptions {
   isFavorite?: boolean;
+  /** Photos whose published previews include a sidecar development, or, with false, the rest. */
+  isDeveloped?: boolean;
   isTrashed?: boolean;
   isDuplicate?: boolean;
   albumId?: string;
@@ -1127,6 +1129,17 @@ export class AssetRepository {
             }),
           )
           .$if(options.isFavorite !== undefined, (qb) => qb.where('asset.isFavorite', '=', options.isFavorite!))
+          .$if(options.isDeveloped !== undefined, (qb) =>
+            qb.where((eb) => {
+              const developed = eb.exists(
+                eb
+                  .selectFrom('asset_job_status')
+                  .whereRef('asset_job_status.assetId', '=', 'asset.id')
+                  .where(sql<string>`asset_job_status.development->'publishedBase'->>'isDeveloped'`, '=', 'true'),
+              );
+              return options.isDeveloped ? developed : eb.not(developed);
+            }),
+          )
           .$if(!!options.assetType, (qb) => qb.where('asset.type', '=', options.assetType!))
           .$if(options.isDuplicate !== undefined, (qb) =>
             qb.where('asset.duplicateId', options.isDuplicate ? 'is not' : 'is', null),
@@ -1219,6 +1232,17 @@ export class AssetRepository {
             }),
           )
           .$if(options.isFavorite !== undefined, (qb) => qb.where('asset.isFavorite', '=', options.isFavorite!))
+          .$if(options.isDeveloped !== undefined, (qb) =>
+            qb.where((eb) => {
+              const developed = eb.exists(
+                eb
+                  .selectFrom('asset_job_status')
+                  .whereRef('asset_job_status.assetId', '=', 'asset.id')
+                  .where(sql<string>`asset_job_status.development->'publishedBase'->>'isDeveloped'`, '=', 'true'),
+              );
+              return options.isDeveloped ? developed : eb.not(developed);
+            }),
+          )
           .$if(!!options.withStacked, (qb) =>
             qb
               .where((eb) =>
