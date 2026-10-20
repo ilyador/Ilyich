@@ -1,3 +1,4 @@
+import IlyichPlatform
 import Photos
 
 /// Saves server assets into the user's Apple Photos library, one asset (or one Live Photo pair) at a time.

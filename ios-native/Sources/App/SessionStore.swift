@@ -1,6 +1,7 @@
 import SwiftUI
 import WidgetKit
 import UIKit
+import IlyichPlatform
 
 @MainActor @Observable final class SessionStore {
     var api: APIClient?
@@ -51,14 +52,14 @@ import UIKit
             if ProcessInfo.processInfo.arguments.contains("--ui-testing-library") {
                 // The fixture serves a long People shelf to this session's own token.
                 let token = ProcessInfo.processInfo.arguments.contains("--ui-testing-many-people") ? "ui-test-many-people" : "ui-test-session"
-                do { try connect(SavedSession(server: URL(string: "http://127.0.0.1:18091")!, token: token, userID: "00000000-0000-4000-8000-000000000001", name: "Test library")) }
+                do { try connect(StoredCredential(server: URL(string: "http://127.0.0.1:18091")!, token: token, userID: "00000000-0000-4000-8000-000000000001", name: "Test library")) }
                 catch { self.error = error.localizedDescription }
             }
             #endif
             return
         }
         do {
-            if var saved = try await Task.detached(priority: .userInitiated, operation: { try SessionKeychain.read() }).value {
+            if var saved = try await Task.detached(priority: .userInitiated, operation: { try KeychainCredentialStore().load() }).value {
                 // Earlier native builds persisted the server flag without the
                 // administrator exemption. Repair it without changing credentials.
                 if saved.requiresPasswordChange == true {
@@ -70,7 +71,7 @@ import UIKit
                     let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID, session: checkSession)
                     if let user = try? await client.currentUser(), user.isAdmin == true {
                         saved.requiresPasswordChange = false
-                        try? SessionKeychain.save(saved)
+                        try? KeychainCredentialStore().save(saved)
                     }
                 }
                 try connect(saved)
@@ -87,14 +88,14 @@ import UIKit
 
     func acceptLogin(_ result: LoginResponse, server: URL) throws {
         guard !isSigningOut else { throw APIError.invalidResponse("Sign-out is still finishing. Try signing in again in a moment.") }
-        let saved = SavedSession(server: server, token: result.accessToken, userID: result.userId, name: result.name,
-                                 requiresPasswordChange: result.requiresPasswordChange)
-        if !isUITesting { try SessionKeychain.save(saved) }
+        let saved = StoredCredential(server: server, token: result.accessToken, userID: result.userId, name: result.name,
+                                     requiresPasswordChange: result.requiresPasswordChange)
+        if !isUITesting { try KeychainCredentialStore().save(saved) }
         if !isUITesting { WidgetCenter.shared.reloadAllTimelines() }
         try connect(saved)
     }
 
-    private func connect(_ saved: SavedSession) throws {
+    private func connect(_ saved: StoredCredential) throws {
         let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID,
                                    networkConfiguration: isUITesting ? NetworkConfiguration() : nil)
         api = client
@@ -327,7 +328,7 @@ import UIKit
         // observe sign-out even if subsequent local cleanup cannot finish.
         var cleanupError: String?
         if !isUITesting {
-            do { try SessionKeychain.remove() } catch { cleanupError = error.localizedDescription }
+            do { try KeychainCredentialStore().remove() } catch { cleanupError = error.localizedDescription }
             WidgetCenter.shared.reloadAllTimelines()
         }
         CastController.shared.signOut()

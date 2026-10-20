@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 
 enum AppLink: Hashable, Sendable {
     case asset(String, albumID: String? = nil), album(String), person(String), memory(String?), activity(String), sharedFiles

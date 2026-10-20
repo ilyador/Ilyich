@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import IlyichPlatform
 
 enum HTTPMethod: String, Sendable { case get = "GET", post = "POST", put = "PUT", patch = "PATCH", delete = "DELETE" }
 
@@ -44,7 +45,9 @@ actor APIClient {
         self.baseURL = try Self.normalizedBaseURL(baseURL)
         self.accessToken = accessToken
         self.userID = userID
-        self.connection = try ServerConnection(server: self.baseURL, configuration: networkConfiguration)
+        self.connection = try ServerConnection(server: self.baseURL,
+                                               configuration: networkConfiguration ?? NetworkConfigurationStore.connectionSettings(server: self.baseURL),
+                                               wifiName: SystemWiFiName())
         if let session {
             self.session = session
             self.streamingSession = session
@@ -72,7 +75,11 @@ actor APIClient {
         try await connection.request(path: path, query: query, token: accessToken)
     }
     func networkConfiguration() async -> NetworkConfiguration { await connection.settings() }
-    func updateNetworkConfiguration(_ configuration: NetworkConfiguration) async throws { try await connection.update(configuration) }
+    func updateNetworkConfiguration(_ configuration: NetworkConfiguration) async throws {
+        let validated = try configuration.validated()
+        try NetworkConfigurationStore.save(validated, server: baseURL)
+        try await connection.update(validated)
+    }
     func activeEndpoint() async throws -> URL { try await connection.endpoint() }
 
     func request<T: Decodable & Sendable>(_ method: HTTPMethod, path: String, query: [URLQueryItem] = []) async throws -> T {

@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 import os
 
 /// Per-call delegate for `URLSession.download(for:delegate:)`. A task delegate replaces the session delegate for

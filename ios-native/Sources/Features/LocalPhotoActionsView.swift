@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import IlyichPlatform
 
 struct LocalPhotoActionsView: View {
     let photos: [LocalPhoto]
@@ -65,8 +66,8 @@ struct LocalPhotoActionsView: View {
             return asset
         }
     }
-    private func writeSession() throws -> SavedSession {
-        guard let saved = try SessionKeychain.read() else { throw APIError.unauthorized }
+    private func writeSession() throws -> StoredCredential {
+        guard let saved = try KeychainCredentialStore().load() else { throw APIError.unauthorized }
         guard !ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
         return saved
     }
