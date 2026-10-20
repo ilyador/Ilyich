@@ -55,6 +55,9 @@ struct DiagnosticsView: View {
                     LabeledContent("Visited timeline snapshots", value: timeline.snapshotCount.formatted())
                     LabeledContent("Timeline cache", value: bytes(timeline.diskBytes))
                 }
+                if let warmer = session?.thumbnailWarmer, warmer.total > 0 {
+                    LabeledContent("Thumbnails kept offline", value: "\(warmer.stored.formatted()) of \(warmer.total.formatted())")
+                }
                 if let media {
                     LabeledContent("Photo download cache", value: bytes(media.diskBytes))
                     LabeledContent("Downloads held in memory", value: bytes(media.memoryBytes))

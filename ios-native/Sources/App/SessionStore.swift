@@ -13,6 +13,8 @@ import UIKit
     var pendingLink: AppLink?
     private(set) var libraryAPI: (any LibraryAPI)?
     private(set) var entities: EntityStore?
+    /// Fills the thumbnail store with the whole library while the app is open.
+    private(set) var thumbnailWarmer: ThumbnailWarmer?
     private(set) var syncError: String?
     private(set) var lastSyncDate: Date?
     private(set) var isSyncing = false
@@ -88,7 +90,9 @@ import UIKit
         let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID,
                                    networkConfiguration: isUITesting ? NetworkConfiguration() : nil)
         api = client
-        pipeline = MediaPipeline(client: client)
+        let pipeline = MediaPipeline(client: client)
+        self.pipeline = pipeline
+        thumbnailWarmer?.stop(); thumbnailWarmer = nil
         name = saved.name
         requiresPasswordChange = saved.requiresPasswordChange == true
         if !isUITesting, !requiresPasswordChange {
@@ -98,6 +102,9 @@ import UIKit
                 let sync = NativeSync(api: client, store: entities)
                 self.sync = sync
                 libraryAPI = NativeLibraryAPI(client: client, entities: entities, sync: sync)
+                let warmer = ThumbnailWarmer()
+                thumbnailWarmer = warmer
+                Task { if (try? await entities.isComplete()) == true { warmer.start(entities: entities, pipeline: pipeline) } }
                 startSync()
             } catch { syncError = error.localizedDescription }
         }
@@ -242,11 +249,17 @@ import UIKit
         lastSyncDate = date; syncError = nil
         await client.persistCachedServerFeatures()
         guard api === client else { return }
+        if summary.completed, let pipeline { thumbnailWarmer?.start(entities: entities, pipeline: pipeline) }
         guard summary.changed || summary.completed || !summary.assetIDs.isEmpty else { return }
         let accessChanged = (try? await entities.takeAccessInvalidation()) == true
         guard api === client else { return }
-        if accessChanged || summary.accessChanged || !summary.deletedAssetIDs.isEmpty || summary.reset {
+        if accessChanged || summary.accessChanged || summary.reset {
             await previousPipeline?.removeAll()
+            // Places are kept through ordinary syncs, but not past a change in what may be seen.
+            await TimelinePlacesCache.shared.removeAll(scope: client.cacheScope)
+        } else if !summary.deletedAssetIDs.isEmpty {
+            // Clearing every cache for one deletion would throw away the whole offline library.
+            await previousPipeline?.forget(assetIDs: summary.deletedAssetIDs)
         }
         guard api === client else { return }
         await TimelineCache.shared.removeAll(scope: client.cacheScope)
@@ -299,6 +312,7 @@ import UIKit
         let previous = api, previousPipeline = pipeline, previousSync = sync, previousEntities = entities
         api = nil; pipeline = nil; name = ""; requiresPasswordChange = false; pendingLink = nil; error = nil
         sync = nil; entities = nil; libraryAPI = nil; syncError = nil; lastSyncDate = nil; isSyncing = false
+        thumbnailWarmer?.stop(); thumbnailWarmer = nil
         validationTask?.cancel()
         syncTask?.cancel(); syncTask = nil
         // Remove shared credentials before suspending; widgets and uploads must
