@@ -20,11 +20,27 @@ struct ViewerPhoto: View {
     @State private var usingLocalCopy = false
     @State private var reload = 0
     @State private var zoomed = false
+    /// The grid's thumbnail, shown enlarged while the preview loads.
+    @State private var placeholder: UIImage?
+    @State private var slowPreview = false
     @AppStorage("imageLoadOriginal") private var fullResolution = false
     @Environment(\.displayScale) private var scale
     @Environment(\.scenePhase) private var scenePhase
     private var mediaKey: String { asset.id + "|" + asset.cacheRevision + "|" + String(asset.hasKnownEditState) + String(asset.isEdited) + String(asset.isDeveloped) }
     private var displayedImage: UIImage? { usingLocalCopy ? (localMedia.image ?? image) : image }
+
+    init(pipeline: MediaPipeline, asset: Asset, active: Bool, onTap: @escaping (Double) -> Void,
+         onDismiss: @escaping () -> Void, matchedLocalPhoto: LocalPhoto? = nil) {
+        self.pipeline = pipeline; self.asset = asset; self.active = active
+        self.onTap = onTap; self.onDismiss = onDismiss; self.matchedLocalPhoto = matchedLocalPhoto
+        // A photo seen before opens sharp at once. Otherwise its grid thumbnail stands in, so a
+        // slow preview, such as a developed RAW, never opens on an empty page.
+        let preview = pipeline.latestImage(assetID: asset.id, size: .preview, revision: asset.cacheRevision)
+        _image = State(initialValue: preview?.uiImage)
+        _placeholder = State(initialValue: preview == nil
+            ? pipeline.latestImage(assetID: asset.id, size: .thumbnail, revision: asset.cacheRevision)?.uiImage : nil)
+    }
+
     var body: some View {
         GeometryReader { geometry in
             ZStack {
@@ -34,6 +50,13 @@ struct ViewerPhoto: View {
                     ContentUnavailableView { Label("Photo couldn’t load", systemImage: "photo.badge.exclamationmark") }
                     description: { Text(failure) }
                     actions: { Button("Retry") { reload += 1 } }
+                } else if let placeholder {
+                    Image(uiImage: placeholder).resizable().scaledToFit()
+                        .overlay {
+                            // Only a preview that keeps the thumbnail up for a while earns a spinner.
+                            if slowPreview { ProgressView().tint(.white).padding(12).background(.black.opacity(0.4), in: .circle) }
+                        }
+                        .contentShape(.rect).onTapGesture { onTap(0.5) }
                 } else { ProgressView().tint(.white) }
             }.frame(width: geometry.size.width, height: geometry.size.height)
                 .overlay(alignment: .bottom) {
@@ -51,6 +74,11 @@ struct ViewerPhoto: View {
                         }
                     }
                 }
+                .task(id: mediaKey) {
+                    slowPreview = false
+                    try? await Task.sleep(for: .seconds(0.8))
+                    slowPreview = !Task.isCancelled
+                }
                 .task(id: mediaKey + String(reload) + String(zoomed) + String(fullResolution) + String(active) + String(Int(max(geometry.size.width, geometry.size.height) * scale))) {
                     await loadImage(pixels: Int(max(geometry.size.width, geometry.size.height) * scale))
                 }
@@ -58,6 +86,7 @@ struct ViewerPhoto: View {
                     await playAnimation(pixels: Int(max(geometry.size.width, geometry.size.height) * scale))
                 }
         }.accessibilityLabel(asset.displayName)
+            .accessibilityIdentifier("viewer.photo." + asset.id)
             .onChange(of: active) { _, value in if !value { zoomed = false; localMedia.cancel() } }
             .onChange(of: localMedia.image) { _, _ in
                 // A Photos edit during an asynchronous image request invalidates
@@ -86,12 +115,17 @@ struct ViewerPhoto: View {
         } catch is CancellationError { }
         catch {
             guard !Task.isCancelled, imageLoadID == loadID, animatedRevision != mediaKey else { return }
-            failure = error.localizedDescription
+            failure = Self.message(for: error)
             if let photo = LocalMediaFallback.photo(after: error, asset: asset, matched: matchedLocalPhoto, active: active) {
                 usingLocalCopy = true
                 localMedia.load(photo, full: true, network: false, maximumResolution: fullResolution || zoomed)
             }
         }
+    }
+    /// A refused photo is not an expired session; only the session check signs out.
+    private static func message(for error: Error) -> String {
+        if case APIError.unauthorized = error { return "The server refused this photo. Try again." }
+        return error.localizedDescription
     }
     private func playAnimation(pixels: Int) async {
         let loadID = UUID(); animationLoadID = loadID
@@ -114,8 +148,8 @@ struct ViewerPhoto: View {
         } catch is CancellationError { }
         catch {
             guard !Task.isCancelled, animationLoadID == loadID else { return }
-            animationFailure = error.localizedDescription
-            if image == nil { failure = error.localizedDescription }
+            animationFailure = Self.message(for: error)
+            if image == nil { failure = Self.message(for: error) }
         }
     }
 
