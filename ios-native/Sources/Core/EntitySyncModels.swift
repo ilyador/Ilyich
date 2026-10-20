@@ -54,6 +54,12 @@ struct SyncChangeSummary: Sendable {
         if deletedAssetIDs.count < 2_000 { deletedAssetIDs.formUnion(other.deletedAssetIDs.prefix(2_000 - deletedAssetIDs.count)) }
     }
 }
+/// A photo the index removed, whose cached media must go too. Revoked when access to it was lost
+/// rather than the photo deleted.
+struct MediaPurge: Hashable, Sendable {
+    let assetID: String
+    let revoked: Bool
+}
 struct EntityStoreStatistics: Sendable {
     let counts: [String: Int]
     let lastSync: Date?

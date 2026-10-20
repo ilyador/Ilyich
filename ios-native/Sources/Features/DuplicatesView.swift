@@ -163,7 +163,7 @@ struct TrashView: View {
         loading = true; defer { loading = false }
         do {
             try await api.trashAssets(ids: Array(selection), permanently: true)
-            await invalidateBrowsingCache(api: api, pipeline: pipeline)
+            await invalidateBrowsingCache(api: api, pipeline: pipeline, deleted: selection)
             loading = false; await reload()
         } catch { failure = .init(error) }
     }
@@ -174,14 +174,17 @@ struct TrashView: View {
             guard try await api.serverFeatures().trash else { throw APIError.invalidResponse("Trash is turned off on this server.") }
             let result: TrashResult = try await api.request(.post, path: permanently ? "trash/empty" : "trash/restore")
             resultMessage = permanently ? "Permanently removed \(result.count.formatted()) items." : "Restored \(result.count.formatted()) items."
-            await invalidateBrowsingCache(api: api, pipeline: pipeline)
+            // The sync forgets the rest of an emptied Trash as their deletions arrive.
+            await invalidateBrowsingCache(api: api, pipeline: pipeline, deleted: permanently ? Set(assets.map(\.id)) : [])
             loading = false; await reload()
         } catch { failure = .init(error) }
     }
 }
 
-@MainActor private func invalidateBrowsingCache(api: APIClient, pipeline: MediaPipeline) async {
+/// The timeline reloads after a change made here. Trashed and restored photos keep their media;
+/// photos deleted for good lose theirs.
+@MainActor private func invalidateBrowsingCache(api: APIClient, pipeline: MediaPipeline, deleted: Set<String> = []) async {
     await TimelineCache.shared.removeAll(scope: api.cacheScope)
-    await pipeline.removeAll()
+    await pipeline.forget(assetIDs: deleted)
     NotificationCenter.default.post(name: .ilyichCachesReset, object: nil, userInfo: ["scope": api.cacheScope])
 }

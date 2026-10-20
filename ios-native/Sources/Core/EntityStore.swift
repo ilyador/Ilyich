@@ -42,12 +42,26 @@ actor EntityStore {
         guard let value = try metadata(Self.cachedServerFeaturesKey) else { return nil }
         return try APIJSON.decoder().decode(ServerFeatures.self, from: Data(value.utf8))
     }
-    /// Access changes survive a later stream failure, allowing the UI to discard
-    /// stale media even when the overall sync did not return a success summary.
+    /// A reset survives a later stream failure, allowing the UI to discard stale media even
+    /// when the overall sync did not return a success summary.
     func takeAccessInvalidation() throws -> Bool {
         let changed = try metadata("accessInvalidated") == "1"
         if changed { try setMetadata("accessInvalidated", "0") }
         return changed
+    }
+    /// Photos the index removed whose media the app still has to forget, with whether access to
+    /// them was lost. They stay queued until the media layer reports them forgotten, so a crash
+    /// in between forgets them on the next sync.
+    func pendingMediaPurges(limit: Int = 5_000) throws -> [MediaPurge] {
+        try database.query("SELECT id,revoked FROM media_purges LIMIT ?", [String(max(limit, 1))]).compactMap { row in
+            row[0].map { MediaPurge(assetID: $0, revoked: row[1] == "1") }
+        }
+    }
+    /// A purge that a later batch made stricter stays queued.
+    func finishMediaPurges(_ purges: [MediaPurge]) throws {
+        try database.transaction {
+            for purge in purges { try database.execute("DELETE FROM media_purges WHERE id=? AND revoked<=?", [purge.assetID, purge.revoked ? "1" : "0"]) }
+        }
     }
     /// New login or a removed local database must never inherit server-only cursors.
     func prepare(sessionFingerprint: String) throws -> Bool {
@@ -98,7 +112,7 @@ actor EntityStore {
                 guard !event.ackType.isEmpty, event.ack.contains("|") else { throw invalidSync() }
                 try database.execute("INSERT INTO acknowledgements(type,ack) VALUES(?,?) ON CONFLICT(type) DO UPDATE SET ack=excluded.ack", [event.ackType, event.ack])
             }
-            if summary.accessChanged { try setMetadata("accessInvalidated", "1") }
+            if summary.reset { try setMetadata("accessInvalidated", "1") }
         }
         return summary
     }
@@ -382,9 +396,11 @@ actor EntityStore {
         summary.changed = true
         if kind == "asset" {
             if summary.assetIDs.count < 2_000 { summary.assetIDs.insert(id) }
-            if delete || object["visibility"]?.string == "locked" {
-                try deleteAsset(id)
-                summary.accessChanged = true
+            let locked = object["visibility"]?.string == "locked"
+            if delete || locked {
+                // A deletion only removes the photo; locking hides it the way lost access does.
+                try deleteAsset(id, revoked: locked)
+                if locked { summary.accessChanged = true }
                 if summary.deletedAssetIDs.count < 2_000 { summary.deletedAssetIDs.insert(id) }
                 return
             }
@@ -399,34 +415,41 @@ actor EntityStore {
             if kind == "album" { try deleteAlbum(id) }
             if kind == "memory" { try database.execute("DELETE FROM entities WHERE kind='memoryAsset' AND json_extract(payload,'$.memoryId')=?", [id]) }
             if kind == "person" { try database.execute("DELETE FROM entities WHERE kind='face' AND json_extract(payload,'$.personId')=?", [id]) }
-            if kind == "user" { try deleteOwnedAssets(id) }
+            if kind == "user", try deleteOwnedAssets(id) > 0 { summary.accessChanged = true }
         } else {
             let encoded = try JSONEncoder().encode(object)
             try database.execute("INSERT INTO entities(kind,id,payload) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET payload=excluded.payload", [kind, id, String(decoding: encoded, as: UTF8.self)])
         }
         if kind != "asset" && kind != "exif" { summary.collectionsChanged = true }
         if delete, kind == "albumUser", object["userId"]?.string == userID, let albumID = object["albumId"]?.string { try deleteAlbum(albumID) }
-        if delete && ["partner", "albumUser", "album", "albumAsset", "user"].contains(kind) {
+        // Only photos that leave the account change what it may see. A photo removed from one of
+        // my own albums stays in my library, and so does its media.
+        if delete && ["partner", "albumUser", "album", "albumAsset", "user"].contains(kind), try purgeInaccessibleAssets() > 0 {
             summary.accessChanged = true
-            try purgeInaccessibleAssets()
         }
     }
-    private func deleteAsset(_ id: String) throws {
+    /// The photo's media is forgotten once the batch commits. Its queued purge commits with the
+    /// batch, so a crash before then cannot leave the media behind.
+    private func deleteAsset(_ id: String, revoked: Bool) throws {
         try database.execute("DELETE FROM entities WHERE (kind='asset' AND id=?) OR (kind IN ('exif','edit','ocr','assetMetadata','face','albumAsset','memoryAsset') AND json_extract(payload,'$.assetId')=?)", [id, id])
+        try database.execute("INSERT INTO media_purges(id,revoked) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET revoked=max(revoked,excluded.revoked)", [id, revoked ? "1" : "0"])
     }
     private func deleteAlbum(_ id: String) throws {
         try database.execute("DELETE FROM entities WHERE (kind='album' AND id=?) OR (kind IN ('albumUser','albumAsset') AND json_extract(payload,'$.albumId')=?)", [id, id])
     }
-    private func deleteOwnedAssets(_ ownerID: String) throws {
-        for row in try database.query("SELECT id FROM entities WHERE kind='asset' AND json_extract(payload,'$.ownerId')=?", [ownerID]) { if let id = row[0] { try deleteAsset(id) } }
+    private func deleteOwnedAssets(_ ownerID: String) throws -> Int {
+        let rows = try database.query("SELECT id FROM entities WHERE kind='asset' AND json_extract(payload,'$.ownerId')=?", [ownerID])
+        for row in rows { if let id = row[0] { try deleteAsset(id, revoked: true) } }
+        return rows.count
     }
-    private func purgeInaccessibleAssets() throws {
+    private func purgeInaccessibleAssets() throws -> Int {
         let rows = try database.query("""
         SELECT a.id FROM entities a WHERE a.kind='asset' AND json_extract(a.payload,'$.ownerId')!=?
         AND NOT EXISTS(SELECT 1 FROM entities p WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedById')=json_extract(a.payload,'$.ownerId') AND json_extract(p.payload,'$.sharedWithId')=?)
         AND NOT EXISTS(SELECT 1 FROM entities r JOIN entities u ON u.kind='albumUser' AND json_extract(u.payload,'$.albumId')=json_extract(r.payload,'$.albumId') AND json_extract(u.payload,'$.userId')=? WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.assetId')=a.id)
         """, [userID, userID, userID])
-        for row in rows { if let id = row[0] { try deleteAsset(id) } }
+        for row in rows { if let id = row[0] { try deleteAsset(id, revoked: true) } }
+        return rows.count
     }
     private func decodeAsset(_ data: Data) throws -> Asset {
         let object = try JSONDecoder().decode([String: EntityJSON].self, from: data)
@@ -504,6 +527,7 @@ private final class EntityDatabase: @unchecked Sendable {
             try execute("CREATE TABLE IF NOT EXISTS entities(kind TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(kind,id))")
             try execute("CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS acknowledgements(type TEXT PRIMARY KEY,ack TEXT NOT NULL)")
+            try execute("CREATE TABLE IF NOT EXISTS media_purges(id TEXT PRIMARY KEY,revoked INTEGER NOT NULL)")
             try execute("CREATE INDEX IF NOT EXISTS entity_asset ON entities(kind,json_extract(payload,'$.assetId'))")
             try execute("CREATE INDEX IF NOT EXISTS entity_person_asset ON entities(kind,json_extract(payload,'$.personId'),json_extract(payload,'$.assetId'))")
             try execute("CREATE INDEX IF NOT EXISTS entity_album ON entities(kind,json_extract(payload,'$.albumId'))")

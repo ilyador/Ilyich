@@ -209,8 +209,36 @@ final class EntitySyncTests: XCTestCase {
         _ = try await store.apply([asset("photo", visibility: "locked"), event("AssetExifV1", #"{"assetId":"photo","description":"late private caption"}"#)], epoch: epoch)
         let locked = try await store.asset(id: "photo"), exif = try await store.entityData(kind: "exif", id: "photo")
         XCTAssertNil(locked); XCTAssertNil(exif)
-        let accessInvalidated = try await store.takeAccessInvalidation(), consumed = try await store.takeAccessInvalidation()
-        XCTAssertTrue(accessInvalidated); XCTAssertFalse(consumed)
+        let resetPending = try await store.takeAccessInvalidation(), purges = try await store.pendingMediaPurges()
+        XCTAssertFalse(resetPending, "Locking one photo forgets only that photo's media.")
+        XCTAssertEqual(purges, [MediaPurge(assetID: "photo", revoked: true)])
+    }
+    /// Every removed photo waits in the index until its media is forgotten, past the summary's
+    /// 2,000 IDs, and photos that left the account are marked revoked.
+    func testRemovedPhotosWaitInTheIndexUntilTheirMediaIsForgotten() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root), epoch = await store.epoch()
+        let ids = (0..<2_100).map { "deleted-\($0)" }
+        _ = try await store.apply(try ids.map { try asset($0) } + [
+            asset("bob-shared", owner: "bob"),
+            event("AlbumV2", #"{"id":"shared","ownerId":"bob","name":"Shared","description":"","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","thumbnailAssetId":null,"isActivityEnabled":true,"order":"desc"}"#),
+            event("AlbumUserV1", #"{"albumId":"shared","userId":"alice","role":"viewer"}"#),
+            event("AlbumToAssetV1", #"{"albumId":"shared","assetId":"bob-shared"}"#),
+        ], epoch: epoch)
+        let deletion = try await store.apply(try ids.map { try event("AssetDeleteV1", "{\"assetId\":\"\($0)\"}") }, epoch: epoch)
+        let unshared = try await store.apply([event("AlbumUserDeleteV1", #"{"albumId":"shared","userId":"alice"}"#)], epoch: epoch)
+        let queued = try await store.pendingMediaPurges(limit: 5_000)
+        XCTAssertFalse(deletion.accessChanged, "Deletions change nothing the account may see.")
+        XCTAssertTrue(unshared.accessChanged, "Bob's photo left the account.")
+        XCTAssertEqual(queued.count, 2_101, "Every removed photo is queued, past the summary's 2,000 IDs.")
+        XCTAssertEqual(queued.filter(\.revoked).map(\.assetID), ["bob-shared"])
+
+        try await store.finishMediaPurges(Array(queued.prefix(2_000)))
+        let left = try await store.pendingMediaPurges(limit: 5_000)
+        let resetPending = try await store.takeAccessInvalidation()
+        XCTAssertEqual(left.count, 101, "Forgotten photos leave the queue.")
+        XCTAssertFalse(resetPending, "Neither removal empties every cache.")
     }
     func testOfflineTimelineUsesLocalMonthsFavoritesStacksAndBothCloudDateFormats() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
