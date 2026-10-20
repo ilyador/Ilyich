@@ -7,6 +7,21 @@ struct TimeBucket: Codable, Hashable, Identifiable, Sendable {
     var date: Date? { APIDate.parse(timeBucket) }
 }
 
+/// The photos of one place. Only the local library index can lay them out by month, so the server
+/// never sees this filter. A place is known by its name and size, which keeps its feed and caches
+/// apart from the library's.
+struct TimelinePlace: Hashable, Sendable {
+    let key: String
+    let assetIDs: [String]
+
+    init(id: String, assetIDs: [String]) {
+        key = "\(id)#\(assetIDs.count)"; self.assetIDs = assetIDs
+    }
+    // A place can hold thousands of photos; comparing and hashing them all would slow every lookup.
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.key == rhs.key }
+    func hash(into hasher: inout Hasher) { hasher.combine(key) }
+}
+
 struct TimelineFilter: Hashable, Sendable {
     var visibility: AssetVisibility? = .timeline
     var albumID: String?
@@ -14,16 +29,27 @@ struct TimelineFilter: Hashable, Sendable {
     var userID: String?
     var isFavorite: Bool?
     var isTrashed: Bool?
+    /// Photos with a developed Lightroom preview, or, with false, the rest.
+    var isDeveloped: Bool?
     var withStacked = true
     var withPartners = false
     var order = "desc"
     var orderBy = "takenAt"
+    var place: TimelinePlace?
+
+    /// Names this feed for the caches on the phone. A place is part of it, though the server never
+    /// sees one.
+    var cacheKey: String {
+        let items = queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
+        return place.map { items + "&place=" + $0.key } ?? items
+    }
 
     var queryItems: [URLQueryItem] {
         var items = [URLQueryItem(name: "order", value: order), URLQueryItem(name: "orderBy", value: orderBy),
                      URLQueryItem(name: "withStacked", value: String(withStacked))]
         for (name, value) in [("visibility", visibility?.rawValue), ("albumId", albumID), ("personId", personID), ("userId", userID),
-                              ("isFavorite", isFavorite.map(String.init)), ("isTrashed", isTrashed.map(String.init))] {
+                              ("isFavorite", isFavorite.map(String.init)), ("isTrashed", isTrashed.map(String.init)),
+                              ("isDeveloped", isDeveloped.map(String.init))] {
             if let value { items.append(.init(name: name, value: value)) }
         }
         if withPartners { items.append(.init(name: "withPartners", value: "true")) }

@@ -175,10 +175,13 @@ actor APIClient {
     func lock() async throws { try await requestVoid(.post, path: "auth/session/lock") }
     func currentUser() async throws -> User { try await request(.get, path: "users/me") }
 
+    // The server cannot narrow its timeline to a place, and would answer with the whole library.
     func timeBuckets(filter: TimelineFilter = .init()) async throws -> [TimeBucket] {
-        try await request(.get, path: "timeline/buckets", query: filter.queryItems)
+        guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
+        return try await request(.get, path: "timeline/buckets", query: filter.queryItems)
     }
     func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) async throws -> [Asset] {
+        guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
         let payload: TimeBucketPayload = try await request(.get, path: "timeline/bucket", query: filter.queryItems + [.init(name: "timeBucket", value: bucket)])
         return try payload.assets()
     }

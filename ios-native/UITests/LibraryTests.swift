@@ -373,6 +373,23 @@ final class LibraryTests: XCTestCase {
         closeGlobe(app)
         XCTAssertTrue(app.textFields["library.search"].isHittable)
     }
+    @MainActor func testTheRailScrubsWithTheEarthOpen() {
+        let app = launch()
+        XCTAssertTrue(app.collectionViews["library.grid"].cells.firstMatch.waitForExistence(timeout: 15))
+        let heading = app.staticTexts["library.heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        let newest = heading.label
+        openShelves(app); app.buttons["Places"].tap()
+        let earth = app.otherElements["Interactive Earth"]
+        XCTAssertTrue(earth.waitForExistence(timeout: 15))
+        // The rail runs down the right edge above the Earth.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.2))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)),
+                   withVelocity: .default, thenHoldForDuration: 1)
+        let moved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", newest), object: heading)
+        XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 5), .completed, "Scrubbing the rail moves the feed while the Earth is open.")
+        XCTAssertTrue(earth.exists, "The Earth stays open while the rail scrubs.")
+    }
     @MainActor func testPeoplePlacesAndLightroomKeepTheCanonicalLibraryFeed() {
         let app = launch()
         let grid = app.collectionViews["library.grid"]
@@ -427,6 +444,8 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(grid.exists)
         XCTAssertTrue(app.buttons["Clear filters"].waitForExistence(timeout: 10))
         XCTAssertTrue(filterShelf.staticTexts["Lightroom"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["library.timeRail"].waitForExistence(timeout: 10),
+                      "Lightroom is a timeline of every developed photo, with its rail, as a person is.")
         XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "Tapping a filter puts the shelves away.")
         XCTAssertEqual(app.collectionViews.matching(identifier: "library.grid").count, 1,
                        "Shelf filters must not open a second photo collection grid.")

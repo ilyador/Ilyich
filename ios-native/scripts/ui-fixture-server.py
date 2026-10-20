@@ -85,12 +85,15 @@ def test_clip():
     finally:
         os.remove(path)
 
-def bucket(date):
-    assets = [asset(i,date) for i in range(100)]
+def bucket(date, developed=False):
+    # Lightroom's timeline holds only the developed photos: every seventh.
+    indexes = [i for i in range(100) if not developed or i % 7 == 0]
+    assets = [asset(i,date) for i in indexes]
+    n = len(assets)
     return {key: [a.get(key) for a in assets] for key in ['id','ownerId','isFavorite','isTrashed','visibility','fileCreatedAt','duration','mediaRevision']} | {
-        'ratio': [1.5]*100, 'isImage': [not is_video(i, date) for i in range(100)], 'createdAt':[date+'T12:00:00Z']*100,
+        'ratio': [1.5]*n, 'isImage': [not is_video(i, date) for i in indexes], 'createdAt':[date+'T12:00:00Z']*n,
         # A real thumbhash, so cells draw a sketch before their thumbnail arrives.
-        'localOffsetHours':[0]*100, 'thumbhash':['HIcNXIyGh4d/eHh5eIWHcEf3dQ==']*100, 'livePhotoVideoId':[None]*100,
+        'localOffsetHours':[0]*n, 'thumbhash':['HIcNXIyGh4d/eHh5eIWHcEf3dQ==']*n, 'livePhotoVideoId':[None]*n,
     }
 
 @functools.lru_cache(maxsize=1024)
@@ -137,8 +140,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path.endswith('/thumbnail'):
             data=test_image(path);self.send_response(200);self.send_header('Content-Type','image/png');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','max-age=3600');self.end_headers();self.wfile.write(data);return
-        if path=='/timeline/buckets':return self.send(BUCKETS)
-        if path=='/timeline/bucket':return self.send(bucket(q.get('timeBucket',['2026-12-01'])[0][:10]))
+        developed=q.get('isDeveloped',[''])[0]=='true'
+        if path=='/timeline/buckets':return self.send([b|{'count':15} for b in BUCKETS] if developed else BUCKETS)
+        if path=='/timeline/bucket':return self.send(bucket(q.get('timeBucket',['2026-12-01'])[0][:10], developed))
         if path.endswith('/video/playback'):
             data=test_clip()
             if data is None: self.send_response(404);self.end_headers();return

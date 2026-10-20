@@ -61,8 +61,7 @@ actor TimelineCache {
     }
     private func directory(_ scope: String) -> URL { root.appendingPathComponent(hash(scope), isDirectory: true) }
     private func file(scope: String, filter: TimelineFilter) -> URL {
-        let key = filter.queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
-        return directory(scope).appendingPathComponent(hash(key) + ".json")
+        directory(scope).appendingPathComponent(hash(filter.cacheKey) + ".json")
     }
     private func hash(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
 }
@@ -102,8 +101,7 @@ actor TimelinePlacesCache {
     }
     private func directory(_ scope: String) -> URL { root.appendingPathComponent(hash(scope), isDirectory: true) }
     private func file(scope: String, filter: TimelineFilter) -> URL {
-        let key = filter.queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
-        return directory(scope).appendingPathComponent(hash(key) + ".json")
+        directory(scope).appendingPathComponent(hash(filter.cacheKey) + ".json")
     }
     private func hash(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
 }

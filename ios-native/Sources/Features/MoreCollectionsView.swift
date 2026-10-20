@@ -7,7 +7,7 @@ struct MoreCollectionsView: View {
     let onFilter: (TimelineFilter, String) -> Void
     let onShowInTimeline: (Asset) -> Void
     let onMetadataFilter: (SearchFilter, String) -> Void
-    let onDevelopedFilter: (SearchFilter, String) -> Void
+    let onDeveloped: (String) -> Void
     var body: some View {
         List {
             Section("On your device") {
@@ -26,7 +26,7 @@ struct MoreCollectionsView: View {
                 Button { var filter = TimelineFilter(); filter.isFavorite = true; onFilter(filter, "Favorites") } label: { Label("Favorites", systemImage: "heart") }
                 Button { onMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO"), visibility: StringFilter(eq: "timeline")), "Videos") } label: { Label("Videos", systemImage: "video") }
                 Button { onMetadataFilter(SearchFilter(isMotion: BoolFilter(eq: true), visibility: StringFilter(eq: "timeline")), "Motion") } label: { Label("Motion", systemImage: "livephoto") }
-                Button { onDevelopedFilter(SearchFilter(visibility: StringFilter(eq: "timeline")), "Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
+                Button { onDeveloped("Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
                 NavigationLink { MemoriesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset, onShowInTimeline: onShowInTimeline) } label: { Label("On this day", systemImage: "clock.arrow.circlepath") }
             }
             Section("Shared") {

@@ -85,11 +85,21 @@ protocol LibraryAPI: Sendable {
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse
     func refresh() async throws
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount]
+    /// Whether a place's photos can be laid out by month, as a person's are.
+    func supportsPlaceTimelines() async -> Bool
 }
 extension LibraryAPI {
     func refresh() async throws {}
     /// Only the local index can count places for every month at once.
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] { [] }
+    /// Only the local index can lay out a place by month.
+    func supportsPlaceTimelines() async -> Bool { false }
+}
+
+enum LibraryAPIError: LocalizedError {
+    /// A place's months come from the offline library, which is not ready.
+    case placeNeedsOfflineLibrary
+    var errorDescription: String? { "This place's photos can be shown by month once the offline library has synced." }
 }
 extension APIClient: LibraryAPI {}
 
@@ -122,6 +132,8 @@ extension APIClient: LibraryAPI {}
     @ObservationIgnored private var placesStale = false
     /// Counting every photo's place is one long read, so it waits for the first months of the grid.
     private let placesDelay: Duration
+    /// Whether a chosen place can be laid out by month like a person, as of the last reload.
+    @ObservationIgnored private(set) var canShowPlacesByMonth = false
     var filterTitle: String?
     var query = ""
     var verification: Verification?
@@ -476,6 +488,7 @@ extension APIClient: LibraryAPI {}
                 if frozenFeed == nil { title = Self.monthTitle(buckets.first?.date) }
             }
             let response = try await api.timeBuckets(filter: timelineFilter)
+            canShowPlacesByMonth = await api.supportsPlaceTimelines()
             guard generation == current else { return }
             let previousSections = timelineSections
             remoteBuckets = response
@@ -508,7 +521,12 @@ extension APIClient: LibraryAPI {}
                     error = failure
                 }
             }
-        } catch is CancellationError {} catch { if generation == current { self.error = error.localizedDescription } }
+        } catch is CancellationError {} catch LibraryAPIError.placeNeedsOfflineLibrary {
+            // The offline library went away under a place, so its photos are found by search instead.
+            guard generation == current, let place = timelineFilter.place else { return }
+            canShowPlacesByMonth = false
+            searchPlace(assetIDs: place.assetIDs, title: filterTitle ?? "Place")
+        } catch { if generation == current { self.error = error.localizedDescription } }
     }
 
     func requestBucket(_ section: Int) {
@@ -682,16 +700,33 @@ extension APIClient: LibraryAPI {}
         scheduleReload()
     }
 
-    func setPlace(assetIDs: [String], title: String) {
+    /// A place's photos are laid out by month, as a person's are, so the rail, the months' places
+    /// and the trips work there too. Without the offline library they are found by search instead.
+    func setPlace(id: String, assetIDs: [String], title: String) {
         guard !assetIDs.isEmpty else { return }
+        guard canShowPlacesByMonth else { searchPlace(assetIDs: assetIDs, title: title); return }
+        rememberOriginal()
+        beginScopeChange()
+        timelineFilter = TimelineFilter(place: TimelinePlace(id: id, assetIDs: assetIDs))
+        searchFilter = Self.placeSearch(assetIDs)
+        filterTitle = title; query = ""; showingResults = false; usesMetadata = false
+        scheduleReload()
+    }
+
+    private func searchPlace(assetIDs: [String], title: String) {
         rememberOriginal()
         beginScopeChange()
         timelineFilter = TimelineFilter()
-        searchFilter = SearchFilter()
-        if assetIDs.count == 1 { searchFilter.id = IDFilter(eq: assetIDs[0]) }
-        else { searchFilter.or = assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) } }
+        searchFilter = Self.placeSearch(assetIDs)
         filterTitle = title; query = ""; usesMetadata = true; showingResults = true
         scheduleReload()
+    }
+
+    private static func placeSearch(_ assetIDs: [String]) -> SearchFilter {
+        var filter = SearchFilter()
+        if assetIDs.count == 1 { filter.id = IDFilter(eq: assetIDs[0]) }
+        else { filter.or = assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) } }
+        return filter
     }
 
     func setMetadataFilter(_ filter: SearchFilter, title: String, developedOnly: Bool = false) {
@@ -702,6 +737,13 @@ extension APIClient: LibraryAPI {}
         developedOnlyResults = developedOnly
         usesMetadata = true; showingResults = true
         queryTask = Task { await loadResults(reset: true) }
+    }
+
+    /// Every photo developed in Lightroom, laid out by month as a person's photos are. A search
+    /// within them keeps to developed photos.
+    func setDeveloped(title: String) {
+        setTimeline(TimelineFilter(isDeveloped: true), title: title)
+        developedOnlyResults = true
     }
 
     func setTimeline(_ filter: TimelineFilter, title: String) {
@@ -777,7 +819,10 @@ extension APIClient: LibraryAPI {}
         let text = query, filter = searchFilter.matching(query, mode: searchMode), requestGeneration = generation
         let mode = searchMode, reference = similarAssetID, developedOnly = developedOnlyResults
         let previousResultIDs = results.map(\.id)
-        let requestLimit = preservingPosition ? max(1, loadedResultPageCount) : 3
+        // Developed photos can sit a thousand photos deep behind recent phone shots, so the
+        // developed shelf reads bigger pages and keeps going, up to 20,000 photos, until it finds some.
+        let pageSize = developedOnly ? 500 : 100
+        let requestLimit = preservingPosition ? max(1, loadedResultPageCount) : developedOnly ? 40 : 3
         let startCursor: String?
         if let retry { startCursor = retry.cursor } else { startCursor = reset ? nil : cursor }
         let prefix = retry?.prefix ?? (reset ? [] : results)
@@ -800,7 +845,7 @@ extension APIClient: LibraryAPI {}
                 if reference != nil {
                     response = try await api.search(SearchQuery(query: nil, queryAssetId: reference, filter: filter, cursor: nextCursor))
                 } else if text.isEmpty || mode != .context {
-                    response = try await api.metadataSearch(MetadataQuery(filter: filter, cursor: nextCursor))
+                    response = try await api.metadataSearch(MetadataQuery(filter: filter, cursor: nextCursor, size: pageSize))
                 } else {
                     response = try await api.search(SearchQuery(query: text, filter: filter, cursor: nextCursor))
                 }

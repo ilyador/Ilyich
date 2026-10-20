@@ -12,14 +12,18 @@ struct NativeLibraryAPI: LibraryAPI {
         if filter.visibility != .locked, try await entities.isComplete() {
             return try await entities.timeBuckets(filter: filter)
         }
+        guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
         return try await client.timeBuckets(filter: filter)
     }
     func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
         if filter.visibility != .locked, try await entities.isComplete() {
             return try await entities.timeBucket(bucket, filter: filter)
         }
+        guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
         return try await client.timeBucket(bucket, filter: filter)
     }
+    /// A place's photos are laid out by month only from the complete local index.
+    func supportsPlaceTimelines() async -> Bool { (try? await entities.isComplete()) == true }
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] {
         guard filter.visibility != .locked, try await entities.isComplete() else { return [] }
         return try await entities.monthPlaces(filter: filter)
