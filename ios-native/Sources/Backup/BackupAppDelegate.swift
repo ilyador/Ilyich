@@ -12,6 +12,10 @@ import UIKit
     func applicationDidBecomeActive(_ application: UIApplication) {
         BackupLifecycle.shared.foregroundChanged()
     }
+
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        OrientationLock.mask
+    }
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
         let uploads: BackgroundUploads
@@ -23,6 +27,29 @@ import UIKit
         let completion = MainActorCompletion(completionHandler)
         uploads.handleEvents { Task { @MainActor in completion.call() } }
         if identifier == BackgroundUploads.identifier { Task { await BackupCoordinator.shared.activate() } }
+    }
+}
+
+/// The app stays upright. While a photo or video viewer is on screen it turns with the phone, and
+/// it turns back upright once the last viewer closes.
+@MainActor enum OrientationLock {
+    private static var viewers = 0
+    static var mask: UIInterfaceOrientationMask { viewers > 0 ? .allButUpsideDown : .portrait }
+
+    static func viewerAppeared() { viewers += 1; update() }
+    static func viewerDisappeared() { viewers = max(0, viewers - 1); update() }
+
+    private static func update() {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows {
+                var controller = window.rootViewController
+                while let current = controller {
+                    current.setNeedsUpdateOfSupportedInterfaceOrientations()
+                    controller = current.presentedViewController
+                }
+            }
+            if viewers == 0 { scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) }
+        }
     }
 }
 

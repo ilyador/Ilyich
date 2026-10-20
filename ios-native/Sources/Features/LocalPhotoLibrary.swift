@@ -148,34 +148,40 @@ struct LocalPhotoThumbnail: View {
 }
 
 struct LocalPhotoViewer: View {
-    let photo: LocalPhoto
+    /// Photos to swipe through; a single photo when the caller has no neighbors to offer.
+    let photos: [LocalPhoto]
     var onChanged: (() -> Void)? = nil
+    @State private var selectedID: String
     @State private var showActions = false
     @State private var actionPhotos: [LocalPhoto] = []
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var media = LocalPhotoMedia()
     @State private var motion = false
-    @State private var network = false
     @State private var retry = 0
-    @AppStorage("imageLoadOriginal") private var fullResolution = false
+    @Environment(\.dismiss) private var dismiss
+
+    init(photo: LocalPhoto, photos: [LocalPhoto] = [], onChanged: (() -> Void)? = nil) {
+        self.photos = photos.contains(where: { $0.id == photo.id }) ? photos : [photo]
+        self.onChanged = onChanged
+        _selectedID = State(initialValue: photo.id)
+    }
+
+    private var selectedIndex: Int { photos.firstIndex { $0.id == selectedID } ?? 0 }
+    private var photo: LocalPhoto { photos[selectedIndex] }
+
     var body: some View {
         NavigationStack {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                if let player = media.player { VideoPlayer(player: player) }
-                else if let live = media.livePhoto { LocalLivePhoto(livePhoto: live, active: scenePhase == .active) }
-                else if let image = media.image { ZoomablePhoto(image: image, resetZoom: false, onTap: { _ in }, onDismiss: { dismiss() }, onZoom: { }) }
-                else if media.loading { ProgressView().tint(.white) }
-                else {
-                    VStack(spacing: 18) {
-                        Image(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark").font(.largeTitle)
-                        Text(media.failure ?? "This item is unavailable.").multilineTextAlignment(.center)
-                        if !network { Button("Download from iCloud") { network = true } }
-                        else { Button("Retry") { retry += 1 } }
-                    }.padding(28).foregroundStyle(.white)
+            TabView(selection: $selectedID) {
+                ForEach(Array(photos.enumerated()), id: \.element.id) { index, page in
+                    Group {
+                        // Only the current photo and its neighbors hold full-size media.
+                        if abs(index - selectedIndex) <= 1 {
+                            LocalPhotoPage(photo: page, active: page.id == selectedID, motion: motion && page.id == selectedID,
+                                           reload: retry, onDismiss: { dismiss() })
+                        } else { Color.black }
+                    }.tag(page.id)
                 }
-            }.navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
+            }.tabViewStyle(.page(indexDisplayMode: .never))
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -186,11 +192,10 @@ struct LocalPhotoViewer: View {
                 if photo.live { ToolbarItem(placement: .topBarTrailing) { Toggle("Live Photo", isOn: $motion).toggleStyle(.button) } }
             }
         }.preferredColorScheme(.dark)
-        .task(id: "\(photo.id)|\(network)|\(motion)|\(retry)|\(fullResolution)") {
-            media.load(photo, full: true, network: network, motion: motion, maximumResolution: fullResolution)
-        }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { media.player?.pause() } }
-        .onDisappear { media.cancel() }
+        // Only the viewer turns with the phone; the rest of the app stays upright.
+        .onAppear { OrientationLock.viewerAppeared() }
+        .onDisappear { OrientationLock.viewerDisappeared() }
+        .onChange(of: selectedID) { motion = false }
         .sheet(isPresented: $showActions) {
             NavigationStack {
                 LocalPhotoActionsView(photos: actionPhotos) {
@@ -200,6 +205,46 @@ struct LocalPhotoViewer: View {
                 }
             }
         }
+    }
+}
+
+private struct LocalPhotoPage: View {
+    let photo: LocalPhoto
+    let active: Bool
+    let motion: Bool
+    let reload: Int
+    let onDismiss: () -> Void
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var media = LocalPhotoMedia()
+    @State private var network = false
+    @State private var retry = 0
+    @AppStorage("imageLoadOriginal") private var fullResolution = false
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let player = media.player { VideoPlayer(player: player) }
+            else if let live = media.livePhoto { LocalLivePhoto(livePhoto: live, active: active && scenePhase == .active) }
+            else if let image = media.image { ZoomablePhoto(image: image, resetZoom: !active, onTap: { _ in }, onDismiss: onDismiss, onZoom: { }) }
+            else if media.loading { ProgressView().tint(.white) }
+            else {
+                VStack(spacing: 18) {
+                    Image(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark").font(.largeTitle)
+                    Text(media.failure ?? "This item is unavailable.").multilineTextAlignment(.center)
+                    if !network { Button("Download from iCloud") { network = true } }
+                    else { Button("Retry") { retry += 1 } }
+                }.padding(28).foregroundStyle(.white)
+            }
+        }
+        .task(id: "\(photo.id)|\(network)|\(motion)|\(retry)|\(reload)|\(fullResolution)") {
+            if active && photo.video { VideoAudio.prepare(foreground: true) }
+            media.load(photo, full: true, network: network, motion: motion, maximumResolution: fullResolution)
+        }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { media.player?.pause() } }
+        .onChange(of: active) { _, value in
+            if !value { media.player?.pause() }
+            if photo.video { if value { VideoAudio.prepare(foreground: true) } else { VideoAudio.finish() } }
+        }
+        .onDisappear { media.cancel(); if active && photo.video { VideoAudio.finish() } }
     }
 }
 
