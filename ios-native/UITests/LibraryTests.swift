@@ -638,6 +638,40 @@ final class LibraryTests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(close.waitForExistence(timeout: 5), "Another tap brings them back.")
     }
+    /// As in Photos, a strip of thumbnails runs above the bottom bar. Tapping a thumbnail jumps to
+    /// its photo, paging moves the strip along, swiping the strip scrubs through the photos, and a
+    /// tap on the photo hides the strip with the bars.
+    @MainActor func testThumbnailStripJumpsToPhotosAndFollowsPaging() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 9).waitForExistence(timeout: 15))
+        tapPhoto(grid.cells.element(boundBy: 9))
+        let strip = app.descendants(matching: .any)["viewer.strip"]
+        XCTAssertTrue(strip.waitForExistence(timeout: 10), "The viewer has a thumbnail strip.")
+        func position() -> Int? { (strip.value as? String)?.split(separator: " ").first.flatMap { Int($0) } }
+        func waitForPosition(_ expected: Int, _ message: String) {
+            let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in position() == expected }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 5), .completed, message)
+        }
+        guard let start = position() else { return XCTFail("The strip says which photo is shown.") }
+        let shown = onScreenPhoto(app)
+        XCTAssertNotNil(shown)
+        XCTAssertLessThan(strip.frame.maxY, app.buttons["Share"].frame.minY, "The strip sits above the bottom bar.")
+        capture(app, "Viewer — thumbnail strip")
+        // Thumbnails are 21 points wide at 2-point spacing; the third one to the right of the middle.
+        let middle = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.width / 2, dy: strip.frame.midY))
+        middle.withOffset(CGVector(dx: 3 * 23, dy: 0)).tap()
+        waitForPosition(start + 3, "Tapping a thumbnail jumps to its photo.")
+        XCTAssertNotEqual(onScreenPhoto(app), shown, "The pager shows the photo picked in the strip.")
+        app.swipeRight()
+        waitForPosition(start + 2, "Paging moves the strip along.")
+        middle.press(forDuration: 0.05, thenDragTo: middle.withOffset(CGVector(dx: -4 * 23, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.3)
+        let scrubbed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in (position() ?? 0) > start + 3 }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [scrubbed], timeout: 5), .completed, "Swiping the strip scrubs through the photos.")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45)).tap()
+        let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: strip)
+        XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 5), .completed, "A tap hides the strip with the bars.")
+    }
     /// The library stays upright when the phone turns. The viewer turns with it, keeps its photo,
     /// still swipes to the photo beside it, and closing it turns the app back upright.
     @MainActor func testOnlyTheViewerTurnsWithThePhoneAndKeepsItsPhoto() {
