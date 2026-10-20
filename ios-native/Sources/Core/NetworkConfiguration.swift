@@ -189,7 +189,18 @@ final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendab
         guard let source = task.originalRequest?.url, let target = request.url, Self.sameOrigin(source, target) else {
             completionHandler(nil); return
         }
-        completionHandler(request)
+        completionHandler(Self.carryingHeaders(of: task.currentRequest ?? task.originalRequest, to: request))
+    }
+    /// The server redirects a full-size photo it never generated to its preview or original.
+    /// The follow-up request must keep the token and custom headers, or the server answers 401.
+    static func carryingHeaders(of source: URLRequest?, to request: URLRequest) -> URLRequest {
+        guard let headers = source?.allHTTPHeaderFields else { return request }
+        var redirected = request
+        for (name, value) in headers where redirected.value(forHTTPHeaderField: name) == nil {
+            if redirected.httpBody == nil, ["content-length", "content-type"].contains(name.lowercased()) { continue }
+            redirected.setValue(value, forHTTPHeaderField: name)
+        }
+        return redirected
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
