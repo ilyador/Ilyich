@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import CryptoKit
+import IlyichPlatform
 
 @MainActor @Observable final class ShareInboxStore {
     static let shared = ShareInboxStore()
@@ -57,7 +58,7 @@ import CryptoKit
                 if generation == runID { isRunning = false; worker = nil; currentID = nil; progress = nil; refresh() }
             }
             do {
-                guard let saved = try SessionKeychain.read(), saved.server == api.baseURL, saved.userID == api.userID else {
+                guard let saved = try KeychainCredentialStore().load(), saved.server == api.baseURL, saved.userID == api.userID else {
                     throw BackupError.message("Sign in before uploading these shared files.")
                 }
                 for (batchID, total) in totals {
@@ -107,16 +108,16 @@ import CryptoKit
         progress = min(1, Double(value.sent) / Double(value.expected))
     }
 
-    private func checkSession(_ expected: SavedSession, runID: UUID) throws {
+    private func checkSession(_ expected: StoredCredential, runID: UUID) throws {
         try Task.checkCancellation()
-        guard generation == runID, let current = try SessionKeychain.read(),
+        guard generation == runID, let current = try KeychainCredentialStore().load(),
               expected.scope == current.scope, expected.token == current.token else { throw CancellationError() }
         guard current.requiresPasswordChange != true else { throw BackupError.message("Change your account password before uploading.") }
         try ReadOnlyPolicy.check(enabled: ReadOnlyPolicy.isEnabled(server: current.server, userID: current.userID), method: "POST", path: "assets")
     }
 
     private func transfer(_ file: UploadFile, sidecar: UploadFile?, fields: [String: String], api: APIClient,
-                          saved: SavedSession, runID: UUID) async throws -> String {
+                          saved: StoredCredential, runID: UUID) async throws -> String {
         let checksum = try await UploadBody.work { try UploadBody.checksum(file.url) }
         let sidecarChecksum = try await UploadBody.work { try sidecar.map { try UploadBody.checksum($0.url) } ?? "" }
         let identity = [saved.scope, file.url.path, checksum, sidecarChecksum, fields["livePhotoVideoId"] ?? ""].joined(separator: "|")

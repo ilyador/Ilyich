@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import IlyichPlatform
 import XCTest
 @testable import Ilyich
 

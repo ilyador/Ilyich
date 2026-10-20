@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 import WidgetKit
+import IlyichPlatform
 
 struct NetworkSettingsView: View {
     var api: APIClient? = nil

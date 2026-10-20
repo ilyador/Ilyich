@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 
 struct UploadProgressSnapshot: Sendable {
     let taskID: Int
@@ -26,7 +27,7 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     private init(identifier: String) {
         super.init()
         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
-        configuration.sharedContainerIdentifier = try? SessionKeychain.appGroup
+        configuration.sharedContainerIdentifier = try? AppGroup.identifier
         configuration.sessionSendsLaunchEvents = true
         configuration.isDiscretionary = false
         configuration.httpMaximumConnectionsPerHost = 2
@@ -55,7 +56,7 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     }
 
     func upload(_ request: URLRequest, body: URL, id: String, receipt: URL) async throws -> UploadReceipt {
-        if let saved = try SessionKeychain.read(), ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID) {
+        if let saved = try KeychainCredentialStore().load(), ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID) {
             throw ReadOnlyPolicy.ReadOnlyError()
         }
         let descriptor = Descriptor(id: id, receipt: receipt)
@@ -148,7 +149,7 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        guard let saved = try? SessionKeychain.read(), let url = task.originalRequest?.url,
+        guard let saved = try? KeychainCredentialStore().load(), let url = task.originalRequest?.url,
               (task.originalRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer \(saved.token)" ||
                task.originalRequest?.value(forHTTPHeaderField: "x-immich-user-token") == saved.token),
               let configuration = try? NetworkConfigurationStore.load(server: saved.server),

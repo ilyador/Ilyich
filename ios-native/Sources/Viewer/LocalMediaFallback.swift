@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 
 /// Offline fallback is allowed only for a direct network failure on unedited
 /// server media whose matched Photos asset has not been modified since matching.

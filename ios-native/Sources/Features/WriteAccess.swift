@@ -1,3 +1,4 @@
+import IlyichPlatform
 import SwiftUI
 
 /// Disables a mutation affordance while leaving navigation and media browsing usable.
@@ -19,7 +20,7 @@ private struct WriteAccessModifier: ViewModifier {
     }
     private static func isReadOnly(_ api: APIClient?) -> Bool {
         if let api { return api.isReadOnly }
-        guard let session = try? SessionKeychain.read() else { return true }
+        guard let session = try? KeychainCredentialStore().load() else { return true }
         return ReadOnlyPolicy.isEnabled(server: session.server, userID: session.userID)
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 
 struct SharedAttachment: Codable, Identifiable, Sendable {
     var id: String { original.url.lastPathComponent }
@@ -17,7 +18,7 @@ struct SharedBatch: Codable, Identifiable, Sendable {
 /// the signed-in app, so a cold launch or expired session never loses the share.
 enum SharedInbox {
     static func directory(for id: UUID) throws -> URL {
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try SessionKeychain.appGroup) else {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try AppGroup.identifier) else {
             throw CocoaError(.fileNoSuchFile)
         }
         return container.appendingPathComponent("ShareInbox", isDirectory: true).appendingPathComponent(id.uuidString, isDirectory: true)

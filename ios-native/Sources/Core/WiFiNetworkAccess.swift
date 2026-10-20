@@ -1,6 +1,6 @@
 import CoreLocation
 import Foundation
-import NetworkExtension
+import IlyichPlatform
 
 enum WiFiNetworkAccessError: LocalizedError {
     case permissionRequired
@@ -11,7 +11,8 @@ enum WiFiNetworkAccessError: LocalizedError {
 }
 
 /// Reads only the connected Wi-Fi name. Location permission is requested only from the
-/// network settings screen; background callers simply receive nil when access is unavailable.
+/// network settings screen; background callers read the name through SystemWiFiName and
+/// simply receive nil when access is unavailable.
 @MainActor final class WiFiNetworkAccess: NSObject, @MainActor CLLocationManagerDelegate {
     private let locationManager = CLLocationManager()
     private var authorizationContinuation: CheckedContinuation<Void, Error>?
@@ -44,7 +45,7 @@ enum WiFiNetworkAccessError: LocalizedError {
         guard locationManager.accuracyAuthorization == .fullAccuracy else {
             throw WiFiNetworkAccessError.permissionRequired
         }
-        return await Self.currentNameIfAvailable()
+        return await SystemWiFiName().currentName()
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
@@ -60,14 +61,6 @@ enum WiFiNetworkAccessError: LocalizedError {
         @unknown default:
             authorizationContinuation = nil
             continuation.resume(throwing: WiFiNetworkAccessError.permissionRequired)
-        }
-    }
-
-    static func currentNameIfAvailable() async -> String? {
-        await withCheckedContinuation { continuation in
-            NEHotspotNetwork.fetchCurrent { network in
-                continuation.resume(returning: network?.ssid)
-            }
         }
     }
 }

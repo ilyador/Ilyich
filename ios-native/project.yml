@@ -19,6 +19,8 @@ settings:
 packages:
   GoogleCast:
     path: Packages/GoogleCast
+  IlyichKit:
+    path: Packages/IlyichKit
 targets:
   Ilyich:
     type: application
@@ -29,6 +31,8 @@ targets:
     dependencies:
       - package: GoogleCast
         product: GoogleCastDynamic
+      - package: IlyichKit
+        product: IlyichPlatform
       - target: ShareExtension
       - target: WidgetExtension
     settings:
@@ -44,11 +48,13 @@ targets:
     sources:
       - path: Extensions/Share
         excludes: [Info.plist]
-      - Sources/Backup/SharedSession.swift
       - Sources/Backup/UploadBody.swift
       - Sources/Backup/SharedInbox.swift
       - Sources/Backup/PhotoResourceExport.swift
       - Sources/Backup/BackupReceipt.swift
+    dependencies:
+      - package: IlyichKit
+        product: IlyichPlatform
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.alextran.immich.ShareExtension
@@ -62,14 +68,13 @@ targets:
     sources:
       - path: Extensions/Widget
         excludes: [Info.plist]
-      - Sources/Backup/SharedSession.swift
-      - Sources/Core/NetworkConfiguration.swift
-      - Sources/Core/ServerConnection.swift
-      - Sources/Core/WiFiNetworkAccess.swift
       - path: ../mobile/ios/WidgetExtension/widgets
       - ../mobile/ios/WidgetExtension/WidgetBundle.swift
       - ../mobile/ios/WidgetExtension/UIImage+Resize.swift
       - Assets.xcassets
+    dependencies:
+      - package: IlyichKit
+        product: IlyichPlatform
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.alextran.immich.WidgetExtension

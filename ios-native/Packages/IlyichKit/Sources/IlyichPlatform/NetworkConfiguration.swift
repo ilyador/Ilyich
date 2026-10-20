@@ -2,14 +2,23 @@ import CryptoKit
 import Foundation
 import Security
 
-struct NetworkConfiguration: Codable, Equatable, Sendable {
-    var customHeaders: [String: String] = [:]
-    var alternateEndpoints: [URL] = []
-    var automaticallySwitchEndpoints = false
-    var preferredWifiName: String?
-    var localEndpoint: URL?
+public struct NetworkConfiguration: Codable, Equatable, Sendable {
+    public var customHeaders: [String: String] = [:]
+    public var alternateEndpoints: [URL] = []
+    public var automaticallySwitchEndpoints = false
+    public var preferredWifiName: String?
+    public var localEndpoint: URL?
 
-    func validated() throws -> Self {
+    public init(customHeaders: [String: String] = [:], alternateEndpoints: [URL] = [], automaticallySwitchEndpoints: Bool = false,
+                preferredWifiName: String? = nil, localEndpoint: URL? = nil) {
+        self.customHeaders = customHeaders
+        self.alternateEndpoints = alternateEndpoints
+        self.automaticallySwitchEndpoints = automaticallySwitchEndpoints
+        self.preferredWifiName = preferredWifiName
+        self.localEndpoint = localEndpoint
+    }
+
+    public func validated() throws -> Self {
         var result = self
         result.preferredWifiName = preferredWifiName?.trimmingCharacters(in: .whitespacesAndNewlines)
         if result.preferredWifiName?.isEmpty == true { result.preferredWifiName = nil }
@@ -30,7 +39,7 @@ struct NetworkConfiguration: Codable, Equatable, Sendable {
         return result
     }
 
-    func candidates(primary: URL, currentWifiName: String? = nil) -> [URL] {
+    public func candidates(primary: URL, currentWifiName: String? = nil) -> [URL] {
         guard automaticallySwitchEndpoints else { return [primary] }
         var result: [URL] = []
         if preferredWifiName == currentWifiName, let preferredWifiName, !preferredWifiName.isEmpty,
@@ -44,9 +53,9 @@ struct NetworkConfiguration: Codable, Equatable, Sendable {
     }
 }
 
-enum NetworkConfigurationError: LocalizedError {
+public enum NetworkConfigurationError: LocalizedError {
     case invalidAddress, invalidHeader, reservedHeader(String), keychain, invalidCertificate, incorrectCertificatePassword, unavailable
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .invalidAddress: "Enter an HTTP or HTTPS server address without a password, query, or fragment."
         case .invalidHeader: "Header names must be valid HTTP names, with no duplicates or line breaks."
@@ -59,17 +68,17 @@ enum NetworkConfigurationError: LocalizedError {
     }
 }
 
-enum TransportFailure {
+public enum TransportFailure {
     /// A definite, non-cancelled transport failure, including every configured endpoint being unreachable.
-    static func isDefinite(_ error: any Error) -> Bool {
+    public static func isDefinite(_ error: any Error) -> Bool {
         if let urlError = error as? URLError { return urlError.code != .cancelled }
         if case .unavailable? = error as? NetworkConfigurationError { return true }
         return false
     }
 }
 
-enum ServerAddress {
-    static func normalized(_ input: URL) throws -> URL {
+public enum ServerAddress {
+    public static func normalized(_ input: URL) throws -> URL {
         guard var parts = URLComponents(url: input, resolvingAgainstBaseURL: false),
               let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
               let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil,
@@ -83,7 +92,7 @@ enum ServerAddress {
         return url
     }
 
-    static func url(base: URL, path: String, query: [URLQueryItem] = []) throws -> URL {
+    public static func url(base: URL, path: String, query: [URLQueryItem] = []) throws -> URL {
         guard !path.contains("://"), !path.contains("?"), !path.contains("#"), !path.hasPrefix("//"),
               !path.split(separator: "/").contains("..") else { throw NetworkConfigurationError.invalidAddress }
         let relative = path.hasPrefix("/") ? String(path.dropFirst()) : path
@@ -101,15 +110,21 @@ enum ServerAddress {
 
 /// Credentials are shared with uploads and extensions, scoped to the explicitly configured server.
 /// They remain in the Keychain rather than preferences or diagnostic logs.
-enum NetworkConfigurationStore {
-    static func load(server: URL) throws -> NetworkConfiguration {
+public enum NetworkConfigurationStore {
+    public static func load(server: URL) throws -> NetworkConfiguration {
         guard let data = try NetworkKeychain.read(server: server, kind: "settings") else { return .init() }
         return try JSONDecoder().decode(NetworkConfiguration.self, from: data).validated()
     }
-    static func save(_ configuration: NetworkConfiguration, server: URL) throws {
+    /// The settings a new connection starts with. A bundle that names no App Group, such as a
+    /// test host, has nothing saved and gets the defaults.
+    public static func connectionSettings(server: URL) throws -> NetworkConfiguration {
+        guard AppGroup.isDeclared else { return .init() }
+        return try load(server: server)
+    }
+    public static func save(_ configuration: NetworkConfiguration, server: URL) throws {
         try NetworkKeychain.save(JSONEncoder().encode(configuration.validated()), server: server, kind: "settings")
     }
-    static func remove(server: URL) throws {
+    public static func remove(server: URL) throws {
         try NetworkKeychain.remove(server: server, kind: "settings")
         try ClientCertificateStore.remove(server: server)
     }
@@ -117,8 +132,7 @@ enum NetworkConfigurationStore {
 
 private enum NetworkKeychain {
     static func query(server: URL, kind: String) throws -> [String: Any] {
-        guard let group = Bundle.main.object(forInfoDictionaryKey: "AppGroupId") as? String,
-              group.hasPrefix("group."), !group.contains("$(") else { throw NetworkConfigurationError.keychain }
+        guard let group = try? AppGroup.identifier else { throw NetworkConfigurationError.keychain }
         let scope = SHA256.hash(data: Data(try ServerAddress.normalized(server).absoluteString.utf8)).map { String(format: "%02x", $0) }.joined()
         return [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "app.ilyich.native.network",
                 kSecAttrAccount as String: kind + ":" + scope, kSecAttrAccessGroup as String: group]
@@ -145,14 +159,14 @@ private enum NetworkKeychain {
     }
 }
 
-enum ClientCertificateStore {
+public enum ClientCertificateStore {
     private struct Package: Codable { let data: Data; let password: String }
-    static func hasCertificate(server: URL) throws -> Bool { try NetworkKeychain.read(server: server, kind: "certificate") != nil }
-    static func importCertificate(data: Data, password: String, server: URL) throws {
+    public static func hasCertificate(server: URL) throws -> Bool { try NetworkKeychain.read(server: server, kind: "certificate") != nil }
+    public static func importCertificate(data: Data, password: String, server: URL) throws {
         _ = try credential(data: data, password: password)
         try NetworkKeychain.save(JSONEncoder().encode(Package(data: data, password: password)), server: server, kind: "certificate")
     }
-    static func remove(server: URL) throws { try NetworkKeychain.remove(server: server, kind: "certificate") }
+    public static func remove(server: URL) throws { try NetworkKeychain.remove(server: server, kind: "certificate") }
     private static func credential(data: Data, password: String) throws -> URLCredential {
         var items: CFArray?
         let status = SecPKCS12Import(data as CFData, [kSecImportExportPassphrase as String: password] as CFDictionary, &items)
@@ -164,8 +178,8 @@ enum ClientCertificateStore {
         let identity = value as! SecIdentity
         return URLCredential(identity: identity, certificates: first[kSecImportItemCertChain as String] as? [Any], persistence: .forSession)
     }
-    static func respond(to challenge: URLAuthenticationChallenge, server: URL, requestURL: URL?,
-                        completion: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+    public static func respond(to challenge: URLAuthenticationChallenge, server: URL, requestURL: URL?,
+                               completion: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodClientCertificate else {
             completion(.performDefaultHandling, nil); return
         }
@@ -181,11 +195,11 @@ enum ClientCertificateStore {
     }
 }
 
-final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
-    let origin: URL
-    init(origin: URL) { self.origin = origin }
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+public final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    public let origin: URL
+    public init(origin: URL) { self.origin = origin }
+    public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                           newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         guard let source = task.originalRequest?.url, let target = request.url, Self.sameOrigin(source, target) else {
             completionHandler(nil); return
         }
@@ -193,7 +207,7 @@ final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendab
     }
     /// The server redirects a full-size photo it never generated to its preview or original.
     /// The follow-up request must keep the token and custom headers, or the server answers 401.
-    static func carryingHeaders(of source: URLRequest?, to request: URLRequest) -> URLRequest {
+    public static func carryingHeaders(of source: URLRequest?, to request: URLRequest) -> URLRequest {
         guard let headers = source?.allHTTPHeaderFields else { return request }
         var redirected = request
         for (name, value) in headers where redirected.value(forHTTPHeaderField: name) == nil {
@@ -202,11 +216,11 @@ final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendab
         }
         return redirected
     }
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                           completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         ClientCertificateStore.respond(to: challenge, server: origin, requestURL: task.originalRequest?.url, completion: completionHandler)
     }
-    static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
+    public static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
         func port(_ url: URL) -> Int { url.port ?? (["https", "wss"].contains(url.scheme?.lowercased() ?? "") ? 443 : 80) }
         return a.scheme?.lowercased() == b.scheme?.lowercased() && a.host?.lowercased() == b.host?.lowercased() && port(a) == port(b)
     }

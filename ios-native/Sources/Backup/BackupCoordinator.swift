@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 import Observation
 import Photos
 
@@ -82,7 +83,7 @@ private struct BackupState: Codable {
     private(set) var activity = "Choose albums to back up"
     private(set) var error: String?
     private var state = BackupState()
-    private var saved: SavedSession?
+    private var saved: StoredCredential?
     private var directory: URL?
     private var worker: Task<Void, Never>?
     private var discovery: Task<[String], any Error>?
@@ -92,10 +93,10 @@ private struct BackupState: Codable {
 
     func activate() async {
         do {
-            guard let session = try SessionKeychain.read() else { return }
+            guard let session = try KeychainCredentialStore().load() else { return }
             guard session.scope != saved?.scope else { refreshLibrary(); return }
             guard !isRunning else { throw BackupError.message("Pause the active backup before switching accounts.") }
-            guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try SessionKeychain.appGroup) else {
+            guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try AppGroup.identifier) else {
                 throw BackupError.message("The app’s shared storage is unavailable. Check the app’s signing and reinstall.")
             }
             let folder = group.appendingPathComponent("Backup", isDirectory: true).appendingPathComponent(session.scope, isDirectory: true)
@@ -505,7 +506,7 @@ private struct BackupState: Codable {
     }
 
     private func transfer(file: UploadFile, sidecar: UploadFile?, fields: [String: String], prepared: PreparedPhoto,
-                          session: SavedSession, runID: UUID) async throws -> BackupRemoteFile {
+                          session: StoredCredential, runID: UUID) async throws -> BackupRemoteFile {
         try requireTransferConditions()
         activity = "Checking \(file.filename)"; progress = nil
         let checksum = try await UploadBody.work { try UploadBody.checksum(file.url) }
@@ -575,9 +576,9 @@ private struct BackupState: Codable {
         self.error = "iOS could not schedule automatic backup: \(error.localizedDescription). You can still use Back up now."
     }
 
-    private func currentSession(_ runID: UUID) throws -> SavedSession {
+    private func currentSession(_ runID: UUID) throws -> StoredCredential {
         try Task.checkCancellation()
-        guard generation == runID, let saved, let current = try SessionKeychain.read(),
+        guard generation == runID, let saved, let current = try KeychainCredentialStore().load(),
               saved.scope == current.scope, saved.token == current.token else { throw CancellationError() }
         guard current.requiresPasswordChange != true else { throw BackupError.message("Change your account password before starting backup.") }
         try ReadOnlyPolicy.check(enabled: ReadOnlyPolicy.isEnabled(server: current.server, userID: current.userID), method: "POST", path: "assets")
