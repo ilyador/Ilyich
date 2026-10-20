@@ -6,6 +6,7 @@ struct AssetInfoView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onUpdated: (Asset) -> Void
+    let onExploreLocation: ((PlaceFocus) -> Void)?
     @State private var asset: Asset
     @State private var caption: String
     @State private var albums: [Album] = []
@@ -19,8 +20,10 @@ struct AssetInfoView: View {
     @State private var export: ViewerExport?
     @State private var tagging = false
 
-    init(api: APIClient, pipeline: MediaPipeline, asset: Asset, onUpdated: @escaping (Asset) -> Void) {
+    init(api: APIClient, pipeline: MediaPipeline, asset: Asset, onUpdated: @escaping (Asset) -> Void,
+         onExploreLocation: ((PlaceFocus) -> Void)? = nil) {
         self.api = api; self.pipeline = pipeline; self.onUpdated = onUpdated
+        self.onExploreLocation = onExploreLocation
         _asset = State(initialValue: asset); _caption = State(initialValue: asset.exifInfo?.description ?? "")
     }
     private var ownsAsset: Bool { asset.ownerId != nil && asset.ownerId == api.userID }
@@ -48,20 +51,24 @@ struct AssetInfoView: View {
             if let exif = asset.exifInfo {
                 if let latitude = exif.latitude, let longitude = exif.longitude {
                     Section {
-                        NavigationLink {
-                            PlacesView(api: api, pipeline: pipeline, onSelect: { place in
-                                guard !place.assetIDs.isEmpty else { return }
-                                collection = .init(title: place.title, filter: SearchFilter(or: place.assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) }))
-                            }, focus: .init(latitude: latitude, longitude: longitude, assetID: asset.id))
-                        } label: {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Map(initialPosition: .region(MKCoordinateRegion(center: .init(latitude: latitude, longitude: longitude), latitudinalMeters: 3000, longitudinalMeters: 3000)), interactionModes: []) {
-                                    Marker("Photo location", coordinate: .init(latitude: latitude, longitude: longitude))
-                                }.frame(height: 140).clipShape(.rect(cornerRadius: 12)).accessibilityHidden(true)
-                                Label([exif.city, exif.state, exif.country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "), systemImage: "globe.europe.africa")
-                                Text(String(format: "%.5f°, %.5f°", latitude, longitude)).font(.caption).foregroundStyle(.secondary)
-                            }.padding(.vertical, 4)
-                        }.accessibilityLabel("Explore this location on the globe")
+                        if let onExploreLocation {
+                            Button {
+                                onExploreLocation(.init(latitude: latitude, longitude: longitude, assetID: asset.id))
+                            } label: {
+                                locationPreview(latitude: latitude, longitude: longitude, exif: exif)
+                            }
+                            .accessibilityLabel("Explore this location on the globe")
+                        } else {
+                            NavigationLink {
+                                PlacesView(api: api, pipeline: pipeline, onSelect: { place in
+                                    guard !place.assetIDs.isEmpty else { return }
+                                    collection = .init(title: place.title, filter: SearchFilter(or: place.assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) }))
+                                }, focus: .init(latitude: latitude, longitude: longitude, assetID: asset.id))
+                            } label: {
+                                locationPreview(latitude: latitude, longitude: longitude, exif: exif)
+                            }
+                            .accessibilityLabel("Explore this location on the globe")
+                        }
                     }
                 }
                 Section {
@@ -105,7 +112,7 @@ struct AssetInfoView: View {
                 Section("People") {
                     ForEach(asset.people ?? []) { person in
                         Button { collection = .init(title: person.name.isEmpty ? "Unnamed person" : person.name, filter: .init(personIds: .init(all: [person.id]))) } label: {
-                            HStack { PersonThumbnail(pipeline: pipeline, person: person).frame(width: 40, height: 40); Text(person.name.isEmpty ? "Unnamed person" : person.name) }
+                            HStack { PersonThumbnail(pipeline: pipeline, person: person, pixelSize: PersonThumbnail.small).frame(width: 40, height: 40); Text(person.name.isEmpty ? "Unnamed person" : person.name) }
                         }
                     }
                     if ownsAsset { Button("Fix faces", systemImage: "person.crop.rectangle.badge.plus") { editingFaces = true }.requiresWriteAccess(api) }
@@ -147,6 +154,16 @@ struct AssetInfoView: View {
         }
         .sheet(item: $export) { item in ViewerShareSheet(url: item.url).onDisappear { item.removeTemporaryFile() } }
         .sheet(isPresented: $tagging) { NavigationStack { ViewerTagEditor(api: api, asset: asset, onUpdated: update) } }
+    }
+    private func locationPreview(latitude: Double, longitude: Double, exif: ExifInfo) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Map(initialPosition: .region(MKCoordinateRegion(center: .init(latitude: latitude, longitude: longitude), latitudinalMeters: 3000, longitudinalMeters: 3000)), interactionModes: []) {
+                Marker("Photo location", coordinate: .init(latitude: latitude, longitude: longitude))
+            }.frame(height: 140).clipShape(.rect(cornerRadius: 12))
+                .allowsHitTesting(false).accessibilityHidden(true)
+            Label([exif.city, exif.state, exif.country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "), systemImage: "globe.europe.africa")
+            Text(String(format: "%.5f°, %.5f°", latitude, longitude)).font(.caption).foregroundStyle(.secondary)
+        }.padding(.vertical, 4)
     }
     private func exifMetric(_ title: String, value: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) { Text(value ?? "—").font(.headline); Text(title).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading)

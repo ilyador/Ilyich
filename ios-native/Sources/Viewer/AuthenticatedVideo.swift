@@ -66,6 +66,7 @@ struct AuthenticatedVideo: View {
         }
         .task(id: requestKey) {
             guard active else { return }
+            VideoAudio.prepare(foreground: !muted && !isLivePhotoMotion)
             stopLocal()
             if let transport, loadedKey == requestKey {
                 if scenePhase == .active && (autoPlay || onEnded != nil) { transport.player.play() }
@@ -85,9 +86,10 @@ struct AuthenticatedVideo: View {
                 if scenePhase == .active && (autoPlay || onEnded != nil) { newTransport.player.play() }
             } catch is CancellationError { } catch { self.error = error.localizedDescription }
         }
-        .onChange(of: active, initial: true) { _, active in
+        .onChange(of: active, initial: true) { wasActive, active in
             activeNow = active
             if !active { transport?.player.pause(); stopLocal() }
+            if wasActive && !active { VideoAudio.finish() }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { transport?.player.pause(); localMedia.player?.pause() }
@@ -97,8 +99,11 @@ struct AuthenticatedVideo: View {
         }
         .onChange(of: localMedia.player) { _, _ in adoptLocal() }
         .onChange(of: localMedia.livePhoto) { _, _ in adoptLocal() }
-        .onDisappear { transport?.close(); transport = nil; loadedKey = nil; stopLocal() }
-        .onChange(of: muted) { _, value in transport?.player.isMuted = value; localMedia.player?.isMuted = value }
+        .onDisappear { transport?.close(); transport = nil; loadedKey = nil; stopLocal(); if activeNow { VideoAudio.finish() } }
+        .onChange(of: muted) { _, value in
+            transport?.player.isMuted = value; localMedia.player?.isMuted = value
+            if active { VideoAudio.prepare(foreground: !value && !isLivePhotoMotion) }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard active, scenePhase == .active, let item = notification.object as? AVPlayerItem else { return }
             let player = usingLocal ? localMedia.player : transport?.player
@@ -129,6 +134,24 @@ struct AuthenticatedVideo: View {
     private func stopLocal() {
         guard usingLocal || localPhoto != nil else { return }
         localMedia.cancel(); localPhoto = nil; usingLocal = false
+    }
+}
+
+/// A video's sound plays as in Photos: with the phone set to silent too, pausing other audio while
+/// it plays and letting that audio resume afterwards. Muted videos and Live Photo motion mix with
+/// other audio and follow the silent setting.
+enum VideoAudio {
+    static func prepare(foreground: Bool) {
+        try? AVAudioSession.sharedInstance().setCategory(foreground ? .playback : .ambient,
+                                                         mode: foreground ? .moviePlayback : .default)
+    }
+
+    /// Deactivating can take a moment, so it happens off the main thread. While another video
+    /// still plays, the session stays active.
+    static func finish() {
+        DispatchQueue.global(qos: .utility).async {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 }
 

@@ -8,6 +8,7 @@ struct AssetViewer: View {
     let assets: [Asset]
     let onUpdated: (Asset) -> Void
     let onDeleted: () -> Void
+    let onExploreLocation: ((PlaceFocus) -> Void)?
     let albumID: String?
     let matchedLocalPhotos: [String: LocalPhoto]
     @ObservedObject private var cast = CastController.shared
@@ -23,6 +24,7 @@ struct AssetViewer: View {
     @State private var refreshRevision = 0
     @State private var accessRefreshRevision = -1
     @State private var locationPresented = false
+    @State private var pendingLocation: PlaceFocus?
     @State private var locationCollection: InfoCollection?
     @State private var error: String?
     @State private var working = false
@@ -44,20 +46,31 @@ struct AssetViewer: View {
     @State private var transferLabel = ""
     @State private var transferProgress: Double?
     @State private var transferSaving = false
+    @State private var safeArea = EdgeInsets()
+    @State private var pagePosition: ScrollPosition
+    /// Only scrolling moves the selection; offsets that change at rest, such as on first showing
+    /// the strip or turning the phone, say nothing about it.
+    @State private var pagerPhase: ScrollPhase = .idle
+    @State private var viewport = CGSize.zero
+    @Environment(\.displayScale) private var displayScale
     @AppStorage("viewerTapToNavigate") private var tapToNavigate = false
+    /// Shared with the setting and every video, so muting carries on to the next video, as in Photos.
+    @AppStorage("viewerMuteVideo") private var muteVideo = false
     @AppStorage("shareFileType") private var shareFileType = "original"
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
     init(api: APIClient, pipeline: MediaPipeline, assets: [Asset], initial: Asset,
          onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping () -> Void, albumID: String? = nil,
-         matchedLocalPhotos: [String: LocalPhoto] = [:]) {
+         matchedLocalPhotos: [String: LocalPhoto] = [:], onExploreLocation: ((PlaceFocus) -> Void)? = nil) {
         self.api = api; self.pipeline = pipeline
         self.assets = assets.contains(where: { $0.id == initial.id }) ? assets : [initial] + assets
         self.onUpdated = onUpdated; self.onDeleted = onDeleted
+        self.onExploreLocation = onExploreLocation
         self.albumID = albumID
         self.matchedLocalPhotos = matchedLocalPhotos
         _selectedID = State(initialValue: initial.id)
+        _pagePosition = State(initialValue: ScrollPosition(id: initial.id, anchor: .leading))
         _replacements = State(initialValue: [initial.id: initial])
     }
 
@@ -73,24 +86,7 @@ struct AssetViewer: View {
     private var canvas: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            TabView(selection: $selectedID) {
-                ForEach(Array(assets.enumerated()), id: \.element.id) { index, summary in
-                    let asset = replacements[summary.id] ?? summary
-                    Group {
-                        if abs(index - selectedIndex) <= 1 {
-                            if asset.isVideo {
-                                AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !(cast.connected && cast.currentAssetID == asset.id),
-                                                   sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset))
-                            } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
-                                AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false },
-                                                   sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), isLivePhotoMotion: true)
-                            } else {
-                                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() }, matchedLocalPhoto: matchedLocalCopy(for: asset))
-                            }
-                        } else { Color.black }
-                    }.tag(asset.id)
-                }
-            }.tabViewStyle(.page(indexDisplayMode: .never)).ignoresSafeArea()
+            pager
             if controls {
                 VStack {
                     header
@@ -107,6 +103,7 @@ struct AssetViewer: View {
                     .accessibilityElement(children: .contain)
             } else if working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
         }
+        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { safeArea = $0 }
         .onChange(of: selectedID) { if !transferSaving { cancelTransfer() } }
         .onDisappear { if !transferSaving { cancelTransfer() } }
         .preferredColorScheme(.dark)
@@ -117,10 +114,84 @@ struct AssetViewer: View {
             CastController.shared.select(api: api, asset: current)
         }
         .task(id: selectedID + "|" + String(refreshRevision)) { await refreshCurrentAsset() }
+        .task(id: selectedID) { await prefetchNeighbors() }
         .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { note in
             guard note.userInfo?["scope"] as? String == api.cacheScope else { return }
             refreshRevision += 1
             if note.userInfo?["accessChanged"] as? Bool == true { accessRefreshRevision = refreshRevision }
+        }
+    }
+
+    private static let pageGap: CGFloat = 20
+
+    /// Photos lie side by side on one paging strip with a black gap between them, as in Photos.
+    /// The strip is one gap wider than the screen, so each page is a photo plus the gap after it.
+    /// Pages keep their place while the selection changes, so a swipe never swaps photos mid-drag.
+    private var pager: some View {
+        GeometryReader { proxy in
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 0) {
+                    ForEach(Array(assets.enumerated()), id: \.element.id) { index, summary in
+                        page(index: index, asset: replacements[summary.id] ?? summary)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .padding(.trailing, Self.pageGap)
+                    }
+                }.scrollTargetLayout()
+            }
+            .frame(width: proxy.size.width + Self.pageGap, alignment: .leading)
+            .scrollIndicators(.hidden)
+            .scrollTargetBehavior(.paging)
+            .scrollPosition($pagePosition, anchor: .leading)
+            .onScrollGeometryChange(for: Int.self) { geometry in
+                Int((geometry.contentOffset.x / max(1, geometry.containerSize.width)).rounded())
+            } action: { _, page in
+                guard pagerPhase != .idle, assets.indices.contains(page) else { return }
+                if assets[page].id != selectedID { selectedID = assets[page].id }
+            }
+            .onScrollPhaseChange { _, phase in pagerPhase = phase }
+            // Turning the phone resizes every page while the offset stays, which would land on a
+            // photo far away; the strip comes back to the selected photo instead.
+            .onChange(of: proxy.size, initial: true) { _, size in
+                viewport = size
+                pagePosition.scrollTo(id: selectedID, anchor: .leading)
+            }
+        }
+        .ignoresSafeArea()
+        // Photos added to or removed from the list must not slide another photo under the viewer.
+        .onChange(of: assets.map(\.id)) { pagePosition.scrollTo(id: selectedID, anchor: .leading) }
+    }
+
+    @ViewBuilder private func page(index: Int, asset: Asset) -> some View {
+        if abs(index - selectedIndex) <= 1 {
+            if asset.isVideo {
+                videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !(cast.connected && cast.currentAssetID == asset.id),
+                                             sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset)))
+            } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
+                videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false },
+                                             sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), isLivePhotoMotion: true))
+            } else {
+                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() }, matchedLocalPhoto: matchedLocalCopy(for: asset))
+            }
+        } else { Color.black }
+    }
+
+    private func showPage(_ index: Int) {
+        guard assets.indices.contains(index) else { return }
+        withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.3)) {
+            pagePosition.scrollTo(id: assets[index].id, anchor: .leading)
+        }
+    }
+
+    /// The photos either side load before a swipe reaches them, so paging never lands on a spinner.
+    private func prefetchNeighbors() async {
+        let pixels = Int(max(viewport.width, viewport.height) * displayScale)
+        guard pixels > 0 else { return }
+        let index = selectedIndex
+        for offset in [1, -1, 2] where assets.indices.contains(index + offset) {
+            let asset = replacements[assets[index + offset].id] ?? assets[index + offset]
+            guard !asset.isVideo else { continue }
+            _ = try? await pipeline.image(for: asset, size: .preview, pixelSize: pixels)
+            if Task.isCancelled { return }
         }
     }
 
@@ -155,12 +226,7 @@ struct AssetViewer: View {
 
     private var detailSheets: some View {
         mediaSheets
-        .sheet(isPresented: $info) {
-            NavigationStack {
-                AssetInfoView(api: api, pipeline: pipeline, asset: current, onUpdated: update)
-                .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { info = false } } }
-            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
-        }
+        .sheet(isPresented: $info, onDismiss: finishLocationNavigation) { infoSheet }
         .fullScreenCover(isPresented: $editing) {
             PhotoEditor(api: api, pipeline: pipeline, asset: current, onSaved: update)
         }
@@ -180,8 +246,23 @@ struct AssetViewer: View {
         }
     }
 
+    private var infoLocationAction: ((PlaceFocus) -> Void)? {
+        guard onExploreLocation != nil else { return nil }
+        return { focus in requestLocationNavigation(focus) }
+    }
+    private var infoSheet: some View {
+        NavigationStack {
+            AssetInfoView(api: api, pipeline: pipeline, asset: current, onUpdated: update,
+                          onExploreLocation: infoLocationAction)
+                .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { info = false } } }
+        }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+    }
+
     var body: some View {
         detailSheets
+        // Only the viewer turns with the phone; the rest of the app stays upright.
+        .onAppear { OrientationLock.viewerAppeared() }
+        .onDisappear { OrientationLock.viewerDisappeared() }
         .alert("Couldn’t complete action", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(error ?? "") }
@@ -197,7 +278,12 @@ struct AssetViewer: View {
             viewerButton("Close", symbol: "chevron.down") { dismiss() }
             Group {
                 if locationFocus != nil {
-                    Button { locationPresented = true } label: { headerMetadata }
+                    Button {
+                        if let focus = locationFocus {
+                            if let onExploreLocation { onExploreLocation(focus) }
+                            else { locationPresented = true }
+                        }
+                    } label: { headerMetadata }
                         .buttonStyle(.plain).accessibilityHint("Explore this location on the globe")
                 } else { headerMetadata }
             }.padding(.horizontal, 14).frame(minHeight: 48).frame(maxWidth: .infinity).glassEffect(in: .capsule)
@@ -242,6 +328,13 @@ struct AssetViewer: View {
               latitude.isFinite, longitude.isFinite, (-90...90).contains(latitude), (-180...180).contains(longitude) else { return nil }
         return .init(latitude: latitude, longitude: longitude, assetID: current.id)
     }
+    private func requestLocationNavigation(_ focus: PlaceFocus) {
+        pendingLocation = focus; info = false
+    }
+    private func finishLocationNavigation() {
+        guard let focus = pendingLocation else { return }
+        pendingLocation = nil; onExploreLocation?(focus)
+    }
     private var headerMetadata: some View {
         VStack(spacing: 3) {
             if let date = current.localDateTime ?? current.fileCreatedAt {
@@ -267,6 +360,10 @@ struct AssetViewer: View {
                     .tint(current.isFavorite ? .red : .primary).disabled(!ownsAsset)
                 Spacer()
                 viewerButton("Info", symbol: "info.circle") { info = true }
+                if current.isVideo {
+                    Spacer()
+                    viewerButton(muteVideo ? "Unmute" : "Mute", symbol: muteVideo ? "speaker.slash.fill" : "speaker.wave.2.fill") { muteVideo.toggle() }
+                }
                 if canEdit {
                     Spacer()
                     viewerButton("Edit", symbol: "slider.horizontal.3") { editing = true }.requiresWriteAccess(api)
@@ -279,14 +376,25 @@ struct AssetViewer: View {
         }
     }
 
+    /// While the viewer's buttons show, the player sits between them so its own controls are never
+    /// covered. The tap that brings up the player controls also puts the viewer's buttons away.
+    private func videoPage(_ video: AuthenticatedVideo) -> some View {
+        video
+            .padding(.top, controls ? safeArea.top + 64 : 0)
+            .padding(.bottom, controls ? safeArea.bottom + (current.livePhotoVideoId != nil ? 122 : 64) : 0)
+            .simultaneousGesture(TapGesture().onEnded { controls.toggle() })
+            // A swipe down closes a video as it does a photo.
+            .gesture(ViewerSwipeDown { dismiss() })
+    }
+
     private func viewerButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol).font(.title3).frame(width: 48, height: 48) }
-            .buttonStyle(.glass).buttonBorderShape(.circle).accessibilityLabel(title)
+        Button(action: action) { Image(systemName: symbol) }
+            .buttonStyle(ViewerCircleButtonStyle()).accessibilityLabel(title)
     }
     private func update(_ asset: Asset) { replacements[asset.id] = asset; onUpdated(asset) }
     private func handlePhotoTap(_ horizontalFraction: Double) {
-        if tapToNavigate && horizontalFraction < 0.33 && selectedIndex > 0 { selectedID = assets[selectedIndex - 1].id }
-        else if tapToNavigate && horizontalFraction > 0.67 && selectedIndex + 1 < assets.count { selectedID = assets[selectedIndex + 1].id }
+        if tapToNavigate && horizontalFraction < 0.33 && selectedIndex > 0 { showPage(selectedIndex - 1) }
+        else if tapToNavigate && horizontalFraction > 0.67 && selectedIndex + 1 < assets.count { showPage(selectedIndex + 1) }
         else { controls.toggle() }
     }
     private func run(_ operation: @escaping @MainActor () async throws -> Void) {
@@ -454,5 +562,43 @@ private struct ViewerAlbumPicker: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
             .task { do { albums = try await api.albums() } catch { self.error = error.localizedDescription } }
             .alert("Couldn’t add photo", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") { } } message: { Text(error ?? "") }
+    }
+}
+
+/// The viewer's round glass buttons, the same 48-pt circle as the actions menu. The system glass
+/// style pads its label, which made these circles 62 pt beside the 48-pt menu.
+private struct ViewerCircleButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.title3).foregroundStyle(.tint).opacity(enabled ? 1 : 0.35)
+            .frame(width: 48, height: 48)
+            .glassEffect(.regular.interactive(), in: .circle)
+            .contentShape(.circle)
+    }
+}
+
+/// A quick swipe down, recognized alongside the player's own gestures. The player swallows
+/// SwiftUI drags, so without this a video could not be swiped closed like a photo.
+private struct ViewerSwipeDown: UIGestureRecognizerRepresentable {
+    let action: () -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UISwipeGestureRecognizer {
+        let swipe = UISwipeGestureRecognizer()
+        swipe.direction = .down
+        swipe.delegate = context.coordinator
+        return swipe
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UISwipeGestureRecognizer, context: Context) {
+        if recognizer.state == .ended { action() }
+    }
+
+    @MainActor final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
     }
 }

@@ -1,9 +1,18 @@
+import AVFoundation
 import Foundation
 import XCTest
 @testable import Ilyich
 
 @MainActor
 final class CoreTests: XCTestCase {
+    func testVideoSoundPlaysWithThePhoneOnSilentAndMutedVideosMix() {
+        VideoAudio.prepare(foreground: true)
+        XCTAssertEqual(AVAudioSession.sharedInstance().category, .playback, "Video sound ignores the silent setting, as in Photos.")
+        XCTAssertEqual(AVAudioSession.sharedInstance().mode, .moviePlayback)
+        VideoAudio.prepare(foreground: false)
+        XCTAssertEqual(AVAudioSession.sharedInstance().category, .ambient, "Muted videos and Live Photo motion mix with other audio.")
+    }
+
     func testPasswordChangeRequirementPreservesAdministratorExemption() throws {
         for (isAdmin, shouldChangePassword, expected) in [(true, true, false), (true, false, false), (false, true, true), (false, false, false)] {
             let data = try JSONSerialization.data(withJSONObject: [
