@@ -203,7 +203,8 @@ struct LibraryView: View {
             .gesture(LibraryEdgePanGesture(size: geometry.size,
                 activeY: (chromeHeight + 16)...max(chromeHeight + 16, geometry.size.height - (showPlaces ? geometry.size.height * 0.4 : 90)),
                 leadingEnabled: !shelves,
-                trailingEnabled: !shelves && !showPlaces && store.canScrubTimeline && store.query.isEmpty,
+                // The rail scrubs above the Earth too; its band ends where the Earth begins.
+                trailingEnabled: !shelves && store.canScrubTimeline && store.query.isEmpty,
                 enabled: screen == nil && viewing == nil && viewingLocal == nil && !sharedFilesPresented && !store.isSelecting && !searchFocused,
                 onChange: handleEdgePan))
             .onChange(of: geometry.size, initial: true) { _, size in librarySize = size }
@@ -649,7 +650,7 @@ struct LibraryView: View {
                 store.setMetadataFilter(SearchFilter(isMotion: BoolFilter(eq: true), visibility: StringFilter(eq: "timeline")), title: "Motion"); searchText = ""
             }
             add("lightroom", "Lightroom", "slider.horizontal.3", selected: store.filterTitle == "Lightroom", filters: true) {
-                store.setMetadataFilter(SearchFilter(visibility: StringFilter(eq: "timeline")), title: "Lightroom", developedOnly: true); searchText = ""
+                store.setDeveloped(title: "Lightroom"); searchText = ""
             }
             add("favorites", "Favorites", "heart", selected: store.timelineFilter.isFavorite == true, filters: true) { store.setTimeline(TimelineFilter(isFavorite: true), title: "Favorites"); searchText = "" }
             add("archive", "Archive", "archivebox", selected: store.timelineFilter.visibility == .archive, filters: true) { store.setTimeline(TimelineFilter(visibility: .archive), title: "Archive"); searchText = "" }
@@ -886,13 +887,13 @@ struct LibraryView: View {
             store.setTimeline(filter, title: title); screen = nil
         }, onShowInTimeline: { requestPhotoNavigation(.timeline($0)) }, onMetadataFilter: { filter, title in
             store.setMetadataFilter(filter, title: title); searchText = ""; screen = nil
-        }, onDevelopedFilter: { filter, title in
-            store.setMetadataFilter(filter, title: title, developedOnly: true); searchText = ""; screen = nil
+        }, onDeveloped: { title in
+            store.setDeveloped(title: title); searchText = ""; screen = nil
         })
         }
     }
     private func selectPlace(_ place: PlaceCollection) {
-        store.setPlace(assetIDs: place.assetIDs, title: place.title); searchText = ""; screen = nil
+        store.setPlace(id: place.id, assetIDs: place.assetIDs, title: place.title); searchText = ""; screen = nil
     }
     private func finishViewerNavigation() {
         guard let focus = pendingPlaceFocus else { return }

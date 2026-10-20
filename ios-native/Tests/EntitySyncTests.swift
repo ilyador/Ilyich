@@ -10,9 +10,9 @@ final class EntitySyncTests: XCTestCase {
     private func event(_ type: String, _ json: String, ack: String? = nil) throws -> EntitySyncEvent {
         .init(type: type, data: try JSONDecoder().decode([String: EntityJSON].self, from: Data(json.utf8)), ack: ack ?? type + "|1")
     }
-    private func asset(_ id: String, owner: String = "alice", visibility: String = "timeline", deleted: Bool = false, favorite: Bool = false, stack: String? = nil) throws -> EntitySyncEvent {
+    private func asset(_ id: String, owner: String = "alice", visibility: String = "timeline", deleted: Bool = false, favorite: Bool = false, stack: String? = nil, developed: Bool = true) throws -> EntitySyncEvent {
         try event("AssetV2", """
-        {"id":"\(id)","ownerId":"\(owner)","type":"IMAGE","originalFileName":"\(id).NEF","checksum":"AQIDBA==","width":6000,"height":4000,"fileCreatedAt":"2026-01-31T23:30:00Z","localDateTime":"2026-02-01T05:00:00Z","createdAt":"2026-03-01T00:00:00Z","visibility":"\(visibility)","isFavorite":\(favorite),"deletedAt":\(deleted ? "\"2026-03-04T00:00:00Z\"" : "null"),"stackId":\(stack.map { "\"\($0)\"" } ?? "null"),"isEdited":false,"isDeveloped":true,"mediaRevision":"xmp-7"}
+        {"id":"\(id)","ownerId":"\(owner)","type":"IMAGE","originalFileName":"\(id).NEF","checksum":"AQIDBA==","width":6000,"height":4000,"fileCreatedAt":"2026-01-31T23:30:00Z","localDateTime":"2026-02-01T05:00:00Z","createdAt":"2026-03-01T00:00:00Z","visibility":"\(visibility)","isFavorite":\(favorite),"deletedAt":\(deleted ? "\"2026-03-04T00:00:00Z\"" : "null"),"stackId":\(stack.map { "\"\($0)\"" } ?? "null"),"isEdited":false,"isDeveloped":\(developed),"mediaRevision":"xmp-7"}
         """, ack: "AssetV2|\(id)")
     }
     func testCancelledReadLeavesDatabaseAvailableForNextRead() async throws {
@@ -239,6 +239,32 @@ final class EntitySyncTests: XCTestCase {
         XCTAssertEqual(paired.createdAt, APIDate.parse("2026-01-31T23:30:00Z"))
         XCTAssertEqual(paired.adjustmentTime, Date(timeIntervalSince1970: 1700000000))
         XCTAssertEqual(paired.latitude, 38.7)
+    }
+    func testLightroomIsLaidOutByMonthFromTheDevelopedPhotos() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root), epoch = await store.epoch()
+        _ = try await store.apply([asset("developed-1"), asset("developed-2"), asset("phone", developed: false)], epoch: epoch)
+        let lightroom = TimelineFilter(isDeveloped: true)
+        let buckets = try await store.timeBuckets(filter: lightroom)
+        XCTAssertEqual(buckets.first?.count, 2, "Only the developed photos.")
+        let month = try await store.timeBucket("2026-02-01", filter: lightroom)
+        XCTAssertEqual(Set(month.map(\.id)), ["developed-1", "developed-2"])
+    }
+    func testAPlaceIsLaidOutByMonthFromItsOwnPhotos() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root), epoch = await store.epoch()
+        _ = try await store.apply([asset("lisbon-1"), asset("lisbon-2"), asset("porto"), asset("partner", owner: "bob"),
+                                   asset("gone", deleted: true)], epoch: epoch)
+        let place = TimelineFilter(place: TimelinePlace(id: "Lisbon", assetIDs: ["lisbon-1", "lisbon-2", "partner", "gone", "unknown"]))
+        let buckets = try await store.timeBuckets(filter: place)
+        XCTAssertEqual(buckets.map(\.timeBucket), ["2026-02-01"])
+        XCTAssertEqual(buckets.first?.count, 3, "The place's photos from its map, a partner's included, without deleted or unknown ones.")
+        let month = try await store.timeBucket("2026-02-01", filter: place)
+        XCTAssertEqual(Set(month.map(\.id)), ["lisbon-1", "lisbon-2", "partner"])
+        let library = try await store.timeBuckets()
+        XCTAssertEqual(library.first?.count, 3, "The library itself is unchanged: its own three photos.")
     }
     func testOfflineMemoriesUseServerDateWindowAndExcludeUnavailableOrHiddenPeopleAssets() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -109,6 +109,76 @@ import XCTest
         store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
+    func testLightroomIsATimelineOfEveryDevelopedPhoto() async throws {
+        let api = PlacesAPIFixture(places: [:])
+        let store = LibraryStore(api: api, placesDelay: .zero)
+        await store.reload()
+        store.setDeveloped(title: "Lightroom")
+        XCTAssertEqual(store.timelineFilter.isDeveloped, true)
+        XCTAssertTrue(store.timelineFilter.queryItems.contains(URLQueryItem(name: "isDeveloped", value: "true")),
+                      "The server lays out the developed photos too, when the offline library cannot.")
+        try await until("Lightroom's months did not load.") { store.canScrubTimeline }
+        XCTAssertNotEqual(store.sections.first?.id, "results", "Lightroom is a timeline by month, with its rail.")
+        XCTAssertEqual(store.filterTitle, "Lightroom")
+        store.stop()
+        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testTheDevelopedShelfLooksPastHundredsOfRecentUndevelopedPhotos() async throws {
+        // Twelve pages of recent phone photos without development come before the first developed one.
+        let recent: [SearchResponse] = (0..<12).map { page in
+            .page(assets: (0..<5).map { Asset(id: "phone-\(page)-\($0)", isDeveloped: false) }, next: "page-\(page + 1)")
+        }
+        let api = LibraryAPIFixture([], metadataPages: recent + [.page(assets: [Asset(id: "developed", isDeveloped: true)])])
+        let store = LibraryStore(api: api)
+        await store.reload()
+        store.setMetadataFilter(SearchFilter(visibility: StringFilter(eq: "timeline")), title: "Lightroom", developedOnly: true)
+        try await until("The developed photo behind the recent ones was not found.") { await api.metadataCalls == 13 && !store.isSearching }
+        XCTAssertEqual(store.results.map(\.id), ["developed"])
+        let sizes = await api.metadataSizes
+        XCTAssertEqual(Set(sizes), [500], "The developed shelf reads big pages.")
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testChoosingAPlaceKeepsTheTimelineAndItsRailAsAPersonDoes() async throws {
+        let api = PlacesAPIFixture(places: [:], byMonth: true)
+        let store = LibraryStore(api: api, placesDelay: .zero)
+        await store.reload()
+        XCTAssertTrue(store.canShowPlacesByMonth)
+        store.setPlace(id: "lisbon", assetIDs: ["lisbon-1", "lisbon-2"], title: "Lisbon")
+        try await until("The place's months did not load.") { store.canScrubTimeline && store.buckets.first?.id == "2023-05-01T00:00:00Z" }
+        XCTAssertNotEqual(store.sections.first?.id, "results", "A place is a timeline by month, as a person is, not a list of results.")
+        XCTAssertEqual(store.buckets.first?.count, 2)
+        XCTAssertEqual(store.filterTitle, "Lisbon")
+        store.clearFilters()
+        XCTAssertNil(store.timelineFilter.place, "Clearing the place brings the library back.")
+        store.stop()
+        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testAPlaceIsFoundBySearchWhenTheOfflineLibraryCannotLayItOut() async throws {
+        let api = PlacesAPIFixture(places: [:], byMonth: true, placeFails: true)
+        let store = LibraryStore(api: api, placesDelay: .zero)
+        await store.reload()
+        store.setPlace(id: "lisbon", assetIDs: ["lisbon-1", "lisbon-2"], title: "Lisbon")
+        try await until("The place did not fall back to search.") { store.sections.first?.id == "results" }
+        XCTAssertNil(store.timelineFilter.place)
+        XCTAssertFalse(store.canShowPlacesByMonth)
+        store.stop()
+        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testAPlaceKeepsItsOwnCachesAndTheServerNeverSeesIt() {
+        let library = TimelineFilter()
+        let lisbon = TimelineFilter(place: TimelinePlace(id: "Lisbon", assetIDs: ["a", "b"]))
+        XCTAssertNotEqual(lisbon.cacheKey, library.cacheKey, "A place's feed is cached apart from the library's.")
+        XCTAssertEqual(library.cacheKey, library.queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&"),
+                       "The library's caches keep their names.")
+        XCTAssertEqual(lisbon.queryItems, library.queryItems, "The server never sees a place.")
+        XCTAssertNotEqual(lisbon, TimelineFilter(place: TimelinePlace(id: "Lisbon", assetIDs: ["a", "b", "c"])),
+                          "A place that gained photos is a new feed.")
+    }
+
     func testClearingAPersonBringsTheLibrarysPlacesStraightBack() async throws {
         let api = PlacesAPIFixture(places: [
             nil: [MonthPlaceCount(bucket: "2024-10-01", city: "Kyoto", country: "Japan", count: 40)],
@@ -460,7 +530,7 @@ import XCTest
         ])
         let store = LibraryStore(api: api)
         store.setTimeline(TimelineFilter(personID: "stale-person"), title: "Someone")
-        store.setPlace(assetIDs: ["place-a", "place-b", "place-c"], title: "Nearby")
+        store.setPlace(id: "nearby", assetIDs: ["place-a", "place-b", "place-c"], title: "Nearby")
         XCTAssertEqual(store.timelineFilter, TimelineFilter(), "A place filter must discard stale person/album routing state.")
         try await until("The place results did not load.") { await api.metadataCalls == 1 && !store.isSearching }
         XCTAssertTrue(store.hasMore)
@@ -672,18 +742,32 @@ import XCTest
     }
 }
 
-/// A library of one month whose places depend on the person chosen.
+/// A library of one month whose places depend on the person chosen. With `byMonth`, a chosen
+/// place is laid out by month in May 2023, as the offline library would; with `placeFails`, the
+/// offline library turns out not to be ready.
 private actor PlacesAPIFixture: LibraryAPI {
     nonisolated let cacheScope: String
     private let places: [String?: [MonthPlaceCount]]
     private let delay: Duration
-    init(scope: String = "test-places-" + UUID().uuidString, places: [String?: [MonthPlaceCount]], delay: Duration = .zero) {
-        cacheScope = scope; self.places = places; self.delay = delay
+    private let byMonth: Bool
+    private let placeFails: Bool
+    init(scope: String = "test-places-" + UUID().uuidString, places: [String?: [MonthPlaceCount]], delay: Duration = .zero,
+         byMonth: Bool = false, placeFails: Bool = false) {
+        cacheScope = scope; self.places = places; self.delay = delay; self.byMonth = byMonth; self.placeFails = placeFails
     }
-    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] { [.init(timeBucket: "2024-10-01T00:00:00Z", count: 1)] }
-    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] { [Asset(id: "photo-\(filter.personID ?? "library")")] }
+    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
+        guard let place = filter.place else { return [.init(timeBucket: "2024-10-01T00:00:00Z", count: 1)] }
+        if placeFails { throw LibraryAPIError.placeNeedsOfflineLibrary }
+        return [.init(timeBucket: "2023-05-01T00:00:00Z", count: place.assetIDs.count)]
+    }
+    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
+        if let place = filter.place { return place.assetIDs.map { Asset(id: $0) } }
+        return [Asset(id: "photo-\(filter.personID ?? "library")")]
+    }
+    func supportsPlaceTimelines() async -> Bool { byMonth }
+    /// A place found by search, as without the offline library.
+    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { .page(["lisbon-1", "lisbon-2"]) }
     func search(_ query: SearchQuery) async throws -> SearchResponse { throw APIError.http(500) }
-    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { throw APIError.http(500) }
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] {
         if delay > .zero { try await Task.sleep(for: delay) }
         return places[filter.personID] ?? []
@@ -754,10 +838,11 @@ private actor LibraryAPIFixture: LibraryAPI {
         return pages.removeFirst()
     }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse {
-        metadataCalls += 1
+        metadataCalls += 1; metadataSizes.append(query.size)
         guard !metadataPages.isEmpty else { throw APIError.http(500) }
         return metadataPages.removeFirst()
     }
+    var metadataSizes: [Int] = []
 }
 
 private extension SearchResponse {

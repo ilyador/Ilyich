@@ -450,6 +450,9 @@ actor EntityStore {
         else { conditions.append("json_extract(a.payload,'$.visibility') IN ('timeline','archive')") }
         conditions.append("json_extract(a.payload,'$.deletedAt') IS \(filter.isTrashed == true ? "NOT " : "")NULL")
         if let favorite = filter.isFavorite { conditions.append("json_extract(a.payload,'$.isFavorite')=CAST(? AS INTEGER)"); values.append(favorite ? "1" : "0") }
+        if let developed = filter.isDeveloped {
+            conditions.append("COALESCE(json_extract(a.payload,'$.isDeveloped'),0)=CAST(? AS INTEGER)"); values.append(developed ? "1" : "0")
+        }
         if let album = filter.albumID {
             conditions.append("a.id IN (SELECT json_extract(r.payload,'$.assetId') FROM entities r WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.albumId')=?)"); values.append(album)
         }
@@ -458,7 +461,13 @@ actor EntityStore {
             // the TEXT asset ID defeats SQLite's expression index affinity.
             conditions.append("a.id IN (SELECT json_extract(f.payload,'$.assetId') FROM entities f WHERE f.kind='face' AND json_extract(f.payload,'$.personId')=? AND json_extract(f.payload,'$.deletedAt') IS NULL AND json_extract(f.payload,'$.isVisible')=1)"); values.append(person)
         }
-        if filter.albumID == nil || filter.userID != nil {
+        if let place = filter.place {
+            // One parameter however many photos the place holds. They came from this account's
+            // own map, so they need no owner check.
+            conditions.append("a.id IN (SELECT value FROM json_each(?))")
+            values.append(String(decoding: (try? JSONEncoder().encode(place.assetIDs)) ?? Data("[]".utf8), as: UTF8.self))
+        }
+        if (filter.albumID == nil && filter.place == nil) || filter.userID != nil {
             var owners = ["json_extract(a.payload,'$.ownerId')=?"]
             values.append(filter.userID ?? userID)
             if filter.withPartners {
