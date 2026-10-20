@@ -25,6 +25,7 @@ import {
   SourceType,
 } from 'src/enum.js';
 import { ReverseGeocodeResult } from 'src/repositories/map.repository.js';
+import { DevelopmentInput, isLegacyDevelopmentFingerprint } from 'src/repositories/media.repository.js';
 import { ImmichTags } from 'src/repositories/metadata.repository.js';
 import { AssetExifTable } from 'src/schema/tables/asset-exif.table.js';
 import { AssetFaceTable } from 'src/schema/tables/asset-face.table.js';
@@ -460,16 +461,24 @@ export class MetadataService extends BaseService {
     const canDevelop = mimeTypes.isImage(asset.originalPath) && !asset.originalPath.toLowerCase().endsWith('.gif');
     if (canDevelop && (sidecarPath !== null || asset.development)) {
       const { image } = await this.getConfig({ withCache: true });
-      const fingerprint = await this.mediaRepository.getDevelopmentInputFingerprint({
-        originalPath: asset.originalPath,
-        sidecarPath,
-        image,
-      });
-      if (asset.development?.observedInputFingerprint !== fingerprint) {
+      const input = { originalPath: asset.originalPath, sidecarPath, image };
+      const fingerprint = await this.mediaRepository.getDevelopmentInputFingerprint(input);
+      let development = asset.development;
+      const published = development?.publishedInputFingerprint;
+      if (
+        development &&
+        sidecarPath !== null &&
+        published &&
+        isLegacyDevelopmentFingerprint(published) &&
+        (await this.adoptLegacyDevelopmentInput(asset.id, input, published, fingerprint))
+      ) {
+        development = { ...development, observedInputFingerprint: fingerprint, publishedInputFingerprint: fingerprint };
+      }
+      if (development?.observedInputFingerprint !== fingerprint) {
         await this.assetRepository.observeImageDevelopmentInput(asset.id, fingerprint);
       }
       // A normal preview publication clears retired sidecar or legacy RAW state.
-      needsGeneration = sidecarPath === null || asset.development?.publishedInputFingerprint !== fingerprint;
+      needsGeneration = sidecarPath === null || development?.publishedInputFingerprint !== fingerprint;
     }
 
     if (sidecarFile?.path || sidecarPath) {
@@ -493,6 +502,24 @@ export class MetadataService extends BaseService {
     }
 
     return JobStatus.Success;
+  }
+
+  /**
+   * Fingerprints stored before v2 also hashed the renderer build and every image setting. When the current photo
+   * and XMP reproduce the stored value, the published files already belong to them, so the record moves to the v2
+   * format without a render. Otherwise the asset renders as it would have before.
+   */
+  private async adoptLegacyDevelopmentInput(
+    assetId: string,
+    input: DevelopmentInput,
+    published: string,
+    fingerprint: string,
+  ): Promise<boolean> {
+    const candidates = await this.mediaRepository.getLegacyDevelopmentInputFingerprints(input);
+    if (!candidates.includes(published)) {
+      return false;
+    }
+    return this.assetRepository.replacePublishedImageDevelopmentInput(assetId, published, fingerprint);
   }
 
   @OnEvent({ name: 'AssetTag' })

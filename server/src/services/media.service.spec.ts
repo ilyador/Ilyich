@@ -21,6 +21,7 @@ import {
   TranscodePolicy,
   VideoCodec,
 } from 'src/enum.js';
+import { ImageDevelopmentState } from 'src/schema/tables/asset-job-status.table.js';
 import { MediaService } from 'src/services/media.service.js';
 import { AssetFaceFactory } from 'test/factories/asset-face.factory.js';
 import { AssetFileFactory } from 'test/factories/asset-file.factory.js';
@@ -41,6 +42,8 @@ const makeSidecarAsset = () =>
     .exif({ exifImageWidth: 6000, exifImageHeight: 4000 })
     .file({ type: AssetFileType.Sidecar, path: '/library/image.nef.xmp' })
     .file({ type: AssetFileType.Preview, path: '/cache/published-preview.jpeg' });
+const getStagedPaths = (mocks: ServiceMocks) => mocks.media.generateThumbnail.mock.calls.map((call) => call[2]);
+const getQueuedJobs = (mocks: ServiceMocks) => mocks.job.queue.mock.calls.map(([job]) => job);
 
 describe(MediaService.name, () => {
   let sut: MediaService;
@@ -1741,6 +1744,188 @@ describe(MediaService.name, () => {
       expect(mocks.job.queue).toHaveBeenCalledExactlyOnceWith({
         name: JobName.FileDelete,
         data: { files: ['/cache/published-preview.jpeg'] },
+      });
+    });
+
+    describe('re-rendering already published output', () => {
+      const thumbhash = Buffer.from('published-thumbhash');
+      const publishedBase = { width: 3000, height: 2000, isDeveloped: true };
+
+      const setup = (development: Partial<ImageDevelopmentState> = {}) => {
+        const asset = makeSidecarAsset()
+          .file({ type: AssetFileType.Thumbnail, path: '/cache/published-thumbnail.webp' })
+          .build();
+        const thumbnailJob = {
+          ...getForGenerateThumbnail(asset),
+          thumbhash,
+          development: {
+            observedInputFingerprint: 'development-input',
+            publishedInputFingerprint: 'previous-input',
+            publishedBase,
+            ...development,
+          },
+        };
+        mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(thumbnailJob);
+        mocks.media.generateThumbhash.mockResolvedValue(thumbhash);
+        mocks.crypto.hashFile.mockResolvedValue(Buffer.from('identical bytes'));
+        mocks.asset.recordUnchangedImageGeneration.mockResolvedValue(true);
+        return { asset, thumbnailJob, published: thumbnailJob.files };
+      };
+
+      it('publishes nothing and queues only the cleanup of its staged files', async () => {
+        const { asset, published } = setup();
+
+        await expect(sut.handleGenerateThumbnails({ id: asset.id, source: 'sidecar' })).resolves.toBe(
+          JobStatus.Skipped,
+        );
+
+        expect(mocks.media.developImage).toHaveBeenCalledOnce();
+        expect(getStagedPaths(mocks)).toHaveLength(2);
+        for (const path of [...published.map((file) => file.path), ...getStagedPaths(mocks)]) {
+          expect(mocks.crypto.hashFile).toHaveBeenCalledWith(path);
+        }
+        expect(mocks.asset.recordUnchangedImageGeneration).toHaveBeenCalledExactlyOnceWith({
+          assetId: asset.id,
+          originalPath: asset.originalPath,
+          sidecarPath: '/library/image.nef.xmp',
+          edits: [],
+          fingerprint: 'development-input',
+          files: expect.arrayContaining(published),
+          thumbhash,
+          base: publishedBase,
+          dimensions: { width: 3000, height: 2000 },
+        });
+        expect(mocks.asset.recordUnchangedImageGeneration.mock.calls[0][0].files).toHaveLength(2);
+        expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
+        expect(mocks.asset.update).not.toHaveBeenCalled();
+        expect(mocks.asset.upsertFile).not.toHaveBeenCalled();
+        expect(mocks.asset.upsertFiles).not.toHaveBeenCalled();
+        expect(mocks.asset.deleteFiles).not.toHaveBeenCalled();
+        expect(mocks.person.updateVisibility).not.toHaveBeenCalled();
+        expect(mocks.ocr.updateOcrVisibilities).not.toHaveBeenCalled();
+        expect(mocks.websocket.clientSend).not.toHaveBeenCalled();
+        // Only the staged copies are removed; no metadata, sidecar or search job follows (Skipped has no follow-ups).
+        expect(getQueuedJobs(mocks)).toEqual([{ name: JobName.FileDelete, data: { files: expect.any(Array) } }]);
+        const deletion = getQueuedJobs(mocks).find((job) => job.name === JobName.FileDelete);
+        expect(deletion?.data.files.toSorted()).toEqual(getStagedPaths(mocks).toSorted());
+      });
+
+      it.each([
+        { name: JobName.AssetGenerateThumbnails, data: { source: 'upload' as const } },
+        { name: JobName.AssetGenerateThumbnails, data: { notify: true } },
+        { name: JobName.AssetEditThumbnailGeneration, data: {} },
+      ])('still reports $name $data as done to its waiting clients without republishing', async (job) => {
+        const { asset } = setup();
+        const data = { id: asset.id, ...job.data };
+
+        const status = await (job.name === JobName.AssetEditThumbnailGeneration
+          ? sut.handleAssetEditThumbnailGeneration(data)
+          : sut.handleGenerateThumbnails(data));
+
+        expect(status).toBe(JobStatus.Success);
+        expect(mocks.asset.recordUnchangedImageGeneration).toHaveBeenCalledOnce();
+        expect(mocks.asset.publishImageGeneration).not.toHaveBeenCalled();
+        expect(getQueuedJobs(mocks)).toEqual([{ name: JobName.FileDelete, data: { files: expect.any(Array) } }]);
+      });
+
+      it('publishes a render whose files changed', async () => {
+        const { asset } = setup();
+        mocks.crypto.hashFile.mockImplementation((path) =>
+          Promise.resolve(Buffer.from(path === '/cache/published-preview.jpeg' ? 'old look' : 'new look')),
+        );
+
+        await expect(sut.handleGenerateThumbnails({ id: asset.id, source: 'sidecar' })).resolves.toBe(
+          JobStatus.Success,
+        );
+
+        expect(mocks.asset.recordUnchangedImageGeneration).not.toHaveBeenCalled();
+        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            fingerprint: 'development-input',
+            thumbhash,
+            base: publishedBase,
+            files: expect.arrayContaining(getStagedPaths(mocks).map((path) => expect.objectContaining({ path }))),
+          }),
+        );
+        expect(getQueuedJobs(mocks)).toEqual([]);
+      });
+
+      it('replaces a published file that can no longer be read', async () => {
+        const { asset } = setup();
+        mocks.crypto.hashFile.mockImplementation((path) =>
+          path === '/cache/published-preview.jpeg'
+            ? Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }))
+            : Promise.resolve(Buffer.from('identical bytes')),
+        );
+
+        await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.asset.recordUnchangedImageGeneration).not.toHaveBeenCalled();
+        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledOnce();
+      });
+
+      it('publishes normally when the published state changed before it could be kept', async () => {
+        const { asset } = setup();
+        mocks.asset.recordUnchangedImageGeneration.mockResolvedValue(false);
+
+        await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledOnce();
+      });
+
+      it.each([
+        ['no development was published', { publishedBase: null }],
+        ['the developed base differs', { publishedBase: { ...publishedBase, width: 2999 } }],
+        ['the published base was not developed', { publishedBase: { ...publishedBase, isDeveloped: false } }],
+      ])('publishes without comparing files when %s', async (_, development) => {
+        const { asset } = setup(development);
+
+        await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledOnce();
+      });
+
+      it('always publishes after sidecar removal so the development state is cleared', async () => {
+        const { asset, thumbnailJob } = setup({ publishedBase: { width: 6000, height: 4000, isDeveloped: false } });
+        mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue({ ...thumbnailJob, sidecarPath: null });
+
+        await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.media.developImage).not.toHaveBeenCalled();
+        expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+        expect(mocks.asset.recordUnchangedImageGeneration).not.toHaveBeenCalled();
+        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
+          expect.objectContaining({ sidecarPath: null, base: { width: 6000, height: 4000, isDeveloped: false } }),
+        );
+      });
+
+      it('publishes without comparing files when the thumbhash changed', async () => {
+        const { asset } = setup();
+        mocks.media.generateThumbhash.mockResolvedValue(Buffer.from('new-thumbhash'));
+
+        await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
+          expect.objectContaining({ thumbhash: Buffer.from('new-thumbhash') }),
+        );
+      });
+
+      it('publishes without comparing files when the set of published files differs', async () => {
+        const { asset } = setup();
+        mocks.systemMetadata.get.mockResolvedValue({
+          image: { colorspace: Colorspace.Srgb, fullsize: { enabled: true } },
+        });
+
+        await expect(sut.handleGenerateThumbnails({ id: asset.id })).resolves.toBe(JobStatus.Success);
+
+        expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+        expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
+          expect.objectContaining({
+            files: expect.arrayContaining([expect.objectContaining({ type: AssetFileType.FullSize })]),
+          }),
+        );
       });
     });
   });

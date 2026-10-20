@@ -57,6 +57,24 @@ const setup = async () => {
   return { ctx, asset, repository, input };
 };
 
+const getPublishedFiles = (assetId: string) =>
+  database
+    .selectFrom('asset_file')
+    .select(['id', 'path', 'type', 'isEdited', 'isProgressive', 'isTransparent', 'updateId', 'updatedAt'])
+    .where('assetId', '=', assetId)
+    .where('type', 'in', [AssetFileType.Thumbnail, AssetFileType.Preview, AssetFileType.FullSize])
+    .orderBy('path')
+    .execute();
+
+const getDevelopment = async (assetId: string) => {
+  const status = await database
+    .selectFrom('asset_job_status')
+    .select('development')
+    .where('assetId', '=', assetId)
+    .executeTakeFirstOrThrow();
+  return status.development;
+};
+
 describe('sidecar development publication', () => {
   it.each([{ isFavorite: true }, { visibility: AssetVisibility.Archive }])(
     'keeps image URLs stable after metadata changes: %j',
@@ -537,6 +555,102 @@ describe('sidecar development publication', () => {
       observedInputFingerprint: 'changed',
       publishedInputFingerprint: 'current',
       publishedBase: input.base,
+    });
+  });
+
+  describe('unchanged re-renders', () => {
+    it('records the new input without touching published rows, the asset or its revision', async () => {
+      const { asset, repository, input } = await setup();
+      await repository.publishImageGeneration(input);
+      const before = (await repository.getById(asset.id))!;
+      const published = await getPublishedFiles(asset.id);
+      await repository.observeImageDevelopmentInput(asset.id, 'next');
+
+      await expect(
+        repository.recordUnchangedImageGeneration({
+          assetId: asset.id,
+          originalPath: asset.originalPath,
+          sidecarPath: '/photos/photo.xmp',
+          fingerprint: 'next',
+          edits: [],
+          files: published.map(({ id, path, type, isEdited, isProgressive, isTransparent }) => ({
+            id,
+            path,
+            type,
+            isEdited,
+            isProgressive,
+            isTransparent,
+          })),
+          thumbhash: input.thumbhash,
+          base: input.base!,
+          dimensions: input.dimensions,
+        }),
+      ).resolves.toBe(true);
+
+      const after = (await repository.getById(asset.id))!;
+      expect(after.updateId).toBe(before.updateId);
+      expect(after.updatedAt).toEqual(before.updatedAt);
+      expect(after.mediaRevision).toBe(before.mediaRevision);
+      await expect(getPublishedFiles(asset.id)).resolves.toEqual(published);
+      await expect(getDevelopment(asset.id)).resolves.toEqual({
+        observedInputFingerprint: 'next',
+        publishedInputFingerprint: 'next',
+        publishedBase: input.base,
+      });
+    });
+
+    it('leaves the state alone when the published files are no longer the compared ones', async () => {
+      const { asset, repository, input } = await setup();
+      await repository.publishImageGeneration(input);
+      const published = await getPublishedFiles(asset.id);
+      await repository.observeImageDevelopmentInput(asset.id, 'next');
+
+      await expect(
+        repository.recordUnchangedImageGeneration({
+          assetId: asset.id,
+          originalPath: asset.originalPath,
+          sidecarPath: '/photos/photo.xmp',
+          fingerprint: 'next',
+          edits: [],
+          files: published.map(({ id, type, isEdited, isProgressive, isTransparent }) => ({
+            id,
+            path: '/cache/compared-earlier.jpg',
+            type,
+            isEdited,
+            isProgressive,
+            isTransparent,
+          })),
+          thumbhash: input.thumbhash,
+          base: input.base!,
+          dimensions: input.dimensions,
+        }),
+      ).resolves.toBe(false);
+
+      await expect(getDevelopment(asset.id)).resolves.toEqual({
+        observedInputFingerprint: 'next',
+        publishedInputFingerprint: 'current',
+        publishedBase: input.base,
+      });
+    });
+
+    it('moves a verified pre-v2 fingerprint to the new format only while it is still published', async () => {
+      const { asset, repository, input } = await setup();
+      await repository.publishImageGeneration(input);
+      const before = (await repository.getById(asset.id))!;
+      const published = await getPublishedFiles(asset.id);
+
+      await expect(repository.replacePublishedImageDevelopmentInput(asset.id, 'stale', 'v2:next')).resolves.toBe(false);
+      await expect(repository.replacePublishedImageDevelopmentInput(asset.id, 'current', 'v2:next')).resolves.toBe(
+        true,
+      );
+
+      await expect(getDevelopment(asset.id)).resolves.toEqual({
+        observedInputFingerprint: 'v2:next',
+        publishedInputFingerprint: 'v2:next',
+        publishedBase: input.base,
+      });
+      expect((await repository.getById(asset.id))!.mediaRevision).toBe(before.mediaRevision);
+      await expect(getPublishedFiles(asset.id)).resolves.toEqual(published);
     });
   });
 

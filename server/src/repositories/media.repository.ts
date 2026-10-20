@@ -37,6 +37,7 @@ import {
   DvSignalCompatibility,
   H264Profile,
   HevcProfile,
+  ImageFormat,
   LogLevel,
   RawExtractedFormat,
 } from 'src/enum.js';
@@ -82,6 +83,36 @@ export interface DevelopImageOptions {
   colorspace: Colorspace;
   size?: number;
 }
+
+export interface DevelopmentInput {
+  originalPath: string;
+  sidecarPath?: string | null;
+  image: SystemConfig['image'];
+}
+
+const DEVELOPMENT_FINGERPRINT_PREFIX = 'v2:';
+// Fingerprints stored before the prefix were bare SHA-256 digests.
+const LEGACY_DEVELOPMENT_FINGERPRINT = /^[\da-f]{64}$/;
+
+export const isLegacyDevelopmentFingerprint = (fingerprint: string) => LEGACY_DEVELOPMENT_FINGERPRINT.test(fingerprint);
+
+// WebP ignores the progressive flag.
+const getEncodingSettings = (output: { format: ImageFormat; quality: number; progressive?: boolean }) => ({
+  format: output.format,
+  quality: output.quality,
+  progressive: output.format !== ImageFormat.Webp && !!output.progressive,
+});
+
+/**
+ * The image settings that change developed preview, thumbnail and fullsize files, in a fixed shape and key order.
+ * `extractEmbedded` only affects the ordinary fallback used when the renderer skips a packet.
+ */
+const getDevelopmentOutputSettings = ({ colorspace, preview, thumbnail, fullsize }: SystemConfig['image']) => ({
+  colorspace,
+  preview: { size: preview.size, ...getEncodingSettings(preview) },
+  thumbnail: { size: thumbnail.size, ...getEncodingSettings(thumbnail) },
+  fullsize: fullsize.enabled ? { enabled: true, ...getEncodingSettings(fullsize) } : { enabled: false },
+});
 
 export interface DevelopedImage extends Bitmap {
   colorspace: Colorspace;
@@ -137,26 +168,57 @@ export class MediaRepository {
     return this.rendererVersion;
   }
 
-  async getDevelopmentInputFingerprint({
+  /**
+   * Identifies the photo, its XMP and the output settings a development render depends on. The renderer build is
+   * deliberately excluded: upgrading it must not re-render every developed asset.
+   */
+  async getDevelopmentInputFingerprint({ originalPath, sidecarPath, image }: DevelopmentInput): Promise<string> {
+    const original = await fs.stat(originalPath);
+    const [digest] = await this.digestDevelopmentInput(
+      [
+        {
+          originalPath,
+          size: original.size,
+          mtime: original.mtimeMs,
+          sidecarPath: sidecarPath ?? null,
+          output: getDevelopmentOutputSettings(image),
+        },
+      ],
+      sidecarPath,
+    );
+    return `${DEVELOPMENT_FINGERPRINT_PREFIX}${digest}`;
+  }
+
+  /**
+   * Recomputes the pre-v2 fingerprint of the current inputs, which also covered the renderer build and the whole
+   * image config. Returns one candidate for the installed renderer and one for each version listed in
+   * `IMMICH_SIDECAR_RENDERER_LEGACY_VERSIONS` (comma separated), so stored values can be verified after an upgrade.
+   */
+  async getLegacyDevelopmentInputFingerprints({
     originalPath,
     sidecarPath,
     image,
-  }: {
-    originalPath: string;
-    sidecarPath?: string | null;
-    image: SystemConfig['image'];
-  }): Promise<string> {
+  }: DevelopmentInput): Promise<string[]> {
     const [original, rendererVersion] = await Promise.all([fs.stat(originalPath), this.getRendererVersion()]);
-    const hash = createHash('sha256').update(
-      JSON.stringify({
-        originalPath,
-        size: original.size,
-        mtime: original.mtimeMs,
-        sidecarPath: sidecarPath ?? null,
-        rendererVersion,
-        image,
-      }),
-    );
+    const legacyVersions = (process.env.IMMICH_SIDECAR_RENDERER_LEGACY_VERSIONS ?? '')
+      .split(',')
+      .map((version) => version.trim())
+      .filter(Boolean);
+    const versions = [...new Set([rendererVersion, ...legacyVersions])];
+    // Key order is part of the stored digest.
+    const headers = versions.map((version) => ({
+      originalPath,
+      size: original.size,
+      mtime: original.mtimeMs,
+      sidecarPath: sidecarPath ?? null,
+      rendererVersion: version,
+      image,
+    }));
+    return this.digestDevelopmentInput(headers, sidecarPath);
+  }
+
+  private async digestDevelopmentInput(headers: object[], sidecarPath?: string | null): Promise<string[]> {
+    const hashes = headers.map((header) => createHash('sha256').update(JSON.stringify(header)));
     if (sidecarPath) {
       const file = await fs.open(sidecarPath, 'r');
       try {
@@ -171,13 +233,15 @@ export class MediaRepository {
           if (length > MAX_XMP_BYTES) {
             throw new Error('XMP packet exceeds 128 MiB');
           }
-          hash.update(chunk);
+          for (const hash of hashes) {
+            hash.update(chunk);
+          }
         }
       } finally {
         await file.close();
       }
     }
-    return hash.digest('hex');
+    return hashes.map((hash) => hash.digest('hex'));
   }
 
   async developImage(options: DevelopImageOptions): Promise<DevelopedImage | null> {

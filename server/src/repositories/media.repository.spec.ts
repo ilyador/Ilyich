@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempDisposableSync, statSync } from 'node:fs';
 import fs, { chmod, mkdtemp, readFile, rm, truncate, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,7 +9,11 @@ import { defaults } from 'src/dtos/config.dto.js';
 import { AssetEditAction, MirrorAxis } from 'src/dtos/editing.dto.js';
 import { Colorspace, ImageFormat } from 'src/enum.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
-import { DevelopImageOptions, MediaRepository } from 'src/repositories/media.repository.js';
+import {
+  DevelopImageOptions,
+  MediaRepository,
+  isLegacyDevelopmentFingerprint,
+} from 'src/repositories/media.repository.js';
 import { automock } from 'test/utils.js';
 
 const getPixelColor = async (buffer: Buffer, x: number, y: number) => {
@@ -472,6 +477,23 @@ else {
   });
 
   const fingerprint = () => sut.getDevelopmentInputFingerprint({ ...options, image: defaults.image });
+  const legacyFingerprints = () => sut.getLegacyDevelopmentInputFingerprints({ ...options, image: defaults.image });
+  const expectedLegacy = async (rendererVersion: string) => {
+    const original = statSync(options.originalPath);
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          originalPath: options.originalPath,
+          size: original.size,
+          mtime: original.mtimeMs,
+          sidecarPath: options.sidecarPath,
+          rendererVersion,
+          image: defaults.image,
+        }),
+      )
+      .update(await readFile(options.sidecarPath))
+      .digest('hex');
+  };
 
   it('hashes XMP content even when its path, size and modification time stay unchanged', async () => {
     const date = new Date('2026-01-01T00:00:00Z');
@@ -500,27 +522,103 @@ else {
     expect(await sut.getDevelopmentInputFingerprint(input)).not.toBe(before);
   });
 
-  it('invalidates when output configuration changes', async () => {
+  const image = defaults.image;
+
+  it.each([
+    ['preview quality', { ...image, preview: { ...image.preview, quality: image.preview.quality - 1 } }],
+    ['preview size', { ...image, preview: { ...image.preview, size: image.preview.size + 1 } }],
+    ['preview progressive JPEG', { ...image, preview: { ...image.preview, progressive: true } }],
+    ['thumbnail format', { ...image, thumbnail: { ...image.thumbnail, format: ImageFormat.Jpeg } }],
+    ['thumbnail size', { ...image, thumbnail: { ...image.thumbnail, size: image.thumbnail.size + 1 } }],
+    ['colorspace', { ...image, colorspace: Colorspace.Srgb }],
+    ['fullsize enabled', { ...image, fullsize: { ...image.fullsize, enabled: true } }],
+  ])('invalidates when output configuration changes (%s)', async (_, changed) => {
     const before = await fingerprint();
-    const changed = await sut.getDevelopmentInputFingerprint({
-      ...options,
-      image: { ...defaults.image, preview: { ...defaults.image.preview, quality: defaults.image.preview.quality - 1 } },
-    });
-    expect(changed).not.toBe(before);
+    expect(await sut.getDevelopmentInputFingerprint({ ...options, image: changed })).not.toBe(before);
   });
 
-  it('includes the renderer build version and caches the version lookup per server process', async () => {
-    const first = await fingerprint();
-    expect(await fingerprint()).toBe(first);
-    const log = await readFile(join(directory, 'calls.jsonl'), 'utf8');
-    const calls = log
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-    expect(calls).toEqual([['--version']]);
+  it('invalidates when the fullsize encoding changes while fullsize is enabled', async () => {
+    const enabled = { ...image, fullsize: { ...image.fullsize, enabled: true } };
+    const before = await sut.getDevelopmentInputFingerprint({ ...options, image: enabled });
+    const changed = { ...enabled, fullsize: { ...enabled.fullsize, quality: enabled.fullsize.quality - 1 } };
+    expect(await sut.getDevelopmentInputFingerprint({ ...options, image: changed })).not.toBe(before);
+  });
+
+  it.each([
+    ['embedded preview extraction', { ...image, extractEmbedded: !image.extractEmbedded }],
+    [
+      'disabled fullsize encoding',
+      { ...image, fullsize: { ...image.fullsize, format: ImageFormat.Webp, quality: 50, progressive: true } },
+    ],
+    ['progressive WebP thumbnails', { ...image, thumbnail: { ...image.thumbnail, progressive: true } }],
+    [
+      'setting order',
+      {
+        extractEmbedded: image.extractEmbedded,
+        fullsize: { ...image.fullsize },
+        colorspace: image.colorspace,
+        preview: {
+          quality: image.preview.quality,
+          progressive: image.preview.progressive,
+          size: image.preview.size,
+          format: image.preview.format,
+        },
+        thumbnail: { ...image.thumbnail },
+      },
+    ],
+  ])('ignores image settings that do not change developed files (%s)', async (_, unchanged) => {
+    const before = await fingerprint();
+    expect(image.thumbnail.format).toBe(ImageFormat.Webp);
+    expect(image.fullsize.enabled).toBe(false);
+    expect(await sut.getDevelopmentInputFingerprint({ ...options, image: unchanged })).toBe(before);
+  });
+
+  it('does not depend on the renderer build, so an upgrade alone does not require a render', async () => {
+    const before = await fingerprint();
+    expect(before).toMatch(/^v2:[\da-f]{64}$/);
+    expect(isLegacyDevelopmentFingerprint(before)).toBe(false);
     await fake('developed', 'renderer-build-b');
     sut = new MediaRepository(logger);
-    expect(await fingerprint()).not.toBe(first);
+    expect(await fingerprint()).toBe(before);
+    await expect(readFile(join(directory, 'calls.jsonl'), 'utf8')).rejects.toThrow();
+  });
+
+  it('requires a render when only the XMP changes under an unchanged renderer', async () => {
+    const before = await fingerprint();
+    await writeFile(options.sidecarPath, '<xmp exposure="1.5"/>');
+    expect(await fingerprint()).not.toBe(before);
+  });
+
+  describe('pre-v2 fingerprints', () => {
+    it('reproduces the stored digest and caches the version lookup per server process', async () => {
+      const expected = await expectedLegacy('renderer-build-a');
+      expect(isLegacyDevelopmentFingerprint(expected)).toBe(true);
+
+      expect(await legacyFingerprints()).toEqual([expected]);
+      expect(await legacyFingerprints()).toEqual([expected]);
+
+      const log = await readFile(join(directory, 'calls.jsonl'), 'utf8');
+      const calls = log
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(calls).toEqual([['--version']]);
+    });
+
+    it('also checks renderer versions listed for an upgrade', async () => {
+      vitest.stubEnv('IMMICH_SIDECAR_RENDERER_LEGACY_VERSIONS', ' renderer-build-old, renderer-build-a ,');
+
+      expect(await legacyFingerprints()).toEqual([
+        await expectedLegacy('renderer-build-a'),
+        await expectedLegacy('renderer-build-old'),
+      ]);
+    });
+
+    it('no longer matches after the XMP changes', async () => {
+      const [before] = await legacyFingerprints();
+      await writeFile(options.sidecarPath, '<xmp exposure="3"/>');
+      expect(await legacyFingerprints()).not.toContain(before);
+    });
   });
 
   it('fingerprints Lightroom lookup tables in packets larger than 4 MiB', async () => {
