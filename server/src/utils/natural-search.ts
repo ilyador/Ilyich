@@ -4,6 +4,8 @@ import { SearchSubject, searchSubjectLabel } from 'src/utils/search-subjects.js'
 export interface SearchVocabulary {
   people: { personGroupId: string; name: string }[];
   cities: string[];
+  /** Regions (states, provinces, districts). A city's suburbs share its region, not its name. */
+  states?: string[];
   countries: string[];
   userName: string;
 }
@@ -88,7 +90,7 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
   const consume = (start: number, length: number) => {
     for (let offset = 0; offset < length; offset++) used.add(start + offset);
   };
-  const places = [...vocabulary.cities, ...vocabulary.countries].map((value) => words(value));
+  const places = [...vocabulary.cities, ...(vocabulary.states ?? []), ...vocabulary.countries].map((value) => words(value));
   for (const [alias, ids] of [...aliases].sort(([a], [b]) => b.length - a.length)) {
     if (ids.size !== 1) continue; // Ambiguous first names must not silently pick a person.
     const parts = alias.split(' ');
@@ -140,7 +142,10 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
       filter.or = subjectGroups.map((all) => ({ personIds: { all } }));
     }
   }
+  // A name that is also a region means the whole region: "in Lisbon" includes the photos
+  // geocoded to Sintra or Mem Martins, which carry the Lisbon region but not its city name.
   for (const [field, values] of [
+    ['state', vocabulary.states ?? []],
     ['city', vocabulary.cities],
     ['country', vocabulary.countries],
   ] as const) {

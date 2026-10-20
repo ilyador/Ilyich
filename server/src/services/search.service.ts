@@ -478,12 +478,13 @@ export class SearchService extends BaseService {
   private async planQuery(auth: AuthDto, dto: SmartSearchDto): Promise<NaturalSearchPlan> {
     if (!dto.query || auth.sharedLink) return { query: dto.query ?? '' };
     const userIds = await this.getUserIdsToSearch(auth, dto.visibility);
-    const [people, cities, countries] = await Promise.all([
+    const [people, cities, states, countries] = await Promise.all([
       this.personRepository.getNames(auth.user.id, { withHidden: false }),
       this.searchRepository.getCities(userIds, { includeArchived: true }),
+      this.searchRepository.getStates(userIds, {}),
       this.searchRepository.getCountries(userIds, { includeArchived: true }),
     ]);
-    return planNaturalSearch(dto.query, { people, cities, countries, userName: auth.user.name });
+    return planNaturalSearch(dto.query, { people, cities, states, countries, userName: auth.user.name });
   }
 
   private async resolveSearchScopeV3(
