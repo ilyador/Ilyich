@@ -276,7 +276,10 @@ actor APIClient {
         do { return try await request(.get, path: "partners", query: [.init(name: "direction", value: direction)]) }
         catch { if canReadOffline(error), let store = entityStore, try await store.isComplete() { return try await store.partners(direction: direction) }; throw error }
     }
-    func sharedLinks() async throws -> [SharedLink] { try await request(.get, path: "shared-links") }
+    /// All of the owner's links, or only those sharing one album.
+    func sharedLinks(albumID: String? = nil) async throws -> [SharedLink] {
+        try await request(.get, path: "shared-links", query: albumID.map { [URLQueryItem(name: "albumId", value: $0)] } ?? [])
+    }
     func createSharedLink(_ body: SharedLinkCreation) async throws -> SharedLink { try await request(.post, path: "shared-links", body: body) }
     func deleteSharedLink(id: String) async throws { try await requestVoid(.delete, path: "shared-links/\(id)") }
     func duplicates() async throws -> [DuplicateGroup] { try await request(.get, path: "duplicates") }

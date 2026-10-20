@@ -12,16 +12,7 @@ struct SharedLinksView: View {
             if loading { ProgressView() }
             if !loading && links.isEmpty { FeatureEmpty(title: "No shared links", symbol: "link", description: "Share photos or an album to create a link.") }
             ForEach(links) { link in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(link.description?.isEmpty == false ? link.description! : link.album?.albumName ?? "Shared photos").font(.headline)
-                    if let expiry = link.expiresAt { Text(expiry < Date() ? "Expired" : "Expires \(expiry.formatted(date: .abbreviated, time: .omitted))").font(.caption).foregroundStyle(.secondary) }
-                    HStack {
-                        if let url = sharedURL(link: link, api: api) { ShareLink(item: url) { Label("Share link", systemImage: "square.and.arrow.up") } }
-                        Spacer()
-                        Button("Edit") { editing = link }.requiresWriteAccess(api)
-                    }.buttonStyle(.borderless)
-                }.padding(.vertical, 4)
-                .swipeActions { Button("Remove", role: .destructive) { deleting = link }.requiresWriteAccess(api) }
+                SharedLinkRow(api: api, link: link, onEdit: { editing = link }, onRemove: { deleting = link })
             }
         }.navigationTitle("Shared links")
         .task { await load() }.refreshable { await load() }
@@ -39,6 +30,26 @@ struct SharedLinksView: View {
     }
     private func remove(_ link: SharedLink) async {
         do { try await api.deleteSharedLink(id: link.id); links.removeAll { $0.id == link.id }; deleting = nil } catch { failure = .init(error) }
+    }
+}
+
+/// One shared link: what it shares and until when, with sharing, editing and removing it.
+struct SharedLinkRow: View {
+    let api: APIClient
+    let link: SharedLink
+    let onEdit: () -> Void
+    let onRemove: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(link.description?.isEmpty == false ? link.description! : link.album?.albumName ?? "Shared photos").font(.headline)
+            if let expiry = link.expiresAt { Text(expiry < Date() ? "Expired" : "Expires \(expiry.formatted(date: .abbreviated, time: .omitted))").font(.caption).foregroundStyle(.secondary) }
+            HStack {
+                if let url = sharedURL(link: link, api: api) { ShareLink(item: url) { Label("Share link", systemImage: "square.and.arrow.up") } }
+                Spacer()
+                Button("Edit", action: onEdit).requiresWriteAccess(api)
+            }.buttonStyle(.borderless)
+        }.padding(.vertical, 4)
+        .swipeActions { Button("Remove", role: .destructive, action: onRemove).requiresWriteAccess(api) }
     }
 }
 

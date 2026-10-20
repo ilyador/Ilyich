@@ -101,7 +101,7 @@ struct AlbumsView: View {
     }
 }
 
-private struct AlbumEditor: View {
+struct AlbumEditor: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let album: Album?
@@ -192,7 +192,7 @@ private struct AlbumEditor: View {
     }
 }
 
-private struct AlbumMembersView: View {
+struct AlbumMembersView: View {
     let api: APIClient
     let album: Album
     let onLeft: () -> Void
@@ -201,6 +201,10 @@ private struct AlbumMembersView: View {
     @State private var users: [User] = []
     @State private var failure: FeatureFailure?
     @State private var busy = false
+    /// Links sharing this album: an album shared only by link is still shared.
+    @State private var links: [SharedLink] = []
+    @State private var editingLink: SharedLink?
+    @State private var removingLink: SharedLink?
     private var owner: Bool { members.contains { $0.user.id == api.userID && $0.role == "owner" } }
     var body: some View {
         List {
@@ -215,6 +219,13 @@ private struct AlbumMembersView: View {
                                 Button("Remove member", role: .destructive) { Task { await remove(member) } }
                             }.requiresWriteAccess(api)
                         } else { Text(member.role.capitalized).foregroundStyle(.secondary) }
+                    }
+                }
+            }
+            if !links.isEmpty {
+                Section("Shared links") {
+                    ForEach(links) { link in
+                        SharedLinkRow(api: api, link: link, onEdit: { editingLink = link }, onRemove: { removingLink = link })
                     }
                 }
             }
@@ -233,14 +244,23 @@ private struct AlbumMembersView: View {
                     Button("Leave album", role: .destructive) { confirmLeave = true }.requiresWriteAccess(api)
                 } footer: { Text("You will lose access to this shared album. Photos you own remain in your library.") }
             }
-        }.navigationTitle("Members").disabled(busy)
+        }.navigationTitle("Sharing").disabled(busy)
         .confirmationDialog("Leave this shared album?", isPresented: $confirmLeave, titleVisibility: .visible) {
             Button("Leave album", role: .destructive) { Task { await leave() } }.requiresWriteAccess(api)
         } message: { Text("An album owner will need to invite you again to restore access.") }
         .task {
             members = album.albumUsers ?? []
+            // An album from a list can arrive without its members.
+            if members.isEmpty { try? await refresh() }
+            await loadLinks()
             if owner { do { users = try await api.request(.get, path: "users") } catch { failure = .init(error) } }
         }
+        .sheet(item: $editingLink) { link in
+            NavigationStack { SharedLinkEditor(api: api, album: link.album, link: link, onSaved: { Task { await loadLinks() } }) }
+        }
+        .confirmationDialog("Remove this shared link?", isPresented: Binding(get: { removingLink != nil }, set: { if !$0 { removingLink = nil } }), titleVisibility: .visible) {
+            Button("Remove link", role: .destructive) { if let link = removingLink { Task { await removeLink(link) } } }.requiresWriteAccess(api)
+        } message: { Text("Anyone with the link will lose access. Your photos stay in your library.") }
         .alert("Couldn’t update members", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
@@ -252,6 +272,12 @@ private struct AlbumMembersView: View {
         catch { failure = .init(error) }
     }
     private func refresh() async throws { members = try await api.album(id: album.id).albumUsers ?? [] }
+    /// The members part still works when the links cannot load, so a failure only leaves them out.
+    private func loadLinks() async { links = (try? await api.sharedLinks(albumID: album.id)) ?? links }
+    private func removeLink(_ link: SharedLink) async {
+        do { try await api.deleteSharedLink(id: link.id); links.removeAll { $0.id == link.id }; removingLink = nil }
+        catch { failure = .init(error) }
+    }
     private func update(_ member: AlbumUser, role: String) async {
         busy = true; defer { busy = false }
         do { try await api.requestVoid(.put, path: "albums/\(album.id)/user/\(member.user.id)", body: ["role": role]); try await refresh() } catch { failure = .init(error) }
