@@ -269,10 +269,10 @@ import XCTest
 
     // MARK: - Media
 
-    /// MEDIA-1. A photo deleted on the server reaches the offline index as AssetDeleteV1, and the
-    /// index reports it as an access change as well as a deletion. SessionStore.didSync empties the
-    /// whole thumbnail store, the URL cache and every decoded image whenever an access change is
-    /// reported, so its branch that forgets only the deleted photos never runs for a deletion.
+    /// MEDIA-1, fixed in build 3040058. A photo deleted on the server reaches the offline index as
+    /// AssetDeleteV1. The index used to report it as an access change, and SessionStore.didSync
+    /// then emptied the whole thumbnail store, the URL cache and every decoded image. Now the
+    /// deletion queues only that photo's media to be forgotten.
     func testSyncedDeletionIsNotAnAccessChange() async throws {
         let (sync, index, server) = try makeSyncedIndex()
         _ = try await pass([asset("kept"), asset("deleted"), complete()], through: sync, server: server)
@@ -280,18 +280,18 @@ import XCTest
         let summary = try await pass([event("AssetDeleteV1", #"{"assetId":"deleted"}"#, ack: "AssetDeleteV1|deleted"), complete()],
                                      through: sync, server: server)
         let invalidated = try await index.takeAccessInvalidation()
+        let purges = try await index.pendingMediaPurges()
         XCTAssertEqual(summary.deletedAssetIDs, ["deleted"], "The deletion itself is reported.")
-
-        XCTExpectFailure("MEDIA-1: a synced deletion wipes the thumbnail store. Q6 removes this wrapper.", strict: true) {
-            XCTAssertFalse(summary.accessChanged, "A deletion is not a change in what the account may see.")
-            XCTAssertFalse(invalidated, "Nor is it kept as one for a later sync.")
-        }
+        XCTAssertFalse(summary.accessChanged, "A deletion is not a change in what the account may see.")
+        XCTAssertFalse(invalidated, "Nor is it kept as one for a later sync.")
+        XCTAssertEqual(purges, [MediaPurge(assetID: "deleted", revoked: false)], "Only the deleted photo's media goes.")
     }
 
-    /// MEDIA-2. Removing one of my photos from my own album on the web reaches the index as
-    /// AlbumToAssetDeleteV1. The index treats every album, partner and user removal as an access
-    /// change, though the photo stays in my library, and SessionStore.didSync then empties the
-    /// whole thumbnail store, so the offline library is downloaded again.
+    /// MEDIA-2, fixed in build 3040058. Removing one of my photos from my own album on the web
+    /// reaches the index as AlbumToAssetDeleteV1. The index used to treat every album, partner and
+    /// user removal as an access change, though the photo stays in my library, and
+    /// SessionStore.didSync then emptied the whole thumbnail store. Now only photos that leave the
+    /// account change access.
     func testRemovingAPhotoFromAnAlbumIsNotAnAccessChange() async throws {
         let (sync, index, server) = try makeSyncedIndex()
         _ = try await pass([
@@ -305,12 +305,11 @@ import XCTest
                                       complete()], through: sync, server: server)
         let invalidated = try await index.takeAccessInvalidation()
         let kept = try await index.asset(id: "trip-photo")
+        let purges = try await index.pendingMediaPurges()
         XCTAssertNotNil(kept, "The photo is still in my library.")
-
-        XCTExpectFailure("MEDIA-2: removing a photo from an album sets accessChanged. Q3 removes this wrapper.", strict: true) {
-            XCTAssertFalse(summary.accessChanged, "Removing my photo from my album changes nothing I may see.")
-            XCTAssertFalse(invalidated, "Nor is it kept as an access change for a later sync.")
-        }
+        XCTAssertFalse(summary.accessChanged, "Removing my photo from my album changes nothing I may see.")
+        XCTAssertFalse(invalidated, "Nor is it kept as an access change for a later sync.")
+        XCTAssertEqual(purges, [], "Its media stays.")
     }
 
     // MARK: - Queries

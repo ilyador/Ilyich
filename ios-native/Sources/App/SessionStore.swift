@@ -260,22 +260,22 @@ import IlyichPlatform
         guard api === client else { return }
         if summary.completed, let pipeline { thumbnailWarmer?.start(entities: entities, pipeline: pipeline) }
         guard summary.changed || summary.completed || !summary.assetIDs.isEmpty else { return }
-        let accessChanged = (try? await entities.takeAccessInvalidation()) == true
+        let resetPending = (try? await entities.takeAccessInvalidation()) == true
         guard api === client else { return }
-        if accessChanged || summary.accessChanged || summary.reset {
-            await previousPipeline?.removeAll()
+        if resetPending || summary.reset { await previousPipeline?.removeAll() }
+        // Clearing every cache for one deletion would throw away the whole offline library.
+        let revoked = await purgeRemovedMedia(entities: entities, pipeline: previousPipeline, client: client)
+        guard api === client else { return }
+        if resetPending || summary.reset || revoked {
             // Places are kept through ordinary syncs, but not past a change in what may be seen.
             await TimelinePlacesCache.shared.removeAll(scope: client.cacheScope)
-        } else if !summary.deletedAssetIDs.isEmpty {
-            // Clearing every cache for one deletion would throw away the whole offline library.
-            await previousPipeline?.forget(assetIDs: summary.deletedAssetIDs)
         }
         guard api === client else { return }
         await TimelineCache.shared.removeAll(scope: client.cacheScope)
         guard api === client else { return }
         NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
                                         userInfo: ["scope": client.cacheScope, "collections": summary.collectionsChanged,
-                                                   "accessChanged": accessChanged || summary.accessChanged])
+                                                   "accessChanged": resetPending || summary.accessChanged || revoked])
         WidgetCenter.shared.reloadAllTimelines()
         if summary.configurationChanged { validateSession() }
     }
@@ -283,11 +283,13 @@ import IlyichPlatform
     private func syncFailed(_ error: any Error, client: APIClient) async {
         guard api === client, let entities else { return }
         let previousPipeline = pipeline
-        let accessChanged = (try? await entities.takeAccessInvalidation()) == true
+        let resetPending = (try? await entities.takeAccessInvalidation()) == true
         guard api === client else { return }
-        if accessChanged {
-            await previousPipeline?.removeAll()
-            guard api === client else { return }
+        if resetPending { await previousPipeline?.removeAll() }
+        // Batches that committed before the failure removed their photos from the index already.
+        let revoked = await purgeRemovedMedia(entities: entities, pipeline: previousPipeline, client: client)
+        guard api === client else { return }
+        if resetPending || revoked {
             await TimelineCache.shared.removeAll(scope: client.cacheScope)
             await TimelinePlacesCache.shared.removeAll(scope: client.cacheScope)
             guard api === client else { return }
@@ -296,6 +298,22 @@ import IlyichPlatform
         }
         if case APIError.unauthorized = error { await signOut() }
         else { syncError = error.localizedDescription }
+    }
+
+    /// Forgets the media of photos the index removed, a batch at a time, and only then takes them
+    /// off the index's queue. Returns whether access to any of them was lost.
+    private func purgeRemovedMedia(entities: EntityStore, pipeline: MediaPipeline?, client: APIClient) async -> Bool {
+        guard let pipeline else { return false }
+        var revoked = false
+        // Bounded, so a queue that can't be cleared waits for the next sync instead of spinning.
+        for _ in 0..<64 {
+            guard api === client, let purges = try? await entities.pendingMediaPurges(), !purges.isEmpty else { break }
+            let lost = purges.contains(where: \.revoked)
+            await pipeline.forget(assetIDs: Set(purges.map(\.assetID)), revoked: lost)
+            revoked = revoked || lost
+            guard (try? await entities.finishMediaPurges(purges)) != nil else { break }
+        }
+        return revoked
     }
 
     func validateSession() {

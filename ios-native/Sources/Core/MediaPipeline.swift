@@ -392,9 +392,26 @@ actor MediaPipeline {
         await thumbnails.removeAll()
     }
 
-    /// Deleted photos drop out of memory and disk; the rest of the library stays cached.
-    func forget(assetIDs: Set<String>) async {
-        decoded.removeAllObjects(); latest.removeAllObjects()
+    /// Photos that left the library drop out of memory and disk; the rest of the library stays
+    /// cached. Decoded copies are keyed by revision and cell size, so they can't be found by ID,
+    /// but nothing asks for them once their photo is gone, and they age out. When access was lost
+    /// the URL cache goes too, since its previews can't be found by ID either.
+    func forget(assetIDs: Set<String>, revoked: Bool = false) async {
+        guard !assetIDs.isEmpty else { return }
+        for id in assetIDs {
+            for size in [MediaSize.thumbnail, .preview] {
+                latest.removeObject(forKey: Self.latestKey(scope: client.cacheScope, resource: "assets/\(id)", size: size.rawValue) as NSString)
+            }
+        }
+        for (key, flight) in thumbnailFlights where assetIDs.contains(String(key.prefix { $0 != "|" })) {
+            flight.task.cancel(); thumbnailFlights.removeValue(forKey: key)
+        }
+        if revoked {
+            for (key, flight) in flights where key.resource.hasPrefix("assets/") && assetIDs.contains(String(key.resource.dropFirst(7))) {
+                flight.task.cancel(); flights.removeValue(forKey: key)
+            }
+            byteCache.removeAllCachedResponses()
+        }
         await thumbnails.forget(assetIDs: assetIDs)
     }
 

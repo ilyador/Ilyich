@@ -38,6 +38,18 @@ final class ThumbnailStoreTests: XCTestCase {
         XCTAssertEqual(cleared, 0)
     }
 
+    func testForgettingManyPhotosKeepsTheRest() async {
+        let store = ThumbnailStore(scope: "scope", root: root)
+        let ids = (0..<40).map { "asset-\($0)" } + ["an.odd/id"]
+        for id in ids { await store.store(Data(id.utf8), assetID: id, revision: "1") }
+        let gone = Set(ids.prefix(20)).union(["an.odd/id"])
+        await store.forget(assetIDs: gone)
+        for id in ids { XCTAssertEqual(store.contains(assetID: id, revision: "1"), !gone.contains(id), id) }
+        let tracked = await store.currentUsage()
+        let measured = await ThumbnailStore(scope: "scope", root: root).currentUsage()
+        XCTAssertEqual(tracked, measured, "Usage drops by exactly what was forgotten.")
+    }
+
     func testTheOldestThumbnailsGoFirstPastTheCap() async {
         let store = ThumbnailStore(scope: "scope", limit: 5 * 4_096, root: root)
         for index in 0..<8 {

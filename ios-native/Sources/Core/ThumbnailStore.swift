@@ -50,9 +50,22 @@ actor ThumbnailStore {
         trimIfNeeded()
     }
 
-    /// Photos deleted on the server leave nothing behind.
+    /// Photos that left the library leave nothing behind. Each folder is listed once, however
+    /// many of its photos go.
     func forget(assetIDs: some Sequence<String>) {
-        for id in assetIDs { remove(assetID: id, keeping: nil) }
+        var names: [String: Set<String>] = [:]
+        for id in assetIDs {
+            let name = Self.fileName(id)
+            names[String(name.prefix(2)), default: []].insert(name)
+        }
+        for (prefix, gone) in names {
+            let folder = directory.appendingPathComponent(prefix, isDirectory: true)
+            guard let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileAllocatedSizeKey]) else { continue }
+            for file in files where gone.contains(String(file.lastPathComponent.prefix { $0 != "." })) {
+                let size = (try? file.resourceValues(forKeys: [.fileAllocatedSizeKey]).fileAllocatedSize) ?? 0
+                if (try? FileManager.default.removeItem(at: file)) != nil, let current = usage { usage = max(0, current - size) }
+            }
+        }
     }
 
     private func remove(assetID: String, keeping kept: URL?) {
