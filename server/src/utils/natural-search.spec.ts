@@ -15,6 +15,18 @@ const vocabulary: SearchVocabulary = {
 const plan = (query: string) => planNaturalSearch(query, vocabulary, new Date('2026-10-15T12:00:00Z'));
 
 describe(planNaturalSearch.name, () => {
+  it('matches a whole region when a place is also one, so its suburbs count', () => {
+    const regional = { ...vocabulary, cities: [...vocabulary.cities, 'Mem Martins'], states: ['Lisbon', 'Setúbal'] };
+    expect(planNaturalSearch('me and Maya in Lisbon', regional)).toEqual({
+      query: '',
+      filter: { personIds: { all: ['self', 'maya'] }, state: { in: ['Lisbon'] } },
+    });
+    expect(planNaturalSearch('me in Mem Martins', regional)).toEqual({
+      query: '',
+      filter: { personIds: { all: ['self'] }, city: { in: ['Mem Martins'] } },
+    });
+  });
+
   it.each([
     ['Priya Raman', 'Søren Lind', 'Utrecht'],
     ['Lúcia Pereira', 'Aarav Shah', 'Oslo'],
