@@ -424,21 +424,23 @@ Routine removeAll calls become precise: viewer lock, bulk lock, Duplicates, Tras
 - **Workstreams:** 6, 8. **Depends on:** F1, Q5. **Risk:** low.
 - **Scope:**
   - **What's wrong today.** Every search typed into the library bar runs the photo-content search with the server's LLM check. The app never sends `verify: false`, and the server checks every text search when verification is configured. The other modes (Filename, Description, Text in photos) and the filters exist in SearchOptionsView, but they are reachable only through the magnifying glass at the start of the bar, which reads as decoration, and the prompt always says "Describe a moment".
-  - **Modes.** The bar shows its search mode and switches it in place, as Immich does:
-    - Photo content: Immich's smart search, sent with `verify: false`;
-    - Photo content, checked: the fork's LLM-verified search, today's behaviour;
-    - Filename, Description and Text in photos.
-    The prompt names the current mode. The chosen mode persists until it is changed.
-  - **Filters.** Immich's search filters show while searching, as chips under the bar: People, Places, Camera, Date, Media type and Display options (favorites, archived, not in any album). Every mode combines with every filter through LibraryQuery predicates. N6 later stacks the shelf facets on the same predicates.
+  - **Under the bar, a simple switch and More (owner, 2026-10-21).**
+    - The switch turns the AI check on photo-content search on or off. Off is Immich's smart search, sent with `verify: false`; on is the fork's LLM-verified search, today's behaviour.
+    - A More option next to it opens the granular Immich options:
+      - the mode: Photo content, Filename, Description, Text in photos;
+      - the filters: People, Places, Camera, Date, Media type, and Display options (favorites, archived, not in any album).
+    - Chosen modes and filters show as removable chips under the bar while they apply. The prompt names the current mode. Choices persist until changed.
+    - Every mode combines with every filter through LibraryQuery predicates. N6 later stacks the shelf facets on the same predicates.
+  - **Design.** Design the switch, More and chips with the design skill, in the app's dark glass, and verify them on screenshots. The owner signs off on the look.
 - **Migration:** None.
 - **Tests:**
   - Each mode builds the right request: smart with `verify: false`, smart with verification, and metadata with filename, description or OCR
   - Filters combine with each mode
   - The mode survives clearing and a new search
-  - UI: switching the mode in the bar changes the request and the prompt
+  - UI: the switch toggles verification in the request; More changes the mode and filters, which show as chips and clear one by one
 - **Acceptance:**
-  - On the phone, a plain photo-content search returns without the "Checking photo content" pass; Filename, Description and Text in photos are one tap away; filters narrow results in every mode
-- **Owner default, assumed:** plain photo content is the default mode, since the owner asked that search stop always using the LLM; the checked mode stays one tap away. Revisit if the owner prefers the checked mode as the default.
+  - On the phone, with the switch off a photo-content search returns without the "Checking photo content" pass, and with it on the check runs; More reaches every Immich mode and filter; filters narrow results in every mode
+- **Owner default, assumed:** the switch starts off, so plain smart search, since the owner asked that search stop always using the LLM.
 
 ### F2 — TimelineFeed keyed by month
 
