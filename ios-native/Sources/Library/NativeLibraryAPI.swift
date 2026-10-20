@@ -17,9 +17,11 @@ struct NativeLibraryAPI: LibraryAPI {
     }
     func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
         if filter.visibility != .locked, try await entities.isComplete() {
+            FeedMonthProbe.note(.index)
             return try await entities.timeBucket(bucket, filter: filter)
         }
         guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
+        FeedMonthProbe.note(.serverTimeline)
         return try await client.timeBucket(bucket, filter: filter)
     }
     /// A place's photos are laid out by month only from the complete local index.

@@ -46,6 +46,9 @@ private struct FrozenFeed {
         return top...max(top, bottom)
     }
 
+    /// How far the timeline scrolls, in points.
+    var scrollableHeight: CGFloat? { range.map { $0.upperBound - $0.lowerBound } }
+
     /// How far down the timeline the grid is, from 0 to 1.
     var fraction: CGFloat? {
         guard let collection, let range, range.upperBound > range.lowerBound else { return nil }
@@ -565,13 +568,14 @@ extension APIClient: LibraryAPI {}
                     }
                 }
                 do {
-                    let assets = try await api.timeBucket(bucket.id, filter: filter)
+                    let assets = try await FeedMonthProbe.measure { try await api.timeBucket(bucket.id, filter: filter) }
                     guard let self, self.generation == current, !Task.isCancelled else { return }
                     self.loaded[bucket.id] = assets
                     self.cachedBuckets.remove(bucket.id)
                     self.recentBuckets.removeAll { $0 == bucket.id }; self.recentBuckets.append(bucket.id)
                     self.trimLoadedBuckets()
                     self.updateMergedEntries(); self.revision += 1
+                    FeedMonthProbe.committed()
                     if let epoch = self.cacheEpoch {
                         let snapshot = TimelineSnapshot(buckets: self.remoteBuckets, assets: self.loaded)
                         await TimelineCache.shared.save(snapshot, scope: api.cacheScope, filter: filter, epoch: epoch)
