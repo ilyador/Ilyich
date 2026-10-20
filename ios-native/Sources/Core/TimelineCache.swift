@@ -66,3 +66,44 @@ actor TimelineCache {
     }
     private func hash(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
 }
+
+/// Each feed's month places, kept apart from the month snapshots, which every sync clears, so the
+/// rail names months straight after launch while their places are counted again.
+actor TimelinePlacesCache {
+    static let shared = TimelinePlacesCache()
+    private let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("IlyichTimelinePlaces", isDirectory: true)
+
+    func load(scope: String, filter: TimelineFilter) -> TimelinePlaces? {
+        guard filter.visibility != .locked, let data = try? Data(contentsOf: file(scope: scope, filter: filter)) else { return nil }
+        return try? JSONDecoder().decode(TimelinePlaces.self, from: data)
+    }
+    func save(_ places: TimelinePlaces, scope: String, filter: TimelineFilter) {
+        guard filter.visibility != .locked else { return }
+        do {
+            let url = file(scope: scope, filter: filter)
+            let directory = url.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try JSONEncoder().encode(places).write(to: url, options: .atomic)
+            #if os(iOS)
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: url.path)
+            #endif
+            // The library and a handful of people or albums are plenty.
+            let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
+            let sorted = files.sorted {
+                let first = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let second = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return first > second
+            }
+            for stale in sorted.dropFirst(12) { try? FileManager.default.removeItem(at: stale) }
+        } catch { /* Cache writes never block a working library. */ }
+    }
+    func removeAll(scope: String) {
+        try? FileManager.default.removeItem(at: directory(scope))
+    }
+    private func directory(_ scope: String) -> URL { root.appendingPathComponent(hash(scope), isDirectory: true) }
+    private func file(scope: String, filter: TimelineFilter) -> URL {
+        let key = filter.queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
+        return directory(scope).appendingPathComponent(hash(key) + ".json")
+    }
+    private func hash(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
+}

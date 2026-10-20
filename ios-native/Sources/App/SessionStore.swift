@@ -223,6 +223,7 @@ import UIKit
             try await entities.clear()
             resetRequested = true
             await TimelineCache.shared.removeAll(scope: client.cacheScope)
+            await TimelinePlacesCache.shared.removeAll(scope: client.cacheScope)
             guard api === client else { return }
             NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
                                             userInfo: ["scope": client.cacheScope, "collections": true, "accessChanged": false])
@@ -266,6 +267,7 @@ import UIKit
             await previousPipeline?.removeAll()
             guard api === client else { return }
             await TimelineCache.shared.removeAll(scope: client.cacheScope)
+            await TimelinePlacesCache.shared.removeAll(scope: client.cacheScope)
             guard api === client else { return }
             NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
                                             userInfo: ["scope": client.cacheScope, "collections": true, "accessChanged": true])
@@ -321,7 +323,10 @@ import UIKit
         }
         await previousPipeline?.removeAll()
         await DiagnosticsStore.shared.clear()
-        if let previous { await TimelineCache.shared.removeAll(scope: previous.cacheScope) }
+        if let previous {
+            await TimelineCache.shared.removeAll(scope: previous.cacheScope)
+            await TimelinePlacesCache.shared.removeAll(scope: previous.cacheScope)
+        }
         error = cleanupError
         isSigningOut = false
         try? await previous?.logout()
