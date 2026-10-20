@@ -113,7 +113,7 @@ actor APIClient {
             await DiagnosticsStore.shared.record(method: method.rawValue, path: path, statusCode: status, startedAt: startedAt, outcome: .success)
             return data
         } catch {
-            if error is URLError { await connection.invalidate() }
+            if (error as? URLError)?.meansEndpointUnreachable == true { await connection.invalidate() }
             await recordFailure(error, method: method.rawValue, path: path, status: status, startedAt: startedAt)
             throw error
         }
@@ -458,7 +458,7 @@ extension APIClient {
             guard ended else { throw APIError.invalidResponse("Synchronization was interrupted before completion. It will resume from the last saved batch.") }
             await DiagnosticsStore.shared.record(method: "POST", path: "sync/stream", statusCode: status, startedAt: startedAt, outcome: .success)
         } catch {
-            if error is URLError { await connection.invalidate() }
+            if (error as? URLError)?.meansEndpointUnreachable == true { await connection.invalidate() }
             await recordFailure(error, method: "POST", path: "sync/stream", status: status, startedAt: startedAt)
             throw error
         }

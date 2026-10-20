@@ -7,6 +7,8 @@ actor ServerConnection {
     private var configuration: NetworkConfiguration
     private let probeSession: URLSession
     private var selected: (url: URL, expires: Date)?
+    /// The address that last answered. A busy server that misses one check keeps it.
+    private var lastGood: URL?
     private var resolution: Task<URL, Error>?
     private var generation = UUID()
 
@@ -71,6 +73,13 @@ actor ServerConnection {
                     try Task.checkCancellation()
                     guard let response = response as? HTTPURLResponse, response.statusCode == 200,
                           let ping = try? JSONDecoder().decode(Ping.self, from: data), ping.res == "pong" else { continue }
+                    // A share-only proxy answers ping but hides the API. Immich itself answers an
+                    // unauthenticated account request with 401, never 404.
+                    var account = URLRequest(url: try ServerAddress.url(base: candidate, path: "users/me"))
+                    for (name, value) in headers { account.setValue(value, forHTTPHeaderField: name) }
+                    let (_, accountResponse) = try await session.data(for: account)
+                    try Task.checkCancellation()
+                    guard let status = (accountResponse as? HTTPURLResponse)?.statusCode, [200, 401, 403].contains(status) else { continue }
                     return candidate
                 } catch is CancellationError { throw CancellationError() }
                 catch let error as URLError where error.code == .cancelled { throw CancellationError() }
@@ -84,9 +93,29 @@ actor ServerConnection {
             try Task.checkCancellation()
             guard generation == currentGeneration else { throw CancellationError() }
             selected = (url, Date().addingTimeInterval(30))
+            lastGood = url
             resolution = nil
             return url
-        } catch { if generation == currentGeneration { resolution = nil }; throw error }
+        } catch {
+            if generation == currentGeneration { resolution = nil }
+            if !(error is CancellationError), generation == currentGeneration, let lastGood {
+                selected = (lastGood, Date().addingTimeInterval(5))
+                return lastGood
+            }
+            throw error
+        }
     }
     private struct Ping: Decodable { let res: String }
+}
+
+extension URLError {
+    /// Only a lost route to the server suggests another address might work. Cancelled requests,
+    /// which scrolling produces by the hundred, say nothing about the server.
+    var meansEndpointUnreachable: Bool {
+        switch code {
+        case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .networkConnectionLost, .notConnectedToInternet,
+             .timedOut, .secureConnectionFailed, .internationalRoamingOff, .dataNotAllowed: true
+        default: false
+        }
+    }
 }
