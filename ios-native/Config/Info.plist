@@ -10,6 +10,8 @@
     <array><string>processing</string><string>fetch</string></array>
     <key>CFBundleDisplayName</key>
     <string>Ilyich</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
     <key>CADisableMinimumFrameDurationOnPhone</key>
     <true/>
     <key>CFBundleName</key>
