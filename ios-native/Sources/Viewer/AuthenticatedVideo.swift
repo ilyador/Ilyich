@@ -1,4 +1,4 @@
-import AVKit
+import AVFoundation
 import IlyichPlatform
 import SwiftUI
 import UniformTypeIdentifiers
@@ -14,6 +14,8 @@ struct AuthenticatedVideo: View {
     var matchedLocalPhoto: LocalPhoto? = nil
     /// `assetID` is a Live Photo motion video rather than a regular video.
     var isLivePhotoMotion = false
+    /// The viewer's playback pill, which follows this page's player while the page is selected.
+    var playback: VideoPlaybackState? = nil
     @State private var transport: AuthenticatedVideoTransport?
     @State private var error: String?
     @State private var attempt = 0
@@ -41,11 +43,15 @@ struct AuthenticatedVideo: View {
                         original: original, localPhoto: matchedLocalPhoto, liveMotion: isLivePhotoMotion, active: active)
     }
     private var shouldPlayLocal: Bool { usingLocal && active && scenePhase == .active && (autoPlay || onEnded != nil) }
+    private var shownPlayer: AVPlayer? {
+        guard active, playback != nil else { return nil }
+        return usingLocal ? localMedia.player : transport?.player
+    }
     var body: some View {
         ZStack {
             Color.black
             if usingLocal {
-                if let player = localMedia.player { VideoPlayer(player: player) }
+                if let player = localMedia.player { PlayerSurface(player: player) }
                 else if let live = localMedia.livePhoto {
                     LocalLivePhoto(livePhoto: live, active: active && scenePhase == .active, autoplay: shouldPlayLocal, muted: muted, onEnded: {
                         if usingLocal, active, scenePhase == .active { onEnded?() }
@@ -58,7 +64,7 @@ struct AuthenticatedVideo: View {
                     actions: { Button("Retry") { attempt += 1 } }
                 }
             }
-            else if let transport { VideoPlayer(player: transport.player) }
+            else if let transport { PlayerSurface(player: transport.player) }
             else if let error {
                 ContentUnavailableView { Label("Video couldn’t load", systemImage: "video.slash") }
                 description: { Text(error) }
@@ -100,7 +106,11 @@ struct AuthenticatedVideo: View {
         }
         .onChange(of: localMedia.player) { _, _ in adoptLocal() }
         .onChange(of: localMedia.livePhoto) { _, _ in adoptLocal() }
-        .onDisappear { transport?.close(); transport = nil; loadedKey = nil; stopLocal(); if activeNow { VideoAudio.finish() } }
+        .onChange(of: shownPlayer.map(ObjectIdentifier.init), initial: true) { _, _ in playback?.show(shownPlayer, for: assetID) }
+        .onDisappear {
+            playback?.release(assetID)
+            transport?.close(); transport = nil; loadedKey = nil; stopLocal(); if activeNow { VideoAudio.finish() }
+        }
         .onChange(of: muted) { _, value in
             transport?.player.isMuted = value; localMedia.player?.isMuted = value
             if active { VideoAudio.prepare(foreground: !value && !isLivePhotoMotion) }
