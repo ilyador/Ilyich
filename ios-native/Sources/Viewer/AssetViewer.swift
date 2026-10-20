@@ -11,6 +11,11 @@ struct AssetViewer: View {
     let onExploreLocation: ((PlaceFocus) -> Void)?
     let albumID: String?
     let matchedLocalPhotos: [String: LocalPhoto]
+    /// Set when the viewer zooms out of a grid cell: it hears which photo is on screen, and the
+    /// system's drag to close replaces the viewer's own swipe down.
+    let transition: ViewerTransitionState?
+    /// Closes the viewer when it was presented outside SwiftUI.
+    let onClose: (() -> Void)?
     @ObservedObject private var cast = CastController.shared
     @State private var selectedID: String
     @State private var replacements: [String: Asset] = [:]
@@ -66,13 +71,15 @@ struct AssetViewer: View {
 
     init(api: APIClient, pipeline: MediaPipeline, assets: [Asset], initial: Asset,
          onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping () -> Void, albumID: String? = nil,
-         matchedLocalPhotos: [String: LocalPhoto] = [:], onExploreLocation: ((PlaceFocus) -> Void)? = nil) {
+         matchedLocalPhotos: [String: LocalPhoto] = [:], onExploreLocation: ((PlaceFocus) -> Void)? = nil,
+         transition: ViewerTransitionState? = nil, onClose: (() -> Void)? = nil) {
         self.api = api; self.pipeline = pipeline
         self.assets = assets.contains(where: { $0.id == initial.id }) ? assets : [initial] + assets
         self.onUpdated = onUpdated; self.onDeleted = onDeleted
         self.onExploreLocation = onExploreLocation
         self.albumID = albumID
         self.matchedLocalPhotos = matchedLocalPhotos
+        self.transition = transition; self.onClose = onClose
         _selectedID = State(initialValue: initial.id)
         _pagePosition = State(initialValue: ScrollPosition(id: initial.id, anchor: .leading))
         _replacements = State(initialValue: [initial.id: initial])
@@ -115,6 +122,11 @@ struct AssetViewer: View {
         .statusBarHidden(!controls)
         .task { features = try? await api.serverFeatures() }
         .onChange(of: selectedID) { playingLive = false }
+        .onChange(of: selectedID, initial: true) {
+            // Closing zooms back into the cell of the photo on screen, lined up with the photo.
+            transition?.currentID = selectedID
+            transition?.aspectRatio = CGFloat(current.aspectRatio)
+        }
         // Scrubbing the strip passes many photos; only the one it stops on is refreshed and cast.
         .task(id: settledID) {
             guard settledID != nil else { return }
@@ -182,7 +194,7 @@ struct AssetViewer: View {
                 videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false },
                                              sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), isLivePhotoMotion: true))
             } else {
-                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { dismiss() },
+                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { if transition == nil { close() } },
                             matchedLocalPhoto: matchedLocalCopy(for: asset), onSwipeUp: { info = true }, settled: !stripScrubbing)
             }
         } else { Color.black }
@@ -290,7 +302,7 @@ struct AssetViewer: View {
     /// a group of Favorite, Info and Edit, and Delete along the bottom. Glyphs only, in system glass.
     @ToolbarContentBuilder private var viewerToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Button("Close", systemImage: "chevron.left") { dismiss() }
+            Button("Close", systemImage: "chevron.left") { close() }
         }
         ToolbarItem(placement: .principal) { titleCapsule }
             .sharedBackgroundVisibility(.hidden)
@@ -475,7 +487,7 @@ struct AssetViewer: View {
         video
             .gesture(ViewerTap { toggleControls() })
             // A swipe down closes a video as it does a photo; a swipe up shows its details.
-            .gesture(ViewerSwipe(direction: .down) { dismiss() })
+            .gesture(ViewerSwipe(direction: .down, enabled: transition == nil) { close() })
             .gesture(ViewerSwipe(direction: .up) { info = true })
     }
 
@@ -483,6 +495,7 @@ struct AssetViewer: View {
         withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.25)) { controls.toggle() }
     }
     private func update(_ asset: Asset) { replacements[asset.id] = asset; onUpdated(asset) }
+    private func close() { if let onClose { onClose() } else { dismiss() } }
     private func handlePhotoTap(_ horizontalFraction: Double) {
         if tapToNavigate && horizontalFraction < 0.33 && selectedIndex > 0 { showPage(selectedIndex - 1) }
         else if tapToNavigate && horizontalFraction > 0.67 && selectedIndex + 1 < assets.count { showPage(selectedIndex + 1) }
@@ -505,7 +518,7 @@ struct AssetViewer: View {
             if visibility == .locked {
                 await pipeline.forget(assetIDs: [id], revoked: true)
                 await TimelineCache.shared.removeAll(scope: api.cacheScope)
-                onDeleted(); dismiss()
+                onDeleted(); close()
             } else { update(updated) }
         }
     }
@@ -522,12 +535,12 @@ struct AssetViewer: View {
     private func deleteAsset() {
         guard let asset = deletionTarget, asset.ownerId != nil, asset.ownerId == api.userID else { return }
         let permanently = deletePermanently
-        run { try await api.trashAssets(ids: [asset.id], permanently: permanently); onDeleted(); dismiss() }
+        run { try await api.trashAssets(ids: [asset.id], permanently: permanently); onDeleted(); close() }
     }
     private func restoreAsset() {
         guard ownsAsset, features?.trash == true else { return }
         let id = current.id
-        run { _ = try await api.restoreAssets(ids: [id]); onDeleted(); dismiss() }
+        run { _ = try await api.restoreAssets(ids: [id]); onDeleted(); close() }
     }
     private func refreshCurrentAsset() async {
         let id = selectedID, revision = refreshRevision
@@ -539,7 +552,7 @@ struct AssetViewer: View {
             try Task.checkCancellation()
             guard selectedID == id, refreshRevision == revision else { return }
             if (asset.visibility == .locked && previous.visibility != .locked) || (asset.isTrashed && !previous.isTrashed) {
-                onDeleted(); dismiss(); return
+                onDeleted(); close(); return
             }
             replacements[id] = asset
             accessRefreshRevision = -1
@@ -549,9 +562,9 @@ struct AssetViewer: View {
             guard selectedID == id, refreshRevision == revision, !Task.isCancelled else { return }
             switch error {
             case APIError.forbidden, APIError.notFound, APIError.unauthorized:
-                onDeleted(); dismiss()
+                onDeleted(); close()
             default:
-                if accessMustBeConfirmed { onDeleted(); dismiss() }
+                if accessMustBeConfirmed { onDeleted(); close() }
                 else if revision == 0 { self.error = error.localizedDescription }
             }
         }
@@ -678,6 +691,7 @@ private struct ViewerTap: UIGestureRecognizerRepresentable {
 /// and shows its details with the same swipes as a photo.
 private struct ViewerSwipe: UIGestureRecognizerRepresentable {
     let direction: UISwipeGestureRecognizer.Direction
+    var enabled = true
     let action: () -> Void
 
     func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
@@ -686,8 +700,11 @@ private struct ViewerSwipe: UIGestureRecognizerRepresentable {
         let swipe = UISwipeGestureRecognizer()
         swipe.direction = direction
         swipe.delegate = context.coordinator
+        swipe.isEnabled = enabled
         return swipe
     }
+
+    func updateUIGestureRecognizer(_ recognizer: UISwipeGestureRecognizer, context: Context) { recognizer.isEnabled = enabled }
 
     func handleUIGestureRecognizerAction(_ recognizer: UISwipeGestureRecognizer, context: Context) {
         if recognizer.state == .ended { action() }

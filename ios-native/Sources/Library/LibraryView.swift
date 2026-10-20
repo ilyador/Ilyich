@@ -215,8 +215,11 @@ struct LibraryView: View {
                         .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { screen = nil } } }
                 }
             }
-            .fullScreenCover(item: $viewing, onDismiss: finishViewerNavigation) { asset in
-                assetViewer(asset)
+            // The viewer zooms out of its grid cell and back into the cell of the photo it closes on.
+            .background {
+                ViewerZoomPresenter(item: $viewing, sourceView: { store.zoomSourceView(for: $0) }, onDismiss: finishViewerNavigation) { asset, transition, close in
+                    AnyView(assetViewer(asset, transition: transition, close: close))
+                }
             }
             .fullScreenCover(item: $viewingLocal) { LocalPhotoViewer(photo: $0, photos: store.availableLocalPhotos(around: $0)) }
             .sheet(item: $bulkSelection) { selection in
@@ -352,12 +355,13 @@ struct LibraryView: View {
         return max(0, (width - (count - 1)) / count)
     }
 
-    private func assetViewer(_ asset: Asset) -> some View {
+    private func assetViewer(_ asset: Asset, transition: ViewerTransitionState, close: @escaping () -> Void) -> some View {
         let explore: (PlaceFocus) -> Void = { focus in pendingPlaceFocus = focus; viewing = nil }
         return AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
                            onUpdated: store.update, onDeleted: { Task { await store.refreshAfterMutation() } },
                            albumID: viewingAlbumID ?? store.timelineFilter.albumID,
-                           matchedLocalPhotos: store.matchingDevicePhotos, onExploreLocation: explore)
+                           matchedLocalPhotos: store.matchingDevicePhotos, onExploreLocation: explore,
+                           transition: transition, onClose: close)
     }
 
     @ViewBuilder private var selectionTitle: some View {
