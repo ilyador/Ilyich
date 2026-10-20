@@ -673,6 +673,52 @@ final class LibraryTests: XCTestCase {
         let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: strip)
         XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 5), .completed, "A tap hides the strip with the bars.")
     }
+    /// As in Photos, the viewer closes into the grid cell of the photo it shows, even after paging
+    /// far from the photo it opened on: the grid scrolls to that cell first. Dragging a photo down
+    /// closes the viewer too.
+    @MainActor func testClosingTheViewerLandsOnThePhotoItShows() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 15))
+        tapPhoto(grid.cells.element(boundBy: 1))
+        let strip = app.descendants(matching: .any)["viewer.strip"]
+        XCTAssertTrue(strip.waitForExistence(timeout: 10))
+        func position() -> Int? { (strip.value as? String)?.split(separator: " ").first.flatMap { Int($0) } }
+        // Seven thumbnails to the right of the middle (23 points apart, and 18 more past the wide
+        // current one), six times over: far past the cells on screen.
+        let jump = strip.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: 7 * 23 + 18, dy: 0))
+        for step in 1...6 {
+            jump.tap()
+            let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in position() == 2 + 7 * step }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 5), .completed, "The strip jumps seven photos.")
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        }
+        // Photo 44 of the newest month sits in the grid's last column, eleven rows down: off screen.
+        app.buttons["Close"].tap()
+        requireHittable(app.textFields["library.search"], in: app)
+        capture(app, "Library — after closing on a photo far from the one opened")
+        // Closing scrolled the grid to that photo and centered it: the last column's cell nearest
+        // the middle of the screen opens it again.
+        let lastColumn = grid.cells.allElementsBoundByIndex.filter { $0.frame.midX > grid.frame.minX + grid.frame.width * 0.75 }
+        let centered = lastColumn.min { abs($0.frame.midY - app.frame.height / 2) < abs($1.frame.midY - app.frame.height / 2) }
+        guard let centered else { return XCTFail("The grid shows photos after closing.") }
+        centered.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(strip.waitForExistence(timeout: 10))
+        XCTAssertEqual(position(), 44, "Closing lands on the photo shown, scrolled into view in the grid.")
+        // A zoomed-in photo pans under a downward drag instead of closing.
+        let photo = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        photo.doubleTap()
+        photo.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)), withVelocity: .fast, thenHoldForDuration: 0)
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertFalse(app.textFields["library.search"].exists, "A zoomed-in photo stays open when dragged down.")
+        XCTAssertTrue(app.buttons["Close"].exists)
+        photo.doubleTap()
+        // A photo dragged down closes the viewer, as in Photos.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)), withVelocity: .fast, thenHoldForDuration: 0)
+        let back = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: app.textFields["library.search"])
+        XCTAssertEqual(XCTWaiter.wait(for: [back], timeout: 5), .completed, "Dragging a photo down closes the viewer.")
+    }
     /// The library stays upright when the phone turns. The viewer turns with it, keeps its photo,
     /// still swipes to the photo beside it, and closing it turns the app back upright.
     @MainActor func testOnlyTheViewerTurnsWithThePhoneAndKeepsItsPhoto() {
