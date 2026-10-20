@@ -15,6 +15,21 @@ final class EntitySyncTests: XCTestCase {
         {"id":"\(id)","ownerId":"\(owner)","type":"IMAGE","originalFileName":"\(id).NEF","checksum":"AQIDBA==","width":6000,"height":4000,"fileCreatedAt":"2026-01-31T23:30:00Z","localDateTime":"2026-02-01T05:00:00Z","createdAt":"2026-03-01T00:00:00Z","visibility":"\(visibility)","isFavorite":\(favorite),"deletedAt":\(deleted ? "\"2026-03-04T00:00:00Z\"" : "null"),"stackId":\(stack.map { "\"\($0)\"" } ?? "null"),"isEdited":false,"isDeveloped":true,"mediaRevision":"xmp-7"}
         """, ack: "AssetV2|\(id)")
     }
+    func testCancelledReadLeavesDatabaseAvailableForNextRead() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root)
+
+        let cancelledRead = Task { try await store.statistics() }
+        cancelledRead.cancel()
+        do {
+            _ = try await cancelledRead.value
+            XCTFail("A cancelled read should stop before returning results")
+        } catch is CancellationError { }
+
+        let statistics = try await store.statistics()
+        XCTAssertTrue(statistics.counts.isEmpty)
+    }
     func testDurableCommitRetainsUnacknowledgedCursorAcrossReopenAndIsolatesAccounts() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -144,6 +159,46 @@ final class EntitySyncTests: XCTestCase {
         ], epoch: epoch)
         let deletedAlbum = try await store.album(id: "album"), deletedPerson = try await store.person(id: "person")
         XCTAssertNil(deletedAlbum); XCTAssertNil(deletedPerson)
+    }
+    func testPersonTimelineMembershipDeduplicatesFacesAndHonorsVisibilityAndAlbumShares() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(root), epoch = await store.epoch()
+        func face(_ id: String, assetID: String, visible: Bool? = true, deleted: Bool = false) throws -> EntitySyncEvent {
+            let visibility = visible.map { ",\"isVisible\":\($0)" } ?? ""
+            let deletion = deleted ? ",\"deletedAt\":\"2026-03-04T00:00:00Z\"" : ""
+            return try event("AssetFaceV3", "{\"id\":\"\(id)\",\"assetId\":\"\(assetID)\",\"personId\":\"person\"\(visibility)\(deletion)}", ack: "Face|\(id)")
+        }
+        _ = try await store.apply([
+            asset("own-visible"), asset("own-invisible"), asset("own-deleted-face"), asset("own-missing-visibility"),
+            asset("shared-visible", owner: "bob"), asset("unshared-bob", owner: "bob"),
+            asset("locked", visibility: "locked"), asset("trashed", deleted: true),
+            event("AlbumV2", #"{"id":"shared-album","name":"Shared","description":"","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","thumbnailAssetId":"shared-visible","isActivityEnabled":true,"order":"desc"}"#, ack: "Album|shared"),
+            event("AlbumUserV1", #"{"albumId":"shared-album","userId":"alice","role":"viewer"}"#, ack: "AlbumUser|shared"),
+            event("AlbumToAssetV1", #"{"albumId":"shared-album","assetId":"shared-visible"}"#, ack: "AlbumAsset|shared"),
+            face("own-face-1", assetID: "own-visible"), face("own-face-2", assetID: "own-visible"),
+            face("invisible-face", assetID: "own-invisible", visible: false),
+            face("deleted-face", assetID: "own-deleted-face", deleted: true),
+            face("missing-visible-flag", assetID: "own-missing-visibility", visible: nil),
+            face("shared-face", assetID: "shared-visible"),
+            face("unshared-face", assetID: "unshared-bob"),
+            face("locked-face", assetID: "locked"), face("trash-face", assetID: "trashed")
+        ], epoch: epoch)
+
+        var personFilter = TimelineFilter()
+        personFilter.personID = "person"
+        let peoplePhotos = try await store.timelineAssets(filter: personFilter)
+        XCTAssertEqual(Set(peoplePhotos.map(\.id)), ["own-visible", "shared-visible"])
+        XCTAssertEqual(peoplePhotos.count, 2, "Multiple visible faces must not duplicate an asset")
+        let peopleBuckets = try await store.timeBuckets(filter: personFilter)
+        XCTAssertEqual(peopleBuckets.map(\.count).reduce(0, +), 2)
+
+        var albumFilter = TimelineFilter()
+        albumFilter.albumID = "shared-album"
+        let albumPhotos = try await store.timelineAssets(filter: albumFilter)
+        XCTAssertEqual(albumPhotos.map(\.id), ["shared-visible"])
+        let albumBuckets = try await store.timeBuckets(filter: albumFilter)
+        XCTAssertEqual(albumBuckets.map(\.count).reduce(0, +), 1)
     }
     func testLockedTransitionPurgesMetadataAndCannotBeRepopulatedByLaterExif() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

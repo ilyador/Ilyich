@@ -20,6 +20,10 @@ struct NativeLibraryAPI: LibraryAPI {
         }
         return try await client.timeBucket(bucket, filter: filter)
     }
+    func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] {
+        guard filter.visibility != .locked, try await entities.isComplete() else { return [] }
+        return try await entities.monthPlaces(filter: filter)
+    }
     func search(_ query: SearchQuery) async throws -> SearchResponse { try await client.search(query) }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { try await client.metadataSearch(query) }
     func refresh() async throws { _ = try await sync.synchronize() }

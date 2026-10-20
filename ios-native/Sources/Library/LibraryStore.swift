@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import Observation
 
 struct LibrarySection: Identifiable, Equatable {
@@ -22,6 +23,54 @@ struct ScrollRequest: Equatable {
     let id = UUID()
     let position: GridPosition
 }
+private struct FrozenFeed {
+    let sections: [LibrarySection]
+    let assets: [String: [Asset]]
+    let mergedEntries: [String: [LibraryEntry]]
+    let dayGroups: [String: [TimelineDayGroup]]
+    let remoteToLocal: [String: LocalPhoto]
+    let showingResults: Bool
+    let totalCount: Int
+    /// The frozen feed's own month places, not those of the filter on its way.
+    let places: [String: [PlaceTally]]
+}
+/// The time rail drives the grid's offset directly, so scrubbing is one continuous movement
+/// instead of jumps from row to row through view updates.
+@MainActor final class GridScroller {
+    weak var collection: UICollectionView?
+
+    private var range: ClosedRange<CGFloat>? {
+        guard let collection else { return nil }
+        let top = -collection.adjustedContentInset.top
+        let bottom = collection.contentSize.height + collection.adjustedContentInset.bottom - collection.bounds.height
+        return top...max(top, bottom)
+    }
+
+    /// How far down the timeline the grid is, from 0 to 1.
+    var fraction: CGFloat? {
+        guard let collection, let range, range.upperBound > range.lowerBound else { return nil }
+        return min(1, max(0, (collection.contentOffset.y - range.lowerBound) / (range.upperBound - range.lowerBound)))
+    }
+
+    func scroll(toFraction fraction: CGFloat) {
+        guard let collection, let range else { return }
+        let y = range.lowerBound + min(1, max(0, fraction)) * (range.upperBound - range.lowerBound)
+        collection.setContentOffset(CGPoint(x: 0, y: y.rounded(.toNearestOrEven)), animated: false)
+    }
+
+    /// Where a month starts on the rail, from the grid's own layout.
+    func fraction(ofSection section: Int) -> CGFloat? {
+        guard let range, range.upperBound > range.lowerBound,
+              let top = (collection?.collectionViewLayout as? VirtualPhotoLayout)?.top(ofSection: section) else { return nil }
+        return min(1, max(0, (top - range.lowerBound) / (range.upperBound - range.lowerBound)))
+    }
+
+    func scroll(toSection section: Int, animated: Bool) {
+        guard let collection, let range, let top = (collection.collectionViewLayout as? VirtualPhotoLayout)?.top(ofSection: section) else { return }
+        collection.setContentOffset(CGPoint(x: 0, y: min(range.upperBound, max(range.lowerBound, top - collection.adjustedContentInset.top))), animated: animated)
+    }
+}
+
 @MainActor @Observable final class TimelinePosition {
     var section = 0
     var item = 0
@@ -35,8 +84,13 @@ protocol LibraryAPI: Sendable {
     func search(_ query: SearchQuery) async throws -> SearchResponse
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse
     func refresh() async throws
+    func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount]
 }
-extension LibraryAPI { func refresh() async throws {} }
+extension LibraryAPI {
+    func refresh() async throws {}
+    /// Only the local index can count places for every month at once.
+    func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] { [] }
+}
 extension APIClient: LibraryAPI {}
 
 @MainActor @Observable final class LibraryStore {
@@ -54,6 +108,20 @@ extension APIClient: LibraryAPI {}
     var error: String?
     var bucketErrors: [String: String] = [:]
     var title = "Library"
+    /// Each feed's places, so a month has a name before its photos load. They are kept per filter,
+    /// so the places shown are always those of the feed shown, and clearing a filter brings the
+    /// library's places straight back.
+    private var placesByFilter: [TimelineFilter: TimelinePlaces] = [:]
+    /// Each month's places in the feed shown, ranked.
+    var monthPlaces: [String: [PlaceTally]] { placesByFilter[timelineFilter]?.months ?? [:] }
+    /// Months spent abroad, named for the time rail.
+    var trips: [String: String] { placesByFilter[timelineFilter]?.trips ?? [:] }
+    /// The places being counted, and for which feed.
+    @ObservationIgnored private var placesLoad: (filter: TimelineFilter, id: UUID, task: Task<Void, Never>)?
+    /// The library changed while its places were being counted, so they are counted again after.
+    @ObservationIgnored private var placesStale = false
+    /// Counting every photo's place is one long read, so it waits for the first months of the grid.
+    private let placesDelay: Duration
     var filterTitle: String?
     var query = ""
     var verification: Verification?
@@ -77,29 +145,40 @@ extension APIClient: LibraryAPI {}
     @ObservationIgnored private var groupSelectionTask: Task<Void, Never>?
     @ObservationIgnored private var groupSelectionID = UUID()
     let navigation = TimelinePosition()
+    /// The rail moves the grid through this directly, at the finger's pace.
+    @ObservationIgnored let scroller = GridScroller()
     private(set) var timelineFilter = TimelineFilter()
     private(set) var searchFilter = SearchFilter()
     private(set) var searchMode = SearchMode.context
     private var similarAssetID: String?
     private var cursor: String?
     private var retryBatch: (cursor: String?, prefix: [Asset])?
+    private var loadedResultPageCount = 0
     private var requests: [String: Task<Void, Never>] = [:]
+    private var pendingBuckets: [Int] = []
+    private var visibleBucketIDs: Set<String> = []
+    private var targetBucketID: String?
+    private let maximumBucketRequests = 3
     private var queryTask: Task<Void, Never>?
     @ObservationIgnored private var navigationTask: Task<Void, Never>?
     private var generation = UUID()
     private var recentBuckets: [String] = []
     private var usesMetadata = false
+    private var developedOnlyResults = false
     private var showingResults = false
     private var timelineSections: [LibrarySection] = []
+    private var frozenFeed: FrozenFeed?
     private var cacheEpoch: UUID?
     private var cachedBuckets: Set<String> = []
     private var searchGeneration = UUID()
     private var originalTimeline: (TimelineSnapshot, GridPosition?, String)?
-    @ObservationIgnored var position: GridPosition?
+    @ObservationIgnored var position: GridPosition? {
+        didSet { updateVisibleResultsTitle() }
+    }
     @ObservationIgnored var started = false
 
-    init(api: any LibraryAPI, includesDevicePhotos: Bool = false) {
-        self.api = api; self.includesDevicePhotos = includesDevicePhotos
+    init(api: any LibraryAPI, includesDevicePhotos: Bool = false, placesDelay: Duration = .seconds(3)) {
+        self.api = api; self.includesDevicePhotos = includesDevicePhotos; self.placesDelay = placesDelay
     }
     private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && timelineFilter == TimelineFilter() }
     var selectedLocalPhotos: [LocalPhoto] { Array(selectedLocalRecords.values) }
@@ -109,17 +188,43 @@ extension APIClient: LibraryAPI {}
     }
     var matchingDevicePhotos: [String: LocalPhoto] { deviceTimeline.remoteToLocal }
     func updateDeviceTimeline(_ snapshot: MergedTimeline) {
+        let previousMatches = deviceTimeline.remoteToLocal
+        let previousEntries = merged
+        let previousSections = timelineSections
         deviceTimeline = snapshot
-        guard mergesDevicePhotos else { return }
+        guard !isReplacingFeed else { return }
+        guard mergesDevicePhotos else {
+            if previousMatches != snapshot.remoteToLocal { revision += 1 }
+            return
+        }
+        updateSections()
+        let rowsChanged = previousSections != timelineSections
+            || previousEntries.mapValues { $0.map(\.id) } != merged.mapValues { $0.map(\.id) }
+        // Indexing publishes discovery and fingerprint progress independently. An
+        // identical snapshot must not recycle every visible cell or move the grid.
+        guard rowsChanged || previousEntries != merged || previousMatches != snapshot.remoteToLocal else { return }
+        revision += 1
+        guard rowsChanged else { return }
         restorePosition = position
         if let id = restorePosition?.assetID, id.hasPrefix("local:"),
            let remote = snapshot.localToRemote[String(id.dropFirst(6))] {
             restorePosition?.assetID = remote
         }
-        updateSections(); resetID = UUID(); revision += 1
+        resetID = UUID()
     }
 
     func restoredIndex(for position: GridPosition) -> (section: Int, item: Int)? {
+        if let frozenFeed {
+            if let id = position.assetID {
+                for (section, bucket) in frozenFeed.sections.enumerated() {
+                    if let item = frozenFeed.assets[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
+                    if let item = frozenFeed.mergedEntries[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
+                }
+            }
+            guard let section = frozenFeed.sections.firstIndex(where: { $0.id == position.section }),
+                  frozenFeed.sections[section].count > 0 else { return nil }
+            return (section, min(position.item, frozenFeed.sections[section].count - 1))
+        }
         if let id = position.assetID {
             if showingResults, let item = results.firstIndex(where: { $0.id == id }) { return (0, item) }
             for (section, bucket) in buckets.enumerated() {
@@ -131,11 +236,13 @@ extension APIClient: LibraryAPI {}
         return (section, min(position.item, sections[section].count - 1))
     }
 
-    var sections: [LibrarySection] {
+    private var liveSections: [LibrarySection] {
         if showingResults { return [.init(id: "results", count: results.count, title: query.isEmpty ? filterTitle ?? "Library" : "Search")] }
         return timelineSections
     }
-    var totalCount: Int { showingResults ? results.count : buckets.reduce(0) { $0 + $1.count } }
+    var sections: [LibrarySection] { frozenFeed?.sections ?? liveSections }
+    var totalCount: Int { frozenFeed?.totalCount ?? (showingResults ? results.count : buckets.reduce(0) { $0 + $1.count }) }
+    var isReplacingFeed: Bool { frozenFeed != nil }
     var isFiltered: Bool { filterTitle != nil || !query.isEmpty }
     var selectedAssets: [Asset] {
         var seen = Set<String>()
@@ -164,7 +271,7 @@ extension APIClient: LibraryAPI {}
     /// Resolve the whole date group before changing selection. A virtualized
     /// viewport or an evicted bucket must not silently select only visible cells.
     func selectMonth(_ selecting: Bool) {
-        guard isSelecting, !showingResults, !isSelectingGroup,
+        guard !isReplacingFeed, isSelecting, !showingResults, !isSelectingGroup,
               buckets.indices.contains(navigation.section) else { return }
         let bucket = buckets[navigation.section].id
         let current = generation, filter = timelineFilter
@@ -200,6 +307,7 @@ extension APIClient: LibraryAPI {}
     }
 
     var canSelectMonth: Bool { !showingResults && buckets.indices.contains(navigation.section) }
+    var canScrubTimeline: Bool { !isReplacingFeed && !showingResults && !buckets.isEmpty }
 
     /// Up to two most common places (city, else country) among already loaded assets.
     func placeSummary(for assets: [Asset]) -> String? {
@@ -214,17 +322,87 @@ extension APIClient: LibraryAPI {}
         let ranked = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
         return ranked.isEmpty ? nil : ranked.prefix(2).map(\.key).joined(separator: " · ")
     }
-    /// Place summary for one loaded month section; nil until that month has loaded.
+    /// Place summary for one month: its loaded photos, or else the local index's count of them.
     func placeSummary(section: Int) -> String? {
-        guard !showingResults, buckets.indices.contains(section), let assets = loaded[buckets[section].id] else { return nil }
-        return placeSummary(for: assets)
+        if let frozenFeed {
+            guard frozenFeed.sections.indices.contains(section) else { return nil }
+            let id = frozenFeed.sections[section].id
+            guard let assets = frozenFeed.assets[id] else { return MonthPlaces.summary(frozenFeed.places[id]) }
+            return placeSummary(for: assets) ?? MonthPlaces.summary(frozenFeed.places[id])
+        }
+        guard !showingResults, buckets.indices.contains(section) else { return nil }
+        guard let assets = loaded[buckets[section].id] else { return MonthPlaces.summary(monthPlaces[buckets[section].id]) }
+        return placeSummary(for: assets) ?? MonthPlaces.summary(monthPlaces[buckets[section].id])
+    }
+
+    /// The places of a whole year, for the rail's year lens.
+    func placeSummary(year: Int) -> String? {
+        var totals: [String: Int] = [:]
+        for (bucket, places) in monthPlaces where bucket.hasPrefix("\(year)-") {
+            for place in places { totals[place.name, default: 0] += place.count }
+        }
+        return MonthPlaces.summary(MonthPlaces.ranked(totals))
+    }
+
+    /// Counts the feed's places once its first months are in, showing the copy kept on the phone
+    /// meanwhile. A reload while they are being counted lets the count finish and then counts
+    /// again, so a library that keeps changing still gets its places.
+    private func loadMonthPlaces(_ filter: TimelineFilter) {
+        if let placesLoad {
+            if placesLoad.filter == filter { placesStale = true; return }
+            placesLoad.task.cancel()
+        }
+        placesStale = false
+        let api = self.api, scope = api.cacheScope, delay = placesDelay, id = UUID()
+        let task = Task { [weak self] in
+            defer { self?.finishPlacesLoad(id) }
+            if self?.placesByFilter[filter] == nil, let saved = await TimelinePlacesCache.shared.load(scope: scope, filter: filter),
+               !Task.isCancelled, self?.placesByFilter[filter] == nil {
+                self?.keepPlaces(saved, for: filter)
+            }
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let counts = try? await api.monthPlaces(filter: filter), !Task.isCancelled else { return }
+            let places = await Task.detached(priority: .utility) { TimelinePlaces(counts: counts) }.value
+            guard !Task.isCancelled, let self else { return }
+            self.keepPlaces(places, for: filter)
+            Task { await TimelinePlacesCache.shared.save(places, scope: scope, filter: filter) }
+        }
+        placesLoad = (filter, id, task)
+    }
+
+    private func finishPlacesLoad(_ id: UUID) {
+        guard let load = placesLoad, load.id == id else { return }
+        placesLoad = nil
+        if placesStale {
+            placesStale = false
+            if load.filter == timelineFilter { loadMonthPlaces(load.filter) }
+        }
+    }
+
+    private func keepPlaces(_ places: TimelinePlaces, for filter: TimelineFilter) {
+        // The library and a handful of people or albums are plenty to keep.
+        if placesByFilter[filter] == nil, placesByFilter.count >= 8 {
+            placesByFilter = placesByFilter.filter { $0.key == TimelineFilter() || $0.key == timelineFilter }
+        }
+        placesByFilter[filter] = places
     }
     /// Search/filter results when showing them, otherwise the month under the viewport.
     var currentPlaceSummary: String? {
-        showingResults ? placeSummary(for: results) : placeSummary(section: navigation.section)
+        if let frozenFeed {
+            if frozenFeed.showingResults { return placeSummary(for: frozenFeed.assets["results"] ?? []) }
+            return placeSummary(section: navigation.section)
+        }
+        return showingResults ? placeSummary(for: results) : placeSummary(section: navigation.section)
     }
 
     func entry(section: Int, item: Int) -> LibraryEntry? {
+        if let frozenFeed {
+            guard frozenFeed.sections.indices.contains(section) else { return nil }
+            let key = frozenFeed.sections[section].id
+            if let entries = frozenFeed.mergedEntries[key], entries.indices.contains(item) { return entries[item] }
+            guard let assets = frozenFeed.assets[key], assets.indices.contains(item) else { return nil }
+            return .remote(assets[item], local: frozenFeed.remoteToLocal[assets[item].id])
+        }
         if mergesDevicePhotos, buckets.indices.contains(section) {
             let key = buckets[section].id
             if let entries = merged[key], entries.indices.contains(item) { return entries[item] }
@@ -234,19 +412,41 @@ extension APIClient: LibraryAPI {}
     }
 
     func dayGroups(section: Int) -> [TimelineDayGroup] {
+        if let frozenFeed {
+            guard frozenFeed.sections.indices.contains(section) else { return [] }
+            return frozenFeed.dayGroups[frozenFeed.sections[section].id] ?? []
+        }
         guard !showingResults, buckets.indices.contains(section) else { return [] }
         return dayGroupCache[buckets[section].id] ?? []
     }
 
     func asset(section: Int, item: Int) -> Asset? {
+        if let frozenFeed {
+            guard frozenFeed.sections.indices.contains(section) else { return nil }
+            return frozenFeed.assets[frozenFeed.sections[section].id].flatMap { $0.indices.contains(item) ? $0[item] : nil }
+        }
         if showingResults { return results.indices.contains(item) ? results[item] : nil }
         guard buckets.indices.contains(section), let assets = loaded[buckets[section].id], assets.indices.contains(item) else { return nil }
         return assets[item]
     }
     func availableAssets(around asset: Asset) -> [Asset] {
+        if let frozenFeed {
+            if frozenFeed.showingResults { return frozenFeed.assets["results"] ?? [] }
+            guard let i = frozenFeed.sections.firstIndex(where: { frozenFeed.assets[$0.id]?.contains(where: { $0.id == asset.id }) == true }) else { return [asset] }
+            return frozenFeed.sections[max(0, i - 1)...min(frozenFeed.sections.count - 1, i + 1)].flatMap { frozenFeed.assets[$0.id] ?? [] }
+        }
         if showingResults { return results }
         guard let i = buckets.firstIndex(where: { loaded[$0.id]?.contains(where: { $0.id == asset.id }) == true }) else { return [asset] }
         return buckets[max(0, i - 1)...min(buckets.count - 1, i + 1)].flatMap { loaded[$0.id] ?? [] }
+    }
+
+    /// Everything on this phone in the photo's month and the months beside it, in the order the grid
+    /// shows them, for swiping in the local viewer.
+    func availableLocalPhotos(around photo: LocalPhoto) -> [LocalPhoto] {
+        let sections = self.sections
+        func phonePhotos(_ section: Int) -> [LocalPhoto] { (0..<sections[section].count).compactMap { entry(section: section, item: $0)?.local } }
+        guard let i = sections.indices.first(where: { phonePhotos($0).contains { $0.id == photo.id } }) else { return [photo] }
+        return (max(0, i - 1)...min(sections.count - 1, i + 1)).flatMap(phonePhotos)
     }
 
     func reload(preservingPosition: Bool = false) async {
@@ -257,22 +457,34 @@ extension APIClient: LibraryAPI {}
         generation = UUID(); let current = generation
         isLoading = true; error = nil; bucketErrors = [:]; cachedBuckets = []
         if preservingPosition { restorePosition = position }
-        else { remoteBuckets = []; buckets = []; loaded = [:]; recentBuckets = [] }
-        updateSections()
-        resetID = UUID()
+        else {
+            remoteBuckets = []; buckets = []; loaded = [:]; recentBuckets = []
+            updateSections()
+            if frozenFeed == nil { resetID = UUID() }
+        }
         defer { if generation == current { isLoading = false } }
         do {
-            if showingResults { await loadResults(reset: true); return }
+            if showingResults { await loadResults(reset: true, preservingPosition: preservingPosition); return }
             cacheEpoch = await TimelineCache.shared.epoch(scope: api.cacheScope)
-            if let snapshot = await TimelineCache.shared.load(scope: api.cacheScope, filter: timelineFilter), generation == current {
+            // A background sync refresh already has current in-memory rows. Disk
+            // hydration is only for an empty timeline; replaying it here can flash
+            // older media revisions before the fresh bucket response arrives.
+            if !preservingPosition,
+               let snapshot = await TimelineCache.shared.load(scope: api.cacheScope, filter: timelineFilter), generation == current {
                 remoteBuckets = snapshot.buckets; loaded = snapshot.assets; cachedBuckets = Set(loaded.keys)
                 recentBuckets = buckets.map(\.id).filter { loaded[$0] != nil }; updateSections(); revision += 1
+                if frozenFeed == nil { title = Self.monthTitle(buckets.first?.date) }
             }
             let response = try await api.timeBuckets(filter: timelineFilter)
             guard generation == current else { return }
+            let previousSections = timelineSections
             remoteBuckets = response
+            loadMonthPlaces(timelineFilter)
             updateSections()
-            title = Self.monthTitle(buckets.first?.date)
+            if preservingPosition && previousSections != timelineSections { resetID = UUID() }
+            // Background sync keeps the viewport heading; scrolling/restoration
+            // publishes a new visible month if the returned sections move it.
+            if !preservingPosition && frozenFeed == nil { title = Self.monthTitle(buckets.first?.date) }
             revision += 1
             if preservingPosition {
                 cachedBuckets = Set(loaded.keys)
@@ -282,56 +494,115 @@ extension APIClient: LibraryAPI {}
                 }
             }
             for index in 0..<min(2, buckets.count) { requestBucket(index) }
+            if frozenFeed != nil {
+                let startup = (0..<min(2, buckets.count)).compactMap { requests[buckets[$0].id] }
+                for task in startup { await task.value }
+                guard generation == current else { return }
+                if buckets.isEmpty || (0..<min(2, buckets.count)).allSatisfy({
+                    let id = buckets[$0].id
+                    return loaded[id] != nil && bucketErrors[id] == nil
+                }) {
+                    if !preservingPosition { title = Self.monthTitle(buckets.first?.date) }
+                    commitFrozenFeed()
+                } else if let failure = bucketErrors.values.first {
+                    error = failure
+                }
+            }
         } catch is CancellationError {} catch { if generation == current { self.error = error.localizedDescription } }
     }
 
     func requestBucket(_ section: Int) {
         guard !showingResults, buckets.indices.contains(section) else { return }
         let bucket = buckets[section]
-        guard remoteBuckets.contains(where: { $0.id == bucket.id }) else { return }
-        guard loaded[bucket.id] == nil || cachedBuckets.contains(bucket.id), requests[bucket.id] == nil, bucketErrors[bucket.id] == nil else { return }
-        let current = generation, filter = timelineFilter
-        requests[bucket.id] = Task { [weak self, api] in
-            do {
-                let assets = try await api.timeBucket(bucket.id, filter: filter)
-                guard let self, self.generation == current, !Task.isCancelled else { return }
-                self.loaded[bucket.id] = assets
-                self.cachedBuckets.remove(bucket.id)
-                self.recentBuckets.removeAll { $0 == bucket.id }; self.recentBuckets.append(bucket.id)
-                // Bucket summaries are cheap; keep a bounded window while the grid remains virtual.
-                while self.recentBuckets.count > 12 { self.loaded[self.recentBuckets.removeFirst()] = nil }
-                self.requests[bucket.id] = nil; self.updateMergedEntries(); self.revision += 1
-                if let epoch = self.cacheEpoch {
-                    let snapshot = TimelineSnapshot(buckets: self.remoteBuckets, assets: self.loaded)
-                    await TimelineCache.shared.save(snapshot, scope: api.cacheScope, filter: filter, epoch: epoch)
+        guard remoteBuckets.contains(where: { $0.id == bucket.id }),
+              loaded[bucket.id] == nil || cachedBuckets.contains(bucket.id),
+              requests[bucket.id] == nil, bucketErrors[bucket.id] == nil else { return }
+        if !pendingBuckets.contains(section) {
+            if visibleBucketIDs.contains(bucket.id) || targetBucketID == bucket.id {
+                pendingBuckets.insert(section, at: 0)
+            } else if pendingBuckets.count < 6 {
+                pendingBuckets.append(section)
+            }
+        }
+        // Prefetch cannot displace the viewport or accumulate every crossed month.
+        if pendingBuckets.count > 6 { pendingBuckets.removeLast(pendingBuckets.count - 6) }
+        startPendingBuckets()
+    }
+
+    private func startPendingBuckets() {
+        while requests.count < maximumBucketRequests, !pendingBuckets.isEmpty {
+            let section = pendingBuckets.removeFirst()
+            guard buckets.indices.contains(section) else { continue }
+            let bucket = buckets[section]
+            guard requests[bucket.id] == nil, bucketErrors[bucket.id] == nil,
+                  loaded[bucket.id] == nil || cachedBuckets.contains(bucket.id) else { continue }
+            let current = generation, filter = timelineFilter
+            requests[bucket.id] = Task { [weak self, api] in
+                defer {
+                    if let self, self.generation == current {
+                        self.requests[bucket.id] = nil
+                        self.startPendingBuckets()
+                    }
                 }
-            } catch is CancellationError {} catch {
-                guard let self, self.generation == current else { return }
-                self.requests[bucket.id] = nil; self.bucketErrors[bucket.id] = error.localizedDescription; self.revision += 1
+                do {
+                    let assets = try await api.timeBucket(bucket.id, filter: filter)
+                    guard let self, self.generation == current, !Task.isCancelled else { return }
+                    self.loaded[bucket.id] = assets
+                    self.cachedBuckets.remove(bucket.id)
+                    self.recentBuckets.removeAll { $0 == bucket.id }; self.recentBuckets.append(bucket.id)
+                    self.trimLoadedBuckets()
+                    self.updateMergedEntries(); self.revision += 1
+                    if let epoch = self.cacheEpoch {
+                        let snapshot = TimelineSnapshot(buckets: self.remoteBuckets, assets: self.loaded)
+                        await TimelineCache.shared.save(snapshot, scope: api.cacheScope, filter: filter, epoch: epoch)
+                    }
+                } catch is CancellationError {} catch {
+                    guard let self, self.generation == current else { return }
+                    self.bucketErrors[bucket.id] = error.localizedDescription; self.revision += 1
+                }
             }
         }
     }
 
-    func visibleSection(_ index: Int) {
-        if showingResults { return }
+    private func trimLoadedBuckets() {
+        let protected = visibleBucketIDs.union(targetBucketID.map { [$0] } ?? [])
+        while recentBuckets.count > 12,
+              let index = recentBuckets.firstIndex(where: { !protected.contains($0) }) {
+            loaded[recentBuckets.remove(at: index)] = nil
+        }
+    }
+
+    /// Actual viewport membership, including months that share the same visible row.
+    func visibleSections(_ indices: Set<Int>) {
+        visibleBucketIDs = Set(indices.compactMap { buckets.indices.contains($0) ? buckets[$0].id : nil })
+        if let targetBucketID, visibleBucketIDs.contains(targetBucketID) { self.targetBucketID = nil }
+        let ordered = indices.filter { buckets.indices.contains($0) }.sorted()
+        let desired = ordered + ordered.flatMap { [$0 + 1, $0 - 1] }.filter { buckets.indices.contains($0) && !indices.contains($0) }
+        pendingBuckets = []
+        for section in desired { requestBucket(section) }
+    }
+
+    func visibleSection(_ index: Int, visible: Set<Int>? = nil) {
+        if isReplacingFeed || showingResults { return }
         guard buckets.indices.contains(index) else { return }
         let next = Self.monthTitle(buckets[index].date)
         if title != next { title = next }
-        requestBucket(index)
-        if index + 1 < buckets.count { requestBucket(index + 1) }
-        if index > 0 { requestBucket(index - 1) }
+        visibleSections(visible ?? [index])
     }
 
     /// Rail jump: the section already exists, so only its data and a fresh scroll request are needed.
-    func scrollToBucket(_ index: Int) {
-        guard !showingResults, buckets.indices.contains(index) else { return }
+    func scrollToBucket(_ index: Int, item: Int = 0) {
+        guard !isReplacingFeed, !showingResults, buckets.indices.contains(index) else { return }
         cancelPendingNavigation()
+        targetBucketID = buckets[index].id
+        pendingBuckets = []
         requestBucket(index)
-        scrollRequest = ScrollRequest(position: GridPosition(section: buckets[index].id, item: 0, offset: 0))
+        let item = min(max(0, item), max(0, buckets[index].count - 1))
+        scrollRequest = ScrollRequest(position: GridPosition(section: buckets[index].id, item: item, offset: 0))
     }
 
     func cancelPendingNavigation() {
-        navigationTask?.cancel(); navigationTask = nil; scrollRequest = nil
+        navigationTask?.cancel(); navigationTask = nil; scrollRequest = nil; targetBucketID = nil
     }
 
     /// Leaves any filter, search or selection, then scrolls the normal timeline to the asset's
@@ -348,8 +619,9 @@ extension APIClient: LibraryAPI {}
             remoteBuckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2
             recentBuckets = remoteBuckets.map(\.id).filter { loaded[$0] != nil }
             cachedBuckets = Set(loaded.keys)
-            updateSections(); resetID = UUID(); revision += 1
+            updateSections(); revision += 1
         }
+        if reuseTimeline || restoreSaved { commitFrozenFeed() }
         let date = asset.localDateTime ?? asset.fileCreatedAt
         navigationTask = Task {
             if !reuseTimeline && !restoreSaved { await reload() }
@@ -359,8 +631,14 @@ extension APIClient: LibraryAPI {}
                 error = "Couldn't find this photo's date in the timeline."; return
             }
             let bucket = buckets[index].id
+            targetBucketID = bucket
+            pendingBuckets = []
             requestBucket(index)
-            await requests[bucket]?.value
+            while generation == current, !Task.isCancelled,
+                  pendingBuckets.contains(index) || requests[bucket] != nil {
+                if let task = requests[bucket] { await task.value }
+                else { await Task.yield() }
+            }
             guard !Task.isCancelled, generation == current else { return }
             guard bucketErrors[bucket] == nil else {
                 error = "Couldn't load photos for that date."; return
@@ -408,11 +686,22 @@ extension APIClient: LibraryAPI {}
         guard !assetIDs.isEmpty else { return }
         rememberOriginal()
         beginScopeChange()
+        timelineFilter = TimelineFilter()
         searchFilter = SearchFilter()
         if assetIDs.count == 1 { searchFilter.id = IDFilter(eq: assetIDs[0]) }
         else { searchFilter.or = assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) } }
         filterTitle = title; query = ""; usesMetadata = true; showingResults = true
         scheduleReload()
+    }
+
+    func setMetadataFilter(_ filter: SearchFilter, title: String, developedOnly: Bool = false) {
+        rememberOriginal()
+        beginScopeChange()
+        timelineFilter = TimelineFilter(); searchFilter = filter
+        filterTitle = title; query = ""; searchMode = .context
+        developedOnlyResults = developedOnly
+        usesMetadata = true; showingResults = true
+        queryTask = Task { await loadResults(reset: true) }
     }
 
     func setTimeline(_ filter: TimelineFilter, title: String) {
@@ -431,14 +720,18 @@ extension APIClient: LibraryAPI {}
             cancelRequests(); generation = UUID(); searchGeneration = UUID()
             remoteBuckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2
             recentBuckets = buckets.map(\.id).filter { loaded[$0] != nil }; cachedBuckets = Set(loaded.keys)
-            updateSections(); restorePosition = saved.1; resetID = UUID(); revision += 1
+            updateSections(); restorePosition = saved.1; frozenFeed = nil; resetID = UUID(); revision += 1
             error = nil; isLoading = false; isSearching = false; originalTimeline = nil
+            // The library's places come back with it, unless they were never counted.
+            if placesByFilter[timelineFilter] == nil { loadMonthPlaces(timelineFilter) }
         } else { scheduleReload() }
     }
 
     func search(_ text: String) {
         rememberOriginal()
+        let keepDevelopedOnly = developedOnlyResults
         beginScopeChange()
+        developedOnlyResults = keepDevelopedOnly
         query = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             if filterTitle == nil { clearFilters() }
@@ -478,10 +771,13 @@ extension APIClient: LibraryAPI {}
         else { scheduleReload() }
     }
 
-    private func loadResults(reset: Bool, retry: (cursor: String?, prefix: [Asset])? = nil) async {
+    private func loadResults(reset: Bool, retry: (cursor: String?, prefix: [Asset])? = nil,
+                             preservingPosition: Bool = false) async {
         let searchID = UUID(); searchGeneration = searchID
         let text = query, filter = searchFilter.matching(query, mode: searchMode), requestGeneration = generation
-        let mode = searchMode, reference = similarAssetID
+        let mode = searchMode, reference = similarAssetID, developedOnly = developedOnlyResults
+        let previousResultIDs = results.map(\.id)
+        let requestLimit = preservingPosition ? max(1, loadedResultPageCount) : 3
         let startCursor: String?
         if let retry { startCursor = retry.cursor } else { startCursor = reset ? nil : cursor }
         let prefix = retry?.prefix ?? (reset ? [] : results)
@@ -494,9 +790,10 @@ extension APIClient: LibraryAPI {}
             var accumulated: [Asset] = []
             var latest: Verification?
             var pendingRetry: (cursor: String?, prefix: [Asset])?
+            var fetchedPageCount = 0
             // A verified page can contain zero matches and still have a continuation.
             // Bound automatic work; expose Check more when the server has more candidates.
-            for _ in 0..<3 {
+            for _ in 0..<requestLimit {
                 try Task.checkCancellation()
                 failedBatch = (nextCursor, prefix + accumulated)
                 let response: SearchResponse
@@ -508,7 +805,9 @@ extension APIClient: LibraryAPI {}
                     response = try await api.search(SearchQuery(query: text, filter: filter, cursor: nextCursor))
                 }
                 try Task.checkCancellation()
-                accumulated += response.assets.items; latest = response.verification
+                fetchedPageCount += 1
+                accumulated += response.assets.items.filter { !developedOnly || $0.isDeveloped }
+                latest = response.verification
                 // Structured filters select this server's cursor API. A legacy page
                 // number must never be sent back as an opaque cursor.
                 if response.assets.nextCursor == nil, response.assets.nextPage != nil {
@@ -521,16 +820,30 @@ extension APIClient: LibraryAPI {}
                 if newCursor == nextCursor || (newCursor.map { seen.contains($0) } ?? false) { nextCursor = nil; break }
                 nextCursor = newCursor
                 if let nextCursor { seen.insert(nextCursor) }
-                if !accumulated.isEmpty || nextCursor == nil { break }
+                if nextCursor == nil || (!preservingPosition && !accumulated.isEmpty) { break }
             }
             guard searchGeneration == searchID, query == text, generation == requestGeneration else { return }
+            if preservingPosition, let pendingRetry {
+                cursor = nextCursor; retryBatch = pendingRetry; hasMore = false; verification = latest
+                revision += 1
+                return
+            }
             var IDs = Set(prefix.map(\.id))
             let unique = accumulated.filter { IDs.insert($0.id).inserted }
-            results = prefix + unique
+            let updatedResults = prefix + unique
+            let resultRowsChanged = previousResultIDs != updatedResults.map(\.id)
+            results = updatedResults
             showingResults = true; cursor = nextCursor; retryBatch = pendingRetry
             hasMore = nextCursor != nil && pendingRetry == nil; verification = latest
             revision += 1
-            if reset { resetID = UUID() }
+            if reset {
+                loadedResultPageCount = retry == nil ? fetchedPageCount : max(loadedResultPageCount, fetchedPageCount)
+            } else {
+                loadedResultPageCount += fetchedPageCount
+            }
+            if reset && (!preservingPosition || resultRowsChanged) { resetID = UUID() }
+            commitFrozenFeed()
+            updateVisibleResultsTitle()
         } catch is CancellationError {} catch {
             if searchGeneration == searchID, query == text, generation == requestGeneration {
                 retryBatch = failedBatch; self.error = error.localizedDescription
@@ -555,16 +868,47 @@ extension APIClient: LibraryAPI {}
         catch { self.error = error.localizedDescription }
     }
 
-    private func cancelRequests() { requests.values.forEach { $0.cancel() }; requests = [:] }
+    private func cancelRequests() {
+        pendingBuckets = []; visibleBucketIDs = []; targetBucketID = nil
+        requests.values.forEach { $0.cancel() }; requests = [:]
+    }
     func stop() {
         cancelRequests(); queryTask?.cancel(); cancelPendingNavigation(); groupSelectionTask?.cancel(); isSelectingGroup = false
         generation = UUID(); searchGeneration = UUID()
+        placesLoad?.task.cancel(); placesLoad = nil; placesStale = false
     }
     private func beginScopeChange() {
+        freezeCurrentFeedIfNeeded()
         stop(); selected = []; isSelecting = false; isSearching = false; isLoading = false
         verification = nil; retryBatch = nil; cursor = nil; hasMore = false
+        loadedResultPageCount = 0
         similarAssetID = nil
+        developedOnlyResults = false
         restorePosition = nil; error = nil
+    }
+    private func freezeCurrentFeedIfNeeded() {
+        guard frozenFeed == nil else { return }
+        let currentSections = liveSections
+        guard currentSections.contains(where: { $0.count > 0 }) else { return }
+        let visibleAssets = showingResults ? ["results": results] : loaded
+        frozenFeed = FrozenFeed(sections: currentSections, assets: visibleAssets, mergedEntries: merged,
+                                dayGroups: dayGroupCache, remoteToLocal: deviceTimeline.remoteToLocal,
+                                showingResults: showingResults,
+                                totalCount: showingResults ? results.count : buckets.reduce(0) { $0 + $1.count },
+                                places: monthPlaces)
+    }
+    private func commitFrozenFeed() {
+        guard frozenFeed != nil else { return }
+        frozenFeed = nil
+        resetID = UUID()
+        revision += 1
+    }
+    private func updateVisibleResultsTitle() {
+        guard showingResults, frozenFeed == nil else { return }
+        let index = position?.section == "results" ? position?.item ?? 0 : 0
+        let asset = results.indices.contains(index) ? results[index] : results.first
+        let next = Self.monthTitle(asset?.localDateTime ?? asset?.fileCreatedAt)
+        if title != next { title = next }
     }
     private func scheduleReload() {
         let current = generation
