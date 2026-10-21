@@ -174,6 +174,55 @@ enum EnqueueResult: Hashable, Sendable {
     case refused(AccountRestriction)
 }
 
+/// A job to add: what to upload, why, and for a photo the revision it has now, which a
+/// confirmation of the same revision already covers.
+struct TransferRequest: Hashable, Sendable {
+    var source: TransferSource
+    var origin: JobOrigin
+    var revision: AssetRevision?
+    /// The file name shown with the job.
+    var displayName: String?
+    /// The notification batch the job counts in.
+    var batch: UUID?
+}
+
+/// A job as the queue and failure lists show it.
+struct TransferQueueItem: Hashable, Sendable {
+    let source: TransferSource
+    let state: JobState
+    /// Its place in its lane's order, which a queue page continues after.
+    let seq: Int64
+    let displayName: String?
+    /// The last failure's message.
+    let message: String?
+    let failedAt: Date?
+}
+
+/// A photo the transfer engine confirmed.
+struct TransferHistoryItem: Hashable, Sendable {
+    let localID: DeviceAssetID
+    /// Nil for a confirmation imported from state.json, which kept no time.
+    let confirmedAt: Date?
+}
+
+/// The commands and reads the backup and share screens use (B8). Commands write rows and wake the
+/// engine's loop; they never run transfers themselves.
+protocol TransferControlling: Sendable {
+    func setIntent(_ intent: RunIntent) async throws
+    func enqueue(_ requests: [TransferRequest]) async throws -> EnqueueResult
+    func cancel(_ sources: [TransferSource]) async throws
+    func setPreferences(_ preferences: TransferPreferences) async throws
+    /// Retries failed jobs: those named, or every one for nil. An explicit retry also lifts an
+    /// account block whose cause has gone.
+    func retry(_ sources: [TransferSource]?) async throws
+    /// The engine's state now, then its changes at most four times a second.
+    func snapshots() async -> AsyncStream<TransferSnapshot>
+    func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem]
+    func historyPage(offset: Int, limit: Int) async throws -> [TransferHistoryItem]
+    func failures(limit: Int) async throws -> [TransferQueueItem]
+    func albumUploadCounts() async throws -> [String: Int]
+}
+
 // MARK: Receipts
 
 /// One part of a backed-up photo on the server: the still or video, or a Live Photo's video.
