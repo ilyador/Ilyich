@@ -178,6 +178,10 @@ extension APIClient: LibraryAPI {}
     /// section's index moves when the phone adds a newer month.
     @ObservationIgnored private var pendingBuckets: [String] = []
     @ObservationIgnored private var visibleBucketIDs: Set<String> = []
+    /// The first and last month on screen as of the last scrolled frame, to tell which way the grid moves.
+    @ObservationIgnored private var shownSections: ClosedRange<Int>?
+    /// Each month's section, so the months loading are placed without searching the feed every frame.
+    @ObservationIgnored private var sectionOfBucket: [String: Int] = [:]
     @ObservationIgnored private var targetBucketID: String?
     private let maximumBucketRequests = 3
     private var queryTask: Task<Void, Never>?
@@ -568,6 +572,11 @@ extension APIClient: LibraryAPI {}
                 defer {
                     if let self, self.generation == current {
                         self.requests[id] = nil
+                        // While a dropped load wound down its month could not be asked for again, so a
+                        // month the grid has come back to meanwhile is asked for now.
+                        if Task.isCancelled, let section = self.sectionOfBucket[id], self.isWanted(section) {
+                            self.requestBucket(section)
+                        }
                         self.startPendingBuckets()
                     }
                 }
@@ -585,7 +594,7 @@ extension APIClient: LibraryAPI {}
                         await TimelineCache.shared.save(snapshot, scope: api.cacheScope, filter: filter, epoch: epoch)
                     }
                 } catch is CancellationError {} catch {
-                    // A load dropped for a month the scrub left behind fails as URLError.cancelled
+                    // A load dropped for a month the grid left behind fails as URLError.cancelled
                     // when the server was answering it; that is not a month that failed.
                     guard let self, self.generation == current, !Task.isCancelled else { return }
                     self.bucketErrors[id] = error.localizedDescription; self.revision += 1
@@ -594,13 +603,28 @@ extension APIClient: LibraryAPI {}
         }
     }
 
-    /// A scrub has moved on: a month left behind that is still loading gives its slot to the months
-    /// on screen. One whose load has not started yet is dropped before it starts, and one that has
-    /// started stops; the month is asked for again if it comes back.
+    /// The grid has moved on: a month it left behind that is still loading gives its slot to the
+    /// months on screen. One whose load has not started yet is dropped before it starts, and one
+    /// that has started stops; the month is asked for again if the grid comes back to it. Months
+    /// ahead of the grid, which prefetch asked for, keep loading, and so does the month a jump lands on.
     private func dropLoadsLeftBehind(near sections: [Int]) {
-        guard let first = sections.first, let last = sections.last, !requests.isEmpty else { return }
-        let nearby = Set(buckets[max(0, first - 2)...min(buckets.count - 1, last + 2)].map(\.id))
-        for (id, task) in requests where !nearby.contains(id) && id != targetBucketID { task.cancel() }
+        guard let first = sections.first, let last = sections.last else { return }
+        // The grid starts at the top of the feed.
+        let previous = shownSections ?? 0...0
+        shownSections = first...last
+        guard !requests.isEmpty, first != previous.lowerBound || last != previous.upperBound else { return }
+        let down = first != previous.lowerBound ? first > previous.lowerBound : last > previous.upperBound
+        for (id, task) in requests where id != targetBucketID {
+            guard let section = sectionOfBucket[id] else { continue }
+            if down ? section < first - 2 : section > last + 2 { task.cancel() }
+        }
+    }
+
+    /// A month on screen or beside one, or the one a jump lands on: the months the grid asks for.
+    private func isWanted(_ section: Int) -> Bool {
+        guard buckets.indices.contains(section) else { return false }
+        if targetBucketID == buckets[section].id { return true }
+        return (section - 1...section + 1).contains { buckets.indices.contains($0) && visibleBucketIDs.contains(buckets[$0].id) }
     }
 
     /// Keeps the twelve most recently loaded months, and any on screen; returns the months let go.
@@ -943,7 +967,7 @@ extension APIClient: LibraryAPI {}
     }
 
     private func cancelRequests() {
-        pendingBuckets = []; visibleBucketIDs = []; targetBucketID = nil
+        pendingBuckets = []; visibleBucketIDs = []; shownSections = nil; targetBucketID = nil
         requests.values.forEach { $0.cancel() }; requests = [:]
     }
     func stop() {
@@ -995,6 +1019,7 @@ extension APIClient: LibraryAPI {}
     }
     private func updateSections() {
         buckets = mergesDevicePhotos ? deviceTimeline.buckets(remote: remoteBuckets) : remoteBuckets
+        sectionOfBucket = Dictionary(buckets.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
         updateMergedEntries()
         timelineSections = buckets.map { .init(id: $0.id, count: $0.count, title: Self.monthTitle($0.date)) }
     }

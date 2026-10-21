@@ -18,11 +18,8 @@ struct NativeLibraryAPI: LibraryAPI {
     func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
         if filter.visibility != .locked, try await entities.isComplete() {
             FeedMonthProbe.note(.index)
-            let assets = try await entities.timeBucket(bucket, filter: filter)
-            // After the feed's first month, read the slow way, the store builds the index months are
-            // found by; once it exists this returns at once.
-            Task(priority: .utility) { [entities] in await entities.buildMonthIndex(for: filter) }
-            return assets
+            // The feed's first month read the slow way starts building the index months are found by.
+            return try await entities.timeBucket(bucket, filter: filter, buildingIndex: true)
         }
         guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
         FeedMonthProbe.note(.serverTimeline)
