@@ -21,6 +21,9 @@ struct GridDragSelection {
     private(set) var current: IndexPath?
     /// The photos this drag changed; leaving the range puts them back.
     private(set) var changed: Set<IndexPath> = []
+    /// Photos in the range whose month was not loaded when they entered it, by section. Each step
+    /// tries them again, so a range never covers only the loaded photos.
+    private(set) var pending: [Int: Set<Int>] = [:]
 
     init(anchor: IndexPath, selects: Bool) {
         self.anchor = anchor
@@ -28,9 +31,10 @@ struct GridDragSelection {
     }
 
     /// The range now runs from the anchor to `target`. `counts` holds each section's photo count;
-    /// `isSelected` answers for a loaded photo and is nil for one not loaded yet, which is skipped.
+    /// `isSelected` answers for a loaded photo and is nil for one not loaded yet, which waits in
+    /// `pending` until its month loads.
     mutating func move(to target: IndexPath, counts: [Int], isSelected: (IndexPath) -> Bool?) -> Change {
-        guard target != current else { return Change() }
+        guard target != current else { return retry(isSelected: isSelected) }
         let new = (low: min(anchor, target), high: max(anchor, target))
         var leaving: [IndexPath] = []
         var entering: [IndexPath] = []
@@ -46,15 +50,44 @@ struct GridDragSelection {
         }
         current = target
         var change = Change()
-        for index in leaving where changed.remove(index) != nil {
-            if selects { change.deselect.append(index) } else { change.select.append(index) }
+        for index in leaving {
+            if pending[index.section]?.remove(index.item) != nil {
+                if pending[index.section]?.isEmpty == true { pending[index.section] = nil }
+            } else if changed.remove(index) != nil {
+                if selects { change.deselect.append(index) } else { change.select.append(index) }
+            }
         }
         for index in entering {
-            guard let selected = isSelected(index), selected != selects else { continue }
-            changed.insert(index)
-            if selects { change.select.append(index) } else { change.deselect.append(index) }
+            guard let selected = isSelected(index) else { pending[index.section, default: []].insert(index.item); continue }
+            take(index, selected: selected, into: &change)
+        }
+        let later = retry(isSelected: isSelected)
+        change.select += later.select
+        change.deselect += later.deselect
+        return change
+    }
+
+    /// Settles the photos in the range whose month has loaded since they entered it. A month loads
+    /// whole, so one photo answers for its section and an unloaded month costs one question.
+    mutating func retry(isSelected: (IndexPath) -> Bool?) -> Change {
+        var change = Change()
+        for (section, items) in pending {
+            guard let probe = items.first, isSelected(IndexPath(item: probe, section: section)) != nil else { continue }
+            var left: Set<Int> = []
+            for item in items.sorted() {
+                let index = IndexPath(item: item, section: section)
+                guard let selected = isSelected(index) else { left.insert(item); continue }
+                take(index, selected: selected, into: &change)
+            }
+            pending[section] = left.isEmpty ? nil : left
         }
         return change
+    }
+
+    private mutating func take(_ index: IndexPath, selected: Bool, into change: inout Change) {
+        guard selected != selects else { return }
+        changed.insert(index)
+        if selects { change.select.append(index) } else { change.deselect.append(index) }
     }
 
     /// Calls `body` for each photo from `low` to `high` in reading order, leaving out either end
@@ -94,23 +127,19 @@ struct GridDragSelection {
 
     private var session: GridDragSelection?
     private weak var gesture: UIGestureRecognizer?
-    /// A light tick for each step that changes photos.
-    private var ticks = true
     private let clock = LibraryShelfFrameClock()
 
     var isActive: Bool { session != nil }
 
-    /// Starts a drag on `anchor`. `selects` is nil to follow the photo: a selected one starts a
-    /// drag that deselects.
-    /// `ticks` false leaves the first photo's tick to the caller.
-    func begin(at anchor: IndexPath, selects: Bool? = nil, gesture: UIGestureRecognizer, ticks: Bool = true) {
+    /// Starts a drag on `anchor`; one from a selected photo deselects.
+    func begin(at anchor: IndexPath, gesture: UIGestureRecognizer) {
         end()
         guard let state = isSelected(anchor) else { return }
-        var session = GridDragSelection(anchor: anchor, selects: selects ?? !state)
+        var session = GridDragSelection(anchor: anchor, selects: !state)
         let first = session.move(to: anchor, counts: counts(), isSelected: isSelected)
         self.session = session
         self.gesture = gesture
-        if !first.isEmpty { apply(first); if ticks { Haptics.selectionChanged() } }
+        if !first.isEmpty { apply(first); Haptics.selectionChanged() }
         update()
     }
 
@@ -122,6 +151,14 @@ struct GridDragSelection {
         if Self.edgeVelocity(at: point, in: collection) != 0 {
             clock.run { [weak self] seconds in self?.scrollFrame(seconds) ?? false }
         }
+    }
+
+    /// Settles photos in the range whose month has loaded, while the finger holds still.
+    func refresh() {
+        guard var session else { return }
+        let change = session.retry(isSelected: isSelected)
+        self.session = session
+        if !change.isEmpty { apply(change) }
     }
 
     func end() {

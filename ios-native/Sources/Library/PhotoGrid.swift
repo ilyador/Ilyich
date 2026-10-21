@@ -126,6 +126,11 @@ struct PhotoGrid: UIViewRepresentable {
                 coordinator.configure(header, at: index)
             }
         }
+        if coordinator.dragSelector.isActive {
+            // A month the drag passed before it loaded may have arrived. The selection changes
+            // after this update, not during it.
+            Task { @MainActor [weak coordinator] in coordinator?.dragSelector.refresh() }
+        }
         if topInsetChanged && wasAtTop && !reset {
             // Growing chrome (Dynamic Type or a filter chip) must not cover the
             // first day header. Scrolled photo positions stay unchanged.
@@ -155,6 +160,8 @@ struct PhotoGrid: UIViewRepresentable {
         /// The sideways drag that selects a range while selecting.
         weak var rangeDrag: UIPanGestureRecognizer?
         let dragSelector = GridDragSelector()
+        /// The entries the drag in progress changed, by where they sit in the grid.
+        private var dragEntries: [IndexPath: LibraryEntry] = [:]
         var dayGroups: [[TimelineDayGroup]] = []
         var resetID: UUID?
         var revision = -1
@@ -177,8 +184,17 @@ struct PhotoGrid: UIViewRepresentable {
                 return store.selected.contains(entry.id)
             }
             dragSelector.apply = { [weak self] change in
-                guard let store = self?.parent.store else { return }
-                let entries = { (paths: [IndexPath]) in paths.compactMap { store.entry(section: $0.section, item: $0.item) } }
+                guard let self else { return }
+                let store = parent.store
+                // A photo the drag changed keeps its entry, so putting it back still works after
+                // its month was evicted while the drag went on.
+                let entries = { (paths: [IndexPath]) in
+                    paths.compactMap { path -> LibraryEntry? in
+                        let entry = store.entry(section: path.section, item: path.item) ?? self.dragEntries[path]
+                        if let entry { self.dragEntries[path] = entry }
+                        return entry
+                    }
+                }
                 store.changeSelection(adding: entries(change.select), removing: entries(change.deselect))
             }
         }
@@ -243,23 +259,17 @@ struct PhotoGrid: UIViewRepresentable {
             } else if let asset = entry.remote { parent.onOpen(asset) }
             else if let photo = entry.local { parent.onOpenLocal?(photo) }
         }
-        /// A long press starts selecting with the photo under it; dragging on selects the photos
-        /// between, as the sideways drag does, but always selecting.
         @objc func selectByDragging(_ gesture: UILongPressGestureRecognizer) {
-            switch gesture.state {
-            case .began:
-                guard let collection, let index = collection.indexPathForItem(at: gesture.location(in: collection)),
-                      parent.store.entry(section: index.section, item: index.item) != nil else { return }
-                parent.store.isSelecting = true; Haptics.selectionChanged()
-                dragSelector.begin(at: index, selects: true, gesture: gesture, ticks: false)
-            case .changed: dragSelector.update()
-            default: dragSelector.end()
-            }
+            guard let collection, let index = collection.indexPathForItem(at: gesture.location(in: collection)),
+                  let entry = parent.store.entry(section: index.section, item: index.item) else { return }
+            if gesture.state == .began { parent.store.isSelecting = true; Haptics.selectionChanged() }
+            if gesture.state == .began || gesture.state == .changed { parent.store.select(entry) }
         }
         @objc func selectRange(_ gesture: UIPanGestureRecognizer) {
             switch gesture.state {
             case .began:
                 guard let index = dragStart(gesture) else { return }
+                dragEntries = [:]
                 dragSelector.begin(at: index, gesture: gesture)
             case .changed: dragSelector.update()
             default: dragSelector.end()
