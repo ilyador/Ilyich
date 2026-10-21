@@ -414,6 +414,13 @@ Discovery merges at commit time: temp table, NOT EXISTS an equal-date confirmati
 - **Acceptance:**
   - Unit suite passes
   - Dormant
+- **As built:**
+  - The engine runs up to `concurrency` jobs at once, each under its own lease (one by default, as in B2); TransferPipeline takes the turns inside them. A new stage starts only once every other stage's size is known and they total less than the budget (1 GiB; one stage may pass it alone), at most two waiting for the transport; at most three parts wait for their answers. Pause, cancel, read-only and blocks release every matching lease.
+  - The executor waits for each part's answer under its lease through PartUploading. The real one (TransportPartUploader with TransportOutcomes) submits through TransferTransport and matches the transport's finished events, or the outcome file on disk, to the attempt; nothing creates it before B9. A lease lost while a part is with the transport leaves the job submitted, as B2 does; applying that outcome is B6's.
+  - An unanswered attempt is resumed by its ID: an outcome on disk is applied without a check or an upload, and its body is sent again under the same ID, so the transport adopts a task iOS still holds. An answered one is recorded in its attempt row (remote ID and status), then its outcome file and body are acknowledged; the row is what a later XMP duplicate check reads as the attempt's own created outcome. A failed answer starts a new attempt after a new check.
+  - The receipt takes the commit time when the executor gives none. The stage folder goes once the engine commits (JobExecuting.committed); a crash between the two leaves it for B6's sweep.
+  - Discovery runs through TransferEngine.discover, which the snapshot shows as discovering. A photo Photos gives no date is queued only if never confirmed (today it is queued every pass). Deleted photos' jobs are dropped only with full Photos access, and never one leased or with the transport.
+  - TransferServerAPI's reads are strict (no offline fallback). AccountRuntime.transferServer wraps the runtime's one client; nothing calls it before B9. PhotoLibraryStaging gained existing(_:), for discovery's deleted-photo check.
 
 ### Q5 — Feeds run on LibraryQuery; TimelineFilter and NativeLibraryAPI deleted
 

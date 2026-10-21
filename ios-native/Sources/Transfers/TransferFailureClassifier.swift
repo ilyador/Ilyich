@@ -20,6 +20,9 @@ enum TransferItemFailure: Error, Equatable, Sendable, LocalizedError {
     case livePairConflict
     /// A staged file is missing or unreadable.
     case unreadableFile
+    /// The server holds this photo already, but not from this attempt's own upload, so its XMP
+    /// sidecar would not reach the server.
+    case sidecarDuplicate
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +30,7 @@ enum TransferItemFailure: Error, Equatable, Sendable, LocalizedError {
         case .trashedDuplicate: "This photo is in the server’s trash. Restore it there to back it up again."
         case .livePairConflict: "This Live Photo’s still and video don’t match on the server."
         case .unreadableFile: "This photo’s file could not be read."
+        case .sidecarDuplicate: "This photo already exists. Its XMP cannot be updated by uploading a duplicate; your source files were kept."
         }
     }
 }
@@ -70,6 +74,12 @@ enum TransferFailureClassifier {
             }
         case let failure as TransferItemFailure:
             return .item(failure.localizedDescription)
+        case let failure as UploadOutcomeFailure:
+            // An outcome file, judged by its receipt, status and error code only.
+            return switch failure {
+            case .failed(let record): classify(outcome: record, context: context) ?? .transient(retryAfter: nil)
+            case .unrecorded: .transient(retryAfter: nil)
+            }
         case BackupError.item(let message):
             return .item(message)
         case let failure as ServerFailure:
@@ -166,6 +176,7 @@ enum TransferFailureClassifier {
     /// Whether the failure is a server error (5xx), which counts toward backing off.
     static func isServerError(_ error: any Error) -> Bool {
         if case ServerFailure.http(let status, _) = error { return status >= 500 }
+        if case UploadOutcomeFailure.failed(let record) = error { return isServerError(outcome: record) }
         return false
     }
 

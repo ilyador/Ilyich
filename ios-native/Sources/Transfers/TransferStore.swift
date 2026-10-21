@@ -281,7 +281,7 @@ actor TransferStore: ReceiptQuery {
                     """, [.text(completion.localID), .real(receipt.revision.referenceSeconds), .text(receipt.original.id),
                           .text(receipt.original.checksum), .optionalInteger(receipt.original.byteCount), .optionalText(receipt.motion?.id),
                           .optionalText(receipt.motion?.checksum), .optionalInteger(receipt.motion?.byteCount),
-                          .optionalDate(receipt.confirmedAt)])
+                          .optionalDate(receipt.confirmedAt ?? completion.confirmedAt)])
             }
             try db.run("UPDATE album_destinations SET remote_id=? WHERE local_id=? AND remote_id IS NULL",
                        [.text(completion.assetID), .text(completion.localID)])
@@ -358,6 +358,13 @@ actor TransferStore: ReceiptQuery {
     }
 
     // MARK: - Testing
+
+    /// Leases one job by its ID, for tests that set a job up as an earlier run left it.
+    func lease(job: Int64, token: UUID) throws -> Bool {
+        let db = try database()
+        try db.run("UPDATE jobs SET lease_token=?,lease_epoch=1 WHERE id=? AND lease_token IS NULL", [.text(token.uuidString), .integer(job)])
+        return db.changes == 1
+    }
 
     /// Every row of every table, by table, in row order, for tests that compare whole databases.
     func dump() throws -> [String: [[TransferSQLite.Value]]] {
@@ -516,7 +523,8 @@ struct TransferCompletion: Sendable {
     let revision: AssetRevision
     /// The still or video's server ID, which the albums it waits for take.
     let assetID: String
-    /// Nil for a legacy Live Photo without its video's checksum, confirmed without a receipt.
+    /// Nil for a legacy Live Photo without its video's checksum, confirmed without a receipt. A
+    /// receipt without its own confirmation time takes `confirmedAt`.
     let receipt: TransferReceipt?
     let confirmedAt: Date
 }

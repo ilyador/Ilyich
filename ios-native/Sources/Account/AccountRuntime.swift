@@ -47,6 +47,10 @@ final class AccountRuntime: Sendable {
 
     var requiresPasswordChange: Bool { credential.requiresPasswordChange == true }
 
+    /// The transfer engine's server calls, over the account's one client (REBUILD_ROADMAP.md B3).
+    /// Dormant: nothing calls it before the cutover (B9).
+    var transferServer: APITransferServer { APITransferServer(client: api) }
+
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
                  device: any AccountDevice, presence: AppPresence, backupStateCopyDelay: Duration) {
