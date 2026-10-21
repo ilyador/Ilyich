@@ -71,8 +71,8 @@ struct ExportJob: Sendable {
 protocol PhotoLibraryWriting: Sendable {
     /// Asks to add to Photos, and says whether that is allowed, fully or for limited access.
     func requestAddAccess() async -> Bool
-    /// Adds one photo, video or Live Photo. Once it starts it can't be cancelled.
-    func add(_ file: URL, isVideo: Bool, pairedVideo: URL?) async throws
+    /// Adds one photo, video or Live Photo, saved for `origin`. Once it starts it can't be cancelled.
+    func add(_ file: URL, isVideo: Bool, pairedVideo: URL?, origin: MutationOrigin) async throws
 }
 
 /// The count-only notifications of a transfer the person started.
@@ -99,7 +99,9 @@ final class MediaExportService: Sendable {
     /// Starts an export. `progress` hears every step, from the export's own task.
     func start(_ request: ExportRequest, id: UUID = UUID(),
                progress: @escaping @Sendable (ExportProgress) -> Void = { _ in }) -> ExportJob {
-        let run = ExportRun(request: request, id: id, api: api, photos: photos, notifications: notifications,
+        // The journal names the account a save worked for by its digest.
+        let account = api.userID.map { AccountID(server: api.baseURL, userID: $0).digest } ?? ""
+        let run = ExportRun(request: request, id: id, api: api, account: account, photos: photos, notifications: notifications,
                             reporter: ExportProgressReporter(total: request.assets.count, deliver: progress))
         return ExportJob(id: id, task: Task(priority: .userInitiated) { await run.perform() })
     }
@@ -110,6 +112,7 @@ private struct ExportRun: Sendable {
     let request: ExportRequest
     let id: UUID
     let api: APIClient
+    let account: String
     let photos: any PhotoLibraryWriting
     let notifications: any ExportNotifying
     let reporter: ExportProgressReporter
@@ -182,7 +185,7 @@ private struct ExportRun: Sendable {
         try checkWritable()
         reporter.committing(true)
         defer { reporter.committing(false) }
-        try await photos.add(file, isVideo: asset.isVideo, pairedVideo: motion)
+        try await photos.add(file, isVideo: asset.isVideo, pairedVideo: motion, origin: .saveFromServer(asset: asset.id, account: account))
     }
 
     private func checkWritable() throws {
@@ -224,24 +227,22 @@ private final class ExportProgressReporter: Sendable {
     }
 }
 
-/// Photos itself, for adding only.
+/// Photos itself, for adding only. A save goes through the Photos adapter, which journals it.
 struct SystemPhotoLibrary: PhotoLibraryWriting {
+    var adapter = PhotoKitAdapter.shared
+
     func requestAddAccess() async -> Bool {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         return status == .authorized || status == .limited
     }
 
-    func add(_ file: URL, isVideo: Bool, pairedVideo: URL?) async throws {
-        try await PHPhotoLibrary.shared().performChanges(Self.changeBlock(file: file, isVideo: isVideo, pairedVideo: pairedVideo))
-    }
-
-    // PhotoKit runs this block on its own queue; built outside any actor, it carries no executor
-    // check that would trap there.
-    private nonisolated static func changeBlock(file: URL, isVideo: Bool, pairedVideo: URL?) -> @Sendable () -> Void {
-        {
-            let creation = PHAssetCreationRequest.forAsset()
-            creation.addResource(with: isVideo ? .video : .photo, fileURL: file, options: nil)
-            if let pairedVideo { creation.addResource(with: .pairedVideo, fileURL: pairedVideo, options: nil) }
+    func add(_ file: URL, isVideo: Bool, pairedVideo: URL?, origin: MutationOrigin) async throws {
+        let result = await adapter.perform(.create(still: isVideo ? nil : file, video: isVideo ? file : nil, pairedVideo: pairedVideo, origin: origin))
+        switch result.outcome {
+        case .committed: return
+        case .declined: throw CancellationError()
+        case .failed(let message): throw PhotosChangeFailure(message: message)
+        case .revisionChanged, .notPermitted, .interrupted: throw PhotosChangeFailure(message: "Photos didn’t save this item. Try again.")
         }
     }
 }

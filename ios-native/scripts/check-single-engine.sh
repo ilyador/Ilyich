@@ -12,6 +12,12 @@
 #      start it beside BackgroundUploads, or hand it today's completion handlers, before B9.
 # B9 deletes BackgroundUploads from rule 2's list and drops rule 3, and adds the old engine's
 # symbols, which must then be gone.
+#
+# One door to Photos as well (REBUILD_ROADMAP.md, P1). The build also fails when code outside
+# Sources/Device
+#   4. observes the Photos library, rather than subscribing to PhotoKitAdapter.changes();
+#   5. changes the library, rather than through PhotoKitAdapter.perform, which journals each change
+#      and checks it again inside its change block.
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
@@ -55,8 +61,12 @@ reject "only BackgroundUploads (until B9) and the transport's live session may b
     "${session_builders[@]}" < <(code_lines 'TransferSessionConfiguration\.make\(')
 reject "the new upload transport stays dormant until B9; the app must not create it beside BackgroundUploads" \
     < <(code_lines -w "$transport_types" | grep -v '^Sources/Transfers/' || true)
+reject "only the Photos adapter in Sources/Device observes the library; subscribe to PhotoKitAdapter.changes()" \
+    < <(code_lines 'PHPhotoLibraryChangeObserver|unregisterChangeObserver|PHPhotoLibrary\.shared\(\)\.register\(' | grep -v '^Sources/Device/' || true)
+reject "only the Photos adapter in Sources/Device changes the library; use PhotoKitAdapter.perform, which journals the change" \
+    < <(code_lines 'performChanges|PHAssetChangeRequest|PHAssetCreationRequest|PHAssetCollectionChangeRequest|PHCollectionListChangeRequest' | grep -v '^Sources/Device/' || true)
 
 if [ "$failures" -gt 0 ]; then
-    echo "check-single-engine: $failures problem(s); see REBUILD_ROADMAP.md, B5 and B9" >&2
+    echo "check-single-engine: $failures problem(s); see REBUILD_ROADMAP.md, B5, B9 and P1" >&2
     exit 1
 fi

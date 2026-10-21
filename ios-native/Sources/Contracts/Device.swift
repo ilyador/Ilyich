@@ -71,19 +71,41 @@ struct DeviceAsset: Hashable, Sendable {
     let canEditProperties: Bool
 }
 
-/// One coalesced burst of Photos library changes.
-struct DeviceLibraryChange: Sendable {
+/// One coalesced burst of Photos library changes. The identifiers name assets to read again:
+/// within one burst an asset may be inserted and then removed, so a reader asks Photos for each
+/// one's state now rather than trusting which set it is in.
+struct DeviceLibraryChange: Equatable, Sendable {
     var access: DeviceAccess
     var inserted: Set<DeviceAssetID> = []
     var removed: Set<DeviceAssetID> = []
     var changed: Set<DeviceAssetID> = []
+    /// An album was added, removed or renamed, or Photos reported a change that names no asset,
+    /// such as photos added to an album.
     var albumsChanged = false
-    /// Photos gave no details, so every reader starts over.
+    /// Photos gave no details, or access changed, so every reader starts over.
+    var requiresFullReload = false
+
+    /// Adds what one notification from Photos reported.
+    mutating func merge(_ details: PhotoLibraryChangeDetails) {
+        inserted.formUnion(details.inserted)
+        removed.formUnion(details.removed)
+        changed.formUnion(details.changed)
+        albumsChanged = albumsChanged || details.albumsChanged
+        requiresFullReload = requiresFullReload || details.requiresFullReload
+    }
+}
+
+/// What one change notification from Photos reported, before bursts are merged.
+struct PhotoLibraryChangeDetails: Hashable, Sendable {
+    var inserted: Set<DeviceAssetID> = []
+    var removed: Set<DeviceAssetID> = []
+    var changed: Set<DeviceAssetID> = []
+    var albumsChanged = false
     var requiresFullReload = false
 }
 
-/// A change to the Photos library. Deletion and favoriting name the revision each asset must
-/// still have: if any differs, nothing is changed.
+/// A change to the Photos library. Deletion names the revision each asset must still have, and
+/// favoriting may name some: if any differs, nothing is changed.
 enum DeviceMutation: Hashable, Sendable {
     case delete([DeviceAssetID], expected: [DeviceAssetID: AssetRevision], origin: MutationOrigin)
     case setFavorite([DeviceAssetID], Bool, expected: [DeviceAssetID: AssetRevision])
@@ -107,9 +129,12 @@ struct DeviceMutationResult: Hashable, Sendable {
         case revisionChanged
         case notPermitted
         case failed(String)
+        /// The app ended while Photos was applying it, and nothing now shows that it happened.
+        /// Reconciled at the next launch; never applied again.
+        case interrupted
     }
 
-    /// The journal entry's ID.
+    /// The journal entry's ID. A change refused before Photos was asked has no entry.
     let id: UUID
     let mutation: DeviceMutation
     let outcome: Outcome

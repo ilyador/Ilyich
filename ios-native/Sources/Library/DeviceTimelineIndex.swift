@@ -5,15 +5,16 @@ import Observation
 
 /// Only backup-selected albums join the main timeline, matching the incumbent
 /// client. Discovery and cloud-ID lookup run off the UI thread; hashing is serial,
-/// cancellable, and never downloads originals from iCloud.
-@MainActor @Observable final class DeviceTimelineIndex: NSObject, @preconcurrency PHPhotoLibraryChangeObserver {
+/// cancellable, and never downloads originals from iCloud. It reads the phone again after each
+/// burst of changes the Photos adapter reports.
+@MainActor @Observable final class DeviceTimelineIndex {
     private(set) var snapshot = MergedTimeline()
     private(set) var revision = 0
     private(set) var isIndexing = false
     @ObservationIgnored private var source: Source?
     @ObservationIgnored private var worker: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
-    @ObservationIgnored private var observing = false
+    @ObservationIgnored private var changes: Task<Void, Never>?
 
     private struct Source: Sendable {
         let scope: String
@@ -24,16 +25,18 @@ import Observation
 
     func configure(scope: String, entities: EntityStore?, preferences: BackupPreferences, receipts: [String: BackupReceipt]) {
         source = Source(scope: scope, entities: entities, preferences: preferences, receipts: receipts)
-        if !observing, [.authorized, .limited].contains(DevicePhotos.authorization) {
-            PHPhotoLibrary.shared().register(self); observing = true
+        if changes == nil {
+            let stream = PhotoKitAdapter.shared.changes()
+            changes = Task { [weak self] in
+                for await _ in stream { self?.refresh() }
+            }
         }
         refresh()
     }
     func stop() {
         generation = UUID(); worker?.cancel(); worker = nil; source = nil; isIndexing = false
-        if observing { PHPhotoLibrary.shared().unregisterChangeObserver(self); observing = false }
+        changes?.cancel(); changes = nil
     }
-    nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) { Task { @MainActor in self.refresh() } }
 
     private func refresh() {
         worker?.cancel(); generation = UUID()

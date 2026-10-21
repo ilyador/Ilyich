@@ -1,16 +1,16 @@
 import BackgroundTasks
-import Photos
 import UIKit
 import Network
 
 /// iOS chooses background execution times. A processing window discovers and
-/// prepares a file, then hands its transfer to the system URLSession daemon.
-@MainActor final class BackupLifecycle: NSObject, @preconcurrency PHPhotoLibraryChangeObserver {
+/// prepares a file, then hands its transfer to the system URLSession daemon. While automatic
+/// backup is on, each burst of changes the Photos adapter reports starts it again.
+@MainActor final class BackupLifecycle {
     static let shared = BackupLifecycle()
     static let identifier = "app.ilyich.native.backup.processing"
     static let refreshIdentifier = "app.ilyich.native.backup.refresh"
     private var registered = false
-    private var observing = false
+    private var libraryChanges: Task<Void, Never>?
     private var hasActiveTask = false
     private var backgroundPreparation: (@MainActor () async -> Bool)?
     private var delayedStart: Task<Void, Never>?
@@ -54,11 +54,14 @@ import Network
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshIdentifier)
         let preferences = BackupCoordinator.shared.preferences
         if !preferences.automatic {
-            if observing { PHPhotoLibrary.shared().unregisterChangeObserver(self); observing = false }
+            libraryChanges?.cancel(); libraryChanges = nil
             return
         }
-        if !observing, [.authorized, .limited].contains(DevicePhotos.authorization) {
-            PHPhotoLibrary.shared().register(self); observing = true
+        if libraryChanges == nil {
+            let changes = PhotoKitAdapter.shared.changes()
+            libraryChanges = Task { [weak self] in
+                for await _ in changes { self?.foregroundChanged(); self?.schedule() }
+            }
         }
         schedule()
         if UIApplication.shared.applicationState == .active { foregroundChanged() }
@@ -73,10 +76,6 @@ import Network
             catch { return }
             await BackupCoordinator.shared.startAutomatically()
         }
-    }
-
-    nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
-        Task { @MainActor in self.foregroundChanged(); self.schedule() }
     }
 
     func conditionsPermitBackup(requireCharging: Bool) -> Bool {

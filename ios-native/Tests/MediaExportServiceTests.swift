@@ -127,7 +127,8 @@ final class MediaExportServiceTests: XCTestCase {
         let steps = Mutex<[ExportProgress]>([])
         let photos = FakePhotoLibrary(committing: { steps.withLock { $0.last?.committing == true } })
         let notifications = RecordingNotifications()
-        let service = MediaExportService(api: try client(server), photos: photos, notifications: notifications)
+        let api = try client(server)
+        let service = MediaExportService(api: api, photos: photos, notifications: notifications)
         var live = Asset(id: "live", originalFileName: "IMG_0004.HEIC")
         live.livePhotoVideoId = "motion"
 
@@ -135,6 +136,8 @@ final class MediaExportServiceTests: XCTestCase {
         guard case .saved(1) = await job.outcome else { return XCTFail("The Live Photo is saved.") }
 
         XCTAssertEqual(photos.added, [.init(still: still, isVideo: false, pairedVideo: motion)])
+        XCTAssertEqual(photos.origins, [.saveFromServer(asset: "live", account: AccountID(server: api.baseURL, userID: "alice").digest)],
+                       "The Photos journal names the server photo and the account it was saved for.")
         XCTAssertEqual(query(try XCTUnwrap(server.requests("GET", "assets/live/original").first))["edited"], "false",
                        "Even the displayed choice saves a Live Photo's original still.")
         XCTAssertTrue(server.requests("GET", "assets/live/thumbnail").isEmpty)
@@ -352,6 +355,7 @@ private final class FakePhotoLibrary: PhotoLibraryWriting {
     private struct State {
         var accessRequests = 0
         var added: [Added] = []
+        var origins: [MutationOrigin] = []
         var files: [URL] = []
         var committingFlags: [Bool] = []
     }
@@ -368,6 +372,7 @@ private final class FakePhotoLibrary: PhotoLibraryWriting {
 
     var accessRequests: Int { state.withLock { $0.accessRequests } }
     var added: [Added] { state.withLock { $0.added } }
+    var origins: [MutationOrigin] { state.withLock { $0.origins } }
     /// The files Photos was given.
     var files: [URL] { state.withLock { $0.files } }
     var addedWhileCommitting: Bool { state.withLock { !$0.committingFlags.isEmpty && $0.committingFlags.allSatisfy { $0 } } }
@@ -377,7 +382,7 @@ private final class FakePhotoLibrary: PhotoLibraryWriting {
         return allowed
     }
 
-    func add(_ file: URL, isVideo: Bool, pairedVideo: URL?) async throws {
+    func add(_ file: URL, isVideo: Bool, pairedVideo: URL?, origin: MutationOrigin) async throws {
         let flag = committing?() ?? false
         state.withLock { $0.committingFlags.append(flag) }
         let still = try Data(contentsOf: file)
@@ -385,6 +390,7 @@ private final class FakePhotoLibrary: PhotoLibraryWriting {
         if let gate { await gate.wait() }
         state.withLock {
             $0.added.append(Added(still: still, isVideo: isVideo, pairedVideo: paired))
+            $0.origins.append(origin)
             $0.files += [file] + (pairedVideo.map { [$0] } ?? [])
         }
     }

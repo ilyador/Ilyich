@@ -2,6 +2,10 @@ import UIKit
 
 @MainActor final class BackupAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // The app's one door to Photos, whatever launched the app: it starts the one change
+        // observer and reconciles any change to Photos an earlier run left unfinished.
+        let photos = PhotoKitAdapter.shared
+        Task { await photos.start() }
         // UI tests run without the phone's photos and backup.
         if AccountEnvironment.current.usesDevicePhotos {
             BackupLifecycle.shared.register()
@@ -11,6 +15,9 @@ import UIKit
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
+        // Photos access may have changed in Settings meanwhile.
+        let photos = PhotoKitAdapter.shared
+        Task { await photos.refreshAccess() }
         BackupLifecycle.shared.foregroundChanged()
     }
 

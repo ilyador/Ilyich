@@ -130,6 +130,8 @@ struct FreeUpSpaceView: View {
     @State private var failure: FeatureFailure?
     @State private var message: String?
     @State private var operation: Task<Void, Never>?
+    /// Names the check a removal came from, in the Photos journal.
+    @State private var scan = UUID()
     private var keptAlbums: Set<String> { (try? JSONDecoder().decode(Set<String>.self, from: keepAlbumData)) ?? [] }
     private var policy: CleanupPolicy { .init(cutoff: cutoff, keepFavorites: keepFavorites, keepMediaType: keepMediaType) }
     var body: some View {
@@ -144,7 +146,7 @@ struct FreeUpSpaceView: View {
                 VStack(spacing: 12) {
                     Text("Allow Photos access to check originals stored on this phone.").foregroundStyle(.secondary)
                     if permission == .notDetermined {
-                        Button("Choose Photos access") { Task { permission = await PHPhotoLibrary.requestAuthorization(for: .readWrite); initializeFilters() } }
+                        Button("Choose Photos access") { Task { permission = await PhotoKitAdapter.shared.requestAccess().status; initializeFilters() } }
                     } else { Button("Open Settings") { openPhotoSettings() } }
                 }.padding(20)
             }
@@ -218,7 +220,7 @@ struct FreeUpSpaceView: View {
     private func check() async {
         guard !loading else { return }
         loading = true; defer { loading = false }
-        selection = []; photos = []; checked = false; message = nil
+        selection = []; photos = []; checked = false; message = nil; scan = UUID()
         do {
             guard [.authorized, .limited].contains(DevicePhotos.authorization) else { throw BackupError.message("Allow Photos access before checking local items.") }
             cutoffDays = max(0, Calendar.current.dateComponents([.day], from: cutoff, to: Date()).day ?? 0)
@@ -240,21 +242,40 @@ struct FreeUpSpaceView: View {
             let verified = Set(try await BackupCoordinator.shared.verifiedLocalDeletionCandidates())
             try Task.checkCancellation()
             guard requested.isSubset(of: verified) else { throw BackupError.message("A photo or its backup changed since you reviewed it. Nothing was removed. Check again before continuing.") }
-            let revisions = Dictionary(uniqueKeysWithValues: photos.filter { requested.contains($0.id) }.map { ($0.id, $0.modified) })
+            let reviewed = photos.filter { requested.contains($0.id) }
+            let revisions = Dictionary(uniqueKeysWithValues: reviewed.map { ($0.id, $0.modified) })
             let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(requested), options: nil)
             let protected = protectedAlbumAssets()
-            guard fetched.count == requested.count, (0..<fetched.count).allSatisfy({ index in
+            guard reviewed.count == requested.count, fetched.count == requested.count, (0..<fetched.count).allSatisfy({ index in
                 let asset = fetched.object(at: index)
                 return revisions[asset.localIdentifier] == .some(asset.modificationDate) && eligible(asset, protected: protected)
-            }) else { throw BackupError.message("Your photo library changed. Nothing was removed. Check again before continuing.") }
+            }) else { throw Self.libraryChanged }
+            // Photos removes nothing unless each photo still has the revision it had when reviewed.
+            var expected: [DeviceAssetID: AssetRevision] = [:]
+            for photo in reviewed {
+                guard let modified = photo.modified else { throw Self.libraryChanged }
+                expected[DeviceAssetID(rawValue: photo.id)] = AssetRevision(modified)
+            }
             guard let currentSession = try KeychainCredentialStore().load(), currentSession.scope == originalSession.scope,
                   currentSession.token == originalSession.token else { throw APIError.signedOut }
             try Task.checkCancellation()
             guard !ReadOnlyPolicy.isEnabled(server: currentSession.server, userID: currentSession.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
-            try await PHPhotoLibrary.shared().performChanges(PhotoChanges.delete(Array(requested)))
-            photos.removeAll { requested.contains($0.id) }; selection = []; message = "Removed \(requested.count) items from Apple Photos. Your server copies are kept."
+            let removal = DeviceMutation.delete(reviewed.map { DeviceAssetID(rawValue: $0.id) }, expected: expected,
+                                                origin: .cleanup(scan: scan, account: currentSession.scope))
+            // Once asked, Photos finishes the removal even if this screen goes, and the journal keeps how it ended.
+            switch await PhotoKitAdapter.shared.perform(removal).outcome {
+            case .committed:
+                photos.removeAll { requested.contains($0.id) }; selection = []; message = "Removed \(requested.count) items from Apple Photos. Your server copies are kept."
+            case .declined, .interrupted:
+                // Declining iOS's prompt is the person's answer, not an error. Nothing was removed.
+                break
+            case .revisionChanged: throw Self.libraryChanged
+            case .notPermitted: throw BackupError.message("Photos does not allow removing one of the selected items. Nothing was removed.")
+            case .failed(let reason): throw BackupError.message(reason)
+            }
         } catch is CancellationError { } catch { failure = .init(error) }
     }
+    private static let libraryChanged = BackupError.message("Your photo library changed. Nothing was removed. Check again before continuing.")
     private func invalidate() { operation?.cancel(); selection = []; photos = []; checked = false; message = nil }
     private func initializeFilters() {
         permission = DevicePhotos.authorization; albums = DevicePhotos.albums()

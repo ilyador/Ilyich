@@ -174,7 +174,7 @@ struct BackupClientCache {
     }
 
     func requestAccess() async {
-        permission = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        permission = await PhotoKitAdapter.shared.requestAccess().status
         refreshLibrary()
         BackupLifecycle.shared.configure()
     }

@@ -33,17 +33,26 @@ struct LocalPhoto: Identifiable, Hashable, Sendable {
     }
 }
 
-@MainActor @Observable final class LocalPhotoLibrary: NSObject, @preconcurrency PHPhotoLibraryChangeObserver {
+/// The photos On this phone shows. It reads Photos again after each burst of changes the Photos
+/// adapter reports, while it is shown.
+@MainActor @Observable final class LocalPhotoLibrary {
     private(set) var photos: [LocalPhoto] = []
     private(set) var albums: [DeviceAlbum] = []
     private(set) var permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     private(set) var total = 0
     var albumID = ""
     private var limit = 240
-    private var observing = false
-    func begin() { refresh(); if !observing, [.authorized, .limited].contains(permission) { PHPhotoLibrary.shared().register(self); observing = true } }
-    func stop() { if observing { PHPhotoLibrary.shared().unregisterChangeObserver(self); observing = false } }
-    func requestAccess() async { permission = await PHPhotoLibrary.requestAuthorization(for: .readWrite); begin() }
+    @ObservationIgnored private var changes: Task<Void, Never>?
+    func begin() {
+        refresh()
+        guard changes == nil else { return }
+        let stream = PhotoKitAdapter.shared.changes()
+        changes = Task { [weak self] in
+            for await _ in stream { self?.refresh() }
+        }
+    }
+    func stop() { changes?.cancel(); changes = nil }
+    func requestAccess() async { permission = await PhotoKitAdapter.shared.requestAccess().status; begin() }
     func selectAlbum() { limit = 240; refresh() }
     func loadMore() { limit += 240; refresh() }
     func refresh() {
@@ -60,7 +69,6 @@ struct LocalPhoto: Identifiable, Hashable, Sendable {
         total = result.count
         photos = (0..<min(limit, result.count)).map { LocalPhoto(result.object(at: $0)) }
     }
-    nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) { Task { @MainActor in self.refresh() } }
 }
 
 /// Requests are scoped to the visible cell or viewer. PhotoKit can deliver more

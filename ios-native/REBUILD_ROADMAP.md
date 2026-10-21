@@ -129,6 +129,7 @@ DeviceDatabase holds the device_mutation journal: begin before performChanges, f
 - **Acceptance:**
   - On the phone: favoriting a phone photo works; Remove from Apple Photos on a disposable photo lands in Recently Deleted; declining the prompt shows no error
   - Free up space is used only with disposable media until P4
+- **As built:** the critic's flag turning Remove off until P4 was not added. S0 (3040055) already made Free up space delete for real, so the flag would take away a working action; P1 only adds the journal, the in-block checks and the declined-prompt mapping on top of every check it had. Whether to turn it off until P4 is an owner question.
 
 ### C7 — Account runtime replaces SessionStore
 
@@ -1094,6 +1095,7 @@ Accept each?
 C7 keeps today's behavior until you answer: sign-out, for either reason, switches automatic backup off and removes thumbnails and network settings. SignOutPolicy holds each default, switched off.
 Should a proxy 401 (no Immich error body) stop signing you out and show a connection problem instead?
 - Cleanup:
+- keep Free up space's Remove working until P4, as since S0 (default), or turn it off until P4's cleanup service lands, as the critic proposed;
 - keep all-or-nothing when re-verification finds changes (default), or allow removing the rest after confirming;
 - count archived server copies as backed up (default yes) and Locked Folder copies (default no);
 - keep receipts after local deletion as history (default yes);
