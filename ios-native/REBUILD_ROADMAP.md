@@ -330,6 +330,13 @@ TransferFailureClassifier implements the table in architecture section 5. JobExe
 - **Acceptance:**
   - Unit suite passes
   - App unchanged (dormant)
+- **As built:**
+  - TransferEngine runs only on a database it owns: meta.engine is transfer, set by B9's authoritative import or, for a fresh database no import ever wrote, by TransferStore.claimForEngine. It never runs on the shadow copy B1 rebuilds. No schema change.
+  - Uploads are fenced by the session token and the write generation, not the access epoch, per the split epoch: losing access to some photos never cancels an upload. lease_epoch still records the access epoch.
+  - Read-only on blocks the engine (blocker readOnly, persisted), as BackupCoordinator pauses today; read-only off does not resume it until the user acts (the owner question on read-only off resuming backup stands). A token change blocks with sessionExpired, which only the next session's engine clears; an ended session's signedOut block is never persisted.
+  - A manual intent requeues the library lane's failed jobs once; an automatic one never does. A relaunch frees the old leases and keeps every job's state and phase, so the executor resumes from its stage; submitted jobs wait for their outcome (B6).
+  - Classes beyond section 5's table: HTTP 400 is item; 403 and 404 from Immich are unknown (transient five times, then item); every 5xx counts toward serverBackoff, which also ends by itself after the backoff. An outcome with neither receipt, status nor v2 error code is an interrupted attempt (transient). Retry-After is honoured when an executor supplies it; none does yet.
+  - Staging is not a seam of its own here: it belongs to JobExecuting, which B3 implements over P2's staging.
 
 ### Q4 — One typed query: planner, translators and the library repository
 

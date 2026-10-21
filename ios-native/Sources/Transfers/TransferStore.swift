@@ -8,7 +8,8 @@ import SQLite3
 /// and readable after the first unlock. It runs on a queue of its own and opens on first use.
 ///
 /// Until the cutover (B9) it is a shadow copy: LegacyBackupImporter rebuilds the library lane from
-/// state.json, which BackupCoordinator still runs from. Nothing else writes it yet.
+/// state.json, which BackupCoordinator still runs from. The transfer engine (B2, dormant) writes
+/// only a database it owns, which no shadow import touches.
 ///
 /// Tables:
 /// - meta: schema, engine (legacy while BackupCoordinator is authoritative, transfer once this
@@ -386,7 +387,9 @@ actor TransferStore: ReceiptQuery {
                            confirmedAt: row.real(8), verifiedAt: row.real(9), localDeletedAt: row.real(10))
     }
 
-    private func database() throws -> TransferSQLite {
+    /// The open connection, opened on first use. Only this actor's methods, here and in its
+    /// extensions, may use it.
+    func database() throws -> TransferSQLite {
         guard !isClosed else { throw TransferStoreError.closed }
         if let connection { return connection }
         let folder = url.deletingLastPathComponent()
