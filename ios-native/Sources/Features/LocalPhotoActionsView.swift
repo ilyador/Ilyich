@@ -55,15 +55,19 @@ struct LocalPhotoActionsView: View {
         .alert("Couldn’t complete photo action", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
         .onDisappear { operation?.cancel(); generation = UUID(); busy = false; preparing = false; if share == nil { cleanupShare() } }
     }
-    private func fetchAssets(checkRevision: Bool) throws -> [PHAsset] {
+    /// The selection, once Photos access allows using it.
+    private func selectedIDs() throws -> [DeviceAssetID] {
         guard [.authorized, .limited].contains(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { throw BackupError.message("Allow Photos access in Settings to use these items.") }
         let ids = photos.map(\.id)
         guard Set(ids).count == ids.count, !ids.isEmpty else { throw BackupError.message("Select the photos again before continuing.") }
+        return ids.map { DeviceAssetID(rawValue: $0) }
+    }
+    private func fetchAssets() throws -> [PHAsset] {
+        let ids = try selectedIDs().map(\.rawValue)
         let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
         let byID = Dictionary(uniqueKeysWithValues: (0..<fetched.count).map { let asset = fetched.object(at: $0); return (asset.localIdentifier, asset) })
         return try photos.map { photo in
-            guard let asset = byID[photo.id] else { throw BackupError.message("Some selected photos are no longer available. Refresh your selection and try again.") }
-            if checkRevision, asset.modificationDate != photo.modified { throw BackupError.message("A selected photo changed. Refresh your selection before removing it.") }
+            guard let asset = byID[photo.id] else { throw Self.unavailable }
             return asset
         }
     }
@@ -72,30 +76,49 @@ struct LocalPhotoActionsView: View {
         guard !ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
         return saved
     }
+    // Favorite and remove go through the Photos adapter, which checks each photo again inside the
+    // change and journals it; once asked, Photos finishes even if this sheet goes.
     private func favorite() async {
         guard !busy else { return }; busy = true; defer { busy = false }
         do {
-            _ = try writeSession(); let assets = try fetchAssets(checkRevision: false), value = makeFavorite
-            guard assets.allSatisfy({ $0.canPerform(.properties) }) else { throw BackupError.message("Photos does not allow changing one of the selected items.") }
+            _ = try writeSession(); let ids = try selectedIDs(), value = makeFavorite
             try Task.checkCancellation(); _ = try writeSession()
-            try await PHPhotoLibrary.shared().performChanges(PhotoChanges.favorite(assets.map(\.localIdentifier), value))
-            onChanged(); dismiss()
+            switch await PhotoKitAdapter.shared.perform(.setFavorite(ids, value, expected: [:])).outcome {
+            case .committed: onChanged(); dismiss()
+            case .declined, .interrupted: break
+            case .revisionChanged: throw Self.unavailable
+            case .notPermitted: throw BackupError.message("Photos does not allow changing one of the selected items.")
+            case .failed(let reason): throw BackupError.message(reason)
+            }
         } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func remove() async {
         guard !busy else { return }; busy = true; defer { busy = false }
         do {
-            _ = try writeSession(); let assets = try fetchAssets(checkRevision: true)
-            guard assets.allSatisfy({ $0.canPerform(.delete) }) else { throw BackupError.message("Photos does not allow removing one of the selected items.") }
+            _ = try writeSession(); let ids = try selectedIDs()
+            // Each photo must still have the revision it had when chosen, or nothing is removed.
+            var expected: [DeviceAssetID: AssetRevision] = [:]
+            for photo in photos {
+                guard let modified = photo.modified else { throw Self.changed }
+                expected[DeviceAssetID(rawValue: photo.id)] = AssetRevision(modified)
+            }
             try Task.checkCancellation(); _ = try writeSession()
-            try await PHPhotoLibrary.shared().performChanges(PhotoChanges.delete(assets.map(\.localIdentifier)))
-            onChanged(); dismiss()
+            switch await PhotoKitAdapter.shared.perform(.delete(ids, expected: expected, origin: .user)).outcome {
+            case .committed: onChanged(); dismiss()
+            // Declining iOS's prompt is the person's answer, not an error.
+            case .declined, .interrupted: break
+            case .revisionChanged: throw Self.changed
+            case .notPermitted: throw BackupError.message("Photos does not allow removing one of the selected items.")
+            case .failed(let reason): throw BackupError.message(reason)
+            }
         } catch is CancellationError { } catch { failure = .init(error) }
     }
+    private static let unavailable = BackupError.message("Some selected photos are no longer available. Refresh your selection and try again.")
+    private static let changed = BackupError.message("A selected photo changed or is no longer available. Refresh your selection before removing it.")
     private func upload() async {
         guard !busy else { return }; busy = true; defer { busy = false }
         do {
-            _ = try writeSession(); _ = try fetchAssets(checkRevision: false)
+            _ = try writeSession(); _ = try fetchAssets()
             await backup.enqueue(localIDs: photos.map(\.id))
             if let error = backup.error { throw BackupError.message(error) }
             showBackup = true
@@ -106,7 +129,7 @@ struct LocalPhotoActionsView: View {
         let token = UUID(); generation = token
         defer { if generation == token { busy = false; preparing = false } }
         do {
-            let assets = try fetchAssets(checkRevision: false)
+            let assets = try fetchAssets()
             let package = try await LocalShareExporter.prepare(assets: assets, preview: quality == "preview", allowCloud: allowCloud) { value in
                 Task { @MainActor in if generation == token { progress = value } }
             }
