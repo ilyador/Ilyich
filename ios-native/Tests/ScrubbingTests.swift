@@ -293,8 +293,9 @@ import XCTest
     }
 }
 
-/// Month loads through the local index read asset_index (Q3): a month is a range of its order
-/// index, read in order without sorting and without reading any other photo's record.
+/// Month loads through the local index read asset_index (Q3): a month is a range of its index,
+/// newest first by the time taken (or added), read in order without sorting and without reading
+/// any other photo's record.
 final class MonthIndexTests: XCTestCase {
     func testMonthsAreReadInOrderFromTheirIndex() async throws {
         let root = temporaryDirectory()
@@ -310,15 +311,15 @@ final class MonthIndexTests: XCTestCase {
         var elapsed = Duration.zero
         for filter in filters {
             let plan = try await store.timeBucketPlan(month, filter: filter)
-            let index = filter.orderBy == "createdAt" ? "asset_index_created" : "asset_index_order"
+            let index = filter.orderBy == "createdAt" ? "asset_index_added" : "asset_index_taken"
             XCTAssertTrue(plan.contains { $0.contains("USING INDEX \(index)") || $0.contains("USING COVERING INDEX \(index)") }, "\(filter): \(plan)")
             XCTAssertFalse(plan.contains { $0.contains("TEMP B-TREE") }, "A month is read in order, not sorted: \(filter): \(plan)")
             elapsed += try await clock.measure { loaded.append(try await store.timeBucket(month, filter: filter).map(\.id)) }
         }
         XCTAssertEqual(loaded[0].count, (11_300..<11_400).count { $0 % 50 != 0 && $0 % 40 != 0 }, "Archived and Bob's photos stay out.")
         let expected = (11_300..<11_400).filter { $0 % 50 != 0 && $0 % 40 != 0 }
-            .sorted { ($0 % 28, $0 % 24, $0) > ($1 % 28, $1 % 24, $1) }.map { String(format: "photo-%05d", $0) }
-        XCTAssertEqual(loaded[0], expected, "The server's order: by day, then by time taken, newest first.")
+            .sorted { ($0 % 28, $0 % 24) > ($1 % 28, $1 % 24) }.map { String(format: "photo-%05d", $0) }
+        XCTAssertEqual(loaded[0], expected, "Newest first by the time taken.")
         XCTAssertTrue(loaded[4].allSatisfy { Int($0.dropFirst(6))! / 100 == 112 }, "Added in June 2015, taken the month before.")
         let months = try await store.timeBuckets()
         XCTAssertEqual(months.count, 240)

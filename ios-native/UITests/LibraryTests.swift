@@ -779,8 +779,19 @@ final class LibraryTests: XCTestCase {
     }
     @MainActor func testVideosCloseWithASwipeDownLikePhotos() {
         let app = launch()
-        let video = app.collectionViews["library.grid"].cells.element(boundBy: 5)
-        XCTAssertTrue(video.waitForExistence(timeout: 15))
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 15))
+        // The fixture's photos were all taken at one time, so they are in ID order and the clip
+        // is further down the newest month.
+        let video = grid.cells.matching(NSPredicate(format: "label ENDSWITH %@", ", video")).firstMatch
+        let height = app.frame.height
+        func placed() -> Bool { video.exists && video.frame.midY > height * 0.25 && video.frame.midY < height * 0.7 }
+        for _ in 0..<12 where !placed() {
+            let down = video.exists && video.frame.midY <= height * 0.25
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.4 : 0.65))
+            from.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.6 : 0.4)))
+        }
+        XCTAssertTrue(placed(), "The newest month has a clip.")
         tapPhoto(video)
         let close = app.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))

@@ -141,7 +141,7 @@ actor APIClient {
     func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) async throws -> [Asset] {
         guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
         let payload: TimeBucketPayload = try await request(.get, path: "timeline/bucket", query: filter.queryItems + [.init(name: "timeBucket", value: bucket)])
-        return try payload.assets()
+        return filter.libraryOrder(try payload.assets())
     }
     func attachEntityStore(_ store: EntityStore?) async {
         entityStore = store.flatMap { $0.scope == cacheScope && $0.userID == userID ? $0 : nil }

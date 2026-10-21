@@ -5,55 +5,70 @@ import Synchronization
 import XCTest
 @testable import Ilyich
 
-/// Q3: feeds read the derived tables in the server's order, the access purge forgets only the
+/// Q3: feeds read the derived tables in the library's order, the access purge forgets only the
 /// photos that left the account, and dependents that came early or were dropped come back.
 final class IndexReadsTests: XCTestCase {
     // MARK: - Order
 
-    /// The server orders a month by local day, then file creation time, then file name, all one
-    /// way (AssetRepository.getTimeBucket); the ID settles what the server leaves open. In
-    /// created-at order the time added comes first instead of the day.
-    func testMonthOrderMatchesTheServer() async throws {
+    /// A month is ordered as the library always was, not as the server orders it (day, file
+    /// creation time, file name): by the time taken, newest first, then by ID, ascending either
+    /// way. In created-at order the time added takes the place of the time taken.
+    func testMonthOrderIsTheTimeTakenThenID() async throws {
         let index = try makeIndex()
         _ = try await index.apply([
             Self.asset("late-day", taken: "2026-02-28T09:00:00Z"),
-            // Same day: the file's creation time decides, not the time taken.
+            // Same day: the time taken decides, not the file's creation time.
             Self.asset("taken-earlier", taken: "2026-02-10T08:00:00Z", fileCreated: "2026-02-10T08:00:00Z", name: "IMG_0001.jpg"),
             Self.asset("taken-later", taken: "2026-02-10T23:00:00Z", fileCreated: "2026-02-10T07:00:00Z", name: "IMG_0002.jpg"),
-            // Same day and creation time: the file name decides, not the ID.
+            // Same time taken: the ID decides, not the file name or creation time.
             Self.asset("name-a", taken: "2026-02-03T12:00:00Z", fileCreated: "2026-02-03T12:00:00Z", name: "IMG_0005.jpg"),
-            Self.asset("name-b", taken: "2026-02-03T12:00:00Z", fileCreated: "2026-02-03T12:00:00Z", name: "IMG_0004.jpg"),
-            // Same everything: the ID.
-            Self.asset("tie-1", taken: "2026-02-03T09:00:00Z", fileCreated: "2026-02-03T09:00:00Z", name: "DSC.jpg"),
+            Self.asset("name-b", taken: "2026-02-03T12:00:00Z", fileCreated: "2026-02-03T11:00:00Z", name: "IMG_0004.jpg"),
             Self.asset("tie-2", taken: "2026-02-03T09:00:00Z", fileCreated: "2026-02-03T09:00:00Z", name: "DSC.jpg"),
+            Self.asset("tie-1", taken: "2026-02-03T09:00:00Z", fileCreated: "2026-02-03T09:00:00Z", name: "DSC.jpg"),
             SyncEvents.complete(),
         ], epoch: index.epoch())
-        let newest = ["late-day", "taken-earlier", "taken-later", "name-a", "name-b", "tie-2", "tie-1"]
+        let newest = ["late-day", "taken-later", "taken-earlier", "name-a", "name-b", "tie-1", "tie-2"]
         let month = try await index.timeBucket("2026-02-01T00:00:00Z").map(\.id)
         XCTAssertEqual(month, newest)
         var oldest = TimelineFilter(); oldest.order = "asc"
         let ascending = try await index.timeBucket("2026-02-01T00:00:00Z", filter: oldest).map(\.id)
-        XCTAssertEqual(ascending, newest.reversed(), "Oldest first is every key the other way.")
+        XCTAssertEqual(ascending, ["tie-1", "tie-2", "name-a", "name-b", "taken-earlier", "taken-later", "late-day"],
+                       "Oldest first, photos taken at one time still in ID order.")
         let across = try await index.timelineAssets().map(\.id)
         XCTAssertEqual(across, newest, "Across months the order is the same.")
 
-        // Added in two months: the time added first, then as above.
+        // Added in two months: the time added first, then the ID.
         _ = try await index.apply([
             Self.asset("added-first", taken: "2026-02-03T12:00:00Z", created: "2026-03-01T00:00:00Z", fileCreated: "2026-02-03T12:00:00Z", name: "Z.jpg"),
             Self.asset("added-last", taken: "2025-05-01T12:00:00Z", created: "2026-03-20T00:00:00Z"),
+            Self.asset("added-late", taken: "2026-02-01T12:00:00Z", created: "2026-03-10T00:00:00Z"),
         ], epoch: index.epoch())
         let added = TimelineFilter(orderBy: "createdAt")
         let addedMonths = try await index.timeBuckets(filter: added)
         XCTAssertEqual(addedMonths.map(\.timeBucket), ["2026-03-01"])
         let addedOrder = try await index.timeBucket("2026-03-01T00:00:00Z", filter: added).map(\.id)
-        XCTAssertEqual(addedOrder, ["added-last", "late-day", "taken-earlier", "taken-later", "added-first", "name-a", "name-b", "tie-2", "tie-1"],
-                       "Photos added at one time keep the creation time, name and ID order.")
+        XCTAssertEqual(addedOrder, ["added-last", "added-late", "added-first", "late-day", "name-a", "name-b", "taken-earlier", "taken-later", "tie-1", "tie-2"],
+                       "Photos added at one time are in ID order.")
+    }
+
+    /// Before the index is readable months come from the server, which orders them by day, file
+    /// creation time and file name; they are shown in the library's order all the same.
+    func testServerMonthsAreShownInTheLibrarysOrder() throws {
+        let day = try XCTUnwrap(APIDate.parse("2026-02-10T00:00:00Z"))
+        let morning = Asset(id: "b-morning", fileCreatedAt: day.addingTimeInterval(9 * 3_600), localDateTime: day.addingTimeInterval(9 * 3_600))
+        let night = Asset(id: "c-night", fileCreatedAt: day.addingTimeInterval(1 * 3_600), localDateTime: day.addingTimeInterval(23 * 3_600))
+        let tie = Asset(id: "a-tie", fileCreatedAt: day.addingTimeInterval(9 * 3_600), localDateTime: day.addingTimeInterval(9 * 3_600))
+        let earlier = Asset(id: "d-earlier", fileCreatedAt: day.addingTimeInterval(-86_400), localDateTime: day.addingTimeInterval(-86_400))
+        let server = [morning, tie, night, earlier]
+        XCTAssertEqual(TimelineFilter().libraryOrder(server).map(\.id), ["c-night", "a-tie", "b-morning", "d-earlier"])
+        var oldest = TimelineFilter(); oldest.order = "asc"
+        XCTAssertEqual(oldest.libraryOrder(server).map(\.id), ["d-earlier", "a-tie", "b-morning", "c-night"])
     }
 
     // MARK: - Equivalence
 
     /// Every feed the app shows, laid out by month from the index, against the server's rules
-    /// applied to the same records: the same months, counts and photos in the same order.
+    /// applied to the same records: the same months, counts and photos, in the library's order.
     /// Place, Lightroom and person by month are among them.
     func testIndexAndServerAgreeForEveryPreset() async throws {
         let index = try makeIndex()
@@ -509,7 +524,8 @@ final class IndexReadsTests: XCTestCase {
 }
 
 /// The server's rules for a timeline (AssetRepository.getTimeBuckets and getTimeBucket, with the
-/// app's owner and partner scope), applied to the records a library was synced from.
+/// app's owner and partner scope), applied to the records a library was synced from, with each
+/// month in the library's order: the time, then the ID.
 private struct ReferenceLibrary {
     struct Photo {
         let id, owner, taken, fileCreated, name, created, visibility: String
@@ -531,10 +547,11 @@ private struct ReferenceLibrary {
         let byMonth = Dictionary(grouping: shown) { String((createdOrder ? $0.created : $0.taken).prefix(7)) + "-01" }
         let descending = filter.order != "asc"
         return byMonth.keys.sorted(by: descending ? (>) : (<)).map { month in
+            // Within a month the library's order, not the server's: the time, then the ID, ascending.
             let ids = byMonth[month]!.sorted { a, b in
-                let left = [createdOrder ? a.created : String(a.taken.prefix(10)), a.fileCreated, a.name, a.id]
-                let right = [createdOrder ? b.created : String(b.taken.prefix(10)), b.fileCreated, b.name, b.id]
-                return descending ? right.lexicographicallyPrecedes(left) : left.lexicographicallyPrecedes(right)
+                let left = createdOrder ? a.created : a.taken, right = createdOrder ? b.created : b.taken
+                if left == right { return a.id < b.id }
+                return descending ? left > right : left < right
             }.map(\.id)
             return (month, ids)
         }

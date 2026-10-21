@@ -169,7 +169,7 @@ final class LibraryIndex: Sendable {
         try await mapped { try await viewport.timelineAssets(filter: filter, offset: offset, limit: limit) }
     }
     func timeBuckets(filter: TimelineFilter = .init()) async throws -> [TimeBucket] { try await mapped { try await viewport.timeBuckets(filter: filter) } }
-    /// One month of a feed, in the server's order.
+    /// One month of a feed, by the time taken (or added), then ID.
     func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) async throws -> [Asset] {
         try await mapped { try await viewport.timeBucket(bucket, filter: filter) }
     }

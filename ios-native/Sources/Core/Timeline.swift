@@ -55,6 +55,19 @@ struct TimelineFilter: Hashable, Sendable {
         if withPartners { items.append(.init(name: "withPartners", value: "true")) }
         return items
     }
+
+    /// A month in the library's order, which the index reads in too: by the time taken (or added,
+    /// in created-at order), newest first unless the feed asks otherwise, then by ID. The server
+    /// orders a month by day, file creation time and file name instead.
+    func libraryOrder(_ assets: [Asset]) -> [Asset] {
+        let added = orderBy == "createdAt", ascending = order == "asc"
+        return assets.sorted { a, b in
+            let left = (added ? a.createdAt : a.localDateTime) ?? .distantPast
+            let right = (added ? b.createdAt : b.localDateTime) ?? .distantPast
+            if left == right { return a.id < b.id }
+            return ascending ? left < right : left > right
+        }
+    }
 }
 
 /// The server returns columns with matching row counts, rather than one object per asset.
