@@ -15,14 +15,14 @@ struct ViewerTagEditor: View {
             Section {
                 HStack {
                     TextField("New tag", text: $name)
-                    Button("Create") { create() }.requiresWriteAccess(api).disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("Create") { create() }.requiresWriteAccess().disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             Section {
                 ForEach(tags) { tag in
                     Button { Task { await toggle(tag) } } label: {
                         HStack { Text(tag.value); Spacer(); if selected.contains(tag.id) { Image(systemName: "checkmark").foregroundStyle(.tint) } }
-                    }.disabled(busy).requiresWriteAccess(api)
+                    }.disabled(busy).requiresWriteAccess()
                 }
             }
             if let error { Text(error).foregroundStyle(.red) }

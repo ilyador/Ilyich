@@ -77,8 +77,8 @@ struct BulkActionsView: View {
                 Picker("Photo quality", selection: $shareFileType) { Text("Original").tag("original"); Text("Displayed").tag("preview") }
             }
             Button("Share files", systemImage: "square.and.arrow.up") { prepareShare(original: shareFileType != "preview") }
-            Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos(original: shareFileType != "preview") }.requiresWriteAccess(api)
-            if !allLocked { Button("Create shared link", systemImage: "link") { publicLink = true }.requiresWriteAccess(api) }
+            Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos(original: shareFileType != "preview") }.requiresWriteAccess()
+            if !allLocked { Button("Create shared link", systemImage: "link") { publicLink = true }.requiresWriteAccess() }
         } header: { Text("Share") } footer: {
             if !assets.allSatisfy(\.isVideo) { Text("Displayed keeps the edits you see. Videos use originals. Saving a Live Photo keeps its original photo and motion.") }
         }
@@ -87,7 +87,7 @@ struct BulkActionsView: View {
         Section("Albums") {
             Menu("Add to album") {
                 ForEach(writableAlbums) { album in Button(album.albumName) { add(to: album) } }
-            }.disabled(writableAlbums.isEmpty).requiresWriteAccess(api)
+            }.disabled(writableAlbums.isEmpty).requiresWriteAccess()
         }
     }
     private var organizeSection: some View {
@@ -108,7 +108,7 @@ struct BulkActionsView: View {
                     Button("Retry", systemImage: "arrow.clockwise") { Task { await loadFeatures() } }
                 }
             }
-        }.requiresWriteAccess(api)
+        }.requiresWriteAccess()
     }
     private func loadFeatures() async {
         featuresFailure = nil

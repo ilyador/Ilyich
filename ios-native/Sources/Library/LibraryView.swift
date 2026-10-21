@@ -78,6 +78,7 @@ struct LibraryView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.authorization) private var authorization
 
     private enum Shelf { case root, people, albums, more, settings }
     private enum AlbumSharing: Identifiable {
@@ -217,7 +218,8 @@ struct LibraryView: View {
             }
             // The viewer zooms out of its grid cell and back into the cell of the photo it closes on.
             .background {
-                ViewerZoomPresenter(item: $viewing, sourceView: { store.zoomSourceView(for: $0) }, onDismiss: finishViewerNavigation) { asset, transition, close in
+                ViewerZoomPresenter(item: $viewing, sourceView: { store.zoomSourceView(for: $0) }, authorization: authorization,
+                                    onDismiss: finishViewerNavigation) { asset, transition, close in
                     AnyView(assetViewer(asset, transition: transition, close: close))
                 }
             }
@@ -576,16 +578,16 @@ struct LibraryView: View {
             Text("\(store.selected.count) selected").font(.subheadline.monospacedDigit())
             Spacer()
             if store.selectedLocalPhotos.isEmpty {
-            Button { creatingAlbum = true } label: { Image(systemName: "rectangle.stack.badge.plus").frame(width: 44, height: 44) }.accessibilityLabel("Create album from selection").requiresWriteAccess(api)
+            Button { creatingAlbum = true } label: { Image(systemName: "rectangle.stack.badge.plus").frame(width: 44, height: 44) }.accessibilityLabel("Create album from selection").requiresWriteAccess()
             Button { runSelection { ids in try await api.requestVoid(.put, path: "assets", body: SelectionUpdate(ids: ids, isFavorite: true)) } }
-                label: { Image(systemName: "heart").frame(width: 44, height: 44) }.accessibilityLabel("Favorite selected photos").requiresWriteAccess(api).disabled(!ownsSelection)
-            Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel(features?.trash == false ? "Delete selection permanently" : "Move selection to Trash").requiresWriteAccess(api).disabled(features == nil || !ownsSelection)
+                label: { Image(systemName: "heart").frame(width: 44, height: 44) }.accessibilityLabel("Favorite selected photos").requiresWriteAccess().disabled(!ownsSelection)
+            Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel(features?.trash == false ? "Delete selection permanently" : "Move selection to Trash").requiresWriteAccess().disabled(features == nil || !ownsSelection)
             } else {
                 Button {
                     let localIDs = store.selectedLocalPhotos.map(\.id)
                     Task { await backup.enqueue(localIDs: localIDs) }
                 } label: { Image(systemName: "icloud.and.arrow.up").frame(width: 44, height: 44) }
-                    .accessibilityLabel("Back up selected phone photos").requiresWriteAccess(api).disabled(backup.isRunning)
+                    .accessibilityLabel("Back up selected phone photos").requiresWriteAccess().disabled(backup.isRunning)
             }
             Button { bulkSelection = BulkSelection(assets: store.selectedAssets, local: store.selectedDevicePhotos) } label: {
                 Image(systemName: "ellipsis").frame(width: 44, height: 44)

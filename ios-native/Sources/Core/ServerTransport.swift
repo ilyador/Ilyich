@@ -56,20 +56,19 @@ actor ServerTransport {
     private nonisolated let session: GuardedURLSession
     /// The sync stream, the event socket and downloads, which take as long as they need.
     private nonisolated let streaming: GuardedURLSession
-    /// Refuses a write while read-only mode is on. It runs before the address is chosen and again
-    /// just before sending, because choosing can take seconds.
-    private let writeCheck: @Sendable (_ method: String, _ path: String) throws -> Void
+    /// Decides whether each request may go: before the address is chosen and again just before
+    /// sending, because choosing can take seconds.
+    private let authority: (any RequestAuthority)?
 
     /// `sessionConfiguration`, when given, is used as it is for every request, and a copy of it
     /// for the address checks: tests route both to a stub server, and a quick check sets short
     /// timeouts.
     init(server: URL, token: String?, configuration: NetworkConfiguration, sessionConfiguration: URLSessionConfiguration? = nil,
-         wifiName: any WiFiNameProviding = SystemWiFiName(),
-         writeCheck: @escaping @Sendable (_ method: String, _ path: String) throws -> Void = { _, _ in }) throws {
+         wifiName: any WiFiNameProviding = SystemWiFiName(), authority: (any RequestAuthority)? = nil) throws {
         let primary = try ServerAddress.normalized(server)
         self.server = primary
         self.token = token
-        self.writeCheck = writeCheck
+        self.authority = authority
         let probes = (sessionConfiguration?.copy() as? URLSessionConfiguration) ?? .ephemeral
         connection = try ServerConnection(server: primary, configuration: configuration, wifiName: wifiName, probeConfiguration: probes)
         if let sessionConfiguration {
@@ -103,12 +102,12 @@ actor ServerTransport {
         var status: Int?
         do {
             try Task.checkCancellation()
-            try writeCheck(endpoint.method.rawValue, endpoint.path)
+            let admitted = try authority?.admit(method: endpoint.method.rawValue, path: endpoint.path)
             var route = try await connection.route()
             var retried = false
             while true {
                 var request = try await connection.request(path: endpoint.path, query: endpoint.query, token: token, route: route)
-                try writeCheck(endpoint.method.rawValue, endpoint.path)
+                try authority?.confirm(method: endpoint.method.rawValue, path: endpoint.path, admittedUnder: admitted)
                 request.httpMethod = endpoint.method.rawValue
                 request.httpBody = endpoint.body
                 request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -191,10 +190,36 @@ actor ServerTransport {
 
     static func record(_ error: any Error, method: String, path: String, status: Int?, startedAt: Date) async {
         let outcome: DiagnosticOutcome
-        if error is ReadOnlyPolicy.ReadOnlyError { outcome = .blocked }
+        if error.isReadOnlyRefusal { outcome = .blocked }
         else if error is CancellationError || (error as? URLError)?.code == .cancelled { outcome = .cancelled }
         else { outcome = .failed }
         await DiagnosticsStore.shared.record(method: method, path: path, statusCode: status, startedAt: startedAt, outcome: outcome)
+    }
+}
+
+/// Decides whether a request may be sent. ServerTransport asks when a request is made and again
+/// just before it goes out.
+protocol RequestAuthority: Sendable {
+    /// Throws if the request may not be sent now. For a write it returns the write generation it
+    /// is made under, which `confirm` is given; nil for a read.
+    func admit(method: String, path: String) throws -> UInt64?
+    /// Throws if a request admitted under `generation` may no longer be sent.
+    func confirm(method: String, path: String, admittedUnder generation: UInt64?) throws
+}
+
+/// The rule for clients made without the signed-in account's AuthorizationState, such as the
+/// backup flows' own: a write is refused while the account's read-only flag is set.
+struct ReadOnlyFlagAuthority: RequestAuthority {
+    let server: URL
+    let userID: String
+
+    func admit(method: String, path: String) throws -> UInt64? {
+        try ReadOnlyPolicy.check(enabled: ReadOnlyPolicy.isEnabled(server: server, userID: userID), method: method, path: path)
+        return nil
+    }
+
+    func confirm(method: String, path: String, admittedUnder generation: UInt64?) throws {
+        try ReadOnlyPolicy.check(enabled: ReadOnlyPolicy.isEnabled(server: server, userID: userID), method: method, path: path)
     }
 }
 

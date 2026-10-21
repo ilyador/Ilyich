@@ -26,9 +26,12 @@ actor APIClient {
     nonisolated let userID: String?
     private nonisolated let anonymousScope = UUID().uuidString
     nonisolated var cacheScope: String { baseURL.absoluteString + "|" + (userID ?? anonymousScope) }
-    nonisolated var isReadOnly: Bool { userID.map { ReadOnlyPolicy.isEnabled(server: baseURL, userID: $0) } ?? false }
-    nonisolated func setReadOnly(_ enabled: Bool) {
-        if let userID { ReadOnlyPolicy.setEnabled(enabled, server: baseURL, userID: userID) }
+    /// The signed-in account's authorization, for the client SessionStore makes. Other clients
+    /// follow the account's read-only flag.
+    nonisolated let authorization: AuthorizationState?
+    nonisolated var isReadOnly: Bool {
+        if let authorization { return authorization.snapshot.readOnly }
+        return userID.map { ReadOnlyPolicy.isEnabled(server: baseURL, userID: $0) } ?? false
     }
     private let accessToken: String?
     /// The sessions and the address choice every request of this client goes through.
@@ -38,20 +41,22 @@ actor APIClient {
     private var entityStore: EntityStore?
     private var cachedServerFeatures: ServerFeatures?
 
-    /// `sessionConfiguration` replaces the transport's default configuration, for tests.
+    /// `sessionConfiguration` replaces the transport's default configuration, for tests. With
+    /// `authorization`, a write is refused while read-only mode is on and when read-only mode
+    /// changed while it waited; without it, while the account's read-only flag is set.
     init(baseURL: URL, accessToken: String? = nil, userID: String? = nil, sessionConfiguration: URLSessionConfiguration? = nil,
-         networkConfiguration: NetworkConfiguration? = nil, wifiName: any WiFiNameProviding = SystemWiFiName()) throws {
+         networkConfiguration: NetworkConfiguration? = nil, wifiName: any WiFiNameProviding = SystemWiFiName(),
+         authorization: AuthorizationState? = nil) throws {
         let server = try Self.normalizedBaseURL(baseURL)
         self.baseURL = server
         self.accessToken = accessToken
         self.userID = userID
+        self.authorization = authorization
+        let authority: (any RequestAuthority)? = if let authorization { authorization }
+            else if let userID { ReadOnlyFlagAuthority(server: server, userID: userID) } else { nil }
         transport = try ServerTransport(server: server, token: accessToken,
                                         configuration: networkConfiguration ?? NetworkConfigurationStore.connectionSettings(server: server),
-                                        sessionConfiguration: sessionConfiguration, wifiName: wifiName,
-                                        writeCheck: { method, path in
-                                            guard let userID else { return }
-                                            try ReadOnlyPolicy.check(enabled: ReadOnlyPolicy.isEnabled(server: server, userID: userID), method: method, path: path)
-                                        })
+                                        sessionConfiguration: sessionConfiguration, wifiName: wifiName, authority: authority)
     }
 
     /// Ends this client's requests and lets its sessions go. Requests made afterwards throw

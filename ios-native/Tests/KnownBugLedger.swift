@@ -155,10 +155,12 @@ import XCTest
         }
     }
 
-    /// FEED-6. A feed's month places are saved on the phone from an unowned task, with no fence.
-    /// When access changes while they are being counted (a revoked album or partner, a library
-    /// reset, sign-out), SessionStore deletes the saved places, and the late count writes them
-    /// back, so places the account may no longer see show at the next launch.
+    /// FEED-6, fixed in rebuild milestone C6. A feed's month places were saved on the phone from
+    /// an unowned task, with no fence. When access changed while they were being counted (a
+    /// revoked album or partner, a library reset, sign-out), SessionStore deleted the saved places,
+    /// and the late count wrote them back, so places the account might no longer see showed at
+    /// the next launch. The count's own task now saves them, under the epoch it began with, and
+    /// every clear moves that epoch.
     func testPlacesCountedBeforeAnAccessChangeAreNotKept() async throws {
         let month = "2026-02-01T00:00:00Z"
         let api = LedgerLibrary(months: [month: [Asset(id: "photo")]], holdPlaces: true,
@@ -178,9 +180,7 @@ import XCTest
             await TimelinePlacesCache.shared.load(scope: api.cacheScope, filter: TimelineFilter()) != nil
         }
 
-        XCTExpectFailure("FEED-6: places counted before an access change are saved after it. C6 removes this wrapper.", strict: true) {
-            XCTAssertFalse(saved, "A count from before the access change is not kept on the phone.")
-        }
+        XCTAssertFalse(saved, "A count from before the access change is not kept on the phone.")
     }
 
     // MARK: - Account

@@ -68,16 +68,28 @@ actor TimelineCache {
 
 /// Each feed's month places, kept apart from the month snapshots, which every sync clears, so the
 /// rail names months straight after launch while their places are counted again.
+///
+/// An account's places are cleared whenever its access changes: a revoked album or partner, a
+/// library reset, sign-out. Each clear moves the account's epoch here, and a save carries the
+/// epoch from before its count began, so places counted under access the account no longer has
+/// are never kept. Temporary until the index's month_places table replaces this cache (F5).
 actor TimelinePlacesCache {
     static let shared = TimelinePlacesCache()
     private let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("IlyichTimelinePlaces", isDirectory: true)
+    private var epochs: [String: UInt64] = [:]
+
+    /// What a count begins under. It moves with every clear of the account's places.
+    func epoch(scope: String) -> UInt64 { epochs[scope] ?? 0 }
 
     func load(scope: String, filter: TimelineFilter) -> TimelinePlaces? {
         guard filter.visibility != .locked, let data = try? Data(contentsOf: file(scope: scope, filter: filter)) else { return nil }
         return try? JSONDecoder().decode(TimelinePlaces.self, from: data)
     }
-    func save(_ places: TimelinePlaces, scope: String, filter: TimelineFilter) {
-        guard filter.visibility != .locked else { return }
+    /// Keeps places counted under `epoch`, unless the account's places were cleared since.
+    /// Returns false when they are refused for that.
+    @discardableResult
+    func save(_ places: TimelinePlaces, scope: String, filter: TimelineFilter, epoch: UInt64) -> Bool {
+        guard filter.visibility != .locked, epoch == self.epoch(scope: scope) else { return false }
         do {
             let url = file(scope: scope, filter: filter)
             let directory = url.deletingLastPathComponent()
@@ -95,8 +107,10 @@ actor TimelinePlacesCache {
             }
             for stale in sorted.dropFirst(12) { try? FileManager.default.removeItem(at: stale) }
         } catch { /* Cache writes never block a working library. */ }
+        return true
     }
     func removeAll(scope: String) {
+        epochs[scope] = epoch(scope: scope) &+ 1
         try? FileManager.default.removeItem(at: directory(scope))
     }
     private func directory(_ scope: String) -> URL { root.appendingPathComponent(hash(scope), isDirectory: true) }

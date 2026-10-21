@@ -208,6 +208,42 @@ final class LibraryTests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Sign out of Ilyich?"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.collectionViews["library.grid"].exists, "Still signed in.")
     }
+    /// Read-only mode turns the viewer's changes off the moment it comes on, and back on the
+    /// moment it goes off. The viewer is presented by UIKit, outside the app's environment.
+    @MainActor func testReadOnlyModeTurnsChangesOffAndBackOnAtOnce() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 15))
+        func setReadOnly(_ on: Bool) {
+            openShelves(app)
+            app.buttons["Settings"].tap()
+            XCTAssertTrue(app.buttons["Read-only mode"].waitForExistence(timeout: 5))
+            app.buttons["Read-only mode"].tap()
+            let toggle = app.switches["Read-only mode"]
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+            // The switch itself sits at the row's trailing end.
+            if (toggle.value as? String == "1") != on { toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap() }
+            let set = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", on ? "1" : "0"), object: toggle)
+            XCTAssertEqual(XCTWaiter.wait(for: [set], timeout: 5), .completed, "Read-only mode is \(on ? "on" : "off").")
+            let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: toggle)
+            XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed, "The toggle is usable again once uploads have followed.")
+            app.buttons["Done"].tap()
+        }
+        func viewerAllowsDeleting() -> Bool {
+            tapPhoto(grid.cells.element(boundBy: 1))
+            let delete = app.buttons["Delete"]
+            XCTAssertTrue(delete.waitForExistence(timeout: 10))
+            let enabled = delete.isEnabled
+            app.buttons["Close"].tap()
+            XCTAssertTrue(app.textFields["library.search"].waitForExistence(timeout: 5))
+            return enabled
+        }
+        XCTAssertTrue(viewerAllowsDeleting(), "Changes start allowed.")
+        setReadOnly(true)
+        XCTAssertFalse(viewerAllowsDeleting(), "Read-only mode turns the viewer's changes off at once.")
+        setReadOnly(false)
+        XCTAssertTrue(viewerAllowsDeleting(), "Turning it off turns them back on at once.")
+    }
     @MainActor func testReorderingPeopleUpdatesTheShelfAtOnce() {
         let app = launch(extraArguments: ["--ui-testing-many-people"])
         openShelves(app)

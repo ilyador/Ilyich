@@ -19,6 +19,10 @@ import IlyichShareInbox
     private var worker: Task<Void, Never>?
     private var stopping: Task<Void, Never>?
     private var generation = UUID()
+    /// The files the running upload was asked for.
+    @ObservationIgnored private var uploading = Set<String>()
+    /// The files read-only mode stopped before they were sent, uploaded once it is turned off.
+    @ObservationIgnored private var resumesAfterReadOnly: Set<String>?
     @ObservationIgnored private var loads = 0
     @ObservationIgnored private var appliedLoad = 0
     @ObservationIgnored private var inbox: ShareInboxRepository?
@@ -44,7 +48,32 @@ import IlyichShareInbox
         }
     }
 
+    /// Stops uploading, for Pause and for sign-out, which also forget a resume read-only mode set up.
     func cancel() {
+        resumesAfterReadOnly = nil
+        stop()
+    }
+
+    /// Read-only mode came on: uploading stops at once, and the files not yet sent, the one being
+    /// sent among them, go once it is turned off. A file that reached the server is found there
+    /// by its checksum, so it is neither lost nor uploaded twice.
+    func pauseForReadOnly() async {
+        if isRunning, stopping == nil { resumesAfterReadOnly = uploading.subtracting(errors.keys) }
+        stop()
+        await waitUntilPaused()
+    }
+
+    /// Read-only mode was turned off: carries on with the files it stopped, keeping the count and
+    /// the failures so far.
+    func resumeAfterReadOnly(api: APIClient) async {
+        await waitUntilPaused()
+        guard let selection = resumesAfterReadOnly else { return }
+        resumesAfterReadOnly = nil
+        await refresh()
+        upload(selected: selection, api: api, continuing: true)
+    }
+
+    private func stop() {
         guard stopping == nil else { return }
         generation = UUID()
         let activeWorker = worker
@@ -69,17 +98,21 @@ import IlyichShareInbox
         }
     }
 
-    func upload(selected: Set<String>, api: APIClient) {
+    func upload(selected: Set<String>, api: APIClient) { upload(selected: selected, api: api, continuing: false) }
+
+    private func upload(selected: Set<String>, api: APIClient, continuing: Bool) {
         guard !isRunning, stopping == nil, !selected.isEmpty else { return }
         let items = batches.flatMap { batch in batch.attachments.filter { selected.contains($0.id) }.map { (batch.id, $0) } }
         guard !items.isEmpty else { return }
         var totals: [UUID: Int] = [:]
         for (batchID, _) in items { totals[batchID, default: 0] += 1 }
         generation = UUID(); let runID = generation
-        isRunning = true; error = nil; errors = [:]; completed = 0
+        isRunning = true; error = nil; uploading = selected
+        if !continuing { errors = [:]; completed = 0 }
         worker = Task {
             var notificationCompleted: [UUID: Int] = [:]
             var notificationsStarted = false
+            var pausedByReadOnly = false
             do {
                 guard let saved = try KeychainCredentialStore().load(), saved.server == api.baseURL, saved.userID == api.userID else {
                     throw BackupError.message("Sign in before uploading these shared files.")
@@ -108,18 +141,25 @@ import IlyichShareInbox
                         await refresh()
                         notificationCompleted[batchID, default: 0] += 1
                     } catch is CancellationError { throw CancellationError() }
-                    // An ended session or a proxy's refusal stops every upload, not only this one.
+                    // An ended session or a proxy's refusal stops every upload, not only this one,
+                    // and so does read-only mode, which pauses them.
                     catch let failure as ServerFailure where failure.stopsEveryUpload { throw failure }
+                    catch let refusal where refusal.isReadOnlyRefusal { throw refusal }
                     catch {
                         try checkSession(saved, runID: runID)
                         errors[item.id] = error.localizedDescription
                     }
                 }
             } catch is CancellationError { }
+            catch let refusal where refusal.isReadOnlyRefusal {
+                // Read-only mode came on before its pause stopped this upload: the pause takes
+                // over, and nothing failed.
+                if generation == runID { resumesAfterReadOnly = selected.subtracting(errors.keys); pausedByReadOnly = true }
+            }
             catch { if generation == runID { self.error = error.localizedDescription } }
             if notificationsStarted {
                 for (batchID, total) in totals {
-                    guard !Task.isCancelled, generation == runID else { TransferNotifications.cancel(id: batchID); continue }
+                    guard !Task.isCancelled, generation == runID, !pausedByReadOnly else { TransferNotifications.cancel(id: batchID); continue }
                     let done = notificationCompleted[batchID, default: 0]
                     await TransferNotifications.finished(id: batchID, kind: "Shared upload", total: total,
                                                          completed: done, failed: total - done)

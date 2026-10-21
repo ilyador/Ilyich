@@ -86,7 +86,7 @@ struct LockedFolderView: View {
                             }
                             if biometricAvailable && !usePassword { Toggle("Enable biometric unlock", isOn: $remember) }
                             Button(settingUp ? "Set PIN and unlock" : "Unlock") { Task { await unlock() } }
-                                .disabled(busy || (usePassword ? password.isEmpty : !validPIN || (settingUp && pin != confirmation))).requiresWriteAccess(api, when: settingUp)
+                                .disabled(busy || (usePassword ? password.isEmpty : !validPIN || (settingUp && pin != confirmation))).requiresWriteAccess(when: settingUp)
                         }
                         if !settingUp {
                             if biometricAvailable { Button("Unlock with biometrics", systemImage: "faceid") { Task { await unlockBiometrically() } }.disabled(busy) }

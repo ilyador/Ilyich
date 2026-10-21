@@ -39,8 +39,8 @@ struct FaceAssignmentView: View {
                         }
                         Spacer(); Image(systemName: "chevron.right").foregroundStyle(.tertiary)
                     }
-                }.disabled(saving).requiresWriteAccess(api)
-                    .swipeActions { Button("Remove face", role: .destructive) { deleteFace = face }.requiresWriteAccess(api) }
+                }.disabled(saving).requiresWriteAccess()
+                    .swipeActions { Button("Remove face", role: .destructive) { deleteFace = face }.requiresWriteAccess() }
             }
         }.navigationTitle("Fix faces").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }

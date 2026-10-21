@@ -23,7 +23,7 @@ import SwiftUI
                 } else if let api = session.api, let pipeline = session.pipeline {
                     if session.requiresPasswordChange {
                         NavigationStack {
-                            RequiredPasswordChange(api: api, onChanged: { Task { await session.signOut() } })
+                            RequiredPasswordChange(api: api, session: session, onChanged: { Task { await session.signOut() } })
                                 .toolbar { ToolbarItem(placement: .cancellationAction) {
                                     Button("Sign out") { Task { await session.signOut() } }
                                 } }
@@ -35,6 +35,8 @@ import SwiftUI
                     SignInView(session: session)
                 }
             }
+            // Every control that changes something reads what the account may do from here.
+            .environment(\.authorization, session.authorization)
             .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }
@@ -45,23 +47,20 @@ import SwiftUI
 
 private struct RequiredPasswordChange: View {
     let api: APIClient
+    let session: SessionStore
     let onChanged: () -> Void
-    @State private var readOnly = false
+    @Environment(\.authorization) private var authorization
 
     var body: some View {
         ChangePasswordView(api: api, onChanged: onChanged)
             .safeAreaInset(edge: .top) {
-                if readOnly {
+                if authorization?.readOnly == true {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Your server requires a new password. Turn off Read-only mode to save it.")
                             .font(.subheadline)
-                        Button("Turn off Read-only mode") {
-                            api.setReadOnly(false)
-                            readOnly = false
-                        }.buttonStyle(.bordered)
+                        Button("Turn off Read-only mode") { session.setReadOnly(false) }.buttonStyle(.bordered)
                     }.padding().frame(maxWidth: .infinity, alignment: .leading).background(.regularMaterial)
                 }
             }
-            .onAppear { readOnly = api.isReadOnly }
     }
 }

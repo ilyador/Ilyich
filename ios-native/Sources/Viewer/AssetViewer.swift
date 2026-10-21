@@ -314,16 +314,16 @@ struct AssetViewer: View {
         ToolbarSpacer(.flexible, placement: .bottomBar)
         ToolbarItemGroup(placement: .bottomBar) {
             Button(current.isFavorite ? "Remove favorite" : "Favorite", systemImage: current.isFavorite ? "heart.fill" : "heart") { toggleFavorite() }
-                .requiresWriteAccess(api).tint(current.isFavorite ? .red : .primary).disabled(!ownsAsset || working)
+                .requiresWriteAccess().tint(current.isFavorite ? .red : .primary).disabled(!ownsAsset || working)
             Button("Info", systemImage: "info.circle") { info = true }.disabled(working)
             if canEdit {
-                Button("Edit", systemImage: "slider.horizontal.3") { editing = true }.requiresWriteAccess(api).disabled(working)
+                Button("Edit", systemImage: "slider.horizontal.3") { editing = true }.requiresWriteAccess().disabled(working)
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
         if ownsAsset {
             ToolbarItem(placement: .bottomBar) {
-                Button("Delete", systemImage: "trash") { requestDeletion() }.requiresWriteAccess(api).disabled(working)
+                Button("Delete", systemImage: "trash") { requestDeletion() }.requiresWriteAccess().disabled(working)
             }
         }
     }
@@ -332,13 +332,13 @@ struct AssetViewer: View {
     private var actionsMenu: some View {
         Menu {
             Section {
-                Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }.requiresWriteAccess(api)
-                Button("Create shared link", systemImage: "link") { sharedLink = true }.requiresWriteAccess(api)
+                Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }.requiresWriteAccess()
+                Button("Create shared link", systemImage: "link") { sharedLink = true }.requiresWriteAccess()
                 if let albumID {
                     Button("Set album cover", systemImage: "photo.on.rectangle.angled") {
                         let id = current.id
                         run { let _: Album = try await api.request(.patch, path: "albums/\(albumID)", body: ["albumThumbnailAssetId": id]) }
-                    }.requiresWriteAccess(api)
+                    }.requiresWriteAccess()
                     Button("Comments and likes", systemImage: "bubble") { albumActivity = true }
                 }
             }
@@ -352,20 +352,20 @@ struct AssetViewer: View {
             Section {
                 Button("Share displayed version", systemImage: "square.and.arrow.up") { exportAsset(original: false) }
                 Button("Download original", systemImage: "arrow.down.document") { exportAsset(original: true) }
-                Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }.requiresWriteAccess(api)
+                Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }.requiresWriteAccess()
                 if matchedLocalPhotos[current.id] != nil, !changedLocalCopies.contains(current.id) {
                     Button("On this phone", systemImage: "iphone") { localPhotoActions = true }
                 }
                 Button("Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
-                if !current.isVideo { Button("Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true }.requiresWriteAccess(api) }
+                if !current.isVideo { Button("Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true }.requiresWriteAccess() }
             }
             if ownsAsset {
                 Section {
                     if current.isTrashed, features?.trash == true {
-                        Button("Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }.requiresWriteAccess(api)
+                        Button("Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }.requiresWriteAccess()
                     } else if !current.isTrashed {
-                        Button(current.visibility == .archive ? "Unarchive" : "Archive", systemImage: "archivebox") { changeVisibility(current.visibility == .archive ? .timeline : .archive) }.requiresWriteAccess(api)
-                        Button(current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") { changeVisibility(current.visibility == .locked ? .timeline : .locked) }.requiresWriteAccess(api)
+                        Button(current.visibility == .archive ? "Unarchive" : "Archive", systemImage: "archivebox") { changeVisibility(current.visibility == .archive ? .timeline : .archive) }.requiresWriteAccess()
+                        Button(current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") { changeVisibility(current.visibility == .locked ? .timeline : .locked) }.requiresWriteAccess()
                     }
                 }
             }

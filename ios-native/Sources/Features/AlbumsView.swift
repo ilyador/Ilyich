@@ -71,7 +71,7 @@ struct AlbumsView: View {
                 }
                 label: { Image(systemName: "arrow.up.arrow.down") }.accessibilityLabel("Sort albums")
             }
-            ToolbarItem(placement: .topBarTrailing) { Button("Create album", systemImage: "plus") { creating = true }.requiresWriteAccess(api) }
+            ToolbarItem(placement: .topBarTrailing) { Button("Create album", systemImage: "plus") { creating = true }.requiresWriteAccess() }
         }
         .task { await load() }.refreshable { await load() }
         .sheet(isPresented: $creating) { NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in albums.insert(album, at: 0) } } }
@@ -122,9 +122,9 @@ struct AlbumEditor: View {
     var body: some View {
         Form {
             Section("Album") {
-                TextField("Name", text: $name).disabled(!canEdit).requiresWriteAccess(api)
-                TextField("Description", text: $detail, axis: .vertical).lineLimit(3...8).disabled(!canEdit).requiresWriteAccess(api)
-                if album != nil { Picker("Photo order", selection: $order) { Text("Newest first").tag("desc"); Text("Oldest first").tag("asc") }.disabled(!canEdit).requiresWriteAccess(api) }
+                TextField("Name", text: $name).disabled(!canEdit).requiresWriteAccess()
+                TextField("Description", text: $detail, axis: .vertical).lineLimit(3...8).disabled(!canEdit).requiresWriteAccess()
+                if album != nil { Picker("Photo order", selection: $order) { Text("Newest first").tag("desc"); Text("Oldest first").tag("asc") }.disabled(!canEdit).requiresWriteAccess() }
             }
             if let album = current {
                 Section {
@@ -132,9 +132,9 @@ struct AlbumEditor: View {
                 }
                 if canEdit {
                     Section("Photos") {
-                        NavigationLink("Add photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .add, onSaved: didUpdate) }.requiresWriteAccess(api)
-                        NavigationLink("Remove photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .remove, onSaved: didUpdate) }.disabled(album.assetCount == 0).requiresWriteAccess(api)
-                        NavigationLink("Choose cover") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .cover, onSaved: didUpdate) }.disabled(album.assetCount == 0).requiresWriteAccess(api)
+                        NavigationLink("Add photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .add, onSaved: didUpdate) }.requiresWriteAccess()
+                        NavigationLink("Remove photos") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .remove, onSaved: didUpdate) }.disabled(album.assetCount == 0).requiresWriteAccess()
+                        NavigationLink("Choose cover") { AlbumAssetsManager(api: api, pipeline: pipeline, album: album, mode: .cover, onSaved: didUpdate) }.disabled(album.assetCount == 0).requiresWriteAccess()
                     }
                 }
                 Section {
@@ -145,8 +145,8 @@ struct AlbumEditor: View {
                 }
                 if isOwner {
                     Section {
-                        NavigationLink("Create a shared link") { SharedLinkEditor(api: api, album: album) }.requiresWriteAccess(api)
-                        Button("Delete album", role: .destructive) { confirmDelete = true }.requiresWriteAccess(api)
+                        NavigationLink("Create a shared link") { SharedLinkEditor(api: api, album: album) }.requiresWriteAccess()
+                        Button("Delete album", role: .destructive) { confirmDelete = true }.requiresWriteAccess()
                     } footer: { Text("Deleting an album keeps its photos and videos in your library.") }
                 }
             }
@@ -155,7 +155,7 @@ struct AlbumEditor: View {
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             if canEdit { ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { Task { await save() } }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy).requiresWriteAccess(api)
+                Button("Save") { Task { await save() } }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy).requiresWriteAccess()
             } }
         }
         .disabled(busy)
@@ -165,7 +165,7 @@ struct AlbumEditor: View {
             if let album { do { latest = try await api.album(id: album.id) } catch { failure = .init(error) } }
         }
         .confirmationDialog("Delete this album?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete album", role: .destructive) { Task { await delete() } }.requiresWriteAccess(api)
+            Button("Delete album", role: .destructive) { Task { await delete() } }.requiresWriteAccess()
         } message: { Text("The album will be removed for everyone. Its photos will stay in the library.") }
         .alert("Couldn’t save changes", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
@@ -217,7 +217,7 @@ struct AlbumMembersView: View {
                                 Button("Viewer") { Task { await update(member, role: "viewer") } }
                                 Button("Editor") { Task { await update(member, role: "editor") } }
                                 Button("Remove member", role: .destructive) { Task { await remove(member) } }
-                            }.requiresWriteAccess(api)
+                            }.requiresWriteAccess()
                         } else { Text(member.role.capitalized).foregroundStyle(.secondary) }
                     }
                 }
@@ -235,18 +235,18 @@ struct AlbumMembersView: View {
                         Menu(user.name) {
                             Button("Add as viewer") { Task { await add(user, role: "viewer") } }
                             Button("Add as editor") { Task { await add(user, role: "editor") } }
-                        }.requiresWriteAccess(api)
+                        }.requiresWriteAccess()
                     }
                 }
             }
             if !owner, members.contains(where: { $0.user.id == api.userID }) {
                 Section {
-                    Button("Leave album", role: .destructive) { confirmLeave = true }.requiresWriteAccess(api)
+                    Button("Leave album", role: .destructive) { confirmLeave = true }.requiresWriteAccess()
                 } footer: { Text("You will lose access to this shared album. Photos you own remain in your library.") }
             }
         }.navigationTitle("Sharing").disabled(busy)
         .confirmationDialog("Leave this shared album?", isPresented: $confirmLeave, titleVisibility: .visible) {
-            Button("Leave album", role: .destructive) { Task { await leave() } }.requiresWriteAccess(api)
+            Button("Leave album", role: .destructive) { Task { await leave() } }.requiresWriteAccess()
         } message: { Text("An album owner will need to invite you again to restore access.") }
         .task {
             members = album.albumUsers ?? []
@@ -259,7 +259,7 @@ struct AlbumMembersView: View {
             NavigationStack { SharedLinkEditor(api: api, album: link.album, link: link, onSaved: { Task { await loadLinks() } }) }
         }
         .confirmationDialog("Remove this shared link?", isPresented: Binding(get: { removingLink != nil }, set: { if !$0 { removingLink = nil } }), titleVisibility: .visible) {
-            Button("Remove link", role: .destructive) { if let link = removingLink { Task { await removeLink(link) } } }.requiresWriteAccess(api)
+            Button("Remove link", role: .destructive) { if let link = removingLink { Task { await removeLink(link) } } }.requiresWriteAccess()
         } message: { Text("Anyone with the link will lose access. Your photos stay in your library.") }
         .alert("Couldn’t update members", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
