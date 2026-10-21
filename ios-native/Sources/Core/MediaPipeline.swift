@@ -258,16 +258,26 @@ actor MediaPipeline {
     }
 
     func image(for asset: Asset, size: MediaSize = .thumbnail, pixelSize: Int, edited: Bool = true) async throws -> PreparedImage {
+        try await image(for: asset, size: size, pixelSize: pixelSize, edited: edited, token: fence.token())
+    }
+
+    /// `token` is the media fence's, taken when the image was asked for: a photo forgotten since
+    /// then is neither downloaded, stored nor remembered.
+    func image(for asset: Asset, size: MediaSize = .thumbnail, pixelSize: Int, edited: Bool = true, token: UInt64) async throws -> PreparedImage {
+        guard fence.admits(asset.id, since: token) else { throw CancellationError() }
         if size == .thumbnail, edited, asset.visibility != .locked {
-            guard let image = try await thumbnail(asset, pixelSize: pixelSize, network: true) else { throw CancellationError() }
+            guard let image = try await thumbnail(asset, pixelSize: pixelSize, network: true, token: token) else { throw CancellationError() }
             return image
         }
         let privacyToken = privateGeneration
         let identity = MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: size, pixelSize: pixelSize, edited: edited)
         let request = try await mediaRequest(asset, size: size, edited: edited)
         guard asset.visibility != .locked || privacyToken == privateGeneration else { throw CancellationError() }
-        return try await load(identity, request: request, isPrivate: asset.visibility == .locked)
+        return try await load(identity, request: request, isPrivate: asset.visibility == .locked, token: token)
     }
+
+    /// The media fence's token now, for work that will store or remember a photo's media later.
+    nonisolated func mediaToken() -> UInt64 { fence.token() }
 
     private func mediaRequest(_ asset: Asset, size: MediaSize, edited: Bool) async throws -> URLRequest {
         try await client.authorizedRequest(path: "assets/\(asset.id)/thumbnail", query: [
@@ -298,9 +308,9 @@ actor MediaPipeline {
         decoder.cancelPrefetch(assets.map { thumbnailRequest($0, pixelSize: pixelSize).identity })
     }
 
-    private nonisolated func thumbnailRequest(_ asset: Asset, pixelSize: Int) -> ThumbnailDecoder.Request {
+    private nonisolated func thumbnailRequest(_ asset: Asset, pixelSize: Int, token: UInt64? = nil) -> ThumbnailDecoder.Request {
         ThumbnailDecoder.Request(identity: MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: .thumbnail, pixelSize: pixelSize),
-                                 assetID: asset.id, revision: asset.cacheRevision, token: fence.token())
+                                 assetID: asset.id, revision: asset.cacheRevision, token: token ?? fence.token())
     }
 
     nonisolated func hasStoredThumbnail(_ asset: Asset) -> Bool {
@@ -308,20 +318,22 @@ actor MediaPipeline {
     }
 
     /// Downloads a thumbnail into the store without decoding it, for keeping the library offline.
-    func storeThumbnail(_ asset: Asset) async throws {
+    /// `token` is the media fence's from when `asset` was read, so a photo locked or deleted since
+    /// is not downloaded or stored.
+    func storeThumbnail(_ asset: Asset, token: UInt64) async throws {
         guard asset.visibility != .locked, !hasStoredThumbnail(asset) else { return }
-        _ = try await thumbnailData(asset)
+        _ = try await thumbnailData(asset, token: token)
     }
 
-    private func thumbnail(_ asset: Asset, pixelSize: Int, network: Bool) async throws -> PreparedImage? {
-        let request = thumbnailRequest(asset, pixelSize: pixelSize), identity = request.identity
+    private func thumbnail(_ asset: Asset, pixelSize: Int, network: Bool, token: UInt64) async throws -> PreparedImage? {
+        let request = thumbnailRequest(asset, pixelSize: pixelSize, token: token), identity = request.identity
         if let image = decoded.object(forKey: identity.stableKey as NSString) { return image.image }
-        let epoch = generation, token = request.token
+        let epoch = generation
         // The decoder remembers what it decodes, and a reset drops it.
         if let stored = await decoder.image(request) { return stored }
         try Task.checkCancellation()
         guard network else { return nil }
-        let data = try await thumbnailData(asset)
+        let data = try await thumbnailData(asset, token: token)
         let image = try await Task.detached(priority: .userInitiated) { try Self.downsample(data, pixelSize: pixelSize) }.value
         try Task.checkCancellation()
         guard epoch == generation, fence.admits(asset.id, since: token) else { throw CancellationError() }
@@ -331,12 +343,14 @@ actor MediaPipeline {
 
     /// One download per photo revision, shared by every cell size that wants it. A download that
     /// has not started is dropped when nobody waits for it; one that has started completes into
-    /// the store, because the server does the work either way.
-    private func thumbnailData(_ asset: Asset) async throws -> Data {
+    /// the store, because the server does the work either way. `token` is the fence's from when the
+    /// caller began; a joined download keeps the token of whoever started it.
+    private func thumbnailData(_ asset: Asset, token: UInt64) async throws -> Data {
         let key = asset.id + "|" + asset.cacheRevision
         let waiter = UUID()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
+            guard fence.admits(asset.id, since: token) else { throw CancellationError() }
             if thumbnailFlights[key] == nil {
                 let request = try await client.authorizedRequest(path: "assets/\(asset.id)/thumbnail", query: [
                     .init(name: "size", value: MediaSize.thumbnail.rawValue), .init(name: "edited", value: "true"),
@@ -345,8 +359,8 @@ actor MediaPipeline {
                 try Task.checkCancellation()
                 // Another caller may have started the same download while the request was built.
                 if thumbnailFlights[key] == nil {
+                    guard fence.admits(asset.id, since: token) else { throw CancellationError() }
                     let limiter = thumbnailLimiter, session = thumbnailSession, store = thumbnails, revision = asset.cacheRevision
-                    let token = fence.token()
                     let task = Task.detached(priority: .userInitiated) { [weak self] () -> Data in
                         try await limiter.acquire()
                         guard let self, await self.beginThumbnail(key), !Task.isCancelled else {
@@ -457,12 +471,17 @@ actor MediaPipeline {
         faceCache(identity).setObject(CachedImage(image), forKey: identity.stableKey as NSString, cost: image.byteCost)
     }
 
-    private func load(_ key: MediaCacheIdentity, request: URLRequest, isPrivate: Bool = false) async throws -> PreparedImage {
+    /// `token` is the media fence's from when the image was asked for. A photo forgotten since is
+    /// not downloaded, or, if its download was already under way, not remembered or left in the
+    /// URL cache.
+    private func load(_ key: MediaCacheIdentity, request: URLRequest, isPrivate: Bool = false, token: UInt64) async throws -> PreparedImage {
+        let assetID = key.resource.hasPrefix("assets/") ? String(key.resource.dropFirst(7)) : nil
+        if let assetID, !fence.admits(assetID, since: token) { throw CancellationError() }
         if isPrivate {
             privateKeys.insert(key)
             byteCache.removeCachedResponse(for: request)
-        } else if key.resource.hasPrefix("assets/") {
-            cachedRequests[String(key.resource.dropFirst(7)), default: []].insert(request)
+        } else if let assetID {
+            cachedRequests[assetID, default: []].insert(request)
         }
         let waiter = UUID()
         return try await withTaskCancellationHandler {
@@ -491,14 +510,20 @@ actor MediaPipeline {
                     }
                 }
                 flight = Flight(task: task, waiters: [waiter], generation: generation, privateGeneration: isPrivate ? privateGeneration : nil,
-                                token: fence.token())
+                                token: token)
                 flights[key] = flight
             }
             defer { release(key, waiter: waiter) }
             let image = try await flight.task.value
             try Task.checkCancellation()
             guard flight.generation == generation, flight.privateGeneration == nil || flight.privateGeneration == privateGeneration else { throw CancellationError() }
-            memory.remember(image, as: key, token: flight.token, latestToo: !isPrivate)
+            // A joined flight may have begun after this caller's token, or before it.
+            let admitted = min(token, flight.token)
+            if let assetID, !fence.admits(assetID, since: admitted) {
+                byteCache.removeCachedResponse(for: request)
+                throw CancellationError()
+            }
+            memory.remember(image, as: key, token: admitted, latestToo: !isPrivate)
             return image
         } onCancel: {
             Task { await self.release(key, waiter: waiter) }

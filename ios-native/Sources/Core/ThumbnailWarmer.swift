@@ -77,6 +77,9 @@ import Network
         stored = 0
         var offset = 0, failures = 0
         while !Task.isCancelled, mayRun {
+            // Taken before the batch is read: a photo locked or deleted while the batch is worked
+            // through is not downloaded or stored again.
+            let token = pipeline.mediaToken()
             guard let batch = try? await entities.timelineAssets(offset: offset, limit: 400), !batch.isEmpty else { return }
             offset += batch.count
             // Hashing names and checking 400 files stays off the main thread.
@@ -88,7 +91,7 @@ import Network
                 guard !Task.isCancelled, mayRun else { return }
                 let pair = Array(missing[index..<min(index + 2, missing.count)])
                 let succeeded = await withTaskGroup(of: Bool.self) { group in
-                    for asset in pair { group.addTask { (try? await pipeline.storeThumbnail(asset)) != nil } }
+                    for asset in pair { group.addTask { (try? await pipeline.storeThumbnail(asset, token: token)) != nil } }
                     var count = 0
                     for await stored in group where stored { count += 1 }
                     return count
