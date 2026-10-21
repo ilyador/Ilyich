@@ -52,6 +52,9 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
             self.state = state; self.host = host; presentedID = asset.id
             host.rootView = root(asset)
             host.modalPresentationStyle = .fullScreen
+            // The viewer is always dark. Its own preference reaches this host only after SwiftUI's
+            // first pass, which let the zoom start in the system's style and flicker.
+            host.overrideUserInterfaceStyle = .dark
             let options = UIViewController.Transition.ZoomOptions()
             options.interactiveDismissShouldBegin = { [weak host] context in
                 guard let view = host?.view else { return false }

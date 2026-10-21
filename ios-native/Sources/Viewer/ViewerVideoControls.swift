@@ -199,6 +199,22 @@ private struct VideoScrubber: View {
             )
         }
         .frame(height: 40)
+        // While dragging, the time reached and the time left, as in Photos.
+        .overlay(alignment: .top) {
+            if playback.isScrubbing {
+                HStack {
+                    Text(Self.clock(playback.time))
+                    Spacer()
+                    Text("-" + Self.clock(playback.duration - playback.time))
+                }
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.5), radius: 3)
+                .offset(y: -26)
+                .transition(.opacity)
+                .accessibilityHidden(true)
+            }
+        }
         .allowsHitTesting(playback.player != nil)
         .animation(.easeOut(duration: 0.15), value: playback.isScrubbing)
         .accessibilityElement()
