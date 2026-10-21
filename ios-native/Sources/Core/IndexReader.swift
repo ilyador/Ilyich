@@ -88,7 +88,7 @@ actor IndexReader {
         try database.query("SELECT (SELECT value FROM metadata WHERE key='complete')='1' AND (SELECT queryable FROM index_state WHERE id=1)=1").first?[0] == "1"
     }
 
-    /// A feed's photos across months, in the server's order.
+    /// A feed's photos across months, newest first by the time taken unless the feed asks otherwise.
     func timelineAssets(filter: TimelineFilter = .init(), offset: Int = 0, limit: Int = 200) throws -> [Asset] {
         let (whereSQL, arguments) = feedPredicate(filter)
         let rows = try database.query("\(Self.feedSelect) WHERE \(whereSQL) ORDER BY \(Self.order(filter, month: false)) LIMIT ? OFFSET ?",
@@ -106,8 +106,8 @@ actor IndexReader {
         }
     }
 
-    /// One month of a feed, in the server's order: local day, file creation time, file name, then
-    /// ID, all one way; in created-at order, the time added first instead of the day.
+    /// One month of a feed, by the time taken (or added, in created-at order), newest first unless
+    /// the feed asks otherwise, then by ID.
     func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) throws -> [Asset] {
         let (sql, arguments) = timeBucketQuery(bucket, filter: filter)
         return try decodeTimelineRows(try database.query(sql, arguments))
@@ -142,14 +142,14 @@ actor IndexReader {
 
     private static func monthColumn(_ filter: TimelineFilter) -> String { filter.orderBy == "createdAt" ? "i.created_month" : "i.local_month" }
     private static func direction(_ filter: TimelineFilter) -> String { filter.order == "asc" ? "ASC" : "DESC" }
-    /// The server's order (AssetRepository.getTimeBucket): the local day, or the time added, then
-    /// the file's creation time and its name, all one way; the ID settles ties, which the server
-    /// leaves open. Within a month the columns follow asset_index's indexes, so SQLite reads a
-    /// month in order without sorting it.
+    /// The library's order: the time taken, or the time added, newest first unless the feed asks
+    /// otherwise, then the ID, ascending either way. Across months the month leads, which the time
+    /// already decides. The columns follow asset_index_taken and asset_index_added, so SQLite reads
+    /// a month newest first in order without sorting it.
     private static func order(_ filter: TimelineFilter, month: Bool) -> String {
         let way = direction(filter)
-        let first = filter.orderBy == "createdAt" ? ["i.created_at"] : (month ? ["i.local_day"] : ["i.local_month", "i.local_day"])
-        return (first + ["i.file_created_at", "i.file_name", "i.id"]).map { "\($0) \(way)" }.joined(separator: ",")
+        let time = filter.orderBy == "createdAt" ? "i.created_at" : "i.local_date_time"
+        return ((month ? [] : ["\(monthColumn(filter)) \(way)"]) + ["\(time) \(way)", "i.id ASC"]).joined(separator: ",")
     }
 
     /// One query brings each photo with its EXIF and the fields the timeline reads from the

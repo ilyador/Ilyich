@@ -24,7 +24,7 @@ import XCTest
         let untouched = try kept()
 
         var store: LibraryIndex? = try LibraryIndex(scope: scope, userID: "alice", directory: root, backfillBatchSize: 3)
-        XCTAssertEqual(try Self.dump(file, "PRAGMA user_version"), [["2"]])
+        XCTAssertEqual(try Self.dump(file, "PRAGMA user_version"), [["3"]])
         let needsReset = try await store!.prepare(sessionFingerprint: "session")
         XCTAssertFalse(needsReset, "The migration never asks the server to replay the library.")
         let complete = try await store!.isComplete()
@@ -107,6 +107,43 @@ import XCTest
         XCTAssertEqual(try Self.dump(file, "SELECT id FROM asset_index ORDER BY id"), [["added"], ["kept"]])
         let fresh = try await reopened.isQueryable()
         XCTAssertTrue(fresh)
+    }
+
+    /// A library at version 2 holds the months in the server's order. Opening it swaps only those
+    /// indexes for ones in the order of the time taken (or added): the index stays queryable, and
+    /// entities, metadata, acknowledgements, purges and derived rows stay byte for byte, so nothing
+    /// syncs or fills again. A kill during the swap rolls it back and the next open does it again.
+    func testVersion3SwapsTheMonthIndexesInPlace() async throws {
+        let (store, file) = try makeStore()
+        _ = try await store.prepare(sessionFingerprint: "session")
+        try await store.markResetRequested()
+        _ = try await store.apply([SyncEvents.asset("one"), SyncEvents.asset("two"), SyncEvents.complete()], epoch: store.epoch())
+        try await Self.runBackfill(store)
+        try Self.execute(file, """
+        BEGIN;
+        DROP INDEX asset_index_taken; DROP INDEX asset_index_added;
+        CREATE INDEX asset_index_order ON asset_index(local_month,local_day,file_created_at,file_name,id);
+        CREATE INDEX asset_index_created ON asset_index(created_month,created_at,file_created_at,file_name,id);
+        PRAGMA user_version=2;
+        COMMIT;
+        """)
+        let indexes = "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='asset_index' AND sql IS NOT NULL ORDER BY name"
+        XCTAssertEqual(try Self.dump(file, indexes), [["asset_index_created"], ["asset_index_order"], ["asset_index_stack"]])
+        let kept = {
+            try ["SELECT kind,id,payload FROM entities ORDER BY kind,id", "SELECT key,value FROM metadata ORDER BY key",
+                 "SELECT type,ack FROM acknowledgements ORDER BY type", "SELECT id,revoked FROM media_purges ORDER BY id",
+                 "SELECT * FROM index_state", "SELECT * FROM asset_index ORDER BY id"].flatMap { try Self.dump(file, $0) }
+        }
+        let before = try kept()
+
+        let reopened = try LibraryIndex(scope: store.scope, userID: "alice", directory: file.deletingLastPathComponent())
+        XCTAssertEqual(try Self.dump(file, "PRAGMA user_version"), [["3"]])
+        XCTAssertEqual(try Self.dump(file, indexes), [["asset_index_added"], ["asset_index_stack"], ["asset_index_taken"]])
+        XCTAssertEqual(try kept(), before, "Only the indexes change.")
+        let queryable = try await reopened.isQueryable()
+        XCTAssertTrue(queryable, "Nothing fills again.")
+        let needsReset = try await reopened.prepare(sessionFingerprint: "session")
+        XCTAssertFalse(needsReset, "Nothing syncs again.")
     }
 
     // MARK: - Sync batches

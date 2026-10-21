@@ -7,8 +7,8 @@ import Foundation
 ///
 /// Version 1 (user_version 1) adds tables derived from the entities, which the writer keeps in
 /// step with every batch and which a backfill fills for a library synced before they existed:
-/// - asset_index: one row per asset, its columns in the order the server sorts a timeline
-///   (local month, local day, file creation time, file name, id), then what feeds filter on;
+/// - asset_index: one row per asset: its month and day taken, file creation time and name, time
+///   taken, month and time added, then what feeds filter on;
 /// - album_member: one row per album-asset record; person_member: one row per visible face of a
 ///   named person;
 /// - locked_asset: assets the server last sent as locked, which are never stored;
@@ -18,16 +18,22 @@ import Foundation
 /// - index_state (one row): the backfill's kind and cursor, whether the derived tables are
 ///   complete (queryable), a persisted revision, and the stale marker.
 ///
-/// Version 2 (Q3) adds indexes for the feeds' reads: months in created-at order and stack
-/// members. It drops the month indexes over the entities that builds before Q3 made on a second
-/// read-write connection; the feeds read asset_index instead.
+/// Version 2 (Q3) adds an index for stack members. It drops the month indexes over the entities
+/// that builds before Q3 made on a second read-write connection; the feeds read asset_index
+/// instead.
+///
+/// Version 3 orders a month by the time taken (or added), newest first, then ID, as the library
+/// always has: it adds asset_index_taken and asset_index_added, which hold a month in that order,
+/// and drops asset_index_order and asset_index_created, which held the server's order (day, file
+/// creation time, file name). Only those indexes change, in one transaction: a kill rolls it back
+/// and the next open runs it again, and no entity, metadata or acknowledgement is read or written.
 ///
 /// The stale marker: triggers on metadata and acknowledgements set index_state.stale on any write
 /// made outside this build's writer, which marks its transactions with writer_active. A build
 /// from before Q2, reinstalled over this one, writes both on every sync batch, reset and sign-out
 /// without keeping the derived tables, so the next open of this build starts the backfill again.
 enum LibraryIndexSchema {
-    static let version = 2
+    static let version = 3
 
     /// The tables and indexes every version has, created as before Q2.
     static let base = [
@@ -78,12 +84,23 @@ enum LibraryIndexSchema {
         }
     }
 
-    /// What version 2 adds. Each statement can run again harmlessly.
+    /// What version 2 adds. Each statement can run again harmlessly. (Its created-at order index,
+    /// which version 3 replaces, is no longer built.)
     static let v2: [String] = [
-        "CREATE INDEX IF NOT EXISTS asset_index_created ON asset_index(created_month,created_at,file_created_at,file_name,id)",
         "CREATE INDEX IF NOT EXISTS asset_index_stack ON asset_index(stack_id) WHERE stack_id IS NOT NULL",
         "DROP INDEX IF EXISTS asset_month_localDateTime",
         "DROP INDEX IF EXISTS asset_month_createdAt",
+    ]
+
+    /// What version 3 changes. Each statement can run again harmlessly. A month is one range of
+    /// each index, newest first, IDs ascending among photos taken (or added) at one time, so SQLite
+    /// reads it in order without sorting it; the month leads so a feed across months reads in
+    /// order too.
+    static let v3: [String] = [
+        "CREATE INDEX IF NOT EXISTS asset_index_taken ON asset_index(local_month DESC,local_date_time DESC,id)",
+        "CREATE INDEX IF NOT EXISTS asset_index_added ON asset_index(created_month DESC,created_at DESC,id)",
+        "DROP INDEX IF EXISTS asset_index_order",
+        "DROP INDEX IF EXISTS asset_index_created",
     ]
 
     /// The tables derived from the entities, which a backfill can work out again.
@@ -106,9 +123,8 @@ enum LibraryIndexSchema {
         var revision: Int64
     }
 
-    /// Brings a file to version 2 in place. Only new tables, indexes, triggers and the state row
-    /// are added, and the old month indexes dropped, in one transaction; no entity is read or
-    /// rewritten. A file a build without the derived tables wrote to since restarts its backfill.
+    /// Brings a file to version 3 in place. Only new tables, indexes, triggers and the state row
+    /// are added, and old indexes dropped, in one transaction; no entity is read or rewritten. A file a build without the derived tables wrote to since restarts its backfill.
     static func migrate(_ database: SQLiteConnection) throws {
         if try database.userVersion < version {
             try database.transaction {
@@ -121,7 +137,8 @@ enum LibraryIndexSchema {
                         try database.execute("UPDATE index_state SET backfill_kind=NULL,backfill_cursor=NULL,queryable=1 WHERE id=1")
                     }
                 }
-                for statement in v2 { try database.execute(statement) }
+                if from < 2 { for statement in v2 { try database.execute(statement) } }
+                for statement in v3 { try database.execute(statement) }
                 try database.execute("PRAGMA user_version=\(version)")
             }
         }
