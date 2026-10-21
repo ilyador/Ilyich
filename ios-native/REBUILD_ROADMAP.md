@@ -128,8 +128,8 @@ DeviceDatabase holds the device_mutation journal: begin before performChanges, f
   - testOneObserverCoalescesBursts
 - **Acceptance:**
   - On the phone: favoriting a phone photo works; Remove from Apple Photos on a disposable photo lands in Recently Deleted; declining the prompt shows no error
-  - Free up space is used only with disposable media until P4
-- **As built:** the critic's flag turning Remove off until P4 was not added. S0 (3040055) already made Free up space delete for real, so the flag would take away a working action; P1 only adds the journal, the in-block checks and the declined-prompt mapping on top of every check it had. Whether to turn it off until P4 is an owner question.
+  - Free up space's Remove is disabled on the phone until P4
+- **As built:** Free up space's Remove sits behind `CleanupRemoval.isEnabled` (CleanupPolicy.swift), off until P4; checking still lists what would be removed. S0 (3040055) had already made it delete for real, with only the legacy verifier in front, so this build turns off an action the phone had. Turning it back on before P4 is an owner question.
 
 ### C7 — Account runtime replaces SessionStore
 
@@ -271,7 +271,7 @@ The adapter implements PhotoLibraryStaging. PhotoResourceExport and PhotoCurrent
 - scan: local filter in batches of 250 through the adapter, then shape, canDelete, policy and kept albums; an optional exclude-only index prefilter; at most 6 concurrent strict remote verifications; per-item exclusions; a 401 aborts; byte counts recorded only if the receipt is unchanged;
 - remove: re-verify only the selection, check the gate twice, then perform delete with expected revisions;
 - results: declined, changed or removed; markLocallyDeleted only on commit.
-Also: CleanupSettingsStore (same keys and messaging-album default); RemoteCopyVerifier with no offline fallback; ReceiptRepository plus the temporary LegacyStateReceipts adapter over BackupCoordinator (removed in B9); FreeUpSpaceStore, one per account, observing mutations(). FreeUpSpaceView only renders. Delete verifiedLocalDeletionCandidates and verifiedOriginalByteCount.
+Also: CleanupSettingsStore (same keys and messaging-album default); RemoteCopyVerifier with no offline fallback; ReceiptRepository plus the temporary LegacyStateReceipts adapter over BackupCoordinator (removed in B9); FreeUpSpaceStore, one per account, observing mutations(). FreeUpSpaceView only renders. Delete verifiedLocalDeletionCandidates and verifiedOriginalByteCount. Delete CleanupRemoval, which has kept Free up space's Remove off since P1, with its test.
 - **Migration:** None. Receipts are read from the legacy state. Settings keys are unchanged.
 - **Tests:**
   - CLEAN-1 unwrapped
@@ -976,7 +976,7 @@ App side: WidgetRefreshCoordinator (typed changes, 60 s debounce, skipped in the
 
 - Two execution engines during the backup cutover. They would corrupt staging and duplicate tasks. Mitigation: B2 to B7 are dormant; B9 deletes the old code in the same change, with a grep gate script and a device migration gate.
 - Migration fidelity. A shifted modification date requeues the library and drops cleanup eligibility. Mitigation: REAL dates bound as doubles; golden fixtures from the production encoder; shadow import on the real phone first (B1); state.json kept until B10.
-- Deletion of user photos. Mitigation: DS1 to DS12; property tests; the commit-time block check; Recently Deleted as the 30-day net; device gate with disposable media (P4). Free up space becomes operational at P1 with the strict legacy verification. Use only disposable media until P4.
+- Deletion of user photos. Mitigation: DS1 to DS12; property tests; the commit-time block check; Recently Deleted as the 30-day net; device gate with disposable media (P4). Free up space's Remove, which S0 made operational with the strict legacy verification, is off from P1 until P4.
 - Server verification and local deletion can never be atomic under the current contracts. Mitigation: re-verify only the selection, immediately before perform; Apple's prompt stays the last window.
 - Sideloaded bundle: iloader rewrites the bundle ID to app.alextran.immich.H4K2MSF2SG and may rewrite the app group. Identifiers must keep deriving from Bundle.main. Verify app-group resolution on the phone in C1 before any app-group format changes.
 - 0xdead10cc termination if a SQLite lock is held in the app group at suspension. Mitigation: every database lives in the private container; the delegate journal is outcome files.
@@ -1095,7 +1095,7 @@ Accept each?
 C7 keeps today's behavior until you answer: sign-out, for either reason, switches automatic backup off and removes thumbnails and network settings. SignOutPolicy holds each default, switched off.
 Should a proxy 401 (no Immich error body) stop signing you out and show a connection problem instead?
 - Cleanup:
-- keep Free up space's Remove working until P4, as since S0 (default), or turn it off until P4's cleanup service lands, as the critic proposed;
+- keep Free up space's Remove off from P1 until P4's cleanup service lands, as the critic proposed (default), or turn it back on before then, as S0 had it;
 - keep all-or-nothing when re-verification finds changes (default), or allow removing the rest after confirming;
 - count archived server copies as backed up (default yes) and Locked Folder copies (default no);
 - keep receipts after local deletion as history (default yes);
