@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 import XCTest
 @testable import Ilyich
 
@@ -359,6 +360,34 @@ import XCTest
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("The library did not settle its search request.")
+    }
+
+    /// A refresh whose pass published a change leaves the feed's reload to LibraryView, which
+    /// reloads on that change, so the months load once. A pass that changed nothing, or a
+    /// library that can't say what changed, still reloads here.
+    func testRefreshAfterMutationLeavesAPublishedChangeToTheViewsReload() async throws {
+        let api = LibraryAPIFixture([])
+        let store = LibraryStore(api: api)
+        await store.reload()
+        let initial = await api.summaryCalls
+        XCTAssertGreaterThan(initial, 0)
+
+        var change = LibraryChange(account: LegacyGoldens.account,
+                                   authorization: AuthorizationEpoch(account: LegacyGoldens.account, value: 1),
+                                   indexRevision: 2, origin: .sync)
+        change.removed = ["timeline-photo"]
+        await api.setRefreshChange(change)
+        await store.refreshAfterMutation()
+        let afterPublished = await api.summaryCalls
+        XCTAssertEqual(afterPublished, initial, "The published change's own reload loads the feed.")
+
+        await api.setRefreshChange(nil)
+        await store.refreshAfterMutation()
+        let afterUnknown = await api.summaryCalls
+        XCTAssertEqual(afterUnknown, initial + 1, "Without a change to go on, the refresh reloads.")
+        let refreshes = await api.refreshes
+        XCTAssertEqual(refreshes, 2)
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testMonthSelectionResolvesEvictedAssetsAndKeepsRemoteAndLocalIdentitiesSeparate() async throws {
@@ -821,7 +850,13 @@ private actor LibraryAPIFixture: LibraryAPI {
         self.bucketAssets = bucketAssets; self.slowBuckets = slowBuckets; self.metadataPages = metadataPages
         self.scopedTimelineAssets = scopedTimelineAssets; self.failingTimelineScopes = failingTimelineScopes
     }
+    var summaryCalls = 0
+    var refreshes = 0
+    private var refreshChange: LibraryChange?
+    func setRefreshChange(_ change: LibraryChange?) { refreshChange = change }
+    func refresh() async throws -> LibraryChange? { refreshes += 1; return refreshChange }
     func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
+        summaryCalls += 1
         if delayedSummary { try await Task.sleep(for: .seconds(3)) }
         if !bucketAssets.isEmpty { return bucketAssets.keys.sorted(by: >).map { .init(timeBucket: $0, count: bucketAssets[$0]?.count ?? 0) } }
         return [.init(timeBucket: "2026-01-01T00:00:00Z", count: assets(for: filter).count)]

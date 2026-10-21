@@ -116,12 +116,17 @@ actor SyncEngine {
     }
 
     /// The app came to the front, or left it, as `presence` now says. Coming back from the
-    /// background syncs once, and the live connection opens after that pass. Leaving stops the
-    /// live connection and every pass except one a background backup window holds.
+    /// background syncs once, and the live connection opens after that pass. Becoming active
+    /// again without leaving the front, after Control Center or the app switcher, syncs once too
+    /// unless a pass is already running, since the live connection may be between retries.
+    /// Leaving stops the live connection and every pass except one a background backup window holds.
     func presenceChanged() {
         guard isOpen else { return }
         let front = presence.isForeground
-        guard front != foreground else { return }
+        guard front != foreground else {
+            if front, runner == nil { requestPass(clearingError: false) }
+            return
+        }
         foreground = front
         if front {
             requestPass(clearingError: true)
