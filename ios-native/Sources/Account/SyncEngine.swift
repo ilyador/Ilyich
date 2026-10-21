@@ -46,6 +46,9 @@ actor SyncEngine {
     private let native: NativeSync
     private let pipeline: MediaPipeline
     private let warmer: ThumbnailWarmer
+    private let repairer: DependentRepairer
+    /// Fetching the dependents the index queued for repair, while the app is in front.
+    private var repairs: Task<Void, Never>?
     private let presence: AppPresence
     private let check: SessionCheck
     private let authorization: AuthorizationState
@@ -85,12 +88,13 @@ actor SyncEngine {
     init(client: APIClient, entities: EntityStore, native: NativeSync, pipeline: MediaPipeline, warmer: ThumbnailWarmer,
          presence: AppPresence, check: SessionCheck, authorization: AuthorizationState, device: any AccountDevice,
          status: SyncStatusBoard, connect: (@Sendable () async throws -> ServerEventConnection)? = nil,
-         debounce: Duration = .milliseconds(350)) {
+         debounce: Duration = .milliseconds(350), dependents: (any DependentFetching)? = nil) {
         self.client = client
         self.entities = entities
         self.native = native
         self.pipeline = pipeline
         self.warmer = warmer
+        repairer = DependentRepairer(index: entities, fetcher: dependents ?? ServerDependentFetcher(client: client))
         self.presence = presence
         self.check = check
         self.authorization = authorization
@@ -132,6 +136,7 @@ actor SyncEngine {
             requestPass(clearingError: true)
         } else {
             stopLive()
+            repairs?.cancel()
             for (id, waiter) in waiters where waiter.lease == nil {
                 waiters[id] = nil
                 waiter.continuation.resume(throwing: CancellationError())
@@ -200,7 +205,8 @@ actor SyncEngine {
     /// cancelling doesn't end, and once stopped it changes nothing.
     func shutdown() async {
         isOpen = false
-        let runner = runner
+        let runner = runner, repairs = repairs
+        repairs?.cancel()
         stopLive()
         stopPass()
         for waiter in waiters.values { waiter.continuation.resume(throwing: CancellationError()) }
@@ -208,6 +214,7 @@ actor SyncEngine {
         for observer in observers.values { observer.finish() }
         observers.removeAll()
         await runner?.value
+        await repairs?.value
         update { $0.isSyncing = false }
     }
 
@@ -300,7 +307,24 @@ actor SyncEngine {
         await publish(settled.change, accessChanged: settled.accessChanged)
         // The widgets pick their photos again after every pass that succeeds, as they always have.
         if isOpen { await device.reloadWidgets() }
+        startRepairs()
         return settled.change
+    }
+
+    /// Fetches the dependents the index queued for repair, two at a time, while the app is in
+    /// front, and publishes what they changed like a pass.
+    private func startRepairs() {
+        guard isOpen, foreground, repairs == nil else { return }
+        repairs = Task { [repairer] in
+            let change = await repairer.run()
+            await self.repairsEnded(change)
+        }
+    }
+
+    private func repairsEnded(_ index: IndexChange) async {
+        repairs = nil
+        guard isOpen, !index.isEmpty, let settled = await settle(index, hints: ServerInvalidation()) else { return }
+        await publish(settled.change, accessChanged: settled.accessChanged)
     }
 
     /// Makes a pass's effects safe and names them for this account: the media of removed photos

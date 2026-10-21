@@ -293,10 +293,10 @@ import XCTest
     }
 }
 
-/// Month loads through the local index: until its index is built a month is found by reading
-/// every photo; afterwards through the index, with the same photos in the same order.
+/// Month loads through the local index read asset_index (Q3): a month is a range of its order
+/// index, read in order without sorting and without reading any other photo's record.
 final class MonthIndexTests: XCTestCase {
-    func testMonthsAreFoundThroughTheirIndexOnceBuiltWithTheSamePhotos() async throws {
+    func testMonthsAreReadInOrderFromTheirIndex() async throws {
         let root = temporaryDirectory()
         let store = try EntityStore(scope: "server|month-index", userID: "alice", directory: root)
         // 24,000 photos over 240 months, as in the UI test library.
@@ -306,86 +306,54 @@ final class MonthIndexTests: XCTestCase {
         let filters = [TimelineFilter(), TimelineFilter(isFavorite: true), TimelineFilter(visibility: .archive),
                        TimelineFilter(withPartners: true), TimelineFilter(orderBy: "createdAt")]
 
-        // Before the index: every photo is read.
-        var before: [[String]] = []
-        var unindexed = Duration.zero
+        var loaded: [[String]] = []
+        var elapsed = Duration.zero
         for filter in filters {
             let plan = try await store.timeBucketPlan(month, filter: filter)
-            XCTAssertFalse(plan.contains { $0.contains("asset_month") }, "\(filter): \(plan)")
-            unindexed += try await clock.measure { before.append(try await store.timeBucket(month, filter: filter).map(\.id)) }
+            let index = filter.orderBy == "createdAt" ? "asset_index_created" : "asset_index_order"
+            XCTAssertTrue(plan.contains { $0.contains("USING INDEX \(index)") || $0.contains("USING COVERING INDEX \(index)") }, "\(filter): \(plan)")
+            XCTAssertFalse(plan.contains { $0.contains("TEMP B-TREE") }, "A month is read in order, not sorted: \(filter): \(plan)")
+            elapsed += try await clock.measure { loaded.append(try await store.timeBucket(month, filter: filter).map(\.id)) }
         }
-        let build = await clock.measure {
-            await store.buildMonthIndex(for: TimelineFilter())
-            await store.buildMonthIndex(for: TimelineFilter(orderBy: "createdAt"))
-        }
-
-        var after: [[String]] = []
-        var indexed = Duration.zero
-        for filter in filters {
-            let plan = try await store.timeBucketPlan(month, filter: filter)
-            let index = filter.orderBy == "createdAt" ? "asset_month_createdAt" : "asset_month_localDateTime"
-            XCTAssertTrue(plan.contains { $0.contains("USING INDEX \(index)") }, "\(filter): \(plan)")
-            indexed += try await clock.measure { after.append(try await store.timeBucket(month, filter: filter).map(\.id)) }
-        }
-        XCTAssertEqual(after, before, "The index finds the same photos in the same order.")
-        XCTAssertEqual(before[0].count, (11_300..<11_400).count { $0 % 50 != 0 && $0 % 40 != 0 }, "Archived and Bob's photos stay out.")
-        XCTAssertTrue(before[4].allSatisfy { Int($0.dropFirst(6))! / 100 == 112 }, "Added in June 2015, taken the month before.")
+        XCTAssertEqual(loaded[0].count, (11_300..<11_400).count { $0 % 50 != 0 && $0 % 40 != 0 }, "Archived and Bob's photos stay out.")
+        let expected = (11_300..<11_400).filter { $0 % 50 != 0 && $0 % 40 != 0 }
+            .sorted { ($0 % 28, $0 % 24, $0) > ($1 % 28, $1 % 24, $1) }.map { String(format: "photo-%05d", $0) }
+        XCTAssertEqual(loaded[0], expected, "The server's order: by day, then by time taken, newest first.")
+        XCTAssertTrue(loaded[4].allSatisfy { Int($0.dropFirst(6))! / 100 == 112 }, "Added in June 2015, taken the month before.")
         let months = try await store.timeBuckets()
         XCTAssertEqual(months.count, 240)
-        print("MONTH INDEX 24,000 photos: \(filters.count) month loads took \(unindexed.formatted(.units(allowed: [.milliseconds]))) reading every photo, "
-              + "\(indexed.formatted(.units(allowed: [.milliseconds]))) through the index; building both indexes took \(build.formatted(.units(allowed: [.milliseconds])))")
+        let all = try await clock.measure { _ = try await store.timeBuckets() }
+        print("MONTH INDEX 24,000 photos: \(filters.count) month loads took \(elapsed.formatted(.units(allowed: [.milliseconds]))), the month list \(all.formatted(.units(allowed: [.milliseconds])))")
     }
 
-    /// Building the index reads every photo, so it runs on a connection of its own. While it waits
-    /// for another writer, as for a sync applying a batch, months keep loading the old way; once
-    /// the write is done the build goes ahead and months use the index.
-    func testMonthsKeepLoadingWhileTheirIndexWaitsToBeBuilt() async throws {
+    /// A library synced before Q3 has month indexes over the entities, which a second read-write
+    /// connection built. Opening it drops them: nothing reads them, and every write paid for them.
+    func testOpeningDropsTheOldMonthIndexes() async throws {
         let root = temporaryDirectory()
-        let store = try EntityStore(scope: "server|month-index-build", userID: "alice", directory: root)
-        try await Self.addPhotos(1_200, to: store)
-        let month = "2006-06-01T00:00:00Z"
-        let expected = try await store.timeBucket(month).map(\.id)
+        let scope = "server|month-index-old"
+        var store: EntityStore? = try EntityStore(scope: scope, userID: "alice", directory: root)
+        try await Self.addPhotos(200, to: store!)
+        store = nil
         let file = try XCTUnwrap(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
             .first { $0.pathExtension == "sqlite" })
-        var writer: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(file.path, &writer), SQLITE_OK)
-        defer { sqlite3_close(writer) }
-        XCTAssertEqual(sqlite3_exec(writer, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
-
-        // The feed's first month starts the build, which waits for the write; months keep loading.
-        let first = try await store.timeBucket(month, buildingIndex: true).map(\.id)
-        try await Task.sleep(for: .milliseconds(200))
-        let second = try await store.timeBucket(month, buildingIndex: true).map(\.id)
-        XCTAssertEqual(first, expected); XCTAssertEqual(second, expected)
-        let early = await store.monthIndexIsReady()
-        XCTAssertFalse(early, "The index cannot be in while the other write goes on.")
-
-        XCTAssertEqual(sqlite3_exec(writer, "COMMIT", nil, nil, nil), SQLITE_OK)
-        await store.buildMonthIndex(for: TimelineFilter())
-        let ready = await store.monthIndexIsReady()
-        XCTAssertTrue(ready, "The build under way finished once the write had.")
-        let plan = try await store.timeBucketPlan(month)
-        XCTAssertTrue(plan.contains { $0.contains("USING INDEX asset_month_localDateTime") }, "\(plan)")
-        let indexed = try await store.timeBucket(month).map(\.id)
-        XCTAssertEqual(indexed, expected)
-    }
-
-    /// The grid drops a month it has left, so a month load can be cancelled as it starts. Looking
-    /// up its index then must not hide an index built in an earlier session from the months after.
-    func testACancelledMonthLoadDoesNotHideTheIndex() async throws {
-        let root = temporaryDirectory()
-        let scope = "server|month-index-cancelled"
-        let earlier = try EntityStore(scope: scope, userID: "alice", directory: root)
-        try await Self.addPhotos(1_200, to: earlier)
-        await earlier.buildMonthIndex(for: TimelineFilter())
-        let store = try EntityStore(scope: scope, userID: "alice", directory: root)
-        let dropped = Task {
-            withUnsafeCurrentTask { $0?.cancel() }
-            return try await store.timeBucket("2006-06-01T00:00:00Z", buildingIndex: true)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(file.path, &database), SQLITE_OK)
+        for date in ["localDateTime", "createdAt"] {
+            XCTAssertEqual(sqlite3_exec(database, "CREATE INDEX asset_month_\(date) ON entities(kind,strftime('%Y-%m',json_extract(payload,'$.\(date)'))) WHERE kind='asset'", nil, nil, nil), SQLITE_OK)
         }
-        _ = try? await dropped.value
-        let ready = await store.monthIndexIsReady()
-        XCTAssertTrue(ready, "The index built earlier is still found.")
+        XCTAssertEqual(sqlite3_exec(database, "PRAGMA user_version=1", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(database)
+
+        store = try EntityStore(scope: scope, userID: "alice", directory: root)
+        let month = try await store!.timeBucket("2006-01-01T00:00:00Z").map(\.id)
+        XCTAssertEqual(month.count, 96)
+        XCTAssertEqual(sqlite3_open(file.path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(database, "SELECT count(*) FROM sqlite_master WHERE name LIKE 'asset_month_%'", -1, &statement, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+        XCTAssertEqual(sqlite3_column_int(statement, 0), 0)
+        sqlite3_finalize(statement)
     }
 
     private func temporaryDirectory() -> URL {

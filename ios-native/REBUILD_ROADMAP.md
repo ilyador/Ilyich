@@ -310,6 +310,15 @@ Also: CleanupSettingsStore (same keys and messaging-album default); RemoteCopyVe
 - **Acceptance:**
   - On the phone, Lightroom still shows 20,968 photos in 54 months
   - Removing a photo from an album on the web keeps thumbnails (Diagnostics usage unchanged)
+- **As built:**
+  - Feeds, month places, map markers, album counts and person and album membership read asset_index, album_member and person_member, only once the index is readable (first sync complete and derived tables queryable); until then they come from the server, as before a sync completes. Single records (an asset, its people, memories, OCR) still read the entities. Months read the order index in order; the payload is still decoded per photo, since asset_index does not hold what the grid shows.
+  - In-month order is the server's (AssetRepository.getTimeBucket): local day or created-at, then fileCreatedAt, then originalFileName, all one way, then id. MergedTimeline keeps that order and inserts phone-only photos by date (the F3 correction, done here so the merged and unmerged library agree).
+  - Stack counts are the server's: members in the timeline and not trashed. albums() is three queries, not two per album.
+  - Schema version 2 adds the created-at order index and a stack index, and drops asset_month_localDateTime and asset_month_createdAt; the reader no longer builds them on a second read-write connection.
+  - The access purge checks only the photos of the album, album share or partner that went away, once per batch, and keeps a photo in an album the account owns. Lost-access IDs were already persisted in media_purges inside the batch transaction, and a legacy accessInvalidated='1' is already consumed by a full media wipe on the next settle, so both corrections hold without new state.
+  - Faces and partner or album EXIF that arrive before their asset wait in orphan_dependent and are promoted when it arrives. The account's own EXIF, OCR, edits and metadata without their asset are still dropped: they belong to a locked or deleted photo, and locked_asset does not know photos locked before Q2.
+  - Unlocking queues a dependent_repair; DependentRepairer (two at a time, foreground only, started after a successful pass) fetches the asset's EXIF, faces and OCR and writes them as AssetExifV1, AssetFaceV3 and AssetOcrV1. 404, 403 and undecodable drop a repair; other failures back off 1, 4, 16, 64 minutes, five attempts in all.
+  - Not done: re-grant repairs (partner and album EXIF arrive again through the server's backfill events, faces come for every photo of the account's group and wait for theirs, and OCR comes only for its own photos), seeding assets without EXIF (the critic asks for a phone count and a cap first), and the e2e-server golden equivalence (the equivalence test checks the index against the server's rules applied to the same records instead).
 
 ### B2 — Transfer engine core (dormant), tested with fakes
 

@@ -14,8 +14,8 @@ typealias EntityStore = LibraryIndex
 /// - IndexReader `viewport` (user-initiated) and `aggregate` (utility) each own a read-only
 ///   connection, so reading never waits for a batch being written.
 /// - The backfill fills the derived tables of a library synced before they existed, in batches
-///   with a cursor that survives a kill. Until it finishes the index is not queryable; reads use
-///   the entities, as before, either way until Q3.
+///   with a cursor that survives a kill. Until it finishes the index is not queryable, and the
+///   feeds, map and offline lists come from the server (`isReadable`).
 final class LibraryIndex: Sendable {
     let scope: String
     let userID: String
@@ -145,12 +145,21 @@ final class LibraryIndex: Sendable {
         return try await mapped { try await writer.apply(events, epoch: epoch) }
     }
     func mediaRevisions(of ids: [String]) async throws -> [String: String] { try await mapped { try await writer.mediaRevisions(of: ids) } }
+    func dueRepairs(limit: Int, now: Date = Date()) async throws -> [String] { try await mapped { try await writer.dueRepairs(limit: limit, now: now) } }
+    func applyRepair(assetID: String, _ events: [EntitySyncEvent]) async throws -> IndexChange {
+        defer { resumeBackfillIfRestarted() }
+        return try await mapped { try await writer.applyRepair(assetID: assetID, events) }
+    }
+    func failRepair(assetID: String, retryAt: Date?) async throws { try await mapped { try await writer.failRepair(assetID: assetID, retryAt: retryAt) } }
 
     // MARK: Viewport reads
 
     /// Read on the viewport's connection, not the writer's, since every month the feed loads asks
     /// first: it never queues behind a backfill batch or a sync batch.
     func isComplete() async throws -> Bool { try await mapped { try await viewport.isComplete() } }
+    /// Whether feeds, map markers, albums and the other lists can be read from the index: the
+    /// first sync is complete and the derived tables hold every entity.
+    func isReadable() async throws -> Bool { try await mapped { try await viewport.isReadable() } }
     func lastSyncDate() async throws -> Date? { try await mapped { try await viewport.lastSyncDate() } }
 
     func entityData(kind: String, id: String) async throws -> Data? { try await mapped { try await viewport.entityData(kind: kind, id: id) } }
@@ -159,19 +168,14 @@ final class LibraryIndex: Sendable {
         try await mapped { try await viewport.timelineAssets(filter: filter, offset: offset, limit: limit) }
     }
     func timeBuckets(filter: TimelineFilter = .init()) async throws -> [TimeBucket] { try await mapped { try await viewport.timeBuckets(filter: filter) } }
-    /// One month of a feed. With `buildingIndex`, as the library's feed asks, a month read the slow
-    /// way then starts building the index months are found by.
-    func timeBucket(_ bucket: String, filter: TimelineFilter = .init(), buildingIndex: Bool = false) async throws -> [Asset] {
-        try await mapped { try await viewport.timeBucket(bucket, filter: filter, buildingIndex: buildingIndex) }
+    /// One month of a feed, in the server's order.
+    func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) async throws -> [Asset] {
+        try await mapped { try await viewport.timeBucket(bucket, filter: filter) }
     }
     /// What SQLite plans for a month's query, for tests and diagnostics.
     func timeBucketPlan(_ bucket: String, filter: TimelineFilter = .init()) async throws -> [String] {
         try await mapped { try await viewport.timeBucketPlan(bucket, filter: filter) }
     }
-    /// Whether a feed's months are found through their index, for tests and diagnostics.
-    func monthIndexIsReady(for filter: TimelineFilter = .init()) async -> Bool { await viewport.monthIndexIsReady(for: filter) }
-    /// Builds the index for months of the feed's date if it is missing, and returns once it is in.
-    func buildMonthIndex(for filter: TimelineFilter) async { await viewport.buildMonthIndex(for: filter) }
     func album(id: String) async throws -> Album? { try await mapped { try await viewport.album(id: id) } }
     func person(id: String) async throws -> Person? { try await mapped { try await viewport.person(id: id) } }
     func assetOCR(id: String) async throws -> [RecognizedText] { try await mapped { try await viewport.assetOCR(id: id) } }

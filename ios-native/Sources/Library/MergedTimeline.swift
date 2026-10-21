@@ -47,10 +47,23 @@ struct MergedTimeline: Sendable {
         result += remaining.map { TimeBucket(timeBucket: $0 + "-01", count: localOnly[$0]?.count ?? 0) }
         return result.sorted { $0.id > $1.id }
     }
+    /// A month's photos: the server's in the server's order (local day, file creation time, file
+    /// name), with the phone-only ones put in by the time they were taken, each ahead of the first
+    /// server photo taken before it. Phone-only photos taken at one time keep their ID order.
     func entries(remote: [Asset], bucket: String) -> [LibraryEntry] {
-        let items = remote.map { LibraryEntry.remote($0, local: remoteToLocal[$0.id]) }
-            + (localOnly[String(bucket.prefix(7))] ?? []).map(LibraryEntry.local)
-        return items.sorted { $0.date == $1.date ? $0.id < $1.id : $0.date > $1.date }
+        let remotes = remote.map { LibraryEntry.remote($0, local: remoteToLocal[$0.id]) }
+        let phoneOnly: [LibraryEntry] = (localOnly[String(bucket.prefix(7))] ?? []).map { LibraryEntry.local($0) }
+        let locals = phoneOnly.sorted { (a: LibraryEntry, b: LibraryEntry) -> Bool in a.date == b.date ? a.id < b.id : a.date > b.date }
+        guard !locals.isEmpty else { return remotes }
+        var result: [LibraryEntry] = []
+        result.reserveCapacity(remotes.count + locals.count)
+        var next = 0
+        for entry in remotes {
+            while next < locals.count, locals[next].date > entry.date { result.append(locals[next]); next += 1 }
+            result.append(entry)
+        }
+        result.append(contentsOf: locals[next...])
+        return result
     }
     static func monthKey(_ date: Date) -> String {
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!

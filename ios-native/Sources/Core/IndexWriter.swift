@@ -19,6 +19,20 @@ actor IndexWriter {
     private(set) var revision: UInt64 = 0
     /// What the batch being applied touched, for the derived tables.
     private var touched = DerivedTouch()
+    /// Photos the batch may have taken out of the account: those of an album, a share or a
+    /// partner that went away. Each is checked once the batch is in.
+    private var accessCandidates = Set<String>()
+    /// The kinds of entity row that belong to one asset.
+    private static let dependentKinds: Set<String> = ["exif", "edit", "ocr", "assetMetadata", "face"]
+    /// Dependents that can arrive before their asset: faces, which the server sends for every
+    /// photo of the account's group, and the EXIF of partners' and albums' photos. The streams of
+    /// the account's own EXIF, OCR, edits and metadata follow its assets, so one of those without
+    /// its asset belongs to a photo in the Locked Folder, or one deleted, and is never kept.
+    private static let earlyDependentTypes: Set<String> = [
+        "AssetFaceV3", "PartnerAssetExifV1", "PartnerAssetExifBackfillV1", "AlbumAssetExifCreateV1", "AlbumAssetExifUpdateV1", "AlbumAssetExifBackfillV1",
+    ]
+    /// The records a repair writes, in the sync stream's shapes.
+    static let repairTypes: Set<String> = ["AssetExifV1", "AssetFaceV3", "AssetOcrV1"]
     /// Entity rows of one kind a backfill batch derives.
     nonisolated let backfillBatchSize: Int
     /// Set when a batch's derived rows failed and the backfill was restarted, until LibraryIndex
@@ -35,8 +49,8 @@ actor IndexWriter {
         self.backfillBatchSize = max(backfillBatchSize, 1)
         do {
             database = try SQLiteConnection(path: url.path, readOnly: false, busyTimeout: 60_000)
-            // The only other writer builds a month index, which takes seconds on a large library;
-            // a write waits for it rather than failing.
+            // A build before Q3, reinstalled, builds month indexes on a connection of its own; a
+            // write waits for it rather than failing.
             try database.execute("PRAGMA journal_mode=WAL"); try database.execute("PRAGMA synchronous=FULL"); try database.execute("PRAGMA secure_delete=ON")
             for statement in LibraryIndexSchema.base { try database.execute(statement) }
             try LibraryIndexSchema.migrate(database)
@@ -118,15 +132,16 @@ actor IndexWriter {
         guard epoch == generation else { throw CancellationError() }
         var change = IndexChange()
         var complete = try metadata("complete") == "1"
-        touched = DerivedTouch()
-        defer { touched = DerivedTouch() }
+        touched = DerivedTouch(); accessCandidates = []
+        defer { touched = DerivedTouch(); accessCandidates = [] }
         try write {
             for event in events {
                 try Task.checkCancellation()
                 if event.type == "SyncResetV1" {
                     try database.execute("DELETE FROM entities"); try database.execute("DELETE FROM acknowledgements")
+                    for table in LibraryIndexSchema.pendingTables { try database.execute("DELETE FROM \(table)") }
                     try setMetadata("complete", "0")
-                    touched = DerivedTouch(reset: true)
+                    touched = DerivedTouch(reset: true); accessCandidates = []
                     change.serverReset = true
                     if complete { change.routingChanged = true; complete = false }
                 } else if event.type == "SyncCompleteV1" {
@@ -141,6 +156,7 @@ actor IndexWriter {
                 try database.execute("INSERT INTO acknowledgements(type,ack) VALUES(?,?) ON CONFLICT(type) DO UPDATE SET ack=excluded.ack", [.text(event.ackType), .text(event.ack)])
             }
             if change.serverReset { try setMetadata("accessInvalidated", "1") }
+            try purgeInaccessibleAssets(change: &change)
             maintainDerived()
         }
         change.limitItems()
@@ -160,10 +176,68 @@ actor IndexWriter {
         return revisions
     }
 
+    // MARK: - Repairs
+
+    /// Assets whose dependents are due to be fetched again, oldest first.
+    func dueRepairs(limit: Int, now: Date = Date()) throws -> [String] {
+        var ids: [String] = []
+        try database.run("SELECT asset_id FROM dependent_repair WHERE not_before IS NULL OR not_before<=? ORDER BY rowid LIMIT ?",
+                         [.real(now.timeIntervalSince1970), .integer(Int64(max(limit, 1)))]) { row in
+            if let id = row.text(0) { ids.append(id) }
+        }
+        return ids
+    }
+
+    /// Writes an asset's dependents fetched again, as the sync stream's own records, and takes the
+    /// asset off the repair queue. Nothing is written for an asset the index no longer holds or
+    /// that went back into the Locked Folder.
+    func applyRepair(assetID: String, _ events: [EntitySyncEvent]) throws -> IndexChange {
+        var change = IndexChange()
+        touched = DerivedTouch(); accessCandidates = []
+        defer { touched = DerivedTouch(); accessCandidates = [] }
+        try write {
+            if try assetMonth(assetID).exists {
+                for event in events where Self.repairTypes.contains(event.type) && event.data["assetId"]?.string == assetID {
+                    try applyEntity(event, change: &change)
+                }
+            }
+            try database.execute("DELETE FROM dependent_repair WHERE asset_id=?", [.text(assetID)])
+            maintainDerived()
+        }
+        change.limitItems()
+        if !change.isEmpty { revision &+= 1 }
+        change.revision = revision
+        return change
+    }
+
+    /// A repair that failed: tried again after `retryAt`, or dropped when that is nil.
+    func failRepair(assetID: String, retryAt: Date?) throws {
+        try write {
+            if let retryAt {
+                try database.execute("UPDATE dependent_repair SET attempts=attempts+1,not_before=? WHERE asset_id=?",
+                                     [.real(retryAt.timeIntervalSince1970), .text(assetID)])
+            } else {
+                try database.execute("DELETE FROM dependent_repair WHERE asset_id=?", [.text(assetID)])
+            }
+        }
+    }
+
+    /// How many times each queued repair has failed, for tests and diagnostics.
+    func repairAttempts() throws -> [String: Int] {
+        var attempts: [String: Int] = [:]
+        for row in try database.query("SELECT asset_id,attempts FROM dependent_repair", cancellable: false) {
+            if let id = row[0] { attempts[id] = row[1].flatMap(Int.init) ?? 0 }
+        }
+        return attempts
+    }
+
     // MARK: - Derived tables
 
     /// Whether the derived tables hold every entity, so a reader may use them.
     func isQueryable() throws -> Bool { try LibraryIndexSchema.state(database).queryable }
+
+    /// Starts the backfill over, as a failed batch of derived rows does, for tests and diagnostics.
+    func restartBackfill() throws { try write { try LibraryIndexSchema.restartBackfill(database) } }
 
     /// Where the backfill is, for tests and diagnostics.
     func backfillState() throws -> LibraryIndexSchema.State { try LibraryIndexSchema.state(database) }
@@ -241,6 +315,7 @@ actor IndexWriter {
         let id = identifiers.joined(separator: "|")
         if kind == "asset" {
             let locked = object["visibility"]?.string == "locked"
+            let wasLocked = try isLocked(id)
             touched.locked[id] = locked
             if delete || locked {
                 // A deletion only removes the photo; locking hides it the way lost access does.
@@ -253,14 +328,23 @@ actor IndexWriter {
             let inMonth = ["timeline", "archive"].contains(object["visibility"]?.string ?? "")
             change.upsert(id, from: before.month, to: inMonth ? before.newMonth : nil)
             if before.exists, let revision = object["mediaRevision"]?.string, revision != before.revision { change.mediaRevisions[id] = revision }
+            if !before.exists { try promoteOrphans(of: id, month: before.newMonth, change: &change) }
+            // Locking dropped the photo's EXIF, faces and OCR, and the server sends them only when
+            // they change: they are fetched again.
+            if wasLocked {
+                try database.execute("INSERT INTO dependent_repair(asset_id,reason,attempts,not_before) VALUES(?,'unlocked',0,NULL) "
+                                     + "ON CONFLICT(asset_id) DO UPDATE SET reason=excluded.reason,attempts=0,not_before=NULL", [.text(id)])
+            }
             return
         }
         // The asset a dependent record belongs to, and the month that asset shows in.
         var subject: (asset: String, month: MonthKey?)?
-        if let assetID = object["assetId"]?.string, ["exif", "edit", "ocr", "assetMetadata", "face"].contains(kind) {
-            // Locked assets are never persisted, including their EXIF, OCR or faces.
+        if let assetID = object["assetId"]?.string, Self.dependentKinds.contains(kind) {
             let held = try assetMonth(assetID)
-            guard held.exists else { return }
+            guard held.exists else {
+                if delete || Self.earlyDependentTypes.contains(type) { try holdOrphan(kind: kind, id: id, assetID: assetID, object: object, delete: delete) }
+                return
+            }
             subject = (assetID, held.month)
         }
         // A face can move to another person, and the deletions of faces and edits name only
@@ -275,10 +359,18 @@ actor IndexWriter {
         }
         if delete {
             try database.execute("DELETE FROM entities WHERE kind=? AND id=?", [.text(kind), .text(id)])
+            // A face or an edit whose deletion names only itself may still be waiting for its asset.
+            if Self.dependentKinds.contains(kind) { try database.execute("DELETE FROM orphan_dependent WHERE kind=? AND id=?", [.text(kind), .text(id)]) }
             if kind == "album" { try deleteAlbum(id) }
             if kind == "memory" { try database.execute("DELETE FROM entities WHERE kind='memoryAsset' AND json_extract(payload,'$.memoryId')=?", [.text(id)]) }
             if kind == "person" { try database.execute("DELETE FROM entities WHERE kind='face' AND json_extract(payload,'$.personId')=?", [.text(id)]); touched.people.insert(id) }
             if kind == "user" { try deleteOwnedAssets(id, change: &change) }
+            if kind == "albumAsset", let assetID = object["assetId"]?.string { accessCandidates.insert(assetID) }
+            if kind == "partner", object["sharedWithId"]?.string == userID, let ownerID = object["sharedById"]?.string {
+                for row in try database.query("SELECT id FROM entities WHERE kind='asset' AND json_extract(payload,'$.ownerId')=?", [ownerID], cancellable: false) {
+                    if let assetID = row[0] { accessCandidates.insert(assetID) }
+                }
+            }
         } else {
             try upsert(kind, id, object)
         }
@@ -301,9 +393,39 @@ actor IndexWriter {
         if kind == "face", let subject { touched.members.insert(subject.asset) }
         if let subject { change.touch(subject.asset, in: subject.month) }
         if delete, kind == "albumUser", object["userId"]?.string == userID, let albumID = object["albumId"]?.string { try deleteAlbum(albumID) }
-        // Only photos that leave the account change what it may see. A photo removed from one of
-        // my own albums stays in my library, and so does its media.
-        if delete && ["partner", "albumUser", "album", "albumAsset", "user"].contains(kind) { try purgeInaccessibleAssets(change: &change) }
+    }
+    /// A dependent record whose asset the index does not hold yet, as when a face comes before
+    /// the shared photo it is on: kept aside until the asset arrives. One of a photo in the
+    /// Locked Folder is never kept.
+    private func holdOrphan(kind: String, id: String, assetID: String, object: [String: EntityJSON], delete: Bool) throws {
+        let locked = try isLocked(assetID)
+        if delete || locked {
+            try database.execute("DELETE FROM orphan_dependent WHERE kind=? AND id=?", [.text(kind), .text(id)])
+            return
+        }
+        let encoded = try JSONEncoder().encode(object)
+        try database.execute("INSERT INTO orphan_dependent(kind,id,asset_id,payload) VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET asset_id=excluded.asset_id,payload=excluded.payload",
+                             [.text(kind), .text(id), .text(assetID), .text(String(decoding: encoded, as: UTF8.self))])
+    }
+    /// The asset arrived: what waited for it becomes its own, as if it had come after it.
+    private func promoteOrphans(of assetID: String, month: MonthKey?, change: inout IndexChange) throws {
+        let rows = try database.query("SELECT kind,id,payload,json_extract(payload,'$.personId') FROM orphan_dependent WHERE asset_id=?", [assetID], cancellable: false)
+        guard !rows.isEmpty else { return }
+        for row in rows {
+            guard let kind = row[0], let id = row[1], let payload = row[2] else { continue }
+            try database.execute("INSERT INTO entities(kind,id,payload) VALUES(?,?,?) ON CONFLICT(kind,id) DO NOTHING", [.text(kind), .text(id), .text(payload)])
+            if kind == "face" {
+                touched.members.insert(assetID)
+                if let personID = row[3] { change.people.insert(personID) }
+            }
+        }
+        try database.execute("DELETE FROM orphan_dependent WHERE asset_id=?", [.text(assetID)])
+        change.touch(assetID, in: month)
+    }
+    /// Whether the asset was last seen in the Locked Folder, this batch or before it.
+    private func isLocked(_ id: String) throws -> Bool {
+        if let locked = touched.locked[id] { return locked }
+        return try !database.query("SELECT 1 FROM locked_asset WHERE id=?", [id], cancellable: false).isEmpty
     }
     private func upsert(_ kind: String, _ id: String, _ object: [String: EntityJSON]) throws {
         let encoded = try JSONEncoder().encode(object)
@@ -337,11 +459,17 @@ actor IndexWriter {
     /// batch, so a crash before then cannot leave the media behind.
     private func deleteAsset(_ id: String, revoked: Bool, change: inout IndexChange) throws {
         try database.execute("DELETE FROM entities WHERE (kind='asset' AND id=?) OR (kind IN ('exif','edit','ocr','assetMetadata','face','albumAsset','memoryAsset') AND json_extract(payload,'$.assetId')=?)", [.text(id), .text(id)])
+        try database.execute("DELETE FROM orphan_dependent WHERE asset_id=?", [.text(id)])
+        try database.execute("DELETE FROM dependent_repair WHERE asset_id=?", [.text(id)])
         try database.execute("INSERT INTO media_purges(id,revoked) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET revoked=max(revoked,excluded.revoked)", [.text(id), .text(revoked ? "1" : "0")])
         touched.assets.insert(id); touched.members.insert(id)
         change.remove(id, accessLost: revoked)
     }
     private func deleteAlbum(_ id: String) throws {
+        // Its photos may have been all the account saw of them.
+        for row in try database.query("SELECT json_extract(payload,'$.assetId') FROM entities WHERE kind='albumAsset' AND json_extract(payload,'$.albumId')=?", [id], cancellable: false) {
+            if let assetID = row[0] { accessCandidates.insert(assetID) }
+        }
         try database.execute("DELETE FROM entities WHERE (kind='album' AND id=?) OR (kind IN ('albumUser','albumAsset') AND json_extract(payload,'$.albumId')=?)", [.text(id), .text(id)])
         touched.albums.insert(id)
     }
@@ -349,12 +477,22 @@ actor IndexWriter {
         let rows = try database.query("SELECT id FROM entities WHERE kind='asset' AND json_extract(payload,'$.ownerId')=?", [ownerID], cancellable: false)
         for row in rows { if let id = row[0] { try deleteAsset(id, revoked: true, change: &change) } }
     }
+    /// Forgets the photos the batch took out of the account, and only those: of the photos of an
+    /// album, a share or a partner that went away, each one the account neither owns nor still
+    /// sees through a partner or an album it owns or was given. A photo removed from one of my
+    /// own albums stays in my library, and so does its media.
     private func purgeInaccessibleAssets(change: inout IndexChange) throws {
+        guard !accessCandidates.isEmpty else { return }
+        let list = String(decoding: try JSONEncoder().encode(accessCandidates.sorted()), as: UTF8.self)
+        accessCandidates = []
         let rows = try database.query("""
-        SELECT a.id FROM entities a WHERE a.kind='asset' AND json_extract(a.payload,'$.ownerId')!=?
-        AND NOT EXISTS(SELECT 1 FROM entities p WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedById')=json_extract(a.payload,'$.ownerId') AND json_extract(p.payload,'$.sharedWithId')=?)
-        AND NOT EXISTS(SELECT 1 FROM entities r JOIN entities u ON u.kind='albumUser' AND json_extract(u.payload,'$.albumId')=json_extract(r.payload,'$.albumId') AND json_extract(u.payload,'$.userId')=? WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.assetId')=a.id)
-        """, [userID, userID, userID], cancellable: false)
+        SELECT a.id FROM entities a WHERE a.kind='asset' AND a.id IN (SELECT value FROM json_each(?))
+        AND json_extract(a.payload,'$.ownerId')!=?
+        AND NOT EXISTS(SELECT 1 FROM entities p WHERE p.kind='partner' AND p.id=json_extract(a.payload,'$.ownerId')||'|'||?)
+        AND NOT EXISTS(SELECT 1 FROM entities r WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.assetId')=a.id
+            AND (EXISTS(SELECT 1 FROM entities u WHERE u.kind='albumUser' AND u.id=json_extract(r.payload,'$.albumId')||'|'||?)
+                 OR EXISTS(SELECT 1 FROM entities b WHERE b.kind='album' AND b.id=json_extract(r.payload,'$.albumId') AND json_extract(b.payload,'$.ownerId')=?)))
+        """, [list, userID, userID, userID, userID], cancellable: false)
         for row in rows { if let id = row[0] { try deleteAsset(id, revoked: true, change: &change) } }
     }
     private func metadata(_ key: String) throws -> String? {

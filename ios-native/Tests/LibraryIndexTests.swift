@@ -24,7 +24,7 @@ import XCTest
         let untouched = try kept()
 
         var store: LibraryIndex? = try LibraryIndex(scope: scope, userID: "alice", directory: root, backfillBatchSize: 3)
-        XCTAssertEqual(try Self.dump(file, "PRAGMA user_version"), [["1"]])
+        XCTAssertEqual(try Self.dump(file, "PRAGMA user_version"), [["2"]])
         let needsReset = try await store!.prepare(sessionFingerprint: "session")
         XCTAssertFalse(needsReset, "The migration never asks the server to replay the library.")
         let complete = try await store!.isComplete()

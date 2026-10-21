@@ -163,12 +163,12 @@ actor APIClient {
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { try await request(.post, path: "search/metadata", body: query) }
     func albums() async throws -> [Album] {
         do { return try await request(.get, path: "albums") }
-        catch { if canReadOffline(error), let store = entityStore, try await store.isComplete() { return try await store.albums() }; throw error }
+        catch { if canReadOffline(error), let store = entityStore, try await store.isReadable() { return try await store.albums() }; throw error }
     }
     func album(id: String) async throws -> Album {
         do { return try await request(.get, path: "albums/\(id)") }
         catch {
-            guard canReadOffline(error), let store = entityStore, try await store.isComplete(), let cached = try await store.album(id: id) else { throw error }
+            guard canReadOffline(error), let store = entityStore, try await store.isReadable(), let cached = try await store.album(id: id) else { throw error }
             return cached
         }
     }
@@ -195,7 +195,7 @@ actor APIClient {
     func mapMarkers(_ query: MapMarkerQuery = .init()) async throws -> [MapMarker] {
         do { return try await request(.get, path: "map/markers", query: query.queryItems) }
         catch {
-            guard canReadOffline(error), let entityStore, try await entityStore.isComplete() else { throw error }
+            guard canReadOffline(error), let entityStore, try await entityStore.isReadable() else { throw error }
             return try await entityStore.mapMarkers(query)
         }
     }

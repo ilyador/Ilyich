@@ -70,6 +70,9 @@ import Network
     private func run(entities: EntityStore, pipeline: MediaPipeline) async {
         // Launch and the first screen of photos come first.
         try? await Task.sleep(for: .seconds(8))
+        // Until the index's backfill is done its photos are not all listed; the next sync starts
+        // the warmer again.
+        guard (try? await entities.isReadable()) == true else { return }
         total = (try? await entities.timeBuckets().reduce(0) { $0 + $1.count }) ?? 0
         stored = 0
         var offset = 0, failures = 0

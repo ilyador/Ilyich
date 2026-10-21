@@ -120,10 +120,10 @@ final class AccountRuntime: Sendable {
     @MainActor func start() async {
         if let library {
             let entities = library.entities
-            library.warmer.start(when: { (try? await entities.isComplete()) == true }, entities: entities, pipeline: pipeline)
+            library.warmer.start(when: { (try? await entities.isReadable()) == true }, entities: entities, pipeline: pipeline)
             await library.sync.start()
             // Fills the index's derived tables for a library synced before they existed, off the
-            // main thread and a batch at a time; reads don't use them yet.
+            // main thread and a batch at a time; the feeds read the server until it is done.
             entities.startBackfill()
         }
         check.validate()

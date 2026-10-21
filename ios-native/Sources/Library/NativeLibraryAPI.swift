@@ -1,6 +1,6 @@
 import Foundation
 
-/// The complete local index serves timeline navigation; first sync never delays
+/// The complete, queryable local index serves timeline navigation; first sync never delays
 /// the server timeline, and semantic searches retain the server's cursor contract.
 struct NativeLibraryAPI: LibraryAPI {
     let client: APIClient
@@ -10,26 +10,25 @@ struct NativeLibraryAPI: LibraryAPI {
     var cacheScope: String { client.cacheScope }
 
     func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
-        if filter.visibility != .locked, try await entities.isComplete() {
+        if filter.visibility != .locked, try await entities.isReadable() {
             return try await entities.timeBuckets(filter: filter)
         }
         guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
         return try await client.timeBuckets(filter: filter)
     }
     func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
-        if filter.visibility != .locked, try await entities.isComplete() {
+        if filter.visibility != .locked, try await entities.isReadable() {
             FeedMonthProbe.note(.index)
-            // The feed's first month read the slow way starts building the index months are found by.
-            return try await entities.timeBucket(bucket, filter: filter, buildingIndex: true)
+            return try await entities.timeBucket(bucket, filter: filter)
         }
         guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
         FeedMonthProbe.note(.serverTimeline)
         return try await client.timeBucket(bucket, filter: filter)
     }
     /// A place's photos are laid out by month only from the complete local index.
-    func supportsPlaceTimelines() async -> Bool { (try? await entities.isComplete()) == true }
+    func supportsPlaceTimelines() async -> Bool { (try? await entities.isReadable()) == true }
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] {
-        guard filter.visibility != .locked, try await entities.isComplete() else { return [] }
+        guard filter.visibility != .locked, try await entities.isReadable() else { return [] }
         return try await entities.monthPlaces(filter: filter)
     }
     func search(_ query: SearchQuery) async throws -> SearchResponse { try await client.search(query) }
