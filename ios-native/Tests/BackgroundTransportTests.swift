@@ -91,7 +91,7 @@ final class BackgroundTransportTests: XCTestCase {
         let transport = makeTransport(fake)
         let key = key()
         try group.write("body", to: key.bodyPath)
-        // An earlier attempt's failure, as a share retry finds it today.
+        // An earlier attempt's failure, as a share retry or a force-quit stage finds it today.
         try group.write(#"{"error":"cancelled"}"#, to: key.outcomePath)
         await assertSubmit(transport, key, throws: .unacknowledgedOutcome)
         XCTAssertEqual(fake.uploads, [])
@@ -100,15 +100,57 @@ final class BackgroundTransportTests: XCTestCase {
         XCTAssertNil(legacy.receipt)
         XCTAssertNil(legacy.httpStatus)
 
-        try transport.acknowledge(key)
+        // Applied as an interrupted attempt, the outcome goes and the body stays, so the attempt is
+        // sent again from the body it has.
+        try transport.acknowledge(key, keepingBody: true)
         XCTAssertFalse(group.exists(key.outcomePath))
-        XCTAssertFalse(group.exists(key.bodyPath))
-        try transport.acknowledge(key)
+        XCTAssertTrue(group.exists(key.bodyPath))
         XCTAssertNil(try transport.outcome(for: key))
-
-        try group.write("body", to: key.bodyPath)
         let id = try await transport.submit(Self.request, key: key)
         XCTAssertEqual(fake.uploads.map(\.id), [id])
+        XCTAssertEqual(fake.uploads.map(\.body), [group.url(key.bodyPath)])
+
+        // Once that upload's outcome is committed, the attempt is over: outcome and body both go.
+        XCTAssertTrue(fake.handler.task(id, didReceive: Data(Self.receiptJSON.utf8)))
+        fake.handler.taskDidComplete(CompletedTask(id: id, description: key.descriptor.taskDescription, httpStatus: 201, failure: nil))
+        fake.forget(id)
+        XCTAssertNotNil(try transport.outcome(for: key)?.receipt)
+        try transport.acknowledge(key, keepingBody: false)
+        XCTAssertFalse(group.exists(key.outcomePath))
+        XCTAssertFalse(group.exists(key.bodyPath))
+        try transport.acknowledge(key, keepingBody: false)
+        XCTAssertNil(try transport.outcome(for: key))
+        await assertSubmit(transport, key, throws: .missingBody)
+    }
+
+    func testATaskThatIsEndingIsNeitherAdoptedNorSentAgainBesideIt() async throws {
+        let fake = FakeTransportSession()
+        let transport = makeTransport(fake)
+        let key = key()
+        try group.write("body", to: key.bodyPath)
+        let first = try await transport.submit(Self.request, key: key)
+
+        // Signing out cancels the task, and iOS reports how it ended only later.
+        let cancelled = await transport.cancel(scope: G.digest)
+        XCTAssertEqual(cancelled, 1)
+        await assertSubmit(transport, key, throws: .outcomePending)
+        XCTAssertEqual(fake.uploads.map(\.id), [first], "No second task beside the cancelled one.")
+
+        // Its outcome arrives and iOS forgets the task. The engine applies the outcome, then sends again.
+        fake.handler.taskDidComplete(CompletedTask(id: first, description: key.descriptor.taskDescription, httpStatus: nil,
+                                                   failure: CompletedTask.Failure(URLError(.cancelled))))
+        fake.forget(first)
+        XCTAssertEqual(try transport.outcome(for: key)?.errorCode, URLError.cancelled.rawValue)
+        await assertSubmit(transport, key, throws: .unacknowledgedOutcome)
+        try transport.acknowledge(key, keepingBody: true)
+        let second = try await transport.submit(Self.request, key: key)
+        XCTAssertEqual(fake.uploads.map(\.id), [first, second])
+
+        // A task iOS lists as completed, its end not yet delivered, as at a relaunch, holds the attempt the same way.
+        let done = FakeTransportSession(tasks: [SessionTask(id: 9, description: key.descriptor.taskDescription, state: .completed, sent: 4, expected: 4)])
+        await assertSubmit(makeTransport(done), key, throws: .outcomePending)
+        XCTAssertEqual(done.uploads, [])
+        XCTAssertEqual(done.resumed, [])
     }
 
     func testSubmitRefusesKeysOutsideTheAppGroupAndMissingBodies() async throws {
@@ -235,6 +277,50 @@ final class BackgroundTransportTests: XCTestCase {
         XCTAssertEqual(oversized.errorCode, TransportOutcomeCode.responseTooLarge.rawValue)
     }
 
+    func testAnAnswerFromAnotherOriginNeverCounts() throws {
+        // A background session follows redirects without asking its delegate, so the transport
+        // learns of one only when the task ends somewhere other than where it was sent.
+        let server = try XCTUnwrap(URL(string: "https://photos.example.org/api/assets"))
+        let elsewhere = try XCTUnwrap(URL(string: "https://elsewhere.example/api/assets"))
+        func outcome(_ status: Int?, _ body: String, current: URL?, response: URL?) -> OutcomeRecord {
+            TransportEventProcessor.outcome(of: CompletedTask(id: 1, description: nil, httpStatus: status, failure: nil,
+                                                              requestURL: server, currentURL: current, responseURL: response),
+                                            response: Data(body.utf8), oversized: false)
+        }
+        let redirected = OutcomeRecord(error: "The upload was redirected to another server.", errorDomain: TransportOutcomeCode.domain,
+                                       errorCode: TransportOutcomeCode.redirected.rawValue, v: 2)
+        XCTAssertEqual(outcome(201, Self.receiptJSON, current: elsewhere, response: elsewhere), redirected, "Another server's receipt confirms nothing.")
+        XCTAssertEqual(outcome(401, #"{"message":"Invalid user token"}"#, current: elsewhere, response: elsewhere), redirected,
+                       "Another server's 401 is not this server signing the user out.")
+        XCTAssertEqual(outcome(201, Self.receiptJSON, current: server, response: elsewhere), redirected)
+        XCTAssertEqual(outcome(201, Self.receiptJSON, current: elsewhere, response: nil), redirected)
+        XCTAssertEqual(String(decoding: try OutcomeRecord.encoded(redirected), as: UTF8.self),
+                       #"{"error":"The upload was redirected to another server.","errorCode":4,"errorDomain":"app.ilyich.transport","v":2}"#)
+        // A redirect within the server's origin, or none, keeps what the server answered.
+        let moved = try XCTUnwrap(URL(string: "https://photos.example.org:443/api/assets/"))
+        XCTAssertEqual(outcome(201, Self.receiptJSON, current: moved, response: moved).receipt?.id, G.originalAsset)
+        XCTAssertEqual(outcome(201, Self.receiptJSON, current: server, response: server).receipt?.id, G.originalAsset)
+        let insecure = try XCTUnwrap(URL(string: "http://photos.example.org/api/assets"))
+        XCTAssertEqual(outcome(201, Self.receiptJSON, current: insecure, response: insecure), redirected, "Another scheme is another origin.")
+
+        // Through the delegate seam, the redirected outcome is what the attempt's file and the finished event say.
+        let fake = FakeTransportSession()
+        let log = TransportEventLog()
+        let transport = makeTransport(fake, log: log)
+        let key = key()
+        try group.makeFolder(key.folder)
+        XCTAssertTrue(fake.handler.task(2, didReceive: Data(Self.receiptJSON.utf8)))
+        fake.handler.taskDidComplete(CompletedTask(id: 2, description: key.descriptor.taskDescription, httpStatus: 201, failure: nil,
+                                                   requestURL: server, currentURL: elsewhere, responseURL: elsewhere))
+        XCTAssertEqual(try transport.outcome(for: key), redirected)
+        XCTAssertEqual(log.all, [.finished(.backup, TransportCompletion(taskID: 2, attempt: key.attempt, outcomePath: key.outcomePath,
+                                                                        journal: .recorded(redirected)))])
+        // An older build reinstalled over this one reads it as a failure without a status.
+        let legacy = try JSONDecoder().decode(BackgroundUploads.Outcome.self, from: Data(try group.text(key.outcomePath).utf8))
+        XCTAssertNil(legacy.receipt)
+        XCTAssertNil(legacy.httpStatus)
+    }
+
     func testAnswersOver64KiBAreCancelledUnread() throws {
         let fake = FakeTransportSession()
         let transport = makeTransport(fake)
@@ -293,14 +379,14 @@ final class BackgroundTransportTests: XCTestCase {
         }
         fake.handler.taskDidComplete(CompletedTask(id: 3, description: "upload", httpStatus: 201, failure: nil))
         fake.handler.sessionDidFinishEvents()
-        XCTAssertEqual(log.all.map(Self.summary), ["finished 1 recorded", "finished 2 recorded", "drained share-upload"],
+        XCTAssertEqual(log.all.map(Self.summary), ["finished 1 recorded", "finished 2 recorded", "drained share-upload 1"],
                        "A task this app did not describe leaves no outcome and no event.")
         XCTAssertTrue(keys.allSatisfy { group.exists($0.outcomePath) })
     }
 
     // MARK: The URLSession delegate
 
-    func testDelegateRefusesRedirectsAndForwardsEveryCallback() throws {
+    func testDelegateForwardsEveryCallback() throws {
         let handler = RecordingHandler(accepts: false)
         let delegate = BackgroundSessionDelegate(handler: handler, challenges: UploadChallengeResponder(credential: { nil }))
         let session = URLSession(configuration: .ephemeral)
@@ -309,11 +395,13 @@ final class BackgroundTransportTests: XCTestCase {
         let task = session.dataTask(with: url)
         task.taskDescription = "described"
 
+        // Only a default or ephemeral session asks, and it is refused. A background session never
+        // asks, so its redirects show in where a finished task ended up (testAnAnswerFromAnotherOriginNeverCounts).
         let redirects = Locked<[URLRequest?]>([])
         let elsewhere = try XCTUnwrap(URL(string: "https://elsewhere.example/api/assets"))
         delegate.urlSession(session, task: task, willPerformHTTPRedirection: try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 307, httpVersion: nil, headerFields: nil)),
                             newRequest: URLRequest(url: elsewhere)) { request in redirects.mutate { $0.append(request) } }
-        XCTAssertEqual(redirects.value, [nil], "A multipart POST is never redirected.")
+        XCTAssertEqual(redirects.value, [nil])
 
         delegate.urlSession(session, dataTask: task, didReceive: Data(count: 3))
         XCTAssertNotEqual(task.state, .suspended, "A refused answer cancels its task.")
@@ -321,7 +409,10 @@ final class BackgroundTransportTests: XCTestCase {
         delegate.urlSession(session, task: task, didCompleteWithError: URLError(.timedOut))
         delegate.urlSessionDidFinishEvents(forBackgroundURLSession: session)
         let id = task.taskIdentifier
-        XCTAssertEqual(handler.calls, ["data \(id) 3", "sent \(id) described 100/1000", "done \(id) described - NSURLErrorDomain -1001", "drained"])
+        XCTAssertEqual(task.originalRequest?.url, url)
+        let route = "sent to photos.example.org, last at \(task.currentRequest?.url?.host ?? "-"), answered from -"
+        XCTAssertEqual(handler.calls, ["data \(id) 3", "sent \(id) described 100/1000",
+                                       "done \(id) described - NSURLErrorDomain -1001 \(route)", "drained"])
 
         let challenge = Self.certificateChallenge()
         let dispositions = Locked<[URLSession.AuthChallengeDisposition]>([])
@@ -394,7 +485,7 @@ final class BackgroundTransportTests: XCTestCase {
         switch event {
         case .progress(_, let progress): "progress \(progress.taskID)"
         case .finished(_, let completion): "finished \(completion.taskID) \(completion.journal.isRecorded ? "recorded" : "unrecorded")"
-        case .drained(let session): "drained \(session.rawValue)"
+        case .drained(let session, let drain): "drained \(session.rawValue) \(drain)"
         }
     }
 
@@ -427,7 +518,8 @@ private final class RecordingHandler: TaskEventHandling {
     func taskDidComplete(_ task: CompletedTask) {
         let status = task.httpStatus.map(String.init) ?? "-"
         let failure = task.failure.map { "\($0.domain) \($0.code)" } ?? "-"
-        recorded.mutate { $0.append("done \(task.id) \(task.description ?? "-") \(status) \(failure)") }
+        let route = "sent to \(task.requestURL?.host ?? "-"), last at \(task.currentURL?.host ?? "-"), answered from \(task.responseURL?.host ?? "-")"
+        recorded.mutate { $0.append("done \(task.id) \(task.description ?? "-") \(status) \(failure) \(route)") }
     }
 
     func sessionDidFinishEvents() { recorded.mutate { $0.append("drained") } }

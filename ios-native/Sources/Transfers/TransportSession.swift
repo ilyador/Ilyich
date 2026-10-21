@@ -63,6 +63,30 @@ struct CompletedTask: Equatable, Sendable {
     /// The answer's status, when the server answered.
     let httpStatus: Int?
     let failure: Failure?
+    /// Where the upload was sent (the task's original request), where the task went last (its
+    /// current request) and where its answer came from. A background session follows redirects
+    /// without asking its delegate, so the last two can be another server's.
+    let requestURL: URL?
+    let currentURL: URL?
+    let responseURL: URL?
+
+    init(id: Int, description: String?, httpStatus: Int?, failure: Failure?,
+         requestURL: URL? = nil, currentURL: URL? = nil, responseURL: URL? = nil) {
+        self.id = id
+        self.description = description
+        self.httpStatus = httpStatus
+        self.failure = failure
+        self.requestURL = requestURL
+        self.currentURL = currentURL
+        self.responseURL = responseURL
+    }
+
+    /// The session followed a redirect to another origin: the body may have gone there, and no
+    /// answer the task got is the server's.
+    var leftOrigin: Bool {
+        guard let requestURL else { return false }
+        return [currentURL, responseURL].contains { $0.map { !SameOriginRedirectDelegate.sameOrigin(requestURL, $0) } ?? false }
+    }
 }
 
 /// The real background session for one TransferSessionID. B9 creates one per identifier at launch;
@@ -115,9 +139,11 @@ extension TransportTaskSnapshot.State {
     }
 }
 
-/// Turns a background session's delegate callbacks into TaskEventHandling calls. It refuses every
-/// redirect, since redirecting a multipart POST can drop its body or forward its credentials, and
-/// answers client certificate challenges through UploadChallengeResponder.
+/// Turns a background session's delegate callbacks into TaskEventHandling calls, and answers client
+/// certificate challenges through UploadChallengeResponder. A background session follows redirects
+/// itself without asking its delegate, so they can't be refused here. Instead each finished task
+/// reports where it was sent and where it ended up, and TransportEventProcessor never records an
+/// answer from another origin as the server's.
 final class BackgroundSessionDelegate: NSObject, URLSessionDataDelegate, Sendable {
     private let handler: any TaskEventHandling
     private let challenges: UploadChallengeResponder
@@ -139,13 +165,18 @@ final class BackgroundSessionDelegate: NSObject, URLSessionDataDelegate, Sendabl
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         handler.taskDidComplete(CompletedTask(id: task.taskIdentifier, description: task.taskDescription,
                                               httpStatus: (task.response as? HTTPURLResponse)?.statusCode,
-                                              failure: error.map(CompletedTask.Failure.init)))
+                                              failure: error.map(CompletedTask.Failure.init),
+                                              requestURL: task.originalRequest?.url, currentURL: task.currentRequest?.url,
+                                              responseURL: task.response?.url))
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         handler.sessionDidFinishEvents()
     }
 
+    /// iOS asks only for tasks of default and ephemeral sessions, never for a background session's.
+    /// A session that asks is refused, since redirecting a multipart POST can drop its body or
+    /// forward its credentials.
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         completionHandler(nil)

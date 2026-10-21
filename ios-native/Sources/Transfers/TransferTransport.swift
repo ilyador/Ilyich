@@ -9,8 +9,9 @@ protocol TransferTransport: Sendable {
     func submit(_ request: URLRequest, key: AttemptKey) async throws(TransportSubmitError) -> Int
     /// The attempt's outcome file, legacy or version 2, or nil when there is none.
     func outcome(for key: AttemptKey) throws -> OutcomeRecord?
-    /// Deletes the attempt's outcome file and body, once its result is committed.
-    func acknowledge(_ key: AttemptKey) throws
+    /// Deletes the attempt's outcome file once what it says is committed, and the body with it
+    /// unless `keepingBody`: an interrupted attempt is sent again from the body it already has.
+    func acknowledge(_ key: AttemptKey, keepingBody: Bool) throws
     /// The tasks iOS holds for the session, with their descriptors decoded.
     func inventory() async -> TransportInventory
     /// Cancels every live task of an account and returns how many.
@@ -60,6 +61,10 @@ enum TransportSubmitError: Error, Equatable, Sendable {
     /// The attempt's last outcome is still on disk. Sending again would replay or lose it, so the
     /// engine applies and acknowledges it first.
     case unacknowledgedOutcome
+    /// iOS still holds a task for the attempt that was cancelled or has finished, and has not yet
+    /// reported how it ended. Its outcome arrives with its finished event; the engine applies and
+    /// acknowledges it before sending again.
+    case outcomePending
     /// Another submit of the same attempt is under way.
     case alreadySubmitting
 }
@@ -70,8 +75,10 @@ enum TransportEvent: Equatable, Sendable {
     case progress(TransferSessionID, TransportProgress)
     /// A task ended. A recorded outcome was written to its file before this event was sent.
     case finished(TransferSessionID, TransportCompletion)
-    /// The session has delivered every event iOS had queued for it. Its finished events all came first.
-    case drained(TransferSessionID)
+    /// The session has delivered every event iOS had queued for it. Its finished events all came
+    /// first. Drains are numbered from 1 in each process, and the engine hands the number to
+    /// BackgroundEventAcks.committed once everything up to that drain is committed.
+    case drained(TransferSessionID, drain: Int)
 }
 
 struct TransportProgress: Equatable, Sendable {
@@ -119,7 +126,10 @@ struct TransportInventory: Equatable, Sendable {
 
     /// The live task for an attempt, whichever build sent it. A legacy task is found by its stage ID
     /// or share identity, whatever container path its descriptor recorded.
-    func task(for attempt: AttemptID) -> TransportTaskSnapshot? { tasks.first { $0.isLive && $0.attempt == attempt } }
+    func task(for attempt: AttemptID) -> TransportTaskSnapshot? { tasks(for: attempt).first(where: \.isLive) }
+
+    /// Every task for an attempt, live or ending.
+    func tasks(for attempt: AttemptID) -> [TransportTaskSnapshot] { tasks.filter { $0.attempt == attempt } }
 
     /// Tasks of one account: version 2 by the scope they name, legacy backups by their Backup
     /// folder. A legacy share task names no account and is never listed.
