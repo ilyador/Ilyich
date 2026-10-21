@@ -45,6 +45,9 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingRea
         /// Albums by identifier, with their titles and members.
         var albums: [String: (title: String, members: [String])] = [:]
         var albumReads = 0
+        /// While set, each album or member read waits for it, as a long enumeration of a large library would.
+        var readGate: DispatchSemaphore?
+        var readsWaiting = 0
     }
 
     private let state: Mutex<State>
@@ -77,6 +80,21 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingRea
 
     /// Puts an album holding `members` in the library, or replaces it.
     func addAlbum(_ id: String, title: String, members: [String]) { state.withLock { $0.albums[id] = (title, members) } }
+
+    /// Album and member reads wait until `releaseReads`, as long ones would.
+    func holdReads() { state.withLock { $0.readGate = DispatchSemaphore(value: 0) } }
+
+    /// Lets every held read go on, and those that come after.
+    func releaseReads() {
+        let (gate, waiting) = state.withLock { state in
+            defer { state.readGate = nil; state.readsWaiting = 0 }
+            return (state.readGate, state.readsWaiting)
+        }
+        for _ in 0..<waiting { gate?.signal() }
+    }
+
+    /// Reads waiting at `holdReads`.
+    var readsWaiting: Int { state.withLock { $0.readsWaiting } }
 
     /// Times the album list was read from Photos.
     var albumReads: Int { state.withLock { $0.albumReads } }
@@ -195,18 +213,28 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingRea
     // MARK: - PhotoStagingReading
 
     func albums() -> [DeviceAlbum] {
-        read { state in
+        waitIfHeld()
+        return read { state in
             state.albumReads += 1
             return state.albums.map { DeviceAlbum(id: $0.key, title: $0.value.title, count: $0.value.members.count, isShared: false) }
         }
     }
 
     func members(of albumIDs: Set<String>) -> Set<String> {
-        read { state in Set(albumIDs.flatMap { state.albums[$0]?.members ?? [] }) }
+        waitIfHeld()
+        return read { state in Set(albumIDs.flatMap { state.albums[$0]?.members ?? [] }) }
     }
 
     func candidates(_ ids: [String]) -> [DeviceCandidate] {
         read { state in ids.compactMap { id in state.assets[DeviceAssetID(rawValue: id)].map { DeviceCandidate(id: id, modified: $0.revision?.date) } } }
+    }
+
+    private func waitIfHeld() {
+        let gate = state.withLock { state -> DispatchSemaphore? in
+            if state.readGate != nil { state.readsWaiting += 1 }
+            return state.readGate
+        }
+        gate?.wait()
     }
 
     private func read<T>(_ body: (inout State) -> T) -> T {
