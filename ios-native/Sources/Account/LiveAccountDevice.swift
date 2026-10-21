@@ -5,8 +5,15 @@ import WidgetKit
 
 /// The device-wide services as they run in the app.
 struct LiveAccountDevice: AccountDevice {
-    /// Pauses backup without switching automatic backup off, and stops shared uploads.
-    func stopUploads() async { await BackupCoordinator.shared.disconnect() }
+    /// The backup sign-out stops: the app's own, or in a test one over a folder of the test's.
+    var backup: @MainActor @Sendable () -> BackupCoordinator = { BackupCoordinator.shared }
+
+    /// Pauses backup, switching automatic backup off unless `keepingAutomaticBackup`, and stops
+    /// shared uploads.
+    func stopUploads(keepingAutomaticBackup: Bool) async {
+        let coordinator = await backup()
+        await coordinator.disconnect(keepingAutomaticBackup: keepingAutomaticBackup)
+    }
 
     func endCasting() async { await CastController.shared.signOut() }
 

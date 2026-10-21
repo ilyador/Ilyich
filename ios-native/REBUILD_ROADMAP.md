@@ -1091,6 +1091,7 @@ Accept each?
 - keep the automatic-backup preference;
 - after a session-expiry sign-out, keep thumbnails and network settings for the same account;
 - explicit sign-out wipes as today.
+C7 keeps today's behavior until you answer: sign-out, for either reason, switches automatic backup off and removes thumbnails and network settings. SignOutPolicy holds each default, switched off.
 Should a proxy 401 (no Immich error body) stop signing you out and show a connection problem instead?
 - Cleanup:
 - keep all-or-nothing when re-verification finds changes (default), or allow removing the rest after confirming;
