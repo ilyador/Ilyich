@@ -171,7 +171,7 @@ final class MediaExportServiceTests: XCTestCase {
         let api = try client(server)
         let key = AccountStoragePaths(AccountID(server: api.baseURL, userID: "alice")).readOnlyKey
         addTeardownBlock { (AppGroup.defaults ?? .standard).removeObject(forKey: key) }
-        api.setReadOnly(true)
+        (AppGroup.defaults ?? .standard).set(true, forKey: key)
         let photos = FakePhotoLibrary()
         let notifications = RecordingNotifications()
         let service = MediaExportService(api: api, photos: photos, notifications: notifications)
