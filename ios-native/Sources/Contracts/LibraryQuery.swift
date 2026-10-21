@@ -4,15 +4,15 @@ import Foundation
 /// What a feed shows, in one typed description the index, the server timeline and server search
 /// all serve. Hidden and locked photos can't be expressed; the Locked Folder has its own query.
 struct LibraryQuery: Hashable, Sendable {
+    /// Whose photos. Albums, people and a place are predicates, so each stacks with any owner and
+    /// with every other filter by AND.
     enum Scope: Hashable, Sendable {
         /// The account's own photos and those of the partners it shows in its timeline.
         case library
         /// Only the account's own photos.
         case mine
+        /// One partner's photos.
         case partner(String)
-        case album(String)
-        case person(String)
-        case place(PlaceMembership)
     }
 
     enum Trash: Hashable, Sendable { case active, trashed }
@@ -58,6 +58,10 @@ struct LibraryQuery: Hashable, Sendable {
         var camera: Camera?
         var location: Location?
         var text: TextMatch?
+        /// Photos in every one of these albums.
+        var albums: Set<String> = []
+        /// Photos in this place, as the map gathered them.
+        var place: PlaceMembership?
     }
 
     struct Camera: Hashable, Sendable {
@@ -105,10 +109,10 @@ extension LibraryQuery {
     static func partner(_ id: String) -> LibraryQuery { LibraryQuery(scope: .partner(id), visibility: [.timeline, .archive]) }
     /// An album in its own order.
     static func album(_ id: String, ascending: Bool = false) -> LibraryQuery {
-        LibraryQuery(scope: .album(id), ranking: .chronological(.takenAt, ascending: ascending))
+        LibraryQuery(ranking: .chronological(.takenAt, ascending: ascending), predicates: Predicates(albums: [id]))
     }
-    static func person(_ id: String) -> LibraryQuery { LibraryQuery(scope: .person(id)) }
-    static func place(_ membership: PlaceMembership) -> LibraryQuery { LibraryQuery(scope: .place(membership)) }
+    static func person(_ id: String) -> LibraryQuery { LibraryQuery(predicates: Predicates(people: [id])) }
+    static func place(_ membership: PlaceMembership) -> LibraryQuery { LibraryQuery(predicates: Predicates(place: membership)) }
 }
 
 // MARK: Refinements
@@ -133,11 +137,12 @@ extension LibraryQuery {
         return query
     }
 
-    /// Photos like one photo, with this feed's scope, trash, visibility, stacks and developed
-    /// state. Its other filters don't apply.
+    /// Photos like one photo, with this feed's owner, albums, people, place, trash, visibility,
+    /// stacks and developed state. Its other filters don't apply.
     func similar(to assetID: String) -> LibraryQuery {
-        LibraryQuery(scope: scope, trash: trash, visibility: visibility, ranking: .relevance(.similar(to: assetID)),
-                     stacks: stacks, predicates: Predicates(developed: predicates.developed))
+        LibraryQuery(scope: scope, trash: trash, visibility: visibility, ranking: .relevance(.similar(to: assetID)), stacks: stacks,
+                     predicates: Predicates(developed: predicates.developed, people: predicates.people, albums: predicates.albums,
+                                            place: predicates.place))
     }
 }
 
@@ -160,12 +165,13 @@ extension LibraryQuery {
         if visibility == .timeline { items.append(("visibility", "timeline")) }
         else if visibility == .archive { items.append(("visibility", "archive")) }
         else if visibility.isEmpty { items.append(("visibility", "none")) }
+        // One album or person is named as today's feeds name it; more are listed further on.
+        if predicates.albums.count == 1, let album = predicates.albums.first { items.append(("albumId", album)) }
+        if predicates.people.count == 1, let person = predicates.people.first { items.append(("personId", person)) }
         switch scope {
-        case .album(let id): items.append(("albumId", id))
-        case .person(let id): items.append(("personId", id))
         case .partner(let id): items.append(("userId", id))
         case .mine: items.append(("userId", "me"))
-        case .library, .place: break
+        case .library: break
         }
         if let favorite = predicates.favorite { items.append(("isFavorite", String(favorite))) }
         // Today's own-photo feeds ask for active photos explicitly; the others leave it to the server.
@@ -174,7 +180,8 @@ extension LibraryQuery {
         // Filters timeline feeds could not express.
         if let kind = predicates.kind { items.append(("type", kind.rawValue)) }
         if let motion = predicates.motion { items.append(("isMotion", String(motion))) }
-        if !predicates.people.isEmpty { items.append(("personIds", predicates.people.sorted().joined(separator: ","))) }
+        if predicates.people.count > 1 { items.append(("personIds", predicates.people.sorted().joined(separator: ","))) }
+        if predicates.albums.count > 1 { items.append(("albumIds", predicates.albums.sorted().joined(separator: ","))) }
         if !predicates.tags.isEmpty { items.append(("tagIds", predicates.tags.sorted().joined(separator: ","))) }
         if let inAnyAlbum = predicates.inAnyAlbum { items.append(("inAnyAlbum", String(inAnyAlbum))) }
         if let rating = predicates.rating { items.append(("rating", String(rating))) }
@@ -193,7 +200,7 @@ extension LibraryQuery {
         case .chronological: break
         }
         let key = items.map { $0.0 + "=" + Self.escaped($0.1) }.joined(separator: "&")
-        guard case .place(let membership) = scope else { return key }
+        guard let membership = predicates.place else { return key }
         return key + "&place=" + Self.escaped(membership.placeID) + "#" + membership.revision
     }
 

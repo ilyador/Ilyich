@@ -76,6 +76,47 @@ final class QueryPlannerTests: XCTestCase {
         XCTAssertEqual(filter.isFavorite, BoolFilter(eq: true))
     }
 
+    /// Every shelf facet stacks with every other by AND: an owner, albums, people and a place.
+    /// The planner says which stacks the timelines lay out by month and sends the rest to search.
+    func testEveryShelfFacetStacksWithEveryOther() throws {
+        func query(_ scope: LibraryQuery.Scope = .library, albums: Set<String> = [], people: Set<String> = [],
+                   place: PlaceMembership? = nil) -> LibraryQuery {
+            LibraryQuery(scope: scope, predicates: LibraryQuery.Predicates(people: people, albums: albums, place: place))
+        }
+        let table: [(String, LibraryQuery, QueryPlan.Backend, QueryPlan.Backend)] = [
+            ("place and album", query(albums: [album], place: lisbon), .index, .serverSearch),
+            ("place and person", query(people: [person], place: lisbon), .index, .serverSearch),
+            ("place and partner", query(.partner(partner), place: lisbon), .index, .serverSearch),
+            ("album and partner", query(.partner(partner), albums: [album]), .index, .serverSearch),
+            ("album and mine", query(.mine, albums: [album]), .index, .serverSearch),
+            ("album and person", query(albums: [album], people: [person]), .index, .serverSearch),
+            ("person and partner", query(.partner(partner), people: [person]), .serverSearch, .serverSearch),
+            ("two albums", query(albums: [album, "other"]), .serverSearch, .serverSearch),
+            ("two people", query(people: [person, "other"]), .serverSearch, .serverSearch),
+        ]
+        for (name, stacked, withIndex, withoutIndex) in table {
+            XCTAssertEqual(try QueryPlanner.plan(stacked, context: indexed).backend, withIndex, name)
+            XCTAssertEqual(try QueryPlanner.plan(stacked, context: online).backend, withoutIndex, name)
+            if withIndex == .index {
+                let filter = try TimelineFilter(stacked, userID: me)
+                XCTAssertEqual(filter.albumID, stacked.predicates.albums.first, name)
+                XCTAssertEqual(filter.personID, stacked.predicates.people.first, name)
+                XCTAssertEqual(filter.place, stacked.predicates.place.map(TimelinePlace.init), name)
+            } else {
+                XCTAssertThrowsError(try TimelineFilter(stacked, userID: me), name)
+            }
+            XCTAssertThrowsError(try ServerTimelineRequest(stacked, userID: me), name)
+            // Search keeps every facet.
+            let search = try ServerSearchRequest(stacked, userID: me)
+            XCTAssertEqual(Set(search.filter.albumIds?.all ?? []), stacked.predicates.albums, name)
+            XCTAssertEqual(Set(search.filter.personIds?.all ?? []), stacked.predicates.people, name)
+            XCTAssertEqual(search.filter.or?.compactMap(\.id.eq), stacked.predicates.place?.assetIDs, name)
+            if case .partner(let id) = stacked.scope { XCTAssertEqual(search.owner, id, name) }
+        }
+        let placeAndAlbum = try ServerSearchRequest(query(albums: [album], place: lisbon), userID: me)
+        XCTAssertFalse(placeAndAlbum.limitations.contains(.excludesSharedAlbumMembers), "An album search reaches the album.")
+    }
+
     func testDateAddedCantBeSearched() {
         var videosByAdded = LibraryQuery.recentlyAdded; videosByAdded.predicates.kind = .video
         XCTAssertThrowsError(try QueryPlanner.plan(videosByAdded, context: indexed)) { XCTAssertEqual($0 as? Unsupported, .orderNotSearchable) }
@@ -108,6 +149,11 @@ final class QueryPlannerTests: XCTestCase {
         XCTAssertFalse(try sendsPartners(trashedLibrary))
         var notFavorites = LibraryQuery.library; notFavorites.predicates.favorite = false
         XCTAssertFalse(try sendsPartners(notFavorites))
+        // An album or a person in the library is no longer the whole library.
+        var albumInLibrary = LibraryQuery.library; albumInLibrary.predicates.albums = [album]
+        XCTAssertFalse(ServerTimelineRequest.allowsPartners(albumInLibrary))
+        XCTAssertFalse(ServerTimelineRequest.allowsPartners(.person(person)))
+        XCTAssertFalse(ServerTimelineRequest.allowsPartners(.place(lisbon)))
         // Until Q5 decides it, the library leaves partners out.
         XCTAssertFalse(try ServerTimelineRequest(.library, userID: me).queryItems.contains { $0.name == "withPartners" })
     }
@@ -233,6 +279,8 @@ final class QueryPlannerTests: XCTestCase {
         XCTAssertEqual(ServerSearchRequest.filter(for: LibraryQuery(SearchFilter())), SearchFilter(visibility: StringFilter(in: ["timeline", "archive"]), trashedAt: .unset))
         // A place's ID list keeps its place.
         let place = ServerSearchRequest.filter(for: .place(lisbon))
-        XCTAssertEqual(LibraryQuery(place, base: .place(lisbon)).scope, .place(lisbon))
+        XCTAssertEqual(LibraryQuery(place, base: .place(lisbon)).predicates.place, lisbon)
+        // Several albums read back as several albums.
+        XCTAssertEqual(LibraryQuery(SearchFilter(albumIds: IDsFilter(all: [album, "other"]))).predicates.albums, [album, "other"])
     }
 }
