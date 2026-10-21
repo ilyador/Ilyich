@@ -262,6 +262,24 @@ import XCTest
         XCTAssertEqual(contents.jobs.map(\.state), ["failed", "queued"])
         XCTAssertEqual(Set(contents.albumDestinations.map(\.state)), ["pending"], "The album failure stays on the photo, never the album add.")
 
+        // The comparison works the jobs out from state.json, not from the plan that wrote them: a
+        // photo off the queue with the wrong origin, a missing one, or one in the running batch
+        // each shows as a mismatch.
+        let legacy = try Legacy.decoder().decode(Legacy.BackupState.self, from: JSONEncoder().encode(state))
+        func mismatches(_ change: (inout TransferStoreContents) -> Void) -> [LegacyImportCategory: Int] {
+            var changed = contents
+            change(&changed)
+            return LegacyBackupComparison.compare(legacy, with: changed).mismatches.filter { $0.value > 0 }
+        }
+        XCTAssertEqual(mismatches { _ in }, [:])
+        func job(_ row: TransferJobRow, origin: String? = nil, batchID: String? = nil) -> TransferJobRow {
+            TransferJobRow(id: row.id, sourceKey: row.sourceKey, origin: origin ?? row.origin, state: row.state, seq: row.seq, errorClass: row.errorClass,
+                           errorMessage: row.errorMessage, errorAt: row.errorAt, displayName: row.displayName, batchID: batchID ?? row.batchID)
+        }
+        XCTAssertEqual(mismatches { $0.jobs[1] = job($0.jobs[1], origin: "legacy") }, [.queueOrder: 1])
+        XCTAssertEqual(mismatches { $0.jobs.removeLast() }, [.queueOrder: 1])
+        XCTAssertEqual(mismatches { $0.jobs[0] = job($0.jobs[0], batchID: UUID().uuidString) }, [.notificationBatch: 1])
+
         // Recovery applies the suspended stage's outcome file and commits the photo: its albums run.
         let failedJob = contents.jobs[0]
         let committed = try await account.store.complete(TransferCompletion(
