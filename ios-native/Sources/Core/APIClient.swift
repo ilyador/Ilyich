@@ -4,21 +4,18 @@ import IlyichPlatform
 
 enum HTTPMethod: String, Sendable { case get = "GET", post = "POST", put = "PUT", patch = "PATCH", delete = "DELETE" }
 
+/// Failures found on the phone. What the server answers is a ServerFailure, and a request that
+/// got no answer fails with a URLError or a TransportFailure.
 enum APIError: Error, LocalizedError, Sendable {
     case invalidServerURL
-    case unauthorized
-    case forbidden
-    case notFound
-    case http(Int)
+    /// No session is saved, or it changed while the work ran.
+    case signedOut
     case invalidResponse(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidServerURL: "Enter a valid HTTP or HTTPS server address without a password, query, or fragment."
-        case .unauthorized: "Your session has expired. Please sign in again."
-        case .forbidden: "This account cannot access that item. It may require unlocking."
-        case .notFound: "This item is unavailable. Refresh and try again."
-        case .http(let code): "The server could not complete the request (HTTP \(code))."
+        case .signedOut: "You’re signed out. Sign in again to continue."
         case .invalidResponse(let message): message
         }
     }
@@ -34,32 +31,32 @@ actor APIClient {
         if let userID { ReadOnlyPolicy.setEnabled(enabled, server: baseURL, userID: userID) }
     }
     private let accessToken: String?
-    private let session: URLSession
-    private let streamingSession: URLSession
-    private let connection: ServerConnection
+    /// The sessions and the address choice every request of this client goes through.
+    nonisolated let transport: ServerTransport
+    private nonisolated var connection: ServerConnection { transport.connection }
     private var castAuthorization: CastAuthorization?
     private var entityStore: EntityStore?
     private var cachedServerFeatures: ServerFeatures?
 
-    init(baseURL: URL, accessToken: String? = nil, userID: String? = nil, session: URLSession? = nil, networkConfiguration: NetworkConfiguration? = nil) throws {
-        self.baseURL = try Self.normalizedBaseURL(baseURL)
+    /// `sessionConfiguration` replaces the transport's default configuration, for tests.
+    init(baseURL: URL, accessToken: String? = nil, userID: String? = nil, sessionConfiguration: URLSessionConfiguration? = nil,
+         networkConfiguration: NetworkConfiguration? = nil, wifiName: any WiFiNameProviding = SystemWiFiName()) throws {
+        let server = try Self.normalizedBaseURL(baseURL)
+        self.baseURL = server
         self.accessToken = accessToken
         self.userID = userID
-        self.connection = try ServerConnection(server: self.baseURL,
-                                               configuration: networkConfiguration ?? NetworkConfigurationStore.connectionSettings(server: self.baseURL),
-                                               wifiName: SystemWiFiName())
-        if let session {
-            self.session = session
-            self.streamingSession = session
-        } else {
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = 75
-            configuration.timeoutIntervalForResource = 120
-            self.session = URLSession(configuration: configuration, delegate: SameOriginRedirectDelegate(origin: self.baseURL), delegateQueue: nil)
-            configuration.timeoutIntervalForResource = 3_600
-            self.streamingSession = URLSession(configuration: configuration, delegate: SameOriginRedirectDelegate(origin: self.baseURL), delegateQueue: nil)
-        }
+        transport = try ServerTransport(server: server, token: accessToken,
+                                        configuration: networkConfiguration ?? NetworkConfigurationStore.connectionSettings(server: server),
+                                        sessionConfiguration: sessionConfiguration, wifiName: wifiName,
+                                        writeCheck: { method, path in
+                                            guard let userID else { return }
+                                            try ReadOnlyPolicy.check(enabled: ReadOnlyPolicy.isEnabled(server: server, userID: userID), method: method, path: path)
+                                        })
     }
+
+    /// Ends this client's requests and lets its sessions go. Requests made afterwards throw
+    /// CancellationError. Called when the client is replaced, for example at sign-out.
+    nonisolated func shutdown() async { await transport.shutdown() }
 
     nonisolated static func normalizedBaseURL(_ input: URL) throws -> URL {
         do { return try ServerAddress.normalized(input) }
@@ -72,7 +69,7 @@ actor APIClient {
     }
 
     func authorizedRequest(path: String, query: [URLQueryItem] = []) async throws -> URLRequest {
-        try await connection.request(path: path, query: query, token: accessToken)
+        try await transport.prepare(path: path, query: query).request
     }
     func networkConfiguration() async -> NetworkConfiguration { await connection.settings() }
     func updateNetworkConfiguration(_ configuration: NetworkConfiguration) async throws {
@@ -83,70 +80,20 @@ actor APIClient {
     func activeEndpoint() async throws -> URL { try await connection.endpoint() }
 
     func request<T: Decodable & Sendable>(_ method: HTTPMethod, path: String, query: [URLQueryItem] = []) async throws -> T {
-        let data = try await perform(method, path: path, query: query)
-        return try decode(T.self, data: data)
+        try await transport.send(.json(method, path, query: query))
     }
 
     func request<T: Decodable & Sendable, Body: Encodable & Sendable>(_ method: HTTPMethod, path: String, body: Body,
                                                                    query: [URLQueryItem] = []) async throws -> T {
-        let data = try await perform(method, path: path, query: query, body: APIJSON.encoder().encode(body))
-        return try decode(T.self, data: data)
+        try await transport.send(.json(method, path, body: body, query: query))
     }
 
     func requestVoid(_ method: HTTPMethod, path: String, query: [URLQueryItem] = []) async throws {
-        _ = try await perform(method, path: path, query: query)
+        _ = try await transport.send(.void(method, path, query: query))
     }
 
     func requestVoid<Body: Encodable & Sendable>(_ method: HTTPMethod, path: String, body: Body) async throws {
-        _ = try await perform(method, path: path, body: APIJSON.encoder().encode(body))
-    }
-
-    private func perform(_ method: HTTPMethod, path: String, query: [URLQueryItem] = [], body: Data? = nil) async throws -> Data {
-        let startedAt = Date()
-        var status: Int?
-        do {
-            try Task.checkCancellation()
-            try ReadOnlyPolicy.check(enabled: isReadOnly, method: method.rawValue, path: path)
-            var request = try await authorizedRequest(path: path, query: query)
-            try ReadOnlyPolicy.check(enabled: isReadOnly, method: method.rawValue, path: path)
-            request.httpMethod = method.rawValue
-            request.httpBody = body
-            request.setValue("application/json", forHTTPHeaderField: "Accept")
-            if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-            let (data, response) = try await session.data(for: request)
-            status = (response as? HTTPURLResponse)?.statusCode
-            try Self.validate(response)
-            try Task.checkCancellation()
-            await DiagnosticsStore.shared.record(method: method.rawValue, path: path, statusCode: status, startedAt: startedAt, outcome: .success)
-            return data
-        } catch {
-            if (error as? URLError)?.meansEndpointUnreachable == true { await connection.invalidate() }
-            await recordFailure(error, method: method.rawValue, path: path, status: status, startedAt: startedAt)
-            throw error
-        }
-    }
-    private func recordFailure(_ error: any Error, method: String, path: String, status: Int?, startedAt: Date) async {
-        let outcome: DiagnosticOutcome
-        if error is ReadOnlyPolicy.ReadOnlyError { outcome = .blocked }
-        else if error is CancellationError || (error as? URLError)?.code == .cancelled { outcome = .cancelled }
-        else { outcome = .failed }
-        await DiagnosticsStore.shared.record(method: method, path: path, statusCode: status, startedAt: startedAt, outcome: outcome)
-    }
-
-    nonisolated static func validate(_ response: URLResponse) throws {
-        guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse("The server returned an invalid response.") }
-        switch response.statusCode {
-        case 200..<300: return
-        case 401: throw APIError.unauthorized
-        case 403: throw APIError.forbidden
-        case 404: throw APIError.notFound
-        default: throw APIError.http(response.statusCode)
-        }
-    }
-
-    private func decode<T: Decodable>(_ type: T.Type, data: Data) throws -> T {
-        do { return try APIJSON.decoder().decode(type, from: data) }
-        catch { throw APIError.invalidResponse("The server returned data this version of Ilyich could not read.") }
+        _ = try await transport.send(.void(method, path, body: try APIJSON.encoder().encode(body)))
     }
 
     func login(email: String, password: String) async throws -> LoginResponse {
@@ -306,28 +253,13 @@ actor APIClient {
     func updateRating(id: String, rating: Int?) async throws -> Asset { try await request(.put, path: "assets/\(id)", body: RatingUpdate(rating: rating)) }
 
     func profileImage(userID: String) async throws -> Data {
-        try await perform(.get, path: "users/\(userID)/profile-image")
+        try await transport.send(.data(.get, "users/\(userID)/profile-image"))
     }
     func uploadProfileImage(jpeg: Data) async throws {
-        let startedAt = Date()
-        var status: Int?
-        do {
-            try ReadOnlyPolicy.check(enabled: isReadOnly, method: "POST", path: "users/profile-image")
-            let boundary = "Ilyich-" + UUID().uuidString
-            var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"profile-picture.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".utf8)
-            body.append(jpeg); body.append(Data("\r\n--\(boundary)--\r\n".utf8))
-            var request = try await authorizedRequest(path: "users/profile-image")
-            try ReadOnlyPolicy.check(enabled: isReadOnly, method: "POST", path: "users/profile-image")
-            request.httpMethod = "POST"
-            request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-            let (_, response) = try await session.upload(for: request, from: body)
-            status = (response as? HTTPURLResponse)?.statusCode
-            try Self.validate(response)
-            await DiagnosticsStore.shared.record(method: "POST", path: "users/profile-image", statusCode: status, startedAt: startedAt, outcome: .success)
-        } catch {
-            await recordFailure(error, method: "POST", path: "users/profile-image", status: status, startedAt: startedAt)
-            throw error
-        }
+        let boundary = "Ilyich-" + UUID().uuidString
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"profile-picture.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".utf8)
+        body.append(jpeg); body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        _ = try await transport.send(.void(.post, "users/profile-image", body: body, contentType: "multipart/form-data; boundary=\(boundary)"))
     }
 
     func prepareCast(asset: Asset) async throws -> CastMedia {
@@ -341,8 +273,8 @@ actor APIClient {
         let query: [URLQueryItem] = asset.isVideo ? [] : [.init(name: "size", value: "fullsize"), .init(name: "edited", value: "true"), .init(name: "c", value: asset.cacheRevision)]
         var mediaRequest = try await authorizedRequest(path: path, query: query)
         mediaRequest.httpMethod = "HEAD"
-        let (_, response) = try await session.data(for: mediaRequest)
-        try Self.validate(response)
+        let (head, response) = try await transport.data(for: mediaRequest)
+        try ServerFailure.check(response, body: head, path: path)
         let castRequest = try await connection.request(path: path, query: query)
         guard let mime = response.mimeType, let castURL = castRequest.url, var parts = URLComponents(url: castURL, resolvingAgainstBaseURL: false) else {
             throw APIError.invalidResponse("The server did not identify this media type for casting.")
@@ -365,12 +297,12 @@ actor APIClient {
         var query = [URLQueryItem(name: "edited", value: useOriginal ? "false" : "true"), .init(name: "c", value: asset.cacheRevision)]
         if !useOriginal { query.append(.init(name: "size", value: "fullsize")) }
         let downloadRequest = try await authorizedRequest(path: path, query: query)
-        let delegate = DownloadProgressDelegate(origin: baseURL) { progress?($0) }
-        defer { delegate.stopObserving() }
-        let (temporaryURL, response) = try await streamingSession.download(for: downloadRequest, delegate: delegate)
+        let observer = DownloadProgressObserver { progress?($0) }
+        defer { observer.stopObserving() }
+        let (temporaryURL, response) = try await transport.download(downloadRequest, starting: { observer.observe($0) })
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
-            try Self.validate(response)
+            try ServerFailure.check(response, body: Self.errorBody(of: response, at: temporaryURL), path: path)
             try Task.checkCancellation()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let rawName = response.suggestedFilename ?? (useOriginal ? asset.originalFileName : "photo.jpg")
@@ -383,6 +315,14 @@ actor APIClient {
             try? FileManager.default.removeItem(at: directory)
             throw error
         }
+    }
+
+    /// The start of a failed download's body, which says whether the server or a proxy refused it.
+    private nonisolated static func errorBody(of response: URLResponse, at file: URL) -> Data? {
+        guard let status = (response as? HTTPURLResponse)?.statusCode, !(200..<300).contains(status),
+              let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        return try? handle.read(upToCount: 64 * 1024)
     }
 }
 
@@ -435,7 +375,7 @@ private struct CastAuthorization: Decodable, Sendable { let id: String; let toke
 extension APIClient {
     /// Only a digest enters the offline database; the actual session remains in Keychain.
     func syncSessionFingerprint() throws -> String {
-        guard let accessToken, userID != nil else { throw APIError.unauthorized }
+        guard let accessToken, userID != nil else { throw APIError.signedOut }
         return SHA256.hash(data: Data(accessToken.utf8)).map { String(format: "%02x", $0) }.joined()
     }
     func acknowledgeSync(_ acks: [String]) async throws {
@@ -445,23 +385,25 @@ extension APIClient {
     func consumeSyncStream(reset: Bool, onBatch: @Sendable ([EntitySyncEvent]) async throws -> Void) async throws {
         let startedAt = Date()
         var status: Int?
+        var route: ServerConnection.Route?
         do {
-            var request = try await authorizedRequest(path: "sync/stream")
+            var (request, chosen) = try await transport.prepare(path: "sync/stream")
+            route = chosen
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("application/jsonlines+json", forHTTPHeaderField: "Accept")
             request.httpBody = try JSONEncoder().encode(EntitySyncRequest(reset: reset))
-            let (bytes, response) = try await streamingSession.bytes(for: request)
-            status = (response as? HTTPURLResponse)?.statusCode
-            try Self.validate(response)
+            let (response, body) = try await transport.stream(request, path: "sync/stream")
+            status = response.statusCode
             var batch: [EntitySyncEvent] = []
             var ended = false
-            for try await line in bytes.lines {
+            let lines = ResponseLines(body: body, limit: 4 * 1_024 * 1_024) { APIError.invalidResponse("The server returned an invalid sync stream.") }
+            for try await line in lines {
                 try Task.checkCancellation()
                 guard !line.isEmpty else { continue }
-                guard line.utf8.count <= 4 * 1_024 * 1_024, !ended else { throw APIError.invalidResponse("The server returned an invalid sync stream.") }
+                guard !ended else { throw APIError.invalidResponse("The server returned an invalid sync stream.") }
                 let event: EntitySyncEvent
-                do { event = try JSONDecoder().decode(EntitySyncEvent.self, from: Data(line.utf8)) }
+                do { event = try JSONDecoder().decode(EntitySyncEvent.self, from: line) }
                 catch { throw APIError.invalidResponse("The server returned an unreadable sync record. The last saved batch can be resumed.") }
                 batch.append(event)
                 ended = ["SyncCompleteV1", "SyncResetV1"].contains(event.type)
@@ -471,8 +413,8 @@ extension APIClient {
             guard ended else { throw APIError.invalidResponse("Synchronization was interrupted before completion. It will resume from the last saved batch.") }
             await DiagnosticsStore.shared.record(method: "POST", path: "sync/stream", statusCode: status, startedAt: startedAt, outcome: .success)
         } catch {
-            if (error as? URLError)?.meansEndpointUnreachable == true { await connection.invalidate() }
-            await recordFailure(error, method: "POST", path: "sync/stream", status: status, startedAt: startedAt)
+            if (error as? URLError)?.meansEndpointUnreachable == true, let route { await connection.routeFailed(route) }
+            await ServerTransport.record(error, method: "POST", path: "sync/stream", status: status, startedAt: startedAt)
             throw error
         }
     }
@@ -481,7 +423,7 @@ extension APIClient {
         guard let url = request.url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw APIError.invalidServerURL }
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         request.url = components.url
-        let socket = streamingSession.webSocketTask(with: request)
+        let socket = try transport.webSocket(with: request)
         socket.maximumMessageSize = 4 * 1_024 * 1_024
         let events = AsyncThrowingStream<ServerInvalidation, any Error>(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let task = Task {

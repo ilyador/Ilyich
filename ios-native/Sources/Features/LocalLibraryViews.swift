@@ -235,7 +235,7 @@ struct FreeUpSpaceView: View {
         removing = true; defer { removing = false }
         let requested = selection
         do {
-            guard let originalSession = try KeychainCredentialStore().load() else { throw APIError.unauthorized }
+            guard let originalSession = try KeychainCredentialStore().load() else { throw APIError.signedOut }
             guard !ReadOnlyPolicy.isEnabled(server: originalSession.server, userID: originalSession.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
             let verified = Set(try await BackupCoordinator.shared.verifiedLocalDeletionCandidates())
             try Task.checkCancellation()
@@ -248,7 +248,7 @@ struct FreeUpSpaceView: View {
                 return revisions[asset.localIdentifier] == .some(asset.modificationDate) && eligible(asset, protected: protected)
             }) else { throw BackupError.message("Your photo library changed. Nothing was removed. Check again before continuing.") }
             guard let currentSession = try KeychainCredentialStore().load(), currentSession.scope == originalSession.scope,
-                  currentSession.token == originalSession.token else { throw APIError.unauthorized }
+                  currentSession.token == originalSession.token else { throw APIError.signedOut }
             try Task.checkCancellation()
             guard !ReadOnlyPolicy.isEnabled(server: currentSession.server, userID: currentSession.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
             try await PHPhotoLibrary.shared().performChanges(PhotoChanges.delete(Array(requested)))

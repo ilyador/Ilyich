@@ -104,9 +104,13 @@ struct SignInView: View {
         }
         .task(id: serverAddress) {
             features = nil
-            guard let url = URL(string: serverAddress), let api = try? APIClient(baseURL: url) else { return }
-            do { try await Task.sleep(for: .milliseconds(500)); features = try await api.serverFeatures() }
-            catch { /* Validation and connection errors surface on an explicit sign-in attempt. */ }
+            // Asked only once typing pauses, through a client that is shut down afterwards.
+            // Validation and connection errors surface on an explicit sign-in attempt.
+            guard (try? await Task.sleep(for: .milliseconds(500))) != nil,
+                  let url = URL(string: serverAddress), let api = try? APIClient(baseURL: url) else { return }
+            let latest = try? await api.serverFeatures()
+            await api.shutdown()
+            if let latest, !Task.isCancelled { features = latest }
         }
     }
 
@@ -139,6 +143,7 @@ struct SignInView: View {
             do { let login = try await oauth.signIn(api: api); try session.acceptLogin(login, server: api.baseURL) }
             catch let failure as ASWebAuthenticationSessionError where failure.code == .canceledLogin { }
             catch { self.error = error.localizedDescription }
+            await api.shutdown()
         }
     }
 }

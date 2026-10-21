@@ -74,7 +74,7 @@ final class LegacyFormatsTests: XCTestCase {
         XCTAssertEqual(state.transferNotification?.completed, 9)
         XCTAssertEqual(state.transferNotification?.terminalFailures, 2)
         XCTAssertEqual(state.paused, false)
-        XCTAssertEqual(state.error, APIError.unauthorized.localizedDescription)
+        XCTAssertEqual(state.error, ServerFailure.sessionExpired(nil).localizedDescription)
     }
 
     func testDatesMatchByBitPattern() throws {
@@ -164,7 +164,7 @@ final class LegacyFormatsTests: XCTestCase {
         let unauthorized = try outcome("401")
         XCTAssertNil(unauthorized.receipt)
         XCTAssertEqual(unauthorized.httpStatus, 401)
-        XCTAssertEqual(unauthorized.error, APIError.unauthorized.localizedDescription)
+        XCTAssertEqual(unauthorized.error, ServerFailure.sessionExpired(nil).localizedDescription)
         // A lost connection and a force-quit cancel differ only in localized text: both are
         // interrupted attempts, which the importer must not tell apart by their message.
         for name in ["lost", "force-quit"] {

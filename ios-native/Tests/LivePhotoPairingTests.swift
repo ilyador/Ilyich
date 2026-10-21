@@ -34,7 +34,7 @@ import XCTest
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [PairingURLProtocol.self]
         return (try APIClient(baseURL: URL(string: "https://\(host)")!, accessToken: "test-token", userID: "test-user",
-                              session: URLSession(configuration: configuration), networkConfiguration: .init()), host)
+                              sessionConfiguration: configuration, networkConfiguration: .init()), host)
     }
 
     private func bodyData(_ request: URLRequest) -> Data? {

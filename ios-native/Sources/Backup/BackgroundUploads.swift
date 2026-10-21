@@ -74,7 +74,8 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
                 let completed = lock.withLock { () -> Bool in
                     if let data = try? Data(contentsOf: receipt), let outcome = try? JSONDecoder().decode(Outcome.self, from: data) {
                         if let value = outcome.receipt { continuation.resume(returning: value) }
-                        else if let status = outcome.httpStatus, !(200..<300).contains(status) { continuation.resume(throwing: APIError.http(status)) }
+                        // A recorded outcome keeps only the status, as earlier builds wrote it.
+                        else if let status = outcome.httpStatus, !(200..<300).contains(status) { continuation.resume(throwing: ServerFailure.http(status, nil)) }
                         else { continuation.resume(throwing: TransferError(errorDescription: outcome.error)) }
                         return true
                     }
@@ -115,7 +116,7 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
             do {
                 if let error { throw error }
                 guard let response = task.response else { throw APIError.invalidResponse("The upload returned no server response.") }
-                try APIClient.validate(response)
+                try ServerFailure.check(response, body: data, path: "assets")
                 let receipt = try JSONDecoder().decode(UploadReceipt.self, from: data)
                 guard UUID(uuidString: receipt.id) != nil, ["created", "duplicate"].contains(receipt.status) else {
                     throw TransferError(errorDescription: "The server did not confirm this upload. Retry to verify its checksum.")
@@ -149,14 +150,21 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        guard let saved = try? KeychainCredentialStore().load(), let url = task.originalRequest?.url,
-              (task.originalRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer \(saved.token)" ||
-               task.originalRequest?.value(forHTTPHeaderField: "x-immich-user-token") == saved.token),
+        guard let saved = try? KeychainCredentialStore().load(), let request = task.originalRequest, let url = request.url,
               let configuration = try? NetworkConfigurationStore.load(server: saved.server),
-              (configuration.alternateEndpoints + [saved.server]).contains(where: { SameOriginRedirectDelegate.sameOrigin($0, url) }) else {
+              Self.offersCertificate(for: request, saved: saved, configuration: configuration) else {
             completionHandler(.performDefaultHandling, nil); return
         }
         ClientCertificateStore.respond(to: challenge, server: saved.server, requestURL: url, completion: completionHandler)
+    }
+
+    /// Whether an upload may be offered the saved client certificate: it carries the saved
+    /// session's token and goes to one of the server's configured addresses, the local one included.
+    static func offersCertificate(for request: URLRequest, saved: StoredCredential, configuration: NetworkConfiguration) -> Bool {
+        guard let url = request.url,
+              request.value(forHTTPHeaderField: "Authorization") == "Bearer \(saved.token)" ||
+              request.value(forHTTPHeaderField: "x-immich-user-token") == saved.token else { return false }
+        return configuration.isConfiguredEndpoint(url, primary: saved.server)
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {

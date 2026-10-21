@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 import Security
 
 public struct NetworkConfiguration: Codable, Equatable, Sendable {
@@ -18,25 +19,63 @@ public struct NetworkConfiguration: Codable, Equatable, Sendable {
         self.localEndpoint = localEndpoint
     }
 
+    /// The settings in their saved form. Throws on the first entry that is not allowed, which
+    /// is how settings are checked before they are saved.
     public func validated() throws -> Self {
         var result = self
-        result.preferredWifiName = preferredWifiName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if result.preferredWifiName?.isEmpty == true { result.preferredWifiName = nil }
+        result.preferredWifiName = Self.wifiName(preferredWifiName)
         if let localEndpoint { result.localEndpoint = try ServerAddress.normalized(localEndpoint) }
         var names = Set<String>()
-        let tokenCharacters = CharacterSet(charactersIn: "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
-        for (name, value) in customHeaders {
-            guard !name.isEmpty, name.unicodeScalars.allSatisfy(tokenCharacters.contains),
-                  !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
-                  names.insert(name.lowercased()).inserted else { throw NetworkConfigurationError.invalidHeader }
-            guard !["host", "content-length", "connection", "transfer-encoding", "x-immich-user-token", "x-immich-session-token"].contains(name.lowercased()) else {
-                throw NetworkConfigurationError.reservedHeader(name)
-            }
-        }
+        for (name, value) in customHeaders { try Self.checkHeader(name: name, value: value, seen: &names) }
         result.alternateEndpoints = try alternateEndpoints.map(ServerAddress.normalized)
         var urls = Set<URL>()
         result.alternateEndpoints = result.alternateEndpoints.filter { urls.insert($0).inserted }
         return result
+    }
+
+    /// The settings without the entries that are not allowed, and how many were left out. Saved
+    /// settings are loaded this way, so an entry that a newer rule rejects costs only that entry,
+    /// never the connection; what is saved stays as it is.
+    public func usable() -> (configuration: Self, dropped: Int) {
+        var result = Self(automaticallySwitchEndpoints: automaticallySwitchEndpoints, preferredWifiName: Self.wifiName(preferredWifiName))
+        var dropped = 0
+        if let localEndpoint {
+            if let normalized = try? ServerAddress.normalized(localEndpoint) { result.localEndpoint = normalized } else { dropped += 1 }
+        }
+        var names = Set<String>()
+        // In name order, so the same duplicate is always the one left out.
+        for (name, value) in customHeaders.sorted(by: { $0.key < $1.key }) {
+            if (try? Self.checkHeader(name: name, value: value, seen: &names)) != nil { result.customHeaders[name] = value } else { dropped += 1 }
+        }
+        var urls = Set<URL>()
+        for endpoint in alternateEndpoints {
+            guard let normalized = try? ServerAddress.normalized(endpoint) else { dropped += 1; continue }
+            if urls.insert(normalized).inserted { result.alternateEndpoints.append(normalized) }
+        }
+        return (result, dropped)
+    }
+
+    /// Whether `url` is on one of the addresses these settings send requests to: the server, an
+    /// alternate address or the local one. Only those are offered the client certificate.
+    public func isConfiguredEndpoint(_ url: URL, primary: URL) -> Bool {
+        ([primary] + alternateEndpoints + (localEndpoint.map { [$0] } ?? [])).contains { SameOriginRedirectDelegate.sameOrigin($0, url) }
+    }
+
+    private static func wifiName(_ name: String?) -> String? {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == true ? nil : trimmed
+    }
+
+    private static let tokenCharacters = CharacterSet(charactersIn: "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+
+    private static func checkHeader(name: String, value: String, seen names: inout Set<String>) throws {
+        guard !name.isEmpty, name.unicodeScalars.allSatisfy(tokenCharacters.contains),
+              !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+              !names.contains(name.lowercased()) else { throw NetworkConfigurationError.invalidHeader }
+        guard !["host", "content-length", "connection", "transfer-encoding", "x-immich-user-token", "x-immich-session-token"].contains(name.lowercased()) else {
+            throw NetworkConfigurationError.reservedHeader(name)
+        }
+        names.insert(name.lowercased())
     }
 
     public func candidates(primary: URL, currentWifiName: String? = nil) -> [URL] {
@@ -54,7 +93,7 @@ public struct NetworkConfiguration: Codable, Equatable, Sendable {
 }
 
 public enum NetworkConfigurationError: LocalizedError {
-    case invalidAddress, invalidHeader, reservedHeader(String), keychain, invalidCertificate, incorrectCertificatePassword, unavailable
+    case invalidAddress, invalidHeader, reservedHeader(String), keychain, invalidCertificate, incorrectCertificatePassword
     public var errorDescription: String? {
         switch self {
         case .invalidAddress: "Enter an HTTP or HTTPS server address without a password, query, or fragment."
@@ -63,7 +102,6 @@ public enum NetworkConfigurationError: LocalizedError {
         case .keychain: "Network credentials couldn’t be accessed. Unlock your phone and try again."
         case .invalidCertificate: "This file does not contain a usable PKCS#12 client certificate and private key."
         case .incorrectCertificatePassword: "The certificate password is incorrect, or the PKCS#12 file is damaged."
-        case .unavailable: "None of the configured server addresses could be reached. Check your connection and try again."
         }
     }
 }
@@ -83,8 +121,18 @@ public enum TransportFailure: Error, Equatable, Sendable {
     /// A definite, non-cancelled transport failure, including every configured endpoint being unreachable.
     public static func isDefinite(_ error: any Error) -> Bool {
         if let urlError = error as? URLError { return urlError.code != .cancelled }
-        if case .unavailable? = error as? NetworkConfigurationError { return true }
-        return false
+        return error is TransportFailure
+    }
+}
+
+extension TransportFailure: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .unreachable(let code): URLError(code).localizedDescription
+        case .endpointChanged: "The connection moved to another server address before the server answered. Check whether the change was made, then try again."
+        case .allEndpointsUnavailable: "None of the configured server addresses could be reached. Check your connection and try again."
+        case .systemCancelled: "iOS stopped this transfer before it finished."
+        }
     }
 }
 
@@ -122,10 +170,19 @@ public enum ServerAddress {
 /// Credentials are shared with uploads and extensions, scoped to the explicitly configured server.
 /// They remain in the Keychain rather than preferences or diagnostic logs.
 public enum NetworkConfigurationStore {
+    /// The saved settings, without any entry that is no longer allowed. The Keychain item is left
+    /// as it was, so nothing the user entered is lost; saving from the settings screen replaces it.
     public static func load(server: URL) throws -> NetworkConfiguration {
         guard let data = try NetworkKeychain.read(server: server, kind: "settings") else { return .init() }
-        return try JSONDecoder().decode(NetworkConfiguration.self, from: data).validated()
+        guard let saved = try? JSONDecoder().decode(NetworkConfiguration.self, from: data) else {
+            logger.error("Saved network settings could not be read. Using the server address alone; the saved settings are kept.")
+            return .init()
+        }
+        let (usable, dropped) = saved.usable()
+        if dropped > 0 { logger.warning("Ignoring \(dropped, privacy: .public) saved network settings that are no longer allowed; the saved settings are kept.") }
+        return usable
     }
+    private static let logger = Logger(subsystem: "app.ilyich.native", category: "Network")
     /// The settings a new connection starts with. A bundle that names no App Group, such as a
     /// test host, has nothing saved and gets the defaults.
     public static func connectionSettings(server: URL) throws -> NetworkConfiguration {

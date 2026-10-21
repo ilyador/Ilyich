@@ -15,6 +15,8 @@ final class StubServer: Sendable {
         var failure: URLError.Code?
         var delay: Duration?
         var gate: Gate?
+        /// Delivers the body this many bytes at a time, as a network would.
+        var pieceSize: Int?
 
         static func json(_ text: String, status: Int = 200) -> Response {
             Response(status: status, headers: ["Content-Type": "application/json"], body: Data(text.utf8))
@@ -52,6 +54,7 @@ final class StubServer: Sendable {
 
         func delayed(by delay: Duration) -> Response { var copy = self; copy.delay = delay; return copy }
         func waiting(for gate: Gate) -> Response { var copy = self; copy.gate = gate; return copy }
+        func inPieces(of size: Int) -> Response { var copy = self; copy.pieceSize = size; return copy }
     }
 
     /// Holds answers back until the test opens it. Opening is permanent.
@@ -112,6 +115,10 @@ final class StubServer: Sendable {
     }
 
     func route(_ method: String, _ path: String, _ responses: Response...) {
+        route(method, path, responses: responses)
+    }
+
+    func route(_ method: String, _ path: String, responses: [Response]) {
         state.withLock { $0.routes[Self.key(method, path)] = responses }
     }
 
@@ -214,7 +221,12 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-        if !response.body.isEmpty { client?.urlProtocol(self, didLoad: response.body) }
+        var start = response.body.startIndex
+        while start < response.body.endIndex {
+            let end = response.body.index(start, offsetBy: response.pieceSize ?? response.body.count, limitedBy: response.body.endIndex) ?? response.body.endIndex
+            client?.urlProtocol(self, didLoad: response.body[start..<end])
+            start = end
+        }
         client?.urlProtocolDidFinishLoading(self)
     }
 

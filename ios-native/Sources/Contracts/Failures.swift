@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 
 /// The server answered, but not with what was asked. Transport problems, where no answer came,
 /// are IlyichPlatform's TransportFailure.
@@ -18,6 +19,70 @@ enum ServerFailure: Error, Equatable, Sendable {
     case readOnly
     /// Refused on the phone until the account's password is changed.
     case passwordChangeRequired
+}
+
+extension ServerFailure {
+    /// The paths where a 401 means the sign-in details were wrong, not that a session ended.
+    static let credentialPaths: Set<String> = ["auth/login", "oauth/callback"]
+
+    /// Returns the HTTP response when it is a success, and throws what the server said otherwise.
+    /// `body` is the answer's body, or nil when it was not read; `path` is the request's path below
+    /// /api.
+    @discardableResult
+    static func check(_ response: URLResponse, body: Data?, path: String? = nil) throws(ServerFailure) -> HTTPURLResponse {
+        guard let http = response as? HTTPURLResponse else { throw .undecodable }
+        guard !(200..<300).contains(http.statusCode) else { return http }
+        throw ServerFailure(status: http.statusCode, immich: ImmichError(response: http, body: body), path: path)
+    }
+
+    init(status: Int, immich: ImmichError?, path: String?) {
+        switch status {
+        case 401:
+            guard let immich else { self = .proxyRejected(401); return }
+            let path = path?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
+            if Self.credentialPaths.contains(path) {
+                self = .credentialsRejected(immich.message ?? "The server didn’t accept these sign-in details.")
+            } else { self = .sessionExpired(immich.message) }
+        case 403: self = immich.map { .forbidden($0.message) } ?? .proxyRejected(403)
+        // Immich never asks for proxy authentication.
+        case 407: self = .proxyRejected(407)
+        case 404: self = .notFound
+        default: self = .http(status, immich?.message)
+        }
+    }
+}
+
+/// An error Immich itself wrote, as opposed to a proxy in front of it. Immich stamps every answer
+/// with an X-Correlation-ID header and writes errors as a JSON object with a message. Both are
+/// required, because API gateways write the same JSON for their own refusals; a header without a
+/// body to read is taken as Immich's.
+struct ImmichError: Equatable, Sendable {
+    let message: String?
+
+    init?(response: HTTPURLResponse, body: Data?) {
+        guard response.value(forHTTPHeaderField: "X-Correlation-ID") != nil else { return nil }
+        guard let body, !body.isEmpty else { message = nil; return }
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
+        if let text = object["message"] as? String { message = text }
+        else if let texts = object["message"] as? [String] { message = texts.joined(separator: " ") }
+        else { message = nil }
+    }
+}
+
+extension ServerFailure: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .sessionExpired: "Your session has expired. Please sign in again."
+        case .credentialsRejected(let message): message
+        case .proxyRejected(let status): "A proxy in front of your server refused the request (HTTP \(status)). Check the network settings for this server."
+        case .forbidden: "This account cannot access that item. It may require unlocking."
+        case .notFound: "This item is unavailable. Refresh and try again."
+        case .http(let status, _): "The server could not complete the request (HTTP \(status))."
+        case .undecodable: "The server returned data this version of Ilyich could not read."
+        case .readOnly: ReadOnlyPolicy.ReadOnlyError().errorDescription
+        case .passwordChangeRequired: "Change your account password before continuing."
+        }
+    }
 }
 
 /// How a failed transfer or job is handled, from section 5 of the rebuild plan.

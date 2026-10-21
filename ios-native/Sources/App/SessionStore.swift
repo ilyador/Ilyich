@@ -66,10 +66,10 @@ import IlyichPlatform
                     let configuration = URLSessionConfiguration.ephemeral
                     configuration.timeoutIntervalForRequest = 4
                     configuration.timeoutIntervalForResource = 6
-                    let checkSession = URLSession(configuration: configuration, delegate: SameOriginRedirectDelegate(origin: saved.server), delegateQueue: nil)
-                    defer { checkSession.invalidateAndCancel() }
-                    let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID, session: checkSession)
-                    if let user = try? await client.currentUser(), user.isAdmin == true {
+                    let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID, sessionConfiguration: configuration)
+                    let user = try? await client.currentUser()
+                    await client.shutdown()
+                    if user?.isAdmin == true {
                         saved.requiresPasswordChange = false
                         try? KeychainCredentialStore().save(saved)
                     }
@@ -82,7 +82,10 @@ import IlyichPlatform
     func signIn(server: String, email: String, password: String) async throws {
         guard let url = URL(string: server.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw APIError.invalidServerURL }
         let client = try APIClient(baseURL: url)
-        let result = try await client.login(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
+        let result: LoginResponse
+        do { result = try await client.login(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password) }
+        catch { await client.shutdown(); throw error }
+        await client.shutdown()
         try acceptLogin(result, server: client.baseURL)
     }
 
@@ -98,6 +101,7 @@ import IlyichPlatform
     private func connect(_ saved: StoredCredential) throws {
         let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID,
                                    networkConfiguration: isUITesting ? NetworkConfiguration() : nil)
+        if let replaced = api, replaced !== client { Task { await replaced.shutdown() } }
         api = client
         let pipeline = MediaPipeline(client: client)
         self.pipeline = pipeline
@@ -146,7 +150,11 @@ import IlyichPlatform
                 let summary = try await sync.synchronize()
                 guard !Task.isCancelled, let self, self.api === client else { return }
                 await self.didSync(summary, client: client)
-            } catch is CancellationError { return }
+            } catch is CancellationError {
+                // Only this task's own cancellation ends it quietly. A pass cancelled under it must
+                // not leave sync marked as running, or Sync now would never start another.
+                guard !Task.isCancelled else { return }
+            }
             catch {
                 guard !Task.isCancelled, let self, self.api === client else { return }
                 await self.syncFailed(error, client: client)
@@ -296,8 +304,11 @@ import IlyichPlatform
             NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
                                             userInfo: ["scope": client.cacheScope, "collections": true, "accessChanged": true])
         }
-        if case APIError.unauthorized = error { await signOut() }
-        else { syncError = error.localizedDescription }
+        if case ServerFailure.sessionExpired = error {
+            await endSessionIfExpired(after: error, client: client)
+            // The session check found the session still valid.
+            if api === client { syncError = "The server refused to sync. Sync again in a moment." }
+        } else { syncError = error.localizedDescription }
     }
 
     /// Forgets the media of photos the index removed, a batch at a time, and only then takes them
@@ -321,12 +332,22 @@ import IlyichPlatform
         validationTask?.cancel()
         validationTask = Task { [weak self] in
             do { try await client.validateToken() }
-            catch APIError.unauthorized {
+            catch {
+                // A temporary network failure, a proxy or a forbidden answer keeps the session,
+                // and with it the offline library.
                 guard !Task.isCancelled, let self, self.api === client else { return }
-                await self.signOut()
-                if self.api == nil { self.error = APIError.unauthorized.localizedDescription }
-            } catch { /* A temporary network failure must not discard an offline session. */ }
+                await self.endSessionIfExpired(after: error, client: client)
+            }
         }
+    }
+
+    /// Signs out only when Immich says the session is gone and a second check agrees. Signing in
+    /// again re-syncs the whole library, so nothing less does.
+    private func endSessionIfExpired(after error: any Error, client: APIClient) async {
+        guard await SessionPolicy.confirmsExpiry(after: error, recheck: { try await client.validateToken() }),
+              api === client, !isSigningOut else { return }
+        await signOut()
+        if api == nil { self.error = ServerFailure.sessionExpired(nil).localizedDescription }
     }
 
     func open(_ url: URL) {
@@ -371,5 +392,6 @@ import IlyichPlatform
         error = cleanupError
         isSigningOut = false
         try? await previous?.logout()
+        await previous?.shutdown()
     }
 }

@@ -104,19 +104,19 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer opaque.not-a-jwt")
         XCTAssertFalse(try XCTUnwrap(request.url).absoluteString.contains("opaque.not-a-jwt"))
         XCTAssertTrue(try XCTUnwrap(request.url).absoluteString.contains("revision%2Bwith"))
-        let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
-        XCTAssertThrowsError(try APIClient.validate(response)) { error in
-            guard case APIError.forbidden = error else { return XCTFail("Permission failures must not be converted into logout.") }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: ["X-Correlation-ID": "permission"])!
+        XCTAssertThrowsError(try ServerFailure.check(response, body: Data(#"{"message":"Forbidden"}"#.utf8))) { error in
+            guard case ServerFailure.forbidden = error else { return XCTFail("Permission failures must not be converted into logout.") }
         }
     }
 
     func testTransportFailureClassificationAcceptsOnlyDefiniteNetworkFailures() {
         XCTAssertTrue(TransportFailure.isDefinite(URLError(.notConnectedToInternet)))
-        XCTAssertTrue(TransportFailure.isDefinite(NetworkConfigurationError.unavailable))
+        XCTAssertTrue(TransportFailure.isDefinite(TransportFailure.allEndpointsUnavailable))
         XCTAssertFalse(TransportFailure.isDefinite(URLError(.cancelled)))
         XCTAssertFalse(TransportFailure.isDefinite(CancellationError()))
         XCTAssertFalse(TransportFailure.isDefinite(NetworkConfigurationError.invalidAddress))
-        XCTAssertFalse(TransportFailure.isDefinite(APIError.forbidden))
+        XCTAssertFalse(TransportFailure.isDefinite(ServerFailure.forbidden(nil)))
     }
 
     func testAssetDecodeKeepsLightcraftDistinctFromImmichEdits() throws {

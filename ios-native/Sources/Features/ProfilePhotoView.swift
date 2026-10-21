@@ -56,7 +56,7 @@ struct ProfilePhotoSettingsView: View {
             let data = try await api.profileImage(userID: id)
             let image = try await Task.detached(priority: .userInitiated) { try ProfileImageDecoder.decode(data, pixels: 400) }.value
             try Task.checkCancellation(); avatar = image.uiImage
-        } catch APIError.notFound { avatar = nil }
+        } catch ServerFailure.notFound { avatar = nil }
         catch is CancellationError { } catch { failure = .init(error) }
     }
 }

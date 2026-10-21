@@ -227,7 +227,7 @@ actor MediaPipeline {
                         }
                         do {
                             let (data, response) = try await session.data(for: request)
-                            try APIClient.validate(response)
+                            try ServerFailure.check(response, body: data)
                             await limiter.release()
                             // Waiters get the bytes now. The flight stays joinable until the file
                             // is written, so nobody downloads it twice meanwhile.
@@ -320,7 +320,7 @@ actor MediaPipeline {
             try await limiter.acquire()
             do {
                 let (data, response) = try await session.data(for: request)
-                try APIClient.validate(response)
+                try ServerFailure.check(response, body: data)
                 let image = try Self.downsample(data, pixelSize: identity.pixelSize)
                 await limiter.release()
                 return image
@@ -362,7 +362,7 @@ actor MediaPipeline {
                     do {
                         try Task.checkCancellation()
                         let (data, response) = try await session.data(for: request)
-                        try APIClient.validate(response)
+                        try ServerFailure.check(response, body: data)
                         try Task.checkCancellation()
                         let image = try Self.downsample(data, pixelSize: key.pixelSize)
                         try Task.checkCancellation()

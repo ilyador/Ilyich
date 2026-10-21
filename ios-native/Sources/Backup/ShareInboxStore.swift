@@ -83,7 +83,8 @@ import IlyichPlatform
                         completed += 1; refresh()
                         notificationCompleted[batchID, default: 0] += 1
                     } catch is CancellationError { throw CancellationError() }
-                    catch APIError.unauthorized { throw APIError.unauthorized }
+                    // An ended session or a proxy's refusal stops every upload, not only this one.
+                    catch let failure as ServerFailure where failure.stopsEveryUpload { throw failure }
                     catch {
                         try checkSession(saved, runID: runID)
                         errors[item.id] = error.localizedDescription
@@ -171,6 +172,16 @@ import IlyichPlatform
         else {
             try SharedInbox.save(batch)
             for file in [item.original, item.motion, item.sidecar].compactMap({ $0 }) { try? FileManager.default.removeItem(at: file.url) }
+        }
+    }
+}
+
+private extension ServerFailure {
+    /// The account can't upload anything right now, so no other file would fare better.
+    var stopsEveryUpload: Bool {
+        switch self {
+        case .sessionExpired, .proxyRejected: true
+        default: false
         }
     }
 }
