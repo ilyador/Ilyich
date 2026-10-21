@@ -297,9 +297,9 @@ extension TransferStore {
 
     // MARK: Rows
 
-    private static let jobColumns = "id,lane,source_key,origin,state,phase,retry_count,batch_id,display_name,error_class,error_message,error_at,seq"
+    static let jobColumns = "id,lane,source_key,origin,state,phase,retry_count,batch_id,display_name,error_class,error_message,error_at,seq"
 
-    private static func storedJob(_ row: TransferSQLite.Row) -> StoredJob? {
+    static func storedJob(_ row: TransferSQLite.Row) -> StoredJob? {
         guard let id = row.integer(0), let lane = row.text(1).flatMap(TransferLane.init(rawValue:)),
               let source = row.text(2).flatMap({ TransferSource(lane: lane, key: $0) }),
               let state = row.text(4).flatMap(JobState.init(rawValue:)) else { return nil }
