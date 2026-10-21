@@ -40,8 +40,8 @@ protocol PhotoLibraryStaging: Sendable {
     func albumMembers(_ albumID: String, excluded: Set<String>) async -> [String]
 }
 
-/// The synchronous reads discovery makes, which tests fake. Safe on any thread; the adapter calls
-/// them on its own queue.
+/// The synchronous reads discovery makes, which tests fake. Safe on any thread; the adapter runs
+/// them off its own queue (PhotoKitAdapter.offQueue).
 protocol PhotoStagingReading: Sendable {
     /// Every album and smart album with at least one asset, unsorted.
     func albums() -> [DeviceAlbum]
@@ -56,23 +56,35 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
 
     // MARK: - Discovery
 
-    /// Read once and kept until Photos reports a change to albums or their contents. Only kept
-    /// while the change observer runs, as nothing else would say it went stale.
-    func albums() -> [DeviceAlbum] {
+    /// Read once and kept until Photos reports a change. Only kept while the change observer runs,
+    /// as nothing else would say it went stale.
+    func albums() async -> [DeviceAlbum] {
         guard Self.canRead(authorization) else { return [] }
         let generation = albumGeneration.withLock { $0 }
         if let albumCache, albumCache.generation == generation { return albumCache.albums }
-        let albums = stagingReader.albums().sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        albumCache = isObserving ? (generation, albums) : nil
+        let reader = stagingReader
+        let albums = await Task.detached(priority: .utility) {
+            reader.albums().sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        }.value
+        // A change during the read leaves nothing cached; a later call reads again.
+        if !isObserving { albumCache = nil }
+        else if generation == albumGeneration.withLock({ $0 }) { albumCache = (generation, albums) }
         return albums
+    }
+
+    /// Runs a long PhotoKit read, such as enumerating every member of an album, at utility and off
+    /// the adapter's queue, so a favorite, a delete or staging never waits behind it.
+    private nonisolated static func offQueue<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try Task.checkCancellation()
+        return try await Task.detached(priority: .utility, operation: body).value
     }
 
     nonisolated func candidates(included: Set<String>, excluded: Set<String>) -> AsyncThrowingStream<[DeviceCandidate], any Error> {
         candidates(included: included, excluded: excluded, batchSize: Self.batchSize)
     }
 
-    /// Each batch is read in a turn of its own on the adapter's queue, so a change to Photos can
-    /// run between two batches, and nothing is read on the caller's thread.
+    /// Each batch is read on its own, off the adapter's queue and the caller's thread, so a change
+    /// to Photos never waits behind discovery and dropping the stream stops it between batches.
     nonisolated func candidates(included: Set<String>, excluded: Set<String>, batchSize: Int) -> AsyncThrowingStream<[DeviceCandidate], any Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: [DeviceCandidate].self)
         let producer = Task {
@@ -89,18 +101,18 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         return stream
     }
 
-    func albumMembers(_ albumID: String, excluded: Set<String>) -> [String] {
-        stagingReader.members(of: [albumID]).subtracting(stagingReader.members(of: excluded)).sorted()
+    nonisolated func albumMembers(_ albumID: String, excluded: Set<String>) async -> [String] {
+        (try? await candidateIDs(included: [albumID], excluded: excluded)) ?? []
     }
 
-    private func candidateIDs(included: Set<String>, excluded: Set<String>) throws -> [String] {
-        try Task.checkCancellation()
-        return stagingReader.members(of: included).subtracting(stagingReader.members(of: excluded)).sorted()
+    private nonisolated func candidateIDs(included: Set<String>, excluded: Set<String>) async throws -> [String] {
+        let reader = stagingReader
+        return try await Self.offQueue { reader.members(of: included).subtracting(reader.members(of: excluded)).sorted() }
     }
 
-    private func readCandidates(_ ids: [String]) throws -> [DeviceCandidate] {
-        try Task.checkCancellation()
-        return stagingReader.candidates(ids)
+    private nonisolated func readCandidates(_ ids: [String]) async throws -> [DeviceCandidate] {
+        let reader = stagingReader
+        return try await Self.offQueue { reader.candidates(ids) }
     }
 
     /// The modification date Photos reports for the asset, nil when it has none or is gone.
@@ -120,18 +132,17 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
 
     /// Phone photos for the merged timeline: each one, its cloud identifier, and whether Photos
     /// holds no edit of it.
-    func timelineItems(included: Set<String>, excluded: Set<String>) async throws -> [DeviceTimelineItem] {
-        let ids = try candidateIDs(included: included, excluded: excluded)
+    nonisolated func timelineItems(included: Set<String>, excluded: Set<String>) async throws -> [DeviceTimelineItem] {
+        let ids = try await candidateIDs(included: included, excluded: excluded)
         var result: [DeviceTimelineItem] = []
         for start in stride(from: 0, to: ids.count, by: Self.batchSize) {
-            result += try await timelineBatch(Array(ids[start..<min(start + Self.batchSize, ids.count)]))
+            let batch = Array(ids[start..<min(start + Self.batchSize, ids.count)])
+            result += try await Self.offQueue { Self.timelineBatch(batch) }
         }
         return result
     }
 
-    private func timelineBatch(_ batch: [String]) async throws -> [DeviceTimelineItem] {
-        await Task.yield()
-        try Task.checkCancellation()
+    private nonisolated static func timelineBatch(_ batch: [String]) -> [DeviceTimelineItem] {
         let clouds = PHPhotoLibrary.shared().cloudIdentifierMappings(forLocalIdentifiers: batch)
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: batch, options: nil)
         return (0..<assets.count).map { index in
@@ -178,8 +189,9 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         let modified = asset.modificationDate ?? created
         var fields = StagingRules.fields(created: created, modified: modified, isFavorite: asset.isFavorite, duration: asset.duration)
         if StagingRules.isUnadjusted(described.map(\.type)) {
-            let mappings = PHPhotoLibrary.shared().cloudIdentifierMappings(forLocalIdentifiers: [localID])
-            let cloudID = (try? mappings[localID]?.get())?.stringValue
+            let cloudID = try await Self.offQueue {
+                (try? PHPhotoLibrary.shared().cloudIdentifierMappings(forLocalIdentifiers: [localID])[localID]?.get())?.stringValue
+            }
             fields["metadata"] = try StagingRules.mobileAppMetadata(cloudID: cloudID, created: created, location: asset.location?.coordinate)
         }
         return PreparedPhoto(localID: localID, modificationDate: modified, original: file, motion: video, sidecar: xmp,

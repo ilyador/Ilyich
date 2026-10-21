@@ -135,9 +135,37 @@ final class StagingRulesTests: XCTestCase {
         let expected = ids.filter { !ids[10..<20].contains($0) }
         XCTAssertEqual(batches.flatMap { $0 }.map(\.id), expected)
         XCTAssertEqual(batches.flatMap { $0 }.first?.modified, AssetRevision(referenceSeconds: FakePhotoKit.revision).date)
-        XCTAssertEqual(photos.readsOnMainThread, 0, "Photos is read only on the adapter's queue.")
+        XCTAssertEqual(photos.readsOnMainThread, 0, "Photos is never read on the main thread.")
         let members = await adapter.albumMembers("screenshots", excluded: [])
         XCTAssertEqual(members, Array(ids[10..<20]))
+    }
+
+    /// A favorite doesn't wait behind a long read of albums or their members, as it would if the
+    /// read held the adapter's queue.
+    func testLongReadsDontHoldUpChanges() async throws {
+        let photos = FakePhotoKit()
+        photos.add("a")
+        photos.addAlbum("all", title: "All", members: ["a"])
+        let adapter = PhotoKitAdapter(library: photos, assets: photos, journal: DeviceDatabase(url: deviceDatabaseURL()), staging: photos)
+        photos.holdReads()
+        let albums = Task { await adapter.albums() }
+        let members = Task { await adapter.albumMembers("all", excluded: []) }
+        try await waitFor { photos.readsWaiting == 2 }
+
+        let done = Locked(false)
+        let favorite = Task {
+            let result = await adapter.perform(.setFavorite([DeviceAssetID(rawValue: "a")], true, expected: [:]))
+            done.mutate { $0 = true }
+            return result
+        }
+        try await waitFor { done.value }
+        photos.releaseReads()
+        let result = await favorite.value
+        XCTAssertEqual(result.outcome, .committed(affected: [DeviceAssetID(rawValue: "a")], created: []))
+        let read = await albums.value
+        XCTAssertEqual(read.map(\.title), ["All"])
+        let found = await members.value
+        XCTAssertEqual(found, ["a"])
     }
 
     /// Dropping the stream stops discovery between batches.
@@ -175,21 +203,27 @@ final class StagingRulesTests: XCTestCase {
         _ = await adapter.albums()
         XCTAssertEqual(photos.albumReads, 1)
 
-        // A favorite or an edit alone changes no album.
+        // A favorite or an edit can change a smart album such as Favorites, which Photos needn't
+        // report as a change to the album.
+        photos.addAlbum("5", title: "Favorites", members: ["a"])
         photos.emit(PhotoLibraryChangeDetails(changed: [DeviceAssetID(rawValue: "a")]))
+        let favorited = await adapter.albums()
+        XCTAssertEqual(favorited.map(\.title), ["Album 9", "Album 10", "Favorites", "Zoo"])
+        XCTAssertEqual(photos.albumReads, 2)
         _ = await adapter.albums()
-        XCTAssertEqual(photos.albumReads, 1)
+        XCTAssertEqual(photos.albumReads, 2, "Kept until the next change.")
+        photos.addAlbum("5", title: "Favorites", members: [])
 
         photos.addAlbum("4", title: "Trip", members: ["b"])
         photos.emit(PhotoLibraryChangeDetails(albumsChanged: true))
         let changed = await adapter.albums()
-        XCTAssertEqual(changed.map(\.title), ["Album 9", "Album 10", "Trip", "Zoo"])
-        XCTAssertEqual(photos.albumReads, 2)
+        XCTAssertEqual(changed.map(\.title), ["Album 9", "Album 10", "Favorites", "Trip", "Zoo"])
+        XCTAssertEqual(photos.albumReads, 3)
 
         // A new photo changes counts.
         photos.emit(PhotoLibraryChangeDetails(inserted: [DeviceAssetID(rawValue: "c")]))
         _ = await adapter.albums()
-        XCTAssertEqual(photos.albumReads, 3)
+        XCTAssertEqual(photos.albumReads, 4)
 
         photos.setStatus(.denied)
         await adapter.refreshAccess()

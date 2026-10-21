@@ -71,7 +71,7 @@ actor PhotoKitAdapter {
     /// The album list as last read, with the album generation it was read at
     /// (PhotoLibraryStaging.swift).
     var albumCache: (generation: UInt64, albums: [DeviceAlbum])?
-    /// Moves whenever Photos reports a change that may add, remove, rename or resize an album.
+    /// Moves whenever Photos reports a change, as any change may add, remove, rename or resize an album.
     nonisolated let albumGeneration = Mutex<UInt64>(0)
 
     private struct Observation {
@@ -166,10 +166,10 @@ actor PhotoKitAdapter {
     /// Adds what Photos reported to the burst subscribers will hear, which goes out one window
     /// after the burst began. Photos calls this on its own queue.
     private nonisolated func ingest(_ details: PhotoLibraryChangeDetails) {
-        // Adding or removing photos changes album counts; an edit or favorite alone needn't.
-        if details.albumsChanged || details.requiresFullReload || !details.inserted.isEmpty || !details.removed.isEmpty {
-            albumGeneration.withLock { $0 &+= 1 }
-        }
+        // Any change may move an album: an insert or removal changes counts, and a favorite or an
+        // edit changes smart albums such as Favorites and Recently Edited, which Photos doesn't
+        // reliably report as a change to the album itself.
+        albumGeneration.withLock { $0 &+= 1 }
         let starts = observation.withLock { state -> Bool in
             var change = state.pending ?? DeviceLibraryChange(access: state.access)
             change.merge(details)
