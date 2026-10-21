@@ -181,7 +181,7 @@ final class LibraryTests: XCTestCase {
         for row in ["Account", "Read-only mode", "Network", "Notifications"] {
             XCTAssertTrue(app.buttons[row].waitForExistence(timeout: 5), "\(row) has its own row on the Settings shelf.")
         }
-        // Eleven rows do not fit; holding near the bottom brings the rest.
+        // Twelve rows do not fit; holding near the bottom brings the rest.
         let origin = app.coordinate(withNormalizedOffset: .zero), height = app.frame.height
         origin.withOffset(CGVector(dx: 120, dy: height * 0.5))
             .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: 120, dy: height - 70)), withVelocity: .slow, thenHoldForDuration: 2)
@@ -194,6 +194,13 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.buttons["Read-only mode"].waitForExistence(timeout: 5))
         app.buttons["Read-only mode"].tap()
         XCTAssertTrue(app.switches["Read-only mode"].waitForExistence(timeout: 5), "Read-only mode can be turned on and off.")
+        app.buttons["Done"].tap()
+        // The viewer's settings have their own row rather than sitting under Appearance.
+        openShelves(app)
+        app.buttons["Settings"].tap()
+        XCTAssertTrue(app.buttons["Photo and video viewer"].waitForExistence(timeout: 5))
+        app.buttons["Photo and video viewer"].tap()
+        XCTAssertTrue(app.switches["Play automatically"].waitForExistence(timeout: 5), "Videos can be set to play when they open.")
         app.buttons["Done"].tap()
         openShelves(app)
         app.buttons["Settings"].tap()
@@ -286,10 +293,12 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.buttons["Manage people"].waitForExistence(timeout: 5), "Holding by People's tip opens it without lifting.")
         XCTAssertTrue(app.buttons["Maya"].exists)
         capture(app, "Shelf — People opened by a swipe")
-        // Left to the edge goes back a level, then folds the shelves away.
+        // Holding at the left edge while its glow builds goes back a level; at the top level the
+        // edge folds the shelves away.
         let middle = app.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.4))
-        middle.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.4)))
-        XCTAssertTrue(app.buttons["People"].waitForExistence(timeout: 5), "The left edge goes back to the top level.")
+        middle.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.4)),
+                     withVelocity: .default, thenHoldForDuration: 0.8)
+        XCTAssertTrue(app.buttons["People"].waitForExistence(timeout: 5), "Holding at the left edge goes back to the top level.")
         XCTAssertFalse(app.buttons["Manage people"].exists)
         middle.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.003, dy: 0.4)))
         XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "At the top level the left edge puts the shelves away.")
@@ -618,6 +627,8 @@ final class LibraryTests: XCTestCase {
         let play = app.buttons.matching(NSPredicate(format: "label IN %@", ["Play", "Pause"])).firstMatch
         XCTAssertTrue(play.waitForExistence(timeout: 5), "A video has a play button.")
         XCTAssertTrue(app.descendants(matching: .any)["Playback position"].exists, "A video has a scrubber.")
+        // Play automatically is on unless it is turned off in Settings.
+        XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 10), "A video starts playing when it opens.")
         let share = app.buttons["Share"]
         XCTAssertEqual(play.frame.midY, mute.frame.midY, accuracy: 1, "Play and mute sit in one pill.")
         XCTAssertLessThan(play.frame.maxX, mute.frame.minX)
