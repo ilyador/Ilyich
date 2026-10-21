@@ -16,6 +16,8 @@ final class AccountStoragePathsTests: XCTestCase {
         XCTAssertEqual(paths.thumbnails, "IlyichThumbnails/cb73830dc48b80dcb5bfbf7950f74cb2")
         XCTAssertEqual(paths.mediaCache, "IlyichMedia/\(digest)")
         XCTAssertEqual(paths.backup, "Backup/\(digest)")
+        XCTAssertEqual(paths.transfersDatabase, "IlyichTransfers/\(digest).sqlite")
+        XCTAssertTrue(TransferStore.url(for: account).path.hasSuffix("/Library/Application Support/" + paths.transfersDatabase))
         XCTAssertEqual(paths.widgetCache, "WidgetCache2/\(digest)")
         XCTAssertEqual(paths.readOnlyKey, "readOnly.\(digest)")
         XCTAssertEqual(paths.lockedPINAccount, digest)

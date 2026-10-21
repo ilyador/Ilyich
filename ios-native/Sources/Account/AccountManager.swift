@@ -70,6 +70,9 @@ protocol AccountDevice: Sendable {
     func clearDiagnostics() async
     /// Uploads follow a read-only change.
     func readOnlyChanged(_ enabled: Bool) async
+    /// Keeps how the latest import of the backup state into the transfers database went, for
+    /// Diagnostics, until sign-out clears diagnostics.
+    func recordTransferImport(_ report: LegacyImportReport) async
 }
 
 /// Makes every client the account layer uses, so that tests can route them to a stub server.
@@ -98,6 +101,9 @@ struct AccountDependencies: Sendable {
     var expiryRecheckDelay: Duration = .seconds(2)
     /// How long sign-out waits for the server to revoke the cast session and end the session.
     var serverSignOutBudget: Duration = .seconds(3)
+    /// How long the copy of the backup state waits after the app opens or comes forward, so a
+    /// rebuild never competes with the first photos on screen.
+    var backupStateCopyDelay: Duration = .seconds(5)
 }
 
 /// Owns the signed-in account: restores it at launch, signs in and out, and opens and tears down

@@ -39,7 +39,15 @@ actor DiagnosticsStore {
         if events.count > capacity { events.removeFirst(events.count - capacity) }
     }
     func snapshot() -> [DiagnosticEvent] { events.reversed() }
-    func clear() { events.removeAll() }
+    /// Everything, as at sign-out.
+    func clear() { events.removeAll(); transferImport = nil }
+    /// The request log only.
+    func clearRequests() { events.removeAll() }
+
+    /// How the latest import of the backup state into the transfers database went: counts only.
+    private var transferImport: LegacyImportReport?
+    func recordTransferImport(_ report: LegacyImportReport) { transferImport = report }
+    func transferImportReport() -> LegacyImportReport? { transferImport }
     nonisolated static func category(path: String) -> String {
         let prefix = path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
         switch prefix {
@@ -47,11 +55,13 @@ actor DiagnosticsStore {
         default: return "other"
         }
     }
-    nonisolated static func report(events: [DiagnosticEvent]) -> String {
+    nonisolated static func report(events: [DiagnosticEvent], transferImport: LegacyImportReport? = nil) -> String {
         let format = ISO8601DateFormatter()
         let rows = events.map { event in
             "\(format.string(from: event.date)) \(event.method) \(event.category) \(event.statusCode.map(String.init) ?? "—") \(event.outcome.rawValue) \(event.milliseconds)ms"
         }
-        return (["Ilyich request diagnostics", "Categories only. No URLs, identifiers, headers, queries, bodies, or error text are recorded."] + rows).joined(separator: "\n")
+        let imports = transferImport.map { ["", "\(format.string(from: $0.date)) \($0.summary)"] } ?? []
+        return (["Ilyich request diagnostics", "Categories only. No URLs, identifiers, headers, queries, bodies, or error text are recorded."] + rows + imports)
+            .joined(separator: "\n")
     }
 }

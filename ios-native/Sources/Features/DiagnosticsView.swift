@@ -15,6 +15,8 @@ struct DiagnosticsView: View {
     @State private var confirmReset = false
     @State private var resetMessage: String?
     @State private var confirmMetadataReset = false
+    @State private var transferImport: LegacyImportReport?
+    @State private var comparingBackupRecords = false
     var body: some View {
         Form {
             Section("App") {
@@ -29,6 +31,27 @@ struct DiagnosticsView: View {
                 LabeledContent("Confirmed", value: backup.confirmed.formatted())
                 LabeledContent("Failed", value: backup.failures.count.formatted())
                 NavigationLink("Backup details") { BackupSettingsView() }
+            }
+            if let session, session.runtime?.transfers != nil {
+                Section {
+                    if let transferImport {
+                        LabeledContent("Mismatches", value: transferImportSummary(transferImport))
+                        LabeledContent("Checked") { Text(transferImport.date, format: .dateTime.month().day().hour().minute()).multilineTextAlignment(.trailing) }
+                        if let comparison = transferImport.comparison {
+                            DisclosureGroup("By category") {
+                                ForEach(LegacyImportCategory.allCases, id: \.self) { category in
+                                    LabeledContent(category.title, value: comparisonValue(comparison, category))
+                                }
+                            }
+                        }
+                    } else {
+                        Text(comparingBackupRecords ? "Comparing…" : "Not compared yet.").foregroundStyle(.secondary)
+                    }
+                    Button("Compare again", systemImage: "arrow.left.arrow.right") { Task { await compareBackupRecords() } }
+                        .disabled(comparingBackupRecords)
+                } header: { Text("Backup records copy") } footer: {
+                    Text("Ilyich keeps a copy of this account’s backup records for the backup engine that will replace today’s, and checks it against the records backup uses now. Backup still runs from its own records; this copy changes nothing.")
+                }
             }
             Section {
                 if let session {
@@ -73,7 +96,7 @@ struct DiagnosticsView: View {
                 Picker("Record", selection: $level) { ForEach(DiagnosticLevel.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) } }
                 if !events.isEmpty {
                     ShareLink(item: report, preview: SharePreview("Ilyich diagnostics")) { Label("Export diagnostics", systemImage: "square.and.arrow.up") }
-                    Button("Clear log", role: .destructive) { Task { await DiagnosticsStore.shared.clear(); await refresh() } }
+                    Button("Clear log", role: .destructive) { Task { await DiagnosticsStore.shared.clearRequests(); await refresh() } }
                 }
                 if events.isEmpty { Text("No recorded events in this session.").foregroundStyle(.secondary) }
                 ForEach(events) { event in
@@ -112,10 +135,32 @@ struct DiagnosticsView: View {
     private var report: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
-        return "Ilyich \(version) (\(build))\n\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)\n\n" + DiagnosticsStore.report(events: events)
+        return "Ilyich \(version) (\(build))\n\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)\n\n"
+            + DiagnosticsStore.report(events: events, transferImport: transferImport)
+    }
+    private func transferImportSummary(_ report: LegacyImportReport) -> String {
+        if let comparison = report.comparison { return comparison.total == 0 ? "None" : comparison.total.formatted() }
+        return switch report.outcome {
+        case .unreadable, .quarantined: "Backup records can’t be read"
+        case .needsMerge: "Changed since the copy"
+        case .skipped: "Copy kept by a newer version"
+        case .unavailable, .imported, .unchanged, .absent: "Couldn’t compare now"
+        }
+    }
+    private func comparisonValue(_ comparison: LegacyImportComparison, _ category: LegacyImportCategory) -> String {
+        let compared = comparison.compared[category] ?? 0, mismatches = comparison.mismatches[category] ?? 0
+        if mismatches == 0 { return compared == 0 ? "None to compare" : compared == 1 ? "Matches" : "All \(compared.formatted()) match" }
+        return compared == 1 && mismatches == 1 ? "Differs" : "\(mismatches.formatted()) differ, \(compared.formatted()) compared"
+    }
+    private func compareBackupRecords() async {
+        guard let session, !comparingBackupRecords else { return }
+        comparingBackupRecords = true; defer { comparingBackupRecords = false }
+        await session.compareBackupRecords()
+        await refresh()
     }
     private func refresh() async {
         events = await DiagnosticsStore.shared.snapshot()
+        transferImport = await DiagnosticsStore.shared.transferImportReport()
         if let pipeline { media = await pipeline.cacheUsage() }
         timeline = await TimelineCache.shared.cacheUsage(scope: api.cacheScope)
         do { syncStatistics = try await api.syncStatistics(); statisticsError = nil }

@@ -173,3 +173,57 @@ enum EnqueueResult: Hashable, Sendable {
     case alreadyBackedUp(Int)
     case refused(AccountRestriction)
 }
+
+// MARK: Receipts
+
+/// One part of a backed-up photo on the server: the still or video, or a Live Photo's video.
+struct RemoteCopy: Hashable, Sendable {
+    let id: String
+    /// Base64 SHA-1, as the server reports it.
+    let checksum: String
+    /// The size the server reported at the last cleanup check; nil until one has run.
+    var byteCount: Int64?
+}
+
+/// Proof that a photo was backed up: what it was when it was uploaded, and its server copies.
+struct TransferReceipt: Hashable, Sendable {
+    let localID: String
+    /// PHAsset.modificationDate when it was uploaded, bit for bit.
+    let revision: AssetRevision
+    var original: RemoteCopy
+    /// A Live Photo's video.
+    var motion: RemoteCopy?
+    let confirmedAt: Date?
+    /// When a cleanup check last measured its sizes.
+    var verifiedAt: Date?
+    /// When cleanup removed the photo from the phone.
+    var localDeletedAt: Date?
+}
+
+/// A phone photo and the server asset it was backed up as.
+struct ReceiptAssociation: Hashable, Sendable {
+    let localID: String
+    let assetID: String
+}
+
+/// Sizes a cleanup check measured for one receipt, recorded only while the receipt is still the
+/// one checked: the same revision and the same server copies.
+struct VerifiedSizes: Hashable, Sendable {
+    let localID: String
+    let revision: AssetRevision
+    let originalID: String
+    let motionID: String?
+    let originalBytes: Int64?
+    let motionBytes: Int64?
+}
+
+/// Backup receipts for cleanup and the phone's timeline. Pages run in local ID order; `after` is
+/// the last local ID of the page before, nil for the first.
+protocol ReceiptQuery: Sendable {
+    func receipts(for localIDs: [String]) async throws -> [String: TransferReceipt]
+    func associations(after localID: String?, limit: Int) async throws -> [ReceiptAssociation]
+    /// Receipts whose photo is still on the phone, for a cleanup check.
+    func receiptsForVerification(after localID: String?, limit: Int) async throws -> [TransferReceipt]
+    /// Records each measured size whose receipt is unchanged, and returns how many were.
+    func updateVerifiedSizes(ifUnchanged sizes: [VerifiedSizes], at date: Date) async throws -> Int
+}

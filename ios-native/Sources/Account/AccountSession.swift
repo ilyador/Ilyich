@@ -88,6 +88,13 @@ import IlyichPlatform
 
     func clearBrowsingCache() async { await manager.clearBrowsingCache() }
 
+    /// Compares the transfers database's copy of the backup state with the backup state now,
+    /// importing it first if it changed, for Diagnostics. Returns once the report is recorded.
+    func compareBackupRecords() async {
+        guard let runtime, phase == .active || phase == .passwordChangeRequired else { return }
+        await runtime.importBackupStateInShadow(comparing: true)?.value
+    }
+
     /// Turns read-only mode on or off for the signed-in account. The setting and the write
     /// generation change at once, so the controls follow straight away and writes still waiting to
     /// be sent are refused. Then uploads follow, as `AccountRuntime.uploadsFollow(readOnly:)`
@@ -108,10 +115,13 @@ import IlyichPlatform
 
     func sceneChanged(_ scene: ScenePhase) {
         if scene == .active {
+            let cameForward = !presence.isForeground
             presence.isForeground = true
             if let runtime, phase == .active || phase == .passwordChangeRequired {
                 runtime.check.validate()
                 if let sync = runtime.library?.sync { Task { await sync.presenceChanged() } }
+                // Only out of the background: Control Center and alerts only make the app inactive.
+                if cameForward { runtime.importBackupStateInShadow() }
             }
             if phase == .waitingForUnlock { Task { await manager.retryRestoreIfWaiting() } }
         } else if scene == .background {

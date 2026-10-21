@@ -19,6 +19,10 @@ public struct AccountStoragePaths: Sendable {
     /// Backup state and staged files, in the App Group container.
     public var backup: String { "Backup/\(account.digest)" }
 
+    /// The transfers database, in Application Support: never the App Group, where a lock held
+    /// at suspension gets the app killed.
+    public var transfersDatabase: String { "IlyichTransfers/\(account.digest).sqlite" }
+
     /// Widget snapshots, in the App Group container.
     public var widgetCache: String { "WidgetCache2/\(account.digest)" }
 

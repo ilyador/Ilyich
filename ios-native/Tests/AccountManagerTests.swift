@@ -198,10 +198,14 @@ import XCTest
             let saved = credential("alice", on: server)
             let backup = try goldenBackup(for: saved)
             turnOnReadOnlyAndOrderShelves(for: saved)
-            let harness = makeHarness(saved, server: server, environment: environment(library: true), mirror: mirror,
+            let environment = copyingBackupState(self.environment(library: true))
+            let harness = makeHarness(saved, server: server, environment: environment, mirror: mirror,
                                       uploads: LiveAccountDevice(backup: { backup.coordinator }))
             await harness.manager.restore()
             let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+            await runtime.importBackupStateInShadow()?.value
+            let transfers = TransferStore.url(for: saved.account, in: environment.transfersDirectory)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: transfers.path), name)
             let library = try XCTUnwrap(runtime.library)
             try await library.entities.persistCachedServerFeatures(ServerFeatures(passwordLogin: true, oauth: false, smartSearch: true, searchVerification: nil,
                                                                                   ocr: true, facialRecognition: true, map: true, trash: true, sidecar: true,
@@ -231,6 +235,7 @@ import XCTest
             XCTAssertFalse(syncOpen, name)
             XCTAssertEqual(try backup.state(), try Self.backupStateAfterSignOut(keepingAutomaticBackup: false),
                            "\(name): the backup state stays with its receipts, paused, and with automatic backup off.")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: transfers.path), "\(name): the transfers database stays, as the backup state does.")
             XCTAssertTrue(ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID), "\(name): the read-only flag stays.")
             XCTAssertEqual(ShelfOrder(scope: saved.account.cacheScope).ids(.albums), ["b", "a"], "\(name): the shelf order stays.")
         }
@@ -489,6 +494,58 @@ import XCTest
         XCTAssertNil(session.pendingLink, "A link for the account that signed out is dropped.")
     }
 
+    /// The account's backup state is copied into its transfers database when the account opens in
+    /// front and each time the app comes out of the background, and compared again when Diagnostics
+    /// asks; never when state.json is written, which BackupCoordinator does several times per photo.
+    /// A background launch, for a backup window or a finished upload, leaves it for the foreground.
+    func testBackupStateIsCopiedWhenTheAppComesForwardNeverOnWrites() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let saved = credential("alice", on: server)
+        let environment = copyingBackupState(self.environment())
+        let folder = try XCTUnwrap(environment.backupContainer).appendingPathComponent(AccountStoragePaths(saved.account).backup, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let stateFile = folder.appendingPathComponent("state.json")
+        try FixtureLoader.data("backup/state-current.json").write(to: stateFile)
+        let dependencies = self.dependencies(saved, server: server, log: AccountEventLog())
+        let device = try XCTUnwrap(dependencies.device as? FakeAccountDevice)
+        let session = AccountSession(environment: environment, dependencies: dependencies, presence: AppPresence(isForeground: false))
+
+        await session.restore()
+        XCTAssertEqual(session.phase, .active)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(device.transferImports.isEmpty, "Opened in the background, nothing is copied.")
+
+        session.sceneChanged(.active)
+        try await until("Coming forward didn't copy the backup state.") { device.transferImports.count == 1 }
+        XCTAssertEqual(device.transferImports.last?.outcome, .imported)
+        XCTAssertEqual(device.transferImports.last?.comparison?.total, 0)
+        let database = TransferStore.url(for: saved.account, in: environment.transfersDirectory)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
+
+        // BackupCoordinator writes state.json, and Control Center comes and goes: nothing is copied.
+        try FixtureLoader.data("backup/state-9780e9625.json").write(to: stateFile, options: .atomic)
+        session.sceneChanged(.inactive)
+        session.sceneChanged(.active)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(device.transferImports.count, 1)
+        session.sceneChanged(.background)
+        session.sceneChanged(.active)
+        try await until("Coming forward again didn't copy the changed state.") { device.transferImports.count == 2 }
+        XCTAssertEqual(device.transferImports.last?.outcome, .imported)
+        XCTAssertEqual(device.transferImports.last?.comparison?.total, 0)
+
+        await session.compareBackupRecords()
+        XCTAssertEqual(device.transferImports.count, 3, "Diagnostics compares again.")
+        XCTAssertEqual(device.transferImports.last?.outcome, .unchanged)
+        XCTAssertEqual(device.transferImports.last?.comparison?.total, 0)
+
+        await session.signOut()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
+        XCTAssertEqual(try Data(contentsOf: stateFile), try FixtureLoader.data("backup/state-9780e9625.json"), "state.json is only ever read.")
+    }
+
     /// The sign-in screen asks the server how it signs in only once typing pauses, and signs in
     /// through the manager.
     func testSignInAsksTheServerOnceTypingPausesAndSignsIn() async throws {
@@ -545,6 +602,10 @@ import XCTest
         XCTAssertEqual(library?.keepsShelvesOpen, true)
         XCTAssertEqual(library?.syncsLibrary, false)
         XCTAssertEqual(library?.usesDevicePhotos, false)
+        XCTAssertEqual(library?.importsBackupState, false, "Nor its backup state.")
+        XCTAssertTrue(AccountEnvironment.live.importsBackupState)
+        XCTAssertNil(AccountEnvironment.live.transfersDirectory)
+        XCTAssertNil(AccountEnvironment.live.backupContainer)
         XCTAssertEqual(try library?.credentialStore().load()?.userID, AccountEnvironment.fixtureUserID)
         let people = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-many-people"])
         XCTAssertEqual(people?.fixtureCredential?.token, "ui-test-many-people")
@@ -576,7 +637,17 @@ import XCTest
         environment.usesDevicePhotos = false
         environment.syncsLibrary = library
         environment.validatesSession = validatesSession
+        environment.importsBackupState = false
         if library { environment.libraryDirectory = temporaryDirectory() }
+        return environment
+    }
+
+    /// `environment`, copying the backup state into a transfers database, both in folders of the test's.
+    private func copyingBackupState(_ environment: AccountEnvironment) -> AccountEnvironment {
+        var environment = environment
+        environment.importsBackupState = true
+        environment.transfersDirectory = temporaryDirectory()
+        environment.backupContainer = temporaryDirectory()
         return environment
     }
 
@@ -594,7 +665,7 @@ import XCTest
         }
         return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log, uploads: uploads, uploadsStop: uploadsStop),
                                    clients: clients, unlockEvents: { unlockEvents }, expiryRecheckDelay: .milliseconds(20),
-                                   serverSignOutBudget: serverSignOutBudget)
+                                   serverSignOutBudget: serverSignOutBudget, backupStateCopyDelay: .milliseconds(20))
     }
 
     private func makeHarness(_ credential: StoredCredential?, server: StubServer, environment: AccountEnvironment? = nil,
@@ -760,6 +831,11 @@ final class FakeAccountDevice: AccountDevice {
     func clearTimelineCaches(scope: String) async { log.append("clearTimelineCaches") }
     func clearDiagnostics() async { log.append("clearDiagnostics") }
     func readOnlyChanged(_ enabled: Bool) async { log.append("readOnly(\(enabled))") }
+
+    /// The backup state imports reported, in order. They stay out of the event log.
+    private let imports = Mutex<[LegacyImportReport]>([])
+    var transferImports: [LegacyImportReport] { imports.withLock { $0 } }
+    func recordTransferImport(_ report: LegacyImportReport) async { imports.withLock { $0.append(report) } }
 }
 
 /// A credential kept in memory that records saves and removals, and can stand for a Keychain

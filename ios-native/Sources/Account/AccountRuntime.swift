@@ -18,11 +18,17 @@ final class AccountRuntime: Sendable {
     let library: LibraryServices?
     /// Why the offline library couldn't open.
     let libraryError: String?
+    /// The account's transfers database, with the shadow import of today's backup state into it
+    /// (REBUILD_ROADMAP.md B1). Nil when the environment runs without it. Backup still runs from
+    /// the backup state; nothing reads the database's records yet.
+    let transfers: TransferServices?
     /// The session checks with the server.
     let check: SessionCheck
     /// The account's tasks, cancelled and waited for at shutdown.
     let work: OwnedWork
     private let device: any AccountDevice
+    private let presence: AppPresence
+    private let backupStateCopyDelay: Duration
 
     struct LibraryServices: Sendable {
         let entities: EntityStore
@@ -34,10 +40,16 @@ final class AccountRuntime: Sendable {
         let warmer: ThumbnailWarmer
     }
 
+    struct TransferServices: Sendable {
+        let store: TransferStore
+        let importer: LegacyBackupImporter
+    }
+
     var requiresPasswordChange: Bool { credential.requiresPasswordChange == true }
 
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
-                 library: LibraryServices?, libraryError: String?, check: SessionCheck, work: OwnedWork, device: any AccountDevice) {
+                 library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
+                 device: any AccountDevice, presence: AppPresence, backupStateCopyDelay: Duration) {
         self.id = id
         self.credential = credential
         self.authorization = authorization
@@ -45,9 +57,12 @@ final class AccountRuntime: Sendable {
         self.pipeline = pipeline
         self.library = library
         self.libraryError = libraryError
+        self.transfers = transfers
         self.check = check
         self.work = work
         self.device = device
+        self.presence = presence
+        self.backupStateCopyDelay = backupStateCopyDelay
     }
 
     /// Opens `credential`'s services. The client reads the server's saved network settings from
@@ -85,12 +100,23 @@ final class AccountRuntime: Sendable {
                 }
             } catch { libraryError = error.localizedDescription }
         }
+        var transfers: TransferServices?
+        if environment.importsBackupState {
+            // The database opens on its own queue at first use; the App Group is only looked up here.
+            let account = credential.account
+            let store = TransferStore(url: TransferStore.url(for: account, in: environment.transfersDirectory))
+            let container = environment.backupContainer ?? (try? AppGroupLayout.current().container)
+            let folder = container?.appendingPathComponent(AccountStoragePaths(account).backup, isDirectory: true)
+            transfers = TransferServices(store: store, importer: LegacyBackupImporter(mode: .shadow, store: store, folder: folder))
+        }
         return AccountRuntime(id: id, credential: credential, authorization: authorization, api: api, pipeline: pipeline,
-                              library: library, libraryError: libraryError, check: check, work: work, device: dependencies.device)
+                              library: library, libraryError: libraryError, transfers: transfers, check: check, work: work,
+                              device: dependencies.device, presence: presence, backupStateCopyDelay: dependencies.backupStateCopyDelay)
     }
 
     /// Starts the account's work once the screens show it: the warmer once the offline library is
-    /// complete, sync while the app is in front, and the session check.
+    /// complete, sync while the app is in front, the session check, and in front the shadow import
+    /// of the backup state.
     @MainActor func start() async {
         if let library {
             let entities = library.entities
@@ -98,17 +124,51 @@ final class AccountRuntime: Sendable {
             await library.sync.start()
         }
         check.validate()
+        // A background launch, for a backup window or a finished upload, leaves it for the next
+        // time the app comes forward.
+        if presence.isForeground { importBackupStateInShadow() }
     }
 
     /// Cancels the account's work and waits for it to end: the warmer, sync and its live stream,
-    /// the session check and read-only changes still on their way.
+    /// the session check, read-only changes still on their way and the shadow import, which rolls
+    /// back. Then the transfers database closes. It stays on disk, whatever the reason for ending.
     func cancelAndJoin() async {
         if let library {
             await library.warmer.stop()
             await library.sync.shutdown()
         }
         await work.cancelAndJoin()
+        await transfers?.store.close()
     }
+
+    // MARK: Transfers
+
+    /// Brings the transfers database's copy of the backup state up to date, if state.json changed,
+    /// and compares it with the file, as owned work: when the runtime opens in front and whenever
+    /// the app comes forward, a few seconds later, and at once when Diagnostics asks (`comparing`,
+    /// which compares again even when nothing changed). Never on a write of state.json. Runs follow
+    /// one another, and the report goes to Diagnostics and the console. Nil when there is nothing
+    /// to run.
+    @discardableResult
+    func importBackupStateInShadow(comparing: Bool = false) -> Task<Void, Never>? {
+        guard let transfers else { return nil }
+        let previous = work.current(Self.shadowImportSlot), device = device
+        let delay = comparing ? .zero : backupStateCopyDelay
+        let run = Task {
+            await withTaskCancellationHandler {
+                await previous?.value
+                if delay > .zero { try? await Task.sleep(for: delay) }
+                guard !Task.isCancelled, let report = await transfers.importer.run(comparing: comparing), !Task.isCancelled else { return }
+                await device.recordTransferImport(report)
+            } onCancel: {
+                previous?.cancel()
+            }
+        }
+        guard work.put(run, in: Self.shadowImportSlot, cancelling: false) else { return nil }
+        return run
+    }
+
+    private static let shadowImportSlot = "shadowImport"
 
     /// Empties the offline library: entities, acknowledgements and metadata. The file stays.
     func clearLibrary() async {
