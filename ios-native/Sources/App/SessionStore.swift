@@ -164,7 +164,7 @@ import IlyichPlatform
             await sync.startEvents(onChange: { [weak self] summary in
                 await self?.didSync(summary, client: client)
             }, onError: { [weak self] error in
-                await self?.syncFailed(error, client: client)
+                await self?.syncFailed(error, client: client, live: true)
             })
         }
     }
@@ -288,7 +288,9 @@ import IlyichPlatform
         if summary.configurationChanged { validateSession() }
     }
 
-    private func syncFailed(_ error: any Error, client: APIClient) async {
+    /// `live` says the failure is the live connection's, which tries again by itself, rather than
+    /// a sync pass's.
+    private func syncFailed(_ error: any Error, client: APIClient, live: Bool = false) async {
         guard api === client, let entities else { return }
         let previousPipeline = pipeline
         let resetPending = (try? await entities.takeAccessInvalidation()) == true
@@ -307,7 +309,10 @@ import IlyichPlatform
         if case ServerFailure.sessionExpired = error {
             await endSessionIfExpired(after: error, client: client)
             // The session check found the session still valid.
-            if api === client { syncError = "The server refused to sync. Sync again in a moment." }
+            if api === client {
+                syncError = live ? "The server rejected the live connection. The library will reconnect."
+                                 : "The server refused to sync. Sync again in a moment."
+            }
         } else { syncError = error.localizedDescription }
     }
 

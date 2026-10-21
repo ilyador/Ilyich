@@ -96,8 +96,10 @@ actor NativeSync {
                 } catch is CancellationError { break }
                 catch {
                     guard !Task.isCancelled else { break }
+                    // An expired session the session check confirms ends this loop through
+                    // sign-out, which stops sync. Any other refusal is tried again: Immich's socket
+                    // says unauthorized whenever its connection handler fails, for any reason.
                     await onError(error)
-                    if case ServerFailure.sessionExpired = error { break }
                 }
                 do { try await Task.sleep(for: .seconds(retry)) } catch { break }
                 retry = min(retry * 2, 30)

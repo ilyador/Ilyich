@@ -83,7 +83,8 @@ public final class GuardedURLSession: Sendable {
 
     /// Sends a request whose answer is read as it arrives, for answers too long to hold in memory.
     /// Returns once the response's headers are in. While more than a few megabytes wait to be
-    /// read, the transfer pauses.
+    /// read, the transfer pauses. It ends when the reader is cancelled while it waits for a
+    /// piece, or lets go of the body before the end.
     public func stream(for request: URLRequest) async throws -> (URLResponse, ResponseBody) {
         let handle = TaskHandle()
         return try await withTaskCancellationHandler {
@@ -203,10 +204,13 @@ private final class TaskHandle: Sendable {
 /// streamed answers for the tasks that read as they arrive. Tasks with completion handlers get
 /// their data there instead.
 private final class SessionRouter: NSObject, URLSessionDataDelegate, Sendable {
+    /// A streamed answer. Once the headers are in, the router keeps only what feeds the pieces in
+    /// and never the body itself, so the reader alone holds that.
     private struct Stream: Sendable {
-        var response: CheckedContinuation<(URLResponse, ResponseBody), any Error>?
+        /// The caller waiting for the headers, and the body it is handed with them.
+        var waiting: (response: CheckedContinuation<(URLResponse, ResponseBody), any Error>, body: ResponseBody)?
         let chunks: AsyncThrowingStream<Data, any Error>.Continuation
-        let body: ResponseBody
+        let flow: FlowControl
     }
 
     private let policy: SameOriginRedirectDelegate
@@ -216,10 +220,13 @@ private final class SessionRouter: NSObject, URLSessionDataDelegate, Sendable {
 
     func register(_ task: URLSessionDataTask, response: CheckedContinuation<(URLResponse, ResponseBody), any Error>) {
         let (chunks, continuation) = AsyncThrowingStream<Data, any Error>.makeStream()
-        // A reader that stops early, or is cancelled, ends the transfer.
+        // A reader that stops early, or is cancelled, ends the transfer: the pieces end when a
+        // reader waiting for one is cancelled, or once nothing holds the body or an iterator of
+        // it. A transfer paused for a reader that is gone would otherwise wait for good.
         continuation.onTermination = { _ in task.cancel() }
-        let body = ResponseBody(chunks: chunks, flow: FlowControl(task: task))
-        streams.withLock { $0[task.taskIdentifier] = Stream(response: response, chunks: continuation, body: body) }
+        let flow = FlowControl(task: task)
+        let body = ResponseBody(chunks: chunks, flow: flow)
+        streams.withLock { $0[task.taskIdentifier] = Stream(waiting: (response, body), chunks: continuation, flow: flow) }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
@@ -234,25 +241,26 @@ private final class SessionRouter: NSObject, URLSessionDataDelegate, Sendable {
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
-        let ready = streams.withLock { streams -> (CheckedContinuation<(URLResponse, ResponseBody), any Error>, ResponseBody)? in
-            guard var stream = streams[dataTask.taskIdentifier], let waiting = stream.response else { return nil }
-            stream.response = nil
+        let ready = streams.withLock { streams -> (response: CheckedContinuation<(URLResponse, ResponseBody), any Error>, body: ResponseBody)? in
+            guard var stream = streams[dataTask.taskIdentifier], let waiting = stream.waiting else { return nil }
+            // From here on the caller alone holds the body.
+            stream.waiting = nil
             streams[dataTask.taskIdentifier] = stream
-            return (waiting, stream.body)
+            return waiting
         }
         completionHandler(.allow)
-        if let ready { ready.0.resume(returning: (response, ready.1)) }
+        if let ready { ready.response.resume(returning: (response, ready.body)) }
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard let stream = streams.withLock({ $0[dataTask.taskIdentifier] }) else { return }
-        stream.body.flow.received(data.count)
+        stream.flow.received(data.count)
         stream.chunks.yield(data)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         guard let stream = streams.withLock({ $0.removeValue(forKey: task.taskIdentifier) }) else { return }
-        stream.response?.resume(throwing: error ?? URLError(.badServerResponse))
+        stream.waiting?.response.resume(throwing: error ?? URLError(.badServerResponse))
         if let error { stream.chunks.finish(throwing: error) } else { stream.chunks.finish() }
     }
 }

@@ -56,6 +56,30 @@ struct BackupState: Codable {
     var error: String?
 }
 
+/// One client for the account's backup requests, kept while the account, token and network
+/// settings stay the same, rather than a new client and its sessions for every request. A client
+/// it replaces is not shut down, since another backup flow may still be sending on it: its
+/// sessions go once the last flow holding it is done. Temporary until the transfer engine owns
+/// its transport (B9).
+struct BackupClientCache {
+    private var current: (scope: String, token: String, settings: NetworkConfiguration, api: APIClient)?
+
+    /// The client for `session` with `settings`, made with `make` when the one kept doesn't fit.
+    mutating func client(for session: StoredCredential, settings: NetworkConfiguration,
+                         make: () throws -> APIClient) rethrows -> APIClient {
+        if let current, current.scope == session.scope, current.token == session.token, current.settings == settings { return current.api }
+        let api = try make()
+        current = (session.scope, session.token, settings, api)
+        return api
+    }
+
+    /// Forgets the client kept and returns it, for a caller ending every backup flow.
+    mutating func removeClient() -> APIClient? {
+        defer { current = nil }
+        return current?.api
+    }
+}
+
 @MainActor @Observable final class BackupCoordinator {
     static let shared = BackupCoordinator()
     var preferences = BackupPreferences()
@@ -90,18 +114,13 @@ struct BackupState: Codable {
     private var stopping: Task<Void, Never>?
     private var generation = UUID()
     private var lastProgress: (id: Int, time: Date, sent: Int64)?
-    /// One client for the account's backup requests, kept while the account, token and network
-    /// settings stay the same, rather than a new client and its sessions for every request.
-    /// Temporary until the transfer engine owns its transport (B9).
-    private var client: (scope: String, token: String, settings: NetworkConfiguration, api: APIClient)?
+    private var clients = BackupClientCache()
 
     private func backupClient(for session: StoredCredential) throws -> APIClient {
         let settings = try NetworkConfigurationStore.connectionSettings(server: session.server)
-        if let client, client.scope == session.scope, client.token == session.token, client.settings == settings { return client.api }
-        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID, networkConfiguration: settings)
-        if let replaced = client?.api { Task { await replaced.shutdown() } }
-        client = (session.scope, session.token, settings, api)
-        return api
+        return try clients.client(for: session, settings: settings) {
+            try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID, networkConfiguration: settings)
+        }
     }
 
     func activate() async {
@@ -253,7 +272,7 @@ struct BackupState: Codable {
         await ShareInboxStore.shared.waitUntilPaused()
         saved = nil; directory = nil; state = BackupState(); preferences = BackupPreferences()
         albums = []; error = nil; refreshCounts()
-        if let replaced = client?.api { client = nil; await replaced.shutdown() }
+        if let replaced = clients.removeClient() { await replaced.shutdown() }
     }
 
     func startAutomatically() async {

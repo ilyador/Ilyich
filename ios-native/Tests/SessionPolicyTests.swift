@@ -87,4 +87,44 @@ final class SessionPolicyTests: XCTestCase {
         let signedOut = await task.value
         XCTAssertFalse(signedOut)
     }
+
+    /// Immich's socket says unauthorized whenever its connection handler fails, a passing database
+    /// error among them. When the session check finds the session and keeps it, live updates
+    /// carry on: the event stream connects again, as after any other failure.
+    func testALiveConnectionRefusalTheCheckDoesNotConfirmIsTriedAgain() async throws {
+        let server = try LoopbackSocketServer(packets: [#"42["error","unauthorized"]"#])
+        let port = try await server.start()
+        defer { server.stop() }
+        let api = try APIClient(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:\(port)")), accessToken: "session-token", userID: "alice",
+                                networkConfiguration: NetworkConfiguration())
+        addTeardownBlock { await api.shutdown() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SessionPolicyTests-" + UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = try EntityStore(scope: api.cacheScope, userID: "alice", directory: directory)
+        let sync = NativeSync(api: api, store: store)
+
+        let refusals = Tally()
+        // The session store, its check having found the session, signs nobody out.
+        await sync.startEvents(onChange: { _ in }, onError: { error in
+            if case ServerFailure.sessionExpired = error { refusals.add() }
+        })
+        try await until { server.connections >= 2 }
+        await sync.stop()
+        XCTAssertGreaterThanOrEqual(refusals.count, 1, "The refusal reaches the session store as an expired session, for its check.")
+    }
+
+    /// Counts what happened.
+    private final class Tally: Sendable {
+        private let value = Mutex(0)
+        var count: Int { value.withLock { $0 } }
+        func add() { value.withLock { $0 += 1 } }
+    }
+
+    private func until(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition() {
+            guard ContinuousClock.now < deadline else { return XCTFail("Timed out.") }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
 }
