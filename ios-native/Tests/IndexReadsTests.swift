@@ -100,8 +100,9 @@ final class IndexReadsTests: XCTestCase {
 
     // MARK: - Dependents
 
-    /// A face can arrive before the shared photo it is on. It waits, and counts for its person,
-    /// once, when the photo arrives.
+    /// A face can arrive before the shared photo it is on. Only a marker of it waits, since the
+    /// face does not say whose photo it is on; when the photo arrives a repair fetches its faces,
+    /// and the face counts for its person, once.
     func testFaceArrivingBeforeItsSharedAssetCountsOnceTheAssetArrives() async throws {
         let index = try makeIndex()
         let person = TimelineFilter(personID: "maya")
@@ -116,11 +117,16 @@ final class IndexReadsTests: XCTestCase {
         let stored = try await index.entityData(kind: "face", id: "face-1")
         XCTAssertEqual(early, [], "No photo yet.")
         XCTAssertNil(stored, "The face waits aside, not as a face of a photo the library lacks.")
+        let waiting = try await index.writer.orphanPayloads(of: "shared")
+        XCTAssertEqual(waiting, [""], "Only a marker waits: no person, no bounding box.")
 
-        let arrival = try await index.apply([
+        _ = try await index.apply([
             Self.asset("shared", owner: "bob", taken: "2026-02-01T05:00:00Z", type: "AlbumAssetCreateV2"),
             SyncEvents.event("AlbumToAssetV1", #"{"albumId":"trip","assetId":"shared"}"#, ack: "AlbumToAssetV1|shared"),
         ], epoch: index.epoch())
+        let queued = try await index.dueRepairs(limit: 10)
+        XCTAssertEqual(queued, ["shared"], "The faces that waited are fetched.")
+        let arrival = await DependentRepairer(index: index, fetcher: StaticFetcher(["shared": [Self.face("face-1", asset: "shared")]])).run()
         XCTAssertTrue(arrival.people.contains("maya"), "Maya's photos changed.")
         let months = try await index.timeBuckets(filter: person)
         XCTAssertEqual(months.map(\.count), [1])
@@ -138,6 +144,12 @@ final class IndexReadsTests: XCTestCase {
         _ = try await index.apply([Self.asset("secret", taken: "2026-02-02T05:00:00Z")], epoch: index.epoch())
         let unlocked = try await index.entityData(kind: "face", id: "face-3")
         XCTAssertNil(unlocked, "Nothing private comes back from the queue; the repair fetches it again.")
+
+        // Nor one of a photo locked before the index knew, which locked_asset lacks: only its
+        // marker waits.
+        _ = try await index.apply([Self.face("face-4", asset: "locked-before-q2", person: "maya")], epoch: index.epoch())
+        let held = try await index.writer.orphanPayloads(of: "locked-before-q2")
+        XCTAssertEqual(held, [""])
 
         // The account's own EXIF follows its photo; without it, the photo is in the Locked Folder
         // or deleted, even one locked before the index knew, and its EXIF is never kept.
@@ -201,6 +213,84 @@ final class IndexReadsTests: XCTestCase {
         XCTAssertEqual(face["personId"], .string("maya"))
     }
 
+    /// A photo locked before the index kept locked_asset comes back from the Locked Folder as a
+    /// photo of the account's own the index never held, though the server had it at the last
+    /// sync: its dependents are fetched. New uploads, partners' photos and a first sync are not.
+    func testPhotoLockedBeforeTheIndexKnewIsRepairedWhenUnlocked() async throws {
+        let index = try makeIndex()
+        _ = try await index.apply([
+            SyncEvents.event("PartnerV1", #"{"sharedById":"bob","sharedWithId":"alice","inTimeline":true}"#, ack: "PartnerV1|bob"),
+            Self.asset("first-sync", taken: "2026-02-01T05:00:00Z", created: "2020-01-01T00:00:00Z"),
+            SyncEvents.complete(),
+        ], epoch: index.epoch())
+        let afterFirst = try await index.dueRepairs(limit: 10)
+        XCTAssertEqual(afterFirst, [], "A first sync sends the dependents itself.")
+
+        let future = Date().addingTimeInterval(3_600).ISO8601Format()
+        _ = try await index.apply([
+            Self.asset("locked-long-ago", taken: "2025-02-01T05:00:00Z", created: "2020-01-01T00:00:00Z"),
+            Self.asset("new-upload", taken: "2026-02-01T06:00:00Z", created: future),
+            Self.asset("partners", owner: "bob", taken: "2026-02-01T07:00:00Z", created: "2020-01-01T00:00:00Z", type: "PartnerAssetBackfillV2"),
+            // Seen before: an update is not a return from the Locked Folder.
+            Self.asset("first-sync", taken: "2026-02-01T05:00:00Z", created: "2020-01-01T00:00:00Z"),
+        ], epoch: index.epoch())
+        let queued = try await index.dueRepairs(limit: 10)
+        XCTAssertEqual(queued, ["locked-long-ago"])
+    }
+
+    /// A repair fetched while the sync stream changed the photo's dependents would put older
+    /// records over newer ones: it writes nothing, stays queued and is fetched again.
+    func testRepairOverlappingTheStreamIsFetchedAgain() async throws {
+        let index = try makeIndex()
+        _ = try await index.apply([
+            SyncEvents.event("PersonV1", #"{"id":"maya","name":"Maya","isHidden":false}"#, ack: "PersonV1|maya"),
+            SyncEvents.event("PersonV1", #"{"id":"leo","name":"Leo","isHidden":false}"#, ack: "PersonV1|leo"),
+            Self.asset("photo", taken: "2026-02-01T05:00:00Z", visibility: "locked"),
+            SyncEvents.complete(),
+        ], epoch: index.epoch())
+        _ = try await index.apply([Self.asset("photo", taken: "2026-02-01T05:00:00Z")], epoch: index.epoch())
+        let fetcher = StaticFetcher(["photo": [Self.face("face-1", asset: "photo", person: "maya")]]) {
+            // The face moves to Leo on the web while the repair is fetching.
+            _ = try? await index.apply([Self.face("face-1", asset: "photo", person: "leo")], epoch: index.epoch())
+        }
+        _ = await DependentRepairer(index: index, fetcher: fetcher).run()
+        let face = try await index.entityData(kind: "face", id: "face-1")
+        let stored = try JSONDecoder().decode([String: EntityJSON].self, from: XCTUnwrap(face))
+        XCTAssertEqual(stored["personId"], .string("leo"), "The stream's newer face stays.")
+        let queued = try await index.dueRepairs(limit: 10)
+        XCTAssertEqual(queued, ["photo"], "Fetched again on the next run.")
+
+        let quiet = StaticFetcher(["photo": [Self.face("face-1", asset: "photo", person: "leo")]])
+        _ = await DependentRepairer(index: index, fetcher: quiet).run()
+        let left = try await index.dueRepairs(limit: 10)
+        XCTAssertEqual(left, [])
+    }
+
+    /// Immich answers a photo the account cannot read with 400: faces or OCR it won't give are
+    /// none, and a photo gone or locked again drops the repair at once.
+    func testRepairTreatsNoAccessAsPermanent() async throws {
+        let index = try makeIndex()
+        let server = makeStubServer()
+        let api = try APIClient(baseURL: server.baseURL, accessToken: "repair-session", userID: "alice",
+                                sessionConfiguration: server.configuration(), networkConfiguration: NetworkConfiguration())
+        _ = try await index.apply([Self.asset("photo", taken: "2026-02-01T05:00:00Z", visibility: "locked"),
+                                   Self.asset("gone", taken: "2026-02-01T05:00:00Z", visibility: "locked"),
+                                   SyncEvents.complete()], epoch: index.epoch())
+        _ = try await index.apply([Self.asset("photo", taken: "2026-02-01T05:00:00Z"), Self.asset("gone", taken: "2026-02-01T05:00:00Z")], epoch: index.epoch())
+        let denied = StubServer.Response.immichError(400, message: "Not found or no asset.read access")
+        server.route("GET", "assets/photo", .json(#"{"id":"photo","visibility":"timeline","exifInfo":{"city":"Lisbon"}}"#))
+        server.route("GET", "faces", denied)
+        server.route("GET", "assets/photo/ocr", denied)
+        server.route("GET", "assets/gone", denied)
+        let start = Date()
+        _ = await DependentRepairer(index: index, fetcher: ServerDependentFetcher(client: api)).run(now: start)
+        let repaired = try await index.asset(id: "photo")
+        XCTAssertEqual(repaired?.exifInfo?.city, "Lisbon")
+        let left = try await index.dueRepairs(limit: 10, now: start.addingTimeInterval(86_400))
+        XCTAssertEqual(left, [])
+        XCTAssertEqual(server.requests("GET", "assets/gone").count, 1)
+    }
+
     /// A repair that fails waits and is tried again; one for a photo the server no longer has is
     /// dropped, and one that keeps failing is dropped after its attempts.
     func testFailedRepairsWaitAndGiveUp() async throws {
@@ -208,7 +298,7 @@ final class IndexReadsTests: XCTestCase {
         _ = try await index.apply([Self.asset("gone", taken: "2026-02-01T05:00:00Z", visibility: "locked"),
                                    Self.asset("flaky", taken: "2026-02-01T05:00:00Z", visibility: "locked")], epoch: index.epoch())
         _ = try await index.apply([Self.asset("gone", taken: "2026-02-01T05:00:00Z"), Self.asset("flaky", taken: "2026-02-01T05:00:00Z")], epoch: index.epoch())
-        let fetcher = FailingFetcher(failures: ["gone": ServerFailure.notFound, "flaky": ServerFailure.http(502, nil)])
+        let fetcher = FailingFetcher(failures: ["gone": ServerFailure.http(400, "Not found or no asset.read access"), "flaky": ServerFailure.http(502, nil)])
         let repairer = DependentRepairer(index: index, fetcher: fetcher, attempts: 2)
         let start = Date()
         _ = await repairer.run(now: start)
@@ -486,6 +576,16 @@ private struct SeededRandom {
 }
 
 /// Fails each asset's repair as told, counting the calls.
+private final class StaticFetcher: DependentFetching {
+    private let events: [String: [EntitySyncEvent]]
+    private let during: (@Sendable () async -> Void)?
+    init(_ events: [String: [EntitySyncEvent]], during: (@Sendable () async -> Void)? = nil) { self.events = events; self.during = during }
+    func dependents(of assetID: String) async throws -> [EntitySyncEvent] {
+        await during?()
+        return events[assetID] ?? []
+    }
+}
+
 private final class FailingFetcher: DependentFetching {
     private let state: Mutex<[String: Int]> = Mutex([:])
     private let failures: [String: ServerFailure]

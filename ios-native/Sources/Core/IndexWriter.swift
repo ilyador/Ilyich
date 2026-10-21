@@ -33,6 +33,11 @@ actor IndexWriter {
     ]
     /// The records a repair writes, in the sync stream's shapes.
     static let repairTypes: Set<String> = ["AssetExifV1", "AssetFaceV3", "AssetOcrV1"]
+    /// Repairs being fetched, and whether the sync stream has written one of that asset's
+    /// dependents since the fetch began, which makes what the fetch brings back older than the index.
+    private var repairsInFlight: [String: Bool] = [:]
+    /// Set while a repair's own records are written, which do not make it stale.
+    private var applyingRepair = false
     /// Entity rows of one kind a backfill batch derives.
     nonisolated let backfillBatchSize: Int
     /// Set when a batch's derived rows failed and the backfill was restarted, until LibraryIndex
@@ -188,13 +193,21 @@ actor IndexWriter {
         return ids
     }
 
+    /// A repair's fetch is starting: from now on the sync stream writing one of the asset's
+    /// dependents makes what the fetch brings back stale.
+    func beginRepair(assetID: String) { repairsInFlight[assetID] = false }
+
     /// Writes an asset's dependents fetched again, as the sync stream's own records, and takes the
     /// asset off the repair queue. Nothing is written for an asset the index no longer holds or
-    /// that went back into the Locked Folder.
+    /// that went back into the Locked Folder. When the stream wrote one of its dependents while
+    /// the fetch ran, nothing is written either and the repair stays queued, to be fetched again
+    /// on the next run rather than putting older records over newer ones.
     func applyRepair(assetID: String, _ events: [EntitySyncEvent]) throws -> IndexChange {
         var change = IndexChange()
+        if repairsInFlight.removeValue(forKey: assetID) == true { change.revision = revision; return change }
         touched = DerivedTouch(); accessCandidates = []
-        defer { touched = DerivedTouch(); accessCandidates = [] }
+        applyingRepair = true
+        defer { touched = DerivedTouch(); accessCandidates = []; applyingRepair = false }
         try write {
             if try assetMonth(assetID).exists {
                 for event in events where Self.repairTypes.contains(event.type) && event.data["assetId"]?.string == assetID {
@@ -212,6 +225,7 @@ actor IndexWriter {
 
     /// A repair that failed: tried again after `retryAt`, or dropped when that is nil.
     func failRepair(assetID: String, retryAt: Date?) throws {
+        repairsInFlight.removeValue(forKey: assetID)
         try write {
             if let retryAt {
                 try database.execute("UPDATE dependent_repair SET attempts=attempts+1,not_before=? WHERE asset_id=?",
@@ -328,10 +342,14 @@ actor IndexWriter {
             let inMonth = ["timeline", "archive"].contains(object["visibility"]?.string ?? "")
             change.upsert(id, from: before.month, to: inMonth ? before.newMonth : nil)
             if before.exists, let revision = object["mediaRevision"]?.string, revision != before.revision { change.mediaRevisions[id] = revision }
-            if !before.exists { try promoteOrphans(of: id, month: before.newMonth, change: &change) }
+            var repair = wasLocked
+            if !before.exists {
+                if try promoteOrphans(of: id, month: before.newMonth, change: &change) { repair = true }
+                if !repair { repair = try wasHeldBack(object) }
+            }
             // Locking dropped the photo's EXIF, faces and OCR, and the server sends them only when
             // they change: they are fetched again.
-            if wasLocked {
+            if repair {
                 try database.execute("INSERT INTO dependent_repair(asset_id,reason,attempts,not_before) VALUES(?,'unlocked',0,NULL) "
                                      + "ON CONFLICT(asset_id) DO UPDATE SET reason=excluded.reason,attempts=0,not_before=NULL", [.text(id)])
             }
@@ -347,6 +365,7 @@ actor IndexWriter {
             }
             subject = (assetID, held.month)
         }
+        defer { if !applyingRepair, Self.dependentKinds.contains(kind) { markRepairsStale(subject?.asset) } }
         // A face can move to another person, and the deletions of faces and edits name only
         // themselves, so what they belonged to is read before they change.
         var faceOwners = Set<String>()
@@ -394,33 +413,59 @@ actor IndexWriter {
         if let subject { change.touch(subject.asset, in: subject.month) }
         if delete, kind == "albumUser", object["userId"]?.string == userID, let albumID = object["albumId"]?.string { try deleteAlbum(albumID) }
     }
+    /// The stream wrote a dependent of this asset, or, when the record named no asset the index
+    /// knows, of any: a repair fetching it now would bring back older records.
+    private func markRepairsStale(_ assetID: String?) {
+        guard !repairsInFlight.isEmpty else { return }
+        if let assetID {
+            if repairsInFlight[assetID] != nil { repairsInFlight[assetID] = true }
+        } else {
+            for key in repairsInFlight.keys { repairsInFlight[key] = true }
+        }
+    }
+    /// Whether an asset of the account's own that the index did not hold was on the server at the
+    /// last completed sync: the stream sends every one of those, so the index dropped it, which it
+    /// does only to a photo in the Locked Folder. Photos locked before Q2 are not in locked_asset,
+    /// and coming back like this is the only sign that they were locked; their dependents are
+    /// fetched again. A first sync, or one after a reset, sends the dependents itself.
+    private func wasHeldBack(_ object: [String: EntityJSON]) throws -> Bool {
+        guard object["ownerId"]?.string == userID, try metadata("complete") == "1",
+              let completed = try lastSyncDate(), let created = object["createdAt"]?.string.flatMap(APIDate.parse) else { return false }
+        return created < completed
+    }
     /// A dependent record whose asset the index does not hold yet, as when a face comes before
     /// the shared photo it is on: kept aside until the asset arrives. One of a photo in the
-    /// Locked Folder is never kept.
+    /// Locked Folder is never kept. A face is kept only as a marker without its payload: a face
+    /// does not say whose photo it is on, and one of a photo locked before Q2, which locked_asset
+    /// does not know, must not be stored. When the photo arrives, a repair fetches its faces.
     private func holdOrphan(kind: String, id: String, assetID: String, object: [String: EntityJSON], delete: Bool) throws {
         let locked = try isLocked(assetID)
         if delete || locked {
             try database.execute("DELETE FROM orphan_dependent WHERE kind=? AND id=?", [.text(kind), .text(id)])
             return
         }
-        let encoded = try JSONEncoder().encode(object)
+        let encoded = kind == "face" ? Data() : try JSONEncoder().encode(object)
         try database.execute("INSERT INTO orphan_dependent(kind,id,asset_id,payload) VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET asset_id=excluded.asset_id,payload=excluded.payload",
                              [.text(kind), .text(id), .text(assetID), .text(String(decoding: encoded, as: UTF8.self))])
     }
-    /// The asset arrived: what waited for it becomes its own, as if it had come after it.
-    private func promoteOrphans(of assetID: String, month: MonthKey?, change: inout IndexChange) throws {
-        let rows = try database.query("SELECT kind,id,payload,json_extract(payload,'$.personId') FROM orphan_dependent WHERE asset_id=?", [assetID], cancellable: false)
-        guard !rows.isEmpty else { return }
+    /// The asset arrived: what waited for it becomes its own, as if it had come after it. Returns
+    /// whether faces waited for it, which only a repair can fetch.
+    private func promoteOrphans(of assetID: String, month: MonthKey?, change: inout IndexChange) throws -> Bool {
+        let rows = try database.query("SELECT kind,id,payload FROM orphan_dependent WHERE asset_id=?", [assetID], cancellable: false)
+        guard !rows.isEmpty else { return false }
+        var faces = false
         for row in rows {
             guard let kind = row[0], let id = row[1], let payload = row[2] else { continue }
+            if kind == "face" { faces = true; continue }
             try database.execute("INSERT INTO entities(kind,id,payload) VALUES(?,?,?) ON CONFLICT(kind,id) DO NOTHING", [.text(kind), .text(id), .text(payload)])
-            if kind == "face" {
-                touched.members.insert(assetID)
-                if let personID = row[3] { change.people.insert(personID) }
-            }
         }
         try database.execute("DELETE FROM orphan_dependent WHERE asset_id=?", [.text(assetID)])
         change.touch(assetID, in: month)
+        return faces
+    }
+    /// The dependents waiting for an asset, as stored, for tests and diagnostics.
+    func orphanPayloads(of assetID: String) throws -> [String] {
+        try database.query("SELECT payload FROM orphan_dependent WHERE asset_id=? ORDER BY kind,id", [assetID], cancellable: false).compactMap { $0[0] }
     }
     /// Whether the asset was last seen in the Locked Folder, this batch or before it.
     private func isLocked(_ id: String) throws -> Bool {

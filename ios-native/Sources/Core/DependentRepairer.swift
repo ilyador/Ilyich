@@ -49,6 +49,7 @@ actor DependentRepairer {
 
     private func repair(_ assetID: String, now: Date) async -> IndexChange? {
         do {
+            try await index.beginRepair(assetID: assetID)
             let events = try await fetcher.dependents(of: assetID)
             try Task.checkCancellation()
             return try await index.applyRepair(assetID: assetID, events)
@@ -61,10 +62,11 @@ actor DependentRepairer {
         }
     }
 
-    /// The asset is gone, or the account may no longer see it: there is nothing to repair.
+    /// The asset is gone, or the account may no longer see it: there is nothing to repair. Immich
+    /// answers a photo the account cannot read, gone or locked, with 400 (requireAccess).
     static func isPermanent(_ error: any Error) -> Bool {
         switch error as? ServerFailure {
-        case .notFound?, .forbidden?, .undecodable?: true
+        case .notFound?, .forbidden?, .undecodable?, .http(400, _)?: true
         default: false
         }
     }
