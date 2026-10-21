@@ -38,6 +38,46 @@ final class TransferEngineRaceTests: XCTestCase {
         await h.tearDown()
     }
 
+    func testOverlappingStartsRunOneLoop() async throws {
+        let h = try await TransferEngineHarness()
+        let gate = TransferGate()
+        h.executor.script("a", .hold(gate))
+        h.executor.script("b", .hold(gate))
+        _ = try await h.engine.enqueue([h.photo("a"), h.photo("b")])
+        try await h.engine.setIntent(.automatic)
+        // A scene foreground and a background task at launch, both before either has loaded.
+        async let first: Void = h.engine.start()
+        async let second: Void = h.engine.start()
+        _ = try await (first, second)
+        await untilTransfers("A job runs.") { gate.waiting >= 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(gate.waiting, 1, "One loop runs one job at a time.")
+        XCTAssertEqual(h.executor.calls.map(\.key), ["a"])
+        let lease = try await h.requireLease()
+        let stored = try await h.requireJob("a")
+        XCTAssertEqual(stored.state, .submitting)
+        XCTAssertEqual(lease.job, stored.id, "No second start gave the running job's lease back.")
+
+        gate.open()
+        try await untilTransfers("Both commit in turn.") { try await h.allConfirmed("a", "b") }
+        XCTAssertEqual(h.executor.submitted, ["a", "b"])
+        await h.tearDown()
+    }
+
+    func testAStopDuringStartKeepsTheEngineStopped() async throws {
+        let h = try await TransferEngineHarness()
+        _ = try await h.engine.enqueue([h.photo("a")])
+        try await h.engine.setIntent(.automatic)
+        async let starting: Void = h.engine.start()
+        await h.engine.stop()
+        try await starting
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertTrue(h.executor.calls.isEmpty, "A stopped engine never runs a loop, whichever came first.")
+        let lease = await h.engine.runningLease
+        XCTAssertNil(lease)
+        await h.tearDown()
+    }
+
     func testALateResultAfterAReleasedLeaseIsDiscarded() async throws {
         let h = try await TransferEngineHarness()
         let gate = TransferGate()

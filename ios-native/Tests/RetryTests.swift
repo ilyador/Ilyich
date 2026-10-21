@@ -33,6 +33,9 @@ final class RetryTests: XCTestCase {
         h.clock.advance(by: .seconds(2))
         try await untilTransfers("Both jobs run again by themselves.") { try await h.allConfirmed("a", "b") }
         XCTAssertEqual(h.executor.calls.map(\.retryCount), [0, 0, 1, 1])
+        let retried = h.executor.calls.filter { $0.key == "a" }.last
+        XCTAssertEqual(retried?.state, .retryScheduled, "The state says why the job runs again.")
+        XCTAssertEqual(retried?.phase, "staged", "The phase says how far it got, so the executor resumes from there.")
         await h.tearDown()
     }
 

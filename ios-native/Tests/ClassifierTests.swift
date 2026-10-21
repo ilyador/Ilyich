@@ -52,6 +52,8 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(classify(ServerFailure.credentialsRejected("Incorrect email or password")), .account(.sessionExpired))
         for status in [401, 403, 407] { XCTAssertEqual(classify(ServerFailure.proxyRejected(status)), .account(.proxyRejected)) }
         XCTAssertEqual(classify(ServerFailure.readOnly), .account(.readOnly))
+        XCTAssertEqual(classify(ReadOnlyPolicy.ReadOnlyError()), .account(.readOnly), "A local read-only refusal pauses, never blames the photo.")
+        XCTAssertEqual(classify(ReadOnlyPolicy.ReadOnlyError(), retries: TransferFailureClassifier.unknownAttempts), .account(.readOnly))
         XCTAssertEqual(classify(ServerFailure.passwordChangeRequired), .account(.passwordChange))
         XCTAssertEqual(classify(APIError.signedOut), .account(.signedOut))
         XCTAssertEqual(classify(CocoaError(.fileWriteOutOfSpace)), .account(.deviceStorage))

@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 import XCTest
 @testable import Ilyich
 
@@ -67,6 +68,38 @@ final class TransferEngineFenceTests: XCTestCase {
         XCTAssertEqual(h.executor.submitted, ["a"])
         let cleared = try await h.store.engineState()
         XCTAssertNil(cleared?.blocker)
+        await h.tearDown()
+    }
+
+    func testALocalReadOnlyRefusalPausesWithoutBlamingThePhoto() async throws {
+        let h = try await TransferEngineHarness()
+        // The request client refused before the engine saw the snapshot change.
+        h.executor.script("a", .fail { ReadOnlyPolicy.ReadOnlyError() }, .succeed)
+        _ = try await h.engine.enqueue([h.photo("a")])
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        await untilTransfers("Read-only blocks the engine.") { await h.engine.currentSnapshot.phase == .blocked(.readOnly) }
+        let job = try await h.requireJob("a")
+        XCTAssertEqual(job.retryCount, 0, "The refusal is not counted against the photo.")
+        XCTAssertNil(job.errorClass)
+        XCTAssertNotEqual(job.state, .failed)
+
+        try await h.engine.setIntent(.automatic)
+        try await untilTransfers("The user's command resumes the job.") { try await h.confirmed("a") }
+        await h.tearDown()
+    }
+
+    func testAFencedWriteRunsAgainUncounted() async throws {
+        let h = try await TransferEngineHarness()
+        // Read-only went on and off while the request waited.
+        h.executor.script("a", .fail { WriteFenced() }, .succeed)
+        _ = try await h.engine.enqueue([h.photo("a")])
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        try await untilTransfers("The job runs again at once.") { try await h.confirmed("a") }
+        XCTAssertEqual(h.executor.calls.map(\.retryCount), [0, 0], "Neither lease counted a failure.")
+        let phase = await h.engine.currentSnapshot.phase
+        XCTAssertNotEqual(phase, .blocked(.readOnly))
         await h.tearDown()
     }
 

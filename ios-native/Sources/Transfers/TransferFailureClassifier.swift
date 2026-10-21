@@ -81,6 +81,11 @@ enum TransferFailureClassifier {
             }
         case APIError.signedOut:
             return .account(.signedOut)
+        case is ReadOnlyPolicy.ReadOnlyError:
+            // Read-only mode refused the request: the engine pauses, as BackupCoordinator does,
+            // and the photo is not blamed. (A WriteFenced request never reaches here: the engine
+            // gives its lease back and runs it again under the new write generation.)
+            return .account(.readOnly)
         case APIError.invalidResponse:
             return .transient(retryAfter: nil)
         case is CancellationError:
