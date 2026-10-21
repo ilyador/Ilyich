@@ -81,6 +81,21 @@ actor IndexWriter {
         if changed { try write { try setMetadata("accessInvalidated", "0") } }
         return changed
     }
+    /// Whether a server reset still waits for its media to be reconciled, without taking it.
+    func accessInvalidationPending() throws -> Bool { try metadata("accessInvalidated") == "1" }
+    /// The thumbnail revision of every asset the index holds that may be cached, as
+    /// Asset.cacheRevision names it: its media revision, else its thumbhash, else "unversioned".
+    /// Locked assets are left out, since their thumbnails are never stored.
+    func thumbnailRevisions() throws -> [String: String] {
+        var revisions: [String: String] = [:]
+        for row in try database.query("""
+            SELECT id,coalesce(json_extract(payload,'$.mediaRevision'),json_extract(payload,'$.thumbhash'),'unversioned') FROM entities
+            WHERE kind='asset' AND coalesce(json_extract(payload,'$.visibility'),'') != 'locked'
+            """, cancellable: false) {
+            if let id = row[0], let revision = row[1] { revisions[id] = revision }
+        }
+        return revisions
+    }
     /// Photos the index removed whose media the app still has to forget, with whether access to
     /// them was lost. They stay queued until the media layer reports them forgotten, so a crash
     /// in between forgets them on the next sync.

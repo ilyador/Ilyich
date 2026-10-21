@@ -7,6 +7,8 @@ import Foundation
 actor ThumbnailStore {
     nonisolated let directory: URL
     nonisolated let limit: Int
+    /// Downloads that began before their photo was forgotten are not written.
+    nonisolated let fence = MediaFence()
     private var usage: Int?
 
     init(scope: String, limit: Int = 1_536 * 1024 * 1024, root: URL? = nil) {
@@ -37,7 +39,11 @@ actor ThumbnailStore {
         FileManager.default.fileExists(atPath: url(assetID: assetID, revision: revision).path)
     }
 
-    func store(_ data: Data, assetID: String, revision: String) {
+    /// `token` is the fence's, taken when the download began; a photo forgotten since is not
+    /// written. The check runs here, on the store's own turn, so a write either comes before the
+    /// forgetting, which then deletes it, or is refused.
+    func store(_ data: Data, assetID: String, revision: String, token: UInt64? = nil) {
+        if let token, !fence.admits(assetID, since: token) { return }
         let url = url(assetID: assetID, revision: revision)
         let existed = FileManager.default.fileExists(atPath: url.path)
         do {
@@ -66,6 +72,33 @@ actor ThumbnailStore {
                 if (try? FileManager.default.removeItem(at: file)) != nil, let current = usage { usage = max(0, current - size) }
             }
         }
+    }
+
+    /// The photo's previews were made again: only the file for `revision` stays, if there is one,
+    /// so the next look downloads the new thumbnail.
+    func refresh(assetID: String, revision: String) {
+        remove(assetID: assetID, keeping: url(assetID: assetID, revision: revision))
+    }
+
+    /// After the server reset the library: keeps the files of the photos the index now holds, at
+    /// the revision it holds, and removes every other, which may belong to a photo the account
+    /// can no longer see. Returns how many went.
+    @discardableResult
+    func sweep(keeping valid: [String: String]) -> Int {
+        let kept = Set(valid.map { url(assetID: $0.key, revision: $0.value).lastPathComponent })
+        var removed = 0
+        guard let folders = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return 0 }
+        for folder in folders {
+            guard let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileAllocatedSizeKey]) else { continue }
+            for file in files where !kept.contains(file.lastPathComponent) {
+                let size = (try? file.resourceValues(forKeys: [.fileAllocatedSizeKey]).fileAllocatedSize) ?? 0
+                if (try? FileManager.default.removeItem(at: file)) != nil {
+                    removed += 1
+                    if let current = usage { usage = max(0, current - size) }
+                }
+            }
+        }
+        return removed
     }
 
     private func remove(assetID: String, keeping kept: URL?) {
