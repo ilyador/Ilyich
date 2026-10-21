@@ -11,28 +11,32 @@ struct PlannerContext: Hashable, Sendable {
 
 /// Chooses the backend for a query, and says what that backend can't do for it. Pure.
 ///
-/// - The index lays out every scope by month, places included, and filters by favorite and
-///   developed. It serves whenever it is readable.
-/// - The server timeline lays out the library, the account's own photos, a partner, an album and a
-///   person by month, with the same two filters. It never sees a place.
-/// - Server search serves everything else, as one list: relevance, the other predicates, and a
-///   place before the index is complete. It can't order by date added.
+/// The owner (the library, the account's own photos or a partner) and the predicates (albums,
+/// people, a place, favorite, developed, kinds and the rest) all combine by AND, so stacked shelf
+/// filters are one query. Which backend serves a stack:
 ///
-/// Every predicate combines with every other by AND, so stacked shelf filters need no new case:
-/// any combination with favorite and developed alone is a timeline; anything more is a search.
+/// - The index lays out by month any owner with at most one album, at most one person and a place,
+///   filtered by favorite and developed, whenever it is readable. A person stacks only with the
+///   library there: the index widens a person to the albums shared with the account, which an
+///   owner can't narrow.
+/// - The server timeline lays out by month the library, the account's own photos, a partner, an
+///   album or a person, one of them, with the same two filters. It never sees a place.
+/// - Server search serves everything else, as one list: relevance, the other predicates, several
+///   albums or people, and any stack the timelines can't, places included before the index is
+///   readable. It can't order by date added.
 enum QueryPlanner {
     /// The photos the phone looks through when a filter runs after the server answered.
     static let postFilterScanBudget = 20_000
 
     static func plan(_ query: LibraryQuery, context: PlannerContext) throws(Unsupported) -> QueryPlan {
         guard !query.visibility.isEmpty else { throw .predicate("visibility") }
-        if case .chronological = query.ranking, timelinePredicatesOnly(query.predicates) {
+        if case .chronological = query.ranking, indexServes(query) {
             if context.indexReadable {
                 var plan = QueryPlan(backend: .index)
                 if let since = context.indexStaleSince { plan.limitations.insert(.indexStale(since: since)) }
                 return plan
             }
-            if query.scope.isServerTimelineScope { return QueryPlan(backend: .serverTimeline) }
+            if serverTimelineServes(query) { return QueryPlan(backend: .serverTimeline) }
         }
         if case .chronological(.createdAt, _) = query.ranking { throw .orderNotSearchable }
         return QueryPlan(backend: .serverSearch, limitations: searchLimitations(query))
@@ -44,26 +48,29 @@ enum QueryPlanner {
         if query.stacks == .primaryOnly { limitations.insert(.includesStackMembers) }
         switch query.scope {
         case .mine, .partner: limitations.insert(.ownerPostFilter)
-        // Search reaches the account's and its partners' photos; an album search reaches the album.
-        case .person: limitations.insert(.excludesSharedAlbumMembers)
-        case .library, .album, .place: break
+        case .library: break
         }
+        // Search reaches the account's and its partners' photos; an album search reaches the album.
+        if !query.predicates.people.isEmpty, query.predicates.albums.isEmpty { limitations.insert(.excludesSharedAlbumMembers) }
         if query.predicates.developed != nil { limitations.insert(.developedPostFilter(scanBudget: postFilterScanBudget)) }
         return limitations
     }
 
-    /// Favorite and developed are the only filters a timeline, on the index or the server, applies.
-    private static func timelinePredicatesOnly(_ predicates: LibraryQuery.Predicates) -> Bool {
-        var rest = predicates
-        rest.favorite = nil; rest.developed = nil
+    /// Whether the index can lay the query's filters out by month, as one TimelineFilter: any
+    /// owner, one album, one person (with the library only), a place, favorite and developed.
+    static func indexServes(_ query: LibraryQuery) -> Bool {
+        var rest = query.predicates
+        guard rest.albums.count <= 1, rest.people.count <= 1 else { return false }
+        if !rest.people.isEmpty, query.scope != .library { return false }
+        rest.favorite = nil; rest.developed = nil; rest.albums = []; rest.people = []; rest.place = nil
         return rest == LibraryQuery.Predicates()
     }
-}
 
-extension LibraryQuery.Scope {
-    var isServerTimelineScope: Bool {
-        if case .place = self { return false }
-        return true
+    /// Whether the server timeline can: what the index can, without a place, and one of an owner
+    /// other than the library, an album or a person, as today's feeds ask it.
+    static func serverTimelineServes(_ query: LibraryQuery) -> Bool {
+        guard indexServes(query), query.predicates.place == nil else { return false }
+        return query.predicates.albums.count + query.predicates.people.count + (query.scope == .library ? 0 : 1) <= 1
     }
 }
 
@@ -80,16 +87,17 @@ extension TimelineFilter {
         else if query.visibility == .archive { visibility = .archive }
         else if query.visibility == [.timeline, .archive] { visibility = nil }
         else { throw .predicate("visibility") }
+        guard QueryPlanner.indexServes(query) else { throw .predicate("search") }
         switch query.scope {
         case .library: break
         case .mine:
             guard let userID else { throw .predicate("owner") }
             self.userID = userID
         case .partner(let id): self.userID = id
-        case .album(let id): albumID = id
-        case .person(let id): personID = id
-        case .place(let membership): place = TimelinePlace(membership)
         }
+        albumID = query.predicates.albums.first
+        personID = query.predicates.people.first
+        place = query.predicates.place.map(TimelinePlace.init)
         if query.trash == .trashed { isTrashed = true } else if query.scope == .mine { isTrashed = false }
         isFavorite = query.predicates.favorite
         isDeveloped = query.predicates.developed
@@ -111,10 +119,10 @@ extension LibraryQuery {
         case nil: visibility = [.timeline, .archive]
         case .hidden, .locked: return nil
         }
-        if let album = filter.albumID { scope = .album(album) }
-        else if let person = filter.personID { scope = .person(person) }
-        else if let place = filter.place { scope = .place(place.membership) }
-        else if let user = filter.userID { scope = user == userID ? .mine : .partner(user) }
+        if let album = filter.albumID { predicates.albums = [album] }
+        if let person = filter.personID { predicates.people = [person] }
+        predicates.place = filter.place?.membership
+        if let user = filter.userID { scope = user == userID ? .mine : .partner(user) }
         trash = filter.isTrashed == true ? .trashed : .active
         ranking = .chronological(filter.orderBy == "createdAt" ? .createdAt : .takenAt, ascending: filter.order == "asc")
         stacks = filter.withStacked ? .primaryOnly : .all
@@ -136,11 +144,11 @@ extension LibraryQuery {
             visibility = [.timeline, .archive]
         }
         trash = filter.trashedAt?.isSet == true ? .trashed : .active
-        if let albums = filter.albumIds?.all, albums.count == 1 { scope = .album(albums[0]) }
-        else if filter.id != nil || filter.or != nil, let base, case .place = base.scope { scope = base.scope }
-        else if let id = filter.id?.eq { scope = .place(PlaceMembership(placeID: "photos", assetIDs: [id], markerQuery: "")) }
+        predicates.albums = Set(filter.albumIds?.all ?? [])
+        if filter.id != nil || filter.or != nil, let place = base?.predicates.place { predicates.place = place }
+        else if let id = filter.id?.eq { predicates.place = PlaceMembership(placeID: "photos", assetIDs: [id], markerQuery: "") }
         else if let alternatives = filter.or {
-            scope = .place(PlaceMembership(placeID: "photos", assetIDs: alternatives.compactMap(\.id.eq), markerQuery: ""))
+            predicates.place = PlaceMembership(placeID: "photos", assetIDs: alternatives.compactMap(\.id.eq), markerQuery: "")
         }
         predicates.people = Set(filter.personIds?.all ?? [])
         predicates.tags = Set(filter.tagIds?.all ?? [])
@@ -168,17 +176,16 @@ struct ServerTimelineRequest: Hashable, Sendable {
     /// `includesPartners` asks for the partners shown in the timeline; it is sent only where
     /// the server accepts it.
     init(_ query: LibraryQuery, userID: String?, includesPartners: Bool = false) throws(Unsupported) {
-        if case .place = query.scope { throw .placeNeedsIndex }
-        var rest = query.predicates
-        rest.favorite = nil; rest.developed = nil
-        guard rest == LibraryQuery.Predicates() else { throw .predicate("search") }
+        if query.predicates.place != nil { throw .placeNeedsIndex }
+        guard QueryPlanner.serverTimelineServes(query) else { throw .predicate("search") }
         filter = try TimelineFilter(query, userID: userID, includesPartners: includesPartners)
     }
 
     /// The server answers 400 when withPartners comes with the archive, favorites or the trash, and
-    /// it means nothing for any scope but the library.
+    /// it means nothing but for the whole library: no owner, album, person or place.
     static func allowsPartners(_ query: LibraryQuery) -> Bool {
-        query.scope == .library && query.visibility == .timeline && query.predicates.favorite == nil && query.trash == .active
+        query.scope == .library && query.predicates.albums.isEmpty && query.predicates.people.isEmpty && query.predicates.place == nil
+            && query.visibility == .timeline && query.predicates.favorite == nil && query.trash == .active
     }
 }
 
@@ -215,7 +222,7 @@ struct ServerSearchRequest: Sendable {
         switch query.scope {
         case .mine: owner = userID
         case .partner(let id): owner = id
-        default: owner = nil
+        case .library: owner = nil
         }
         limitations = QueryPlanner.searchLimitations(query)
     }
@@ -227,18 +234,13 @@ struct ServerSearchRequest: Sendable {
         filter.visibility = StringFilter(in: [(LibraryQuery.Visibility.timeline, "timeline"), (.archive, "archive")]
             .filter { query.visibility.contains($0.0) }.map(\.1))
         filter.trashedAt = query.trash == .trashed ? .set : .unset
-        switch query.scope {
-        case .album(let id): filter.albumIds = IDsFilter(all: [id])
-        case .person(let id): filter.personIds = IDsFilter(all: [id])
-        case .place(let membership):
+        let predicates = query.predicates
+        if !predicates.albums.isEmpty { filter.albumIds = IDsFilter(all: predicates.albums.sorted()) }
+        if let membership = predicates.place {
             if membership.assetIDs.count == 1 { filter.id = IDFilter(eq: membership.assetIDs[0]) }
             else { filter.or = membership.assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) } }
-        case .library, .mine, .partner: break
         }
-        let predicates = query.predicates
-        if !predicates.people.isEmpty {
-            filter.personIds = IDsFilter(all: (Set(filter.personIds?.all ?? []).union(predicates.people)).sorted())
-        }
+        if !predicates.people.isEmpty { filter.personIds = IDsFilter(all: predicates.people.sorted()) }
         if !predicates.tags.isEmpty { filter.tagIds = IDsFilter(all: predicates.tags.sorted()) }
         if let kind = predicates.kind { filter.type = StringFilter(eq: kind.rawValue) }
         if let favorite = predicates.favorite { filter.isFavorite = BoolFilter(eq: favorite) }

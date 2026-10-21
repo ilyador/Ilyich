@@ -64,7 +64,7 @@ final class LibraryRepository: TimelineSource, SearchSource, Sendable {
         try ServerTimelineRequest(query, userID: client.userID, includesPartners: includesPartners)
     }
     private static func noMonths(_ query: LibraryQuery) -> Unsupported {
-        if case .place = query.scope { return .placeNeedsIndex }
+        if query.predicates.place != nil { return .placeNeedsIndex }
         return .predicate("months")
     }
 

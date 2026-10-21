@@ -93,7 +93,9 @@ final class LibraryQueryTests: XCTestCase {
             XCTAssertEqual(similar.trash, preset.trash)
             XCTAssertEqual(similar.visibility, preset.visibility)
             XCTAssertEqual(similar.stacks, preset.stacks)
-            XCTAssertEqual(similar.predicates, LibraryQuery.Predicates(developed: preset.predicates.developed))
+            // The feed's albums, people and place are its scope, as they were before they became predicates.
+            XCTAssertEqual(similar.predicates, LibraryQuery.Predicates(developed: preset.predicates.developed, people: preset.predicates.people,
+                                                                       albums: preset.predicates.albums, place: preset.predicates.place))
             XCTAssertEqual(similar.ranking, .relevance(.similar(to: "asset")))
             XCTAssertTrue(similar.stableKey.contains("&similar=asset"), similar.stableKey)
         }
