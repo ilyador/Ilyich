@@ -34,10 +34,10 @@ struct AccountState: Sendable {
 
 /// What sign-out removes besides the session, by reason. Always kept, for either reason: the
 /// backup state (Backup/<digest>/state.json, and from B1 the transfers database) with its
-/// receipts and the automatic-backup preference, the read-only flag, shelf order and the app's
-/// preferences. Both reasons remove the rest, as every earlier build did. Keeping thumbnails and
-/// network settings after a session expiry is an open owner question, so it stays off until the
-/// owner answers.
+/// receipts, the read-only flag, shelf order and the app's preferences. Both reasons switch
+/// automatic backup off in that backup state and remove the rest, as every earlier build did.
+/// Keeping automatic backup on, and keeping thumbnails and network settings after a session
+/// expiry, are open owner questions, so they stay off until the owner answers.
 struct SignOutPolicy: Equatable, Sendable {
     /// The offline library's entities, acknowledgements and metadata.
     var clearsLibraryIndex = true
@@ -45,6 +45,9 @@ struct SignOutPolicy: Equatable, Sendable {
     var clearsMedia = true
     /// The server's custom headers, other addresses and client certificate.
     var removesNetworkSettings = true
+    /// Automatic backup stays on in the account's backup state, so signing in to the account
+    /// again carries on with it.
+    var keepsAutomaticBackup = false
 
     init(reason: SignOutReason) {}
 }
@@ -52,8 +55,9 @@ struct SignOutPolicy: Equatable, Sendable {
 /// The device-wide services that still hold some of an account's work until later milestones
 /// move it into the runtime, and the stores sign-out clears outside it.
 protocol AccountDevice: Sendable {
-    /// Stops backup and shared uploads. The automatic-backup preference stays as it is.
-    func stopUploads() async
+    /// Stops backup and shared uploads, and switches automatic backup off unless
+    /// `keepingAutomaticBackup`. The backup state stays on disk with its receipts.
+    func stopUploads(keepingAutomaticBackup: Bool) async
     /// Stops casting and revokes the receiver's server session.
     func endCasting() async
     func reloadWidgets() async
@@ -305,13 +309,18 @@ actor AccountManager {
         await publish()
         let device = dependencies.device
         let scope = runtime.api.cacheScope
+        let policy = SignOutPolicy(reason: reason)
         // 1. Nothing made under the session is current any more, and the mirror says so.
         runtime.authorization.end()
+        // The address step 3's requests go to is chosen now, if it needs choosing, while the
+        // account's work ends: checking every address can take longer than step 3's budget.
+        let address = Task { _ = try? await runtime.api.activeEndpoint() }
         // 2. The account's work ends, and uploads stop while the session can still answer them.
         await runtime.cancelAndJoin()
-        await device.stopUploads()
+        await device.stopUploads(keepingAutomaticBackup: policy.keepsAutomaticBackup)
         // 3. While the token and the network settings still work: the cast session first, which
-        //    needs the token, then the session itself.
+        //    needs the token, then the session itself. Past the budget, sign-out goes on without
+        //    them.
         await Self.within(dependencies.serverSignOutBudget) {
             await device.endCasting()
             await runtime.api.revokeCastAuthorization()
@@ -325,7 +334,6 @@ actor AccountManager {
         await device.clearNotifications()
         await device.removeLockedPIN(scope: scope)
         // 5. What the account kept on the phone, as the policy for the reason says.
-        let policy = SignOutPolicy(reason: reason)
         if policy.clearsLibraryIndex { await runtime.clearLibrary() }
         if policy.clearsMedia {
             await runtime.pipeline.removeAll()
@@ -335,8 +343,10 @@ actor AccountManager {
             do { try await device.removeNetworkSettings(server: runtime.api.baseURL) }
             catch { problem = problem ?? error.localizedDescription }
         }
-        // 6. The transport, and the request log with it.
+        // 6. The transport, and the request log with it. A request still waiting for an address
+        //    ends here, unsent.
         await runtime.api.shutdown()
+        address.cancel()
         await device.clearDiagnostics()
         // 7.
         phase = .signedOut(reason)
@@ -405,13 +415,15 @@ actor AccountManager {
         await present(AccountState(phase: phase, runtime: runtime, message: message))
     }
 
-    /// Runs `work`, and gives up on it after `budget`.
+    /// Runs `work`, and waits for it at most `budget`. Past the budget `work` is cancelled and no
+    /// longer waited for: a task group would still wait for it, and a request waiting for the
+    /// server's address doesn't end when it is cancelled, only when the transport shuts down.
     private static func within(_ budget: Duration, _ work: @escaping @Sendable () async -> Void) async {
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { await work() }
-            group.addTask { try? await Task.sleep(for: budget) }
-            await group.next()
-            group.cancelAll()
-        }
+        let (ended, end) = AsyncStream.makeStream(of: Void.self)
+        let job = Task { await work(); end.finish() }
+        let deadline = Task { try? await Task.sleep(for: budget); end.finish() }
+        for await _ in ended {}
+        job.cancel()
+        deadline.cancel()
     }
 }

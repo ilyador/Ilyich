@@ -283,11 +283,12 @@ struct BackupClientCache {
     }
 
     /// Stops outgoing requests before the caller deletes the shared credentials. The backup state
-    /// stays on disk with its receipts, and so does the automatic-backup preference: signing in
-    /// to the account again carries on as it was set.
-    func disconnect() async {
+    /// stays on disk with its receipts. Automatic backup is switched off in it, as every earlier
+    /// build did, unless `keepingAutomaticBackup`: signing in to the account again then carries
+    /// on with it.
+    func disconnect(keepingAutomaticBackup: Bool = false) async {
         ShareInboxStore.shared.cancel()
-        await pause(disableAutomatic: false, endsBatch: true)
+        await pause(disableAutomatic: !keepingAutomaticBackup, endsBatch: true)
         await ShareInboxStore.shared.waitUntilPaused()
         saved = nil; directory = nil; state = BackupState(); preferences = BackupPreferences()
         albums = []; error = nil; refreshCounts()

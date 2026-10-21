@@ -176,67 +176,146 @@ import XCTest
         XCTAssertTrue(runtime.api.transport.isShutDown)
     }
 
-    /// An explicit sign-out removes exactly its list, in order: what the account kept and the
-    /// device-wide services hold for it. The backup state with its receipts, the read-only flag
-    /// and the shelf order are not on it.
-    func testExplicitSignOutRemovesExactlyItsCleanupList() async throws {
-        let server = makeStubServer()
-        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
-        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
-        let mirror = makeMirror()
-        let saved = credential("alice", on: server)
-        let harness = makeHarness(saved, server: server, environment: environment(library: true), mirror: mirror)
-        await harness.manager.restore()
-        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
-        let library = try XCTUnwrap(runtime.library)
-        try await library.entities.persistCachedServerFeatures(ServerFeatures(passwordLogin: true, oauth: false, smartSearch: true, searchVerification: nil,
-                                                                              ocr: true, facialRecognition: true, map: true, trash: true, sidecar: true,
-                                                                              realtimeTranscoding: false))
-        XCTAssertEqual(mirror.read()?.digest, saved.account.digest)
-
-        await harness.manager.signOut(.user)
-
-        XCTAssertEqual(harness.log.all, Self.signOutSteps)
-        let phase = await harness.manager.phase
-        XCTAssertEqual(phase, .signedOut(.user))
-        XCTAssertNil(harness.recorder.states.last?.message)
-        XCTAssertEqual(harness.recorder.phases.suffix(2), [.signingOut, .signedOut(.user)])
-        XCTAssertNil(harness.credentials.credential)
-        XCTAssertEqual(mirror.read()?.digest, "", "The extensions see nobody signed in.")
-        XCTAssertTrue(runtime.authorization.hasEnded)
-        XCTAssertTrue(runtime.api.transport.isShutDown)
-        let features = try await library.entities.cachedServerFeatures()
-        XCTAssertNil(features, "The offline library is emptied.")
-        XCTAssertFalse(library.sync.isOpen)
+    /// Sign-out, for either reason, removes exactly its list, in order: what the account kept and
+    /// the device-wide services hold for it. Uploads stop as the app stops them, over the
+    /// account's backup in the middle of a run. Not on the list, for either reason: the backup
+    /// state with its receipts, in which automatic backup is switched off as every earlier build
+    /// did; the read-only flag; and the shelf order.
+    func testSignOutRemovesExactlyItsCleanupListForEitherReason() async throws {
         // Owner question: keeping thumbnails and network settings after a session expiry. Until it
         // is answered, an expiry removes what an explicit sign-out does.
         XCTAssertEqual(SignOutPolicy(reason: .sessionExpired), SignOutPolicy(reason: .user))
+        for reason in [SignOutReason.user, .sessionExpired] {
+            let name = "\(reason)"
+            let server = makeStubServer()
+            // An expiry is answered once the test has filled the offline library.
+            let expiry = StubServer.Gate()
+            let check: StubServer.Response = reason == .user ? .json(#"{"authStatus":true}"#)
+                : StubServer.Response.immichError(401, message: "Invalid user token").waiting(for: expiry)
+            server.route("POST", "auth/validateToken", check)
+            server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+            let mirror = makeMirror()
+            let saved = credential("alice", on: server)
+            let backup = try goldenBackup(for: saved)
+            turnOnReadOnlyAndOrderShelves(for: saved)
+            let harness = makeHarness(saved, server: server, environment: environment(library: true), mirror: mirror,
+                                      uploads: LiveAccountDevice(backup: { backup.coordinator }))
+            await harness.manager.restore()
+            let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+            let library = try XCTUnwrap(runtime.library)
+            try await library.entities.persistCachedServerFeatures(ServerFeatures(passwordLogin: true, oauth: false, smartSearch: true, searchVerification: nil,
+                                                                                  ocr: true, facialRecognition: true, map: true, trash: true, sidecar: true,
+                                                                                  realtimeTranscoding: false))
+            XCTAssertEqual(mirror.read()?.digest, saved.account.digest, name)
+
+            if reason == .user {
+                await harness.manager.signOut(.user)
+            } else {
+                expiry.open()
+                try await until("The expired session was not signed out.") { harness.recorder.phases.last == .signedOut(.sessionExpired) }
+            }
+
+            XCTAssertEqual(harness.log.all, Self.signOutSteps, name)
+            let phase = await harness.manager.phase
+            XCTAssertEqual(phase, .signedOut(reason), name)
+            let message: String? = reason == .user ? nil : ServerFailure.sessionExpired(nil).localizedDescription
+            XCTAssertEqual(harness.recorder.states.last?.message, message, name)
+            XCTAssertEqual(harness.recorder.phases.suffix(2), [.signingOut, .signedOut(reason)], name)
+            XCTAssertNil(harness.credentials.credential, name)
+            XCTAssertEqual(mirror.read()?.digest, "", "\(name): the extensions see nobody signed in.")
+            XCTAssertTrue(runtime.authorization.hasEnded, name)
+            XCTAssertTrue(runtime.api.transport.isShutDown, name)
+            let features = try await library.entities.cachedServerFeatures()
+            XCTAssertNil(features, "\(name): the offline library is emptied.")
+            XCTAssertFalse(library.sync.isOpen, name)
+            XCTAssertEqual(try backup.state(), try Self.backupStateAfterSignOut(keepingAutomaticBackup: false),
+                           "\(name): the backup state stays with its receipts, paused, and with automatic backup off.")
+            XCTAssertTrue(ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID), "\(name): the read-only flag stays.")
+            XCTAssertEqual(ShelfOrder(scope: saved.account.cacheScope).ids(.albums), ["b", "a"], "\(name): the shelf order stays.")
+        }
     }
 
-    /// Sign-out pauses backup without switching automatic backup off, and the backup state stays
-    /// on disk with its receipts, so signing in to the account again carries on as it was set.
-    func testSignOutKeepsTheAutomaticBackupPreference() async throws {
-        let folder = temporaryDirectory()
-        var state = BackupState()
-        state.preferences.automatic = true
-        state.paused = true
-        state.confirmed = ["L1": Date(timeIntervalSinceReferenceDate: 782_481_234.5)]
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try JSONEncoder().encode(state).write(to: folder.appendingPathComponent("state.json"))
-        let saved = LegacyGoldens.credential
-        let backup = BackupCoordinator()
-        try backup.load(saved, folder: folder)
-        XCTAssertTrue(backup.preferences.automatic)
+    /// Uploads stop as the app stops them at sign-out: backup pauses, its batch of transfer
+    /// notifications ends and nobody is left signed in to it, while its state stays on disk with
+    /// its receipts. Automatic backup is switched off in that state, as every earlier build did,
+    /// unless sign-out keeps it, the roadmap's default that waits for the owner's answer: then
+    /// signing in to the account again carries on with it.
+    func testStoppingUploadsSwitchesAutomaticBackupOffUnlessKept() async throws {
+        XCTAssertFalse(SignOutPolicy(reason: .user).keepsAutomaticBackup, "Owner question: until it is answered, sign-out switches it off.")
+        XCTAssertFalse(SignOutPolicy(reason: .sessionExpired).keepsAutomaticBackup)
+        for keeping in [false, true] {
+            let saved = LegacyGoldens.credential
+            let backup = try goldenBackup(for: saved)
 
-        await backup.disconnect()
+            await LiveAccountDevice(backup: { backup.coordinator }).stopUploads(keepingAutomaticBackup: keeping)
 
-        XCTAssertFalse(backup.preferences.automatic, "Nobody is signed in, so nothing backs up.")
-        let kept = try JSONDecoder().decode(BackupState.self, from: Data(contentsOf: folder.appendingPathComponent("state.json")))
-        XCTAssertTrue(kept.preferences.automatic, "The preference is kept for the account.")
-        XCTAssertEqual(kept.confirmed.keys.sorted(), ["L1"], "So are the confirmations.")
-        let again = BackupCoordinator()
-        try again.load(saved, folder: folder)
-        XCTAssertTrue(again.preferences.automatic, "Signing in again carries on with automatic backup.")
+            XCTAssertFalse(backup.coordinator.preferences.automatic, "Nobody is signed in, so nothing backs up.")
+            XCTAssertTrue(backup.coordinator.associations.isEmpty)
+            XCTAssertEqual(backup.coordinator.remaining, 0)
+            XCTAssertEqual(try backup.state(), try Self.backupStateAfterSignOut(keepingAutomaticBackup: keeping), "keeping: \(keeping)")
+            let again = BackupCoordinator()
+            try again.load(saved, folder: backup.folder)
+            XCTAssertEqual(again.preferences.automatic, keeping, "Signing in again carries on as sign-out left it.")
+            XCTAssertEqual(again.associations.count, 2, "The receipts are kept.")
+        }
+    }
+
+    /// A server the logout can't reach within the budget doesn't hold sign-out up. Here the
+    /// preferred address never answers its check, so the logout never gets an address: once the
+    /// budget is spent, sign-out goes on, removes everything as usual and sends nothing more.
+    func testSignOutGoesOnWithoutTheServerOnceItsBudgetIsSpent() async throws {
+        let server = answeringAddressChecks(makeStubServer()), away = makeStubServer()
+        let unanswered = StubServer.Gate()
+        addTeardownBlock { unanswered.open() }
+        away.route("GET", "server/ping", StubServer.Response.json(#"{"res":"pong"}"#).waiting(for: unanswered))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let harness = makeHarness(credential("alice", on: server), server: server, environment: environment(validatesSession: false),
+                                  network: NetworkConfiguration(alternateEndpoints: [away.baseURL], automaticallySwitchEndpoints: true),
+                                  serverSignOutBudget: .milliseconds(300))
+        await harness.manager.restore()
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+
+        let started = ContinuousClock.now
+        let signingOut = Task { await harness.manager.signOut(.user) }
+        try await until("Sign-out waited for the server past its budget.", timeout: .seconds(3)) {
+            harness.recorder.phases.last == .signedOut(.user)
+        }
+        // A sign-out still waiting for the address waits until the test ends and the check is
+        // answered, so it isn't waited for here.
+        guard harness.recorder.phases.last == .signedOut(.user) else { return }
+        await signingOut.value
+
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(3))
+        XCTAssertEqual(away.requests("GET", "server/ping").count, 1, "The preferred address was still being checked.")
+        XCTAssertEqual(harness.log.all, Self.signOutSteps)
+        XCTAssertNil(harness.credentials.credential)
+        XCTAssertTrue(runtime.api.transport.isShutDown)
+        XCTAssertTrue(server.requests("POST", "auth/logout").isEmpty, "Nothing is sent once the budget is spent.")
+    }
+
+    /// The address the logout goes to is chosen while uploads stop, so the budget goes to the
+    /// logout rather than to checking every address, which can take longer than the budget.
+    func testSignOutChoosesTheServersAddressWhileUploadsStop() async throws {
+        let server = answeringAddressChecks(makeStubServer()), away = makeStubServer()
+        let unreachable = StubServer.Gate(), stopping = StubServer.Gate()
+        addTeardownBlock { unreachable.open(); stopping.open() }
+        away.route("GET", "server/ping", StubServer.Response.transportFailure(.cannotConnectToHost).waiting(for: unreachable))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let harness = makeHarness(credential("alice", on: server), server: server, environment: environment(validatesSession: false),
+                                  holdingUploadsStop: stopping,
+                                  network: NetworkConfiguration(alternateEndpoints: [away.baseURL], automaticallySwitchEndpoints: true))
+        await harness.manager.restore()
+
+        let signingOut = Task { await harness.manager.signOut(.user) }
+        try await until("The address was not checked while uploads stopped.") {
+            stopping.waiting == 1 && away.requests("GET", "server/ping").count == 1
+        }
+        unreachable.open()
+        stopping.open()
+        await signingOut.value
+
+        XCTAssertEqual(server.requests("POST", "auth/logout").count, 1, "The logout reached the server's own address.")
+        XCTAssertEqual(harness.log.all, Self.signOutSteps)
     }
 
     /// A sign-in during sign-out waits for it to finish: the old session is gone, credential
@@ -490,31 +569,40 @@ import XCTest
                       isAdmin: false, shouldChangePassword: false, profileImagePath: nil, isOnboarded: true)
     }
 
-    private func environment(library: Bool = false) -> AccountEnvironment {
+    private func environment(library: Bool = false, validatesSession: Bool = true) -> AccountEnvironment {
         var environment = AccountEnvironment()
         environment.usesDevicePhotos = false
         environment.syncsLibrary = library
+        environment.validatesSession = validatesSession
         if library { environment.libraryDirectory = temporaryDirectory() }
         return environment
     }
 
+    /// `uploads` stops uploads as the app does; `uploadsStop` holds stopping them back until the
+    /// test opens it.
     private func dependencies(_ credential: StoredCredential?, server: StubServer, log: AccountEventLog, locked: Bool = false,
-                              mirror: AuthorizationMirror? = nil, unlockEvents: AsyncStream<Void> = AsyncStream { $0.finish() }) -> AccountDependencies {
+                              mirror: AuthorizationMirror? = nil, unlockEvents: AsyncStream<Void> = AsyncStream { $0.finish() },
+                              uploads: LiveAccountDevice? = nil, uploadsStop: StubServer.Gate? = nil,
+                              network: NetworkConfiguration = NetworkConfiguration(), serverSignOutBudget: Duration = .seconds(3)) -> AccountDependencies {
         let store = TestCredentialStore(credential, log: log, locked: locked)
         let clients = AccountClients { address, credential, purpose in
             let authorization: AuthorizationState? = if case .session(let state) = purpose { state } else { nil }
             return try APIClient(baseURL: address, accessToken: credential?.token, userID: credential?.userID, sessionConfiguration: server.configuration(),
-                                 networkConfiguration: NetworkConfiguration(), wifiName: NoWiFi(), authorization: authorization)
+                                 networkConfiguration: network, wifiName: NoWiFi(), authorization: authorization)
         }
-        return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log), clients: clients,
-                                   unlockEvents: { unlockEvents }, expiryRecheckDelay: .milliseconds(20))
+        return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log, uploads: uploads, uploadsStop: uploadsStop),
+                                   clients: clients, unlockEvents: { unlockEvents }, expiryRecheckDelay: .milliseconds(20),
+                                   serverSignOutBudget: serverSignOutBudget)
     }
 
     private func makeHarness(_ credential: StoredCredential?, server: StubServer, environment: AccountEnvironment? = nil,
-                             locked: Bool = false, foreground: Bool = false, mirror: AuthorizationMirror? = nil) -> AccountHarness {
+                             locked: Bool = false, foreground: Bool = false, mirror: AuthorizationMirror? = nil,
+                             uploads: LiveAccountDevice? = nil, holdingUploadsStop uploadsStop: StubServer.Gate? = nil,
+                             network: NetworkConfiguration = NetworkConfiguration(), serverSignOutBudget: Duration = .seconds(3)) -> AccountHarness {
         let log = AccountEventLog()
         let (events, unlock) = AsyncStream.makeStream(of: Void.self)
-        let dependencies = dependencies(credential, server: server, log: log, locked: locked, mirror: mirror, unlockEvents: events)
+        let dependencies = dependencies(credential, server: server, log: log, locked: locked, mirror: mirror, unlockEvents: events,
+                                        uploads: uploads, uploadsStop: uploadsStop, network: network, serverSignOutBudget: serverSignOutBudget)
         let harness = AccountHarness(log: log, credentials: dependencies.credentials as! TestCredentialStore, unlock: unlock)
         harness.presence.isForeground = foreground
         let recorder = harness.recorder
@@ -526,6 +614,49 @@ import XCTest
     /// Ends a test's session, so its media and caches go with it.
     private func signOutAfterwards(_ harness: AccountHarness) async {
         await harness.manager.signOut(.user)
+    }
+
+    /// `server`, answering the check of which address answers as Immich does.
+    private func answeringAddressChecks(_ server: StubServer) -> StubServer {
+        server.route("GET", "server/ping", .json(#"{"res":"pong"}"#))
+        server.route("GET", "users/me", .immichError(401, message: "Authentication required"))
+        return server
+    }
+
+    /// `saved`'s backup, loaded as the app loads it, from the golden state of a backup in the
+    /// middle of a run: a queue, a stage in flight, receipts, failures and a notification batch.
+    private func goldenBackup(for saved: StoredCredential) throws -> GoldenBackup {
+        let folder = temporaryDirectory()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FixtureLoader.data("backup/state-current.json").write(to: folder.appendingPathComponent("state.json"))
+        let coordinator = BackupCoordinator()
+        try coordinator.load(saved, folder: folder)
+        XCTAssertTrue(coordinator.preferences.automatic)
+        XCTAssertEqual(coordinator.associations.count, 2)
+        return GoldenBackup(coordinator: coordinator, folder: folder)
+    }
+
+    /// The golden backup state as sign-out leaves it: paused, its notification batch ended, and
+    /// automatic backup off unless kept. Everything else, receipts included, is as it was.
+    private static func backupStateAfterSignOut(keepingAutomaticBackup: Bool) throws -> String {
+        var state = LegacyGoldens.backupState()
+        state.paused = true
+        state.transferNotification = nil
+        state.preferences.automatic = keepingAutomaticBackup
+        return try FixtureLoader.canonicalJSON(JSONEncoder().encode(state), unorderedArrays: LegacyGoldens.stateSets)
+    }
+
+    /// Turns `saved`'s read-only flag on and orders its album shelf, until the test ends.
+    private func turnOnReadOnlyAndOrderShelves(for saved: StoredCredential) {
+        ReadOnlyPolicy.setEnabled(true, server: saved.server, userID: saved.userID)
+        ShelfOrder(scope: saved.account.cacheScope).save(["b", "a"], for: .albums)
+        addTeardownBlock {
+            (AppGroup.defaults ?? .standard).removeObject(forKey: AccountStoragePaths(saved.account).readOnlyKey)
+            for key in UserDefaults.standard.dictionaryRepresentation().keys
+            where key.hasPrefix("shelfOrder.") && key.hasSuffix(saved.account.cacheScope) {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
     }
 
     private func makeMirror() -> AuthorizationMirror {
@@ -590,13 +721,35 @@ final class AccountEventLog: Sendable {
     var all: [String] { events.withLock { $0 } }
 }
 
-/// The device-wide services, recording what they are asked.
+/// An account's backup in a folder of the test's, and its state.json as it is now.
+struct GoldenBackup {
+    let coordinator: BackupCoordinator
+    let folder: URL
+
+    /// state.json, canonical.
+    func state() throws -> String {
+        try FixtureLoader.canonicalJSON(Data(contentsOf: folder.appendingPathComponent("state.json")), unorderedArrays: LegacyGoldens.stateSets)
+    }
+}
+
+/// The device-wide services, recording what they are asked. With `uploads`, uploads stop as the
+/// app stops them; with `uploadsStop`, only once the test opens it.
 final class FakeAccountDevice: AccountDevice {
     let log: AccountEventLog
+    private let uploads: LiveAccountDevice?
+    private let uploadsStop: StubServer.Gate?
 
-    init(log: AccountEventLog) { self.log = log }
+    init(log: AccountEventLog, uploads: LiveAccountDevice? = nil, uploadsStop: StubServer.Gate? = nil) {
+        self.log = log
+        self.uploads = uploads
+        self.uploadsStop = uploadsStop
+    }
 
-    func stopUploads() async { log.append("stopUploads") }
+    func stopUploads(keepingAutomaticBackup: Bool) async {
+        log.append(keepingAutomaticBackup ? "stopUploads(keepingAutomaticBackup)" : "stopUploads")
+        await uploadsStop?.wait()
+        await uploads?.stopUploads(keepingAutomaticBackup: keepingAutomaticBackup)
+    }
     func endCasting() async { log.append("endCasting") }
     func reloadWidgets() async { log.append("reloadWidgets") }
     func clearNotifications() async { log.append("clearNotifications") }
