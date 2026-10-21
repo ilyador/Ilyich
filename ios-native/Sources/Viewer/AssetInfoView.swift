@@ -17,7 +17,9 @@ struct AssetInfoView: View {
     @State private var editingFaces = false
     @State private var collection: InfoCollection?
     @State private var saving = false
-    @State private var export: ViewerExport?
+    /// Download original.
+    @State private var exports: ExportTracker
+    @State private var shared: ExportedFiles?
     @State private var tagging = false
 
     init(api: APIClient, pipeline: MediaPipeline, asset: Asset, onUpdated: @escaping (Asset) -> Void,
@@ -25,27 +27,32 @@ struct AssetInfoView: View {
         self.api = api; self.pipeline = pipeline; self.onUpdated = onUpdated
         self.onExploreLocation = onExploreLocation
         _asset = State(initialValue: asset); _caption = State(initialValue: asset.exifInfo?.description ?? "")
+        _exports = State(initialValue: ExportTracker(api: api))
     }
-    private var ownsAsset: Bool { asset.ownerId != nil && asset.ownerId == api.userID }
+    /// What the photo offers here: changing its details and downloading its original.
+    private var capabilities: AssetCapabilities {
+        AssetCapabilityPolicy.evaluate(asset, context: CapabilityContext(api: api, features: nil))
+    }
     var body: some View {
+        let can = capabilities
         Form {
             Section {
                 if let date = asset.localDateTime ?? asset.fileCreatedAt {
                     LabeledContent("Taken", value: date.formatted(Date.FormatStyle(date: .long, time: .shortened, timeZone: TimeZone(secondsFromGMT: 0)!)))
                 }
-                if ownsAsset { Button("Adjust date and location") { editingMetadata = true }.requiresWriteAccess() }
-                TextField("Add a caption", text: $caption, axis: .vertical).disabled(!ownsAsset).lineLimit(2...6).requiresWriteAccess()
+                if can.shows(.editInfo) { Button("Adjust date and location") { editingMetadata = true }.disabled(!can.offers(.editInfo)) }
+                TextField("Add a caption", text: $caption, axis: .vertical).disabled(!can.offers(.editInfo)).lineLimit(2...6)
                 if caption != (asset.exifInfo?.description ?? "") {
-                    Button("Save caption") { saveCaption() }.requiresWriteAccess().disabled(saving)
+                    Button("Save caption") { saveCaption() }.disabled(saving || !can.offers(.editInfo))
                 }
-                if ownsAsset {
+                if can.shows(.editInfo) {
                     Menu {
                         ForEach(1...5, id: \.self) { rating in Button("\(rating) \(rating == 1 ? "star" : "stars")") { setRating(rating) } }
                         Button("Rejected") { setRating(-1) }
                         Button("Clear rating") { setRating(nil) }
                     } label: {
                         LabeledContent("Rating", value: asset.exifInfo?.rating.map { $0 == -1 ? "Rejected" : "\($0) stars" } ?? "Unrated")
-                    }.disabled(saving).requiresWriteAccess()
+                    }.disabled(saving || !can.offers(.editInfo))
                 }
             }
             if let exif = asset.exifInfo {
@@ -99,23 +106,21 @@ struct AssetInfoView: View {
                     Text("Preview developed from the XMP sidecar.").font(.caption).foregroundStyle(.secondary)
                 }
                 if asset.isEdited { Label("Edited in Ilyich", systemImage: "crop.rotate") }
-                Button("Download original", systemImage: "arrow.down.document") {
-                    saving = true
-                    Task {
-                        defer { saving = false }
-                        do { export = ViewerExport(url: try await api.download(asset: asset, original: true)) }
-                        catch { self.error = error.localizedDescription }
-                    }
-                }.disabled(saving)
+                if can.shows(.download) {
+                    Button("Download original", systemImage: "arrow.down.document") { downloadOriginal() }
+                        .disabled(saving || exports.isRunning || !can.offers(.download))
+                }
             }
-            if !(asset.people ?? []).isEmpty || ownsAsset {
+            if !(asset.people ?? []).isEmpty || can.shows(.editInfo) {
                 Section("People") {
                     ForEach(asset.people ?? []) { person in
                         Button { collection = .init(title: person.name.isEmpty ? "Unnamed person" : person.name, filter: .init(personIds: .init(all: [person.id]))) } label: {
                             HStack { PersonThumbnail(pipeline: pipeline, person: person, pixelSize: PersonThumbnail.small).frame(width: 40, height: 40); Text(person.name.isEmpty ? "Unnamed person" : person.name) }
                         }
                     }
-                    if ownsAsset { Button("Fix faces", systemImage: "person.crop.rectangle.badge.plus") { editingFaces = true }.requiresWriteAccess() }
+                    if can.shows(.editInfo) {
+                        Button("Fix faces", systemImage: "person.crop.rectangle.badge.plus") { editingFaces = true }.disabled(!can.offers(.editInfo))
+                    }
                 }
             }
             if !albums.isEmpty {
@@ -125,10 +130,10 @@ struct AssetInfoView: View {
                     }
                 }
             }
-            if !(asset.tags ?? []).isEmpty || ownsAsset {
+            if !(asset.tags ?? []).isEmpty || can.shows(.editInfo) {
                 Section("Tags") {
                     ForEach(asset.tags ?? []) { tag in Text(tag.value) }
-                    if ownsAsset { Button("Edit tags") { tagging = true }.requiresWriteAccess() }
+                    if can.shows(.editInfo) { Button("Edit tags") { tagging = true }.disabled(!can.offers(.editInfo)) }
                 }
             }
             if !text.isEmpty {
@@ -152,7 +157,7 @@ struct AssetInfoView: View {
         .sheet(item: $collection) { selection in
             NavigationStack { InfoCollectionView(api: api, pipeline: pipeline, collection: selection) }
         }
-        .sheet(item: $export) { item in ViewerShareSheet(url: item.url).onDisappear { item.removeTemporaryFile() } }
+        .sheet(item: $shared) { files in ShareSheet(urls: files.urls).onDisappear { files.remove() } }
         .sheet(isPresented: $tagging) { NavigationStack { ViewerTagEditor(api: api, asset: asset, onUpdated: update) } }
     }
     private func locationPreview(latitude: Double, longitude: Double, exif: ExifInfo) -> some View {
@@ -169,6 +174,15 @@ struct AssetInfoView: View {
         VStack(alignment: .leading, spacing: 3) { Text(value ?? "—").font(.headline); Text(title).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private func update(_ asset: Asset) { self.asset = asset; caption = asset.exifInfo?.description ?? ""; onUpdated(asset) }
+    private func downloadOriginal() {
+        exports.start(.share([asset], original: true)) { outcome in
+            switch outcome {
+            case .files(let files): shared = files
+            case .failed(let failure, _): error = failure.localizedDescription
+            case .saved, .cancelled: break
+            }
+        }
+    }
     private func saveCaption() {
         saving = true
         Task { defer { saving = false }; do { update(try await api.updateAsset(id: asset.id, update: .init(description: caption))) } catch { self.error = error.localizedDescription } }

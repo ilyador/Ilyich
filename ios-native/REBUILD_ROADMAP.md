@@ -117,7 +117,7 @@ APIClient becomes the endpoint catalogue over the transport. BackupAttempt maps 
 - perform(DeviceMutation) builds every change block with nonisolated static factories that capture only Sendable values and a locked ChangeReport;
 - inside the block: all-or-nothing checks for existence, canPerform and revision;
 - userCancelled maps to declined.
-DeviceDatabase holds the device_mutation journal: begin before performChanges, finish after, reconcileInterrupted at launch; results go to a mutations() stream. FreeUpSpaceView remove, LocalPhotoActionsView favorite and remove, and PhotoLibrarySave create all route through perform. LocalPhotoLibrary, DeviceTimelineIndex and BackupLifecycle subscribe to adapter.changes(). Seams: PhotoLibraryPerforming, AssetFetching.
+DeviceDatabase holds the device_mutation journal: begin before performChanges, finish after, reconcileInterrupted at launch; results go to a mutations() stream. FreeUpSpaceView remove, LocalPhotoActionsView favorite and remove, and MediaExportService's Photos writer (SystemPhotoLibrary, W1) create all route through perform. LocalPhotoLibrary, DeviceTimelineIndex and BackupLifecycle subscribe to adapter.changes(). Seams: PhotoLibraryPerforming, AssetFetching.
 - **Migration:** New, empty device.sqlite.
 - **Tests:**
   - testChangeBlocksRunOffMainWithoutIsolationTrap
