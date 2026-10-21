@@ -58,6 +58,8 @@ struct PerfSummary: Codable, Equatable, Sendable {
             var empty: Int
             /// Nothing yet: the photo's month had not loaded. Counted once per cell and month.
             var awaitingMonth: Int
+            /// The sketch's average colour, for the frame or two its sketch takes to decode.
+            var color: Int
             var total: Int
         }
         /// Cells bound to a photo they did not show yet.

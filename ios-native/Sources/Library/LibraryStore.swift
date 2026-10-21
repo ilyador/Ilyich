@@ -171,22 +171,26 @@ extension APIClient: LibraryAPI {}
     private var cursor: String?
     private var retryBatch: (cursor: String?, prefix: [Asset])?
     private var loadedResultPageCount = 0
-    private var requests: [String: Task<Void, Never>] = [:]
-    private var pendingBuckets: [Int] = []
-    private var visibleBucketIDs: Set<String> = []
-    private var targetBucketID: String?
+    // The month queue drives no view. Observing it made SwiftUI update the grid on every scrolled
+    // frame, since binding a cell that waits for its month reads it.
+    @ObservationIgnored private var requests: [String: Task<Void, Never>] = [:]
+    /// Months waiting for a request slot, the one wanted most first. They are held by ID: a
+    /// section's index moves when the phone adds a newer month.
+    @ObservationIgnored private var pendingBuckets: [String] = []
+    @ObservationIgnored private var visibleBucketIDs: Set<String> = []
+    @ObservationIgnored private var targetBucketID: String?
     private let maximumBucketRequests = 3
     private var queryTask: Task<Void, Never>?
     @ObservationIgnored private var navigationTask: Task<Void, Never>?
     private var generation = UUID()
-    private var recentBuckets: [String] = []
+    @ObservationIgnored private var recentBuckets: [String] = []
     private var usesMetadata = false
     private var developedOnlyResults = false
     private var showingResults = false
     private var timelineSections: [LibrarySection] = []
     private var frozenFeed: FrozenFeed?
     private var cacheEpoch: UUID?
-    private var cachedBuckets: Set<String> = []
+    @ObservationIgnored private var cachedBuckets: Set<String> = []
     private var searchGeneration = UUID()
     private var originalTimeline: (TimelineSnapshot, GridPosition?, String)?
     @ObservationIgnored var position: GridPosition? {
@@ -536,16 +540,17 @@ extension APIClient: LibraryAPI {}
 
     func requestBucket(_ section: Int) {
         guard !showingResults, buckets.indices.contains(section) else { return }
-        let bucket = buckets[section]
-        guard remoteBuckets.contains(where: { $0.id == bucket.id }),
-              loaded[bucket.id] == nil || cachedBuckets.contains(bucket.id),
-              requests[bucket.id] == nil, bucketErrors[bucket.id] == nil else { return }
-        if !pendingBuckets.contains(section) {
-            if visibleBucketIDs.contains(bucket.id) || targetBucketID == bucket.id {
-                pendingBuckets.insert(section, at: 0)
-            } else if pendingBuckets.count < 6 {
-                pendingBuckets.append(section)
-            }
+        let id = buckets[section].id
+        // Every cell still waiting for its month asks again on each bind, so the cheap checks go first.
+        guard requests[id] == nil, bucketErrors[id] == nil,
+              loaded[id] == nil || cachedBuckets.contains(id),
+              remoteBuckets.contains(where: { $0.id == id }) else { return }
+        if visibleBucketIDs.contains(id) || targetBucketID == id {
+            // A month on screen, or the one a jump lands on, goes first: the newest request first.
+            pendingBuckets.removeAll { $0 == id }
+            pendingBuckets.insert(id, at: 0)
+        } else if !pendingBuckets.contains(id) {
+            pendingBuckets.append(id)
         }
         // Prefetch cannot displace the viewport or accumulate every crossed month.
         if pendingBuckets.count > 6 { pendingBuckets.removeLast(pendingBuckets.count - 6) }
@@ -554,46 +559,61 @@ extension APIClient: LibraryAPI {}
 
     private func startPendingBuckets() {
         while requests.count < maximumBucketRequests, !pendingBuckets.isEmpty {
-            let section = pendingBuckets.removeFirst()
-            guard buckets.indices.contains(section) else { continue }
-            let bucket = buckets[section]
-            guard requests[bucket.id] == nil, bucketErrors[bucket.id] == nil,
-                  loaded[bucket.id] == nil || cachedBuckets.contains(bucket.id) else { continue }
+            let id = pendingBuckets.removeFirst()
+            guard requests[id] == nil, bucketErrors[id] == nil,
+                  loaded[id] == nil || cachedBuckets.contains(id),
+                  remoteBuckets.contains(where: { $0.id == id }) else { continue }
             let current = generation, filter = timelineFilter
-            requests[bucket.id] = Task { [weak self, api] in
+            requests[id] = Task { [weak self, api] in
                 defer {
                     if let self, self.generation == current {
-                        self.requests[bucket.id] = nil
+                        self.requests[id] = nil
                         self.startPendingBuckets()
                     }
                 }
                 do {
-                    let assets = try await FeedMonthProbe.measure { try await api.timeBucket(bucket.id, filter: filter) }
+                    let assets = try await FeedMonthProbe.measure { try await api.timeBucket(id, filter: filter) }
                     guard let self, self.generation == current, !Task.isCancelled else { return }
-                    self.loaded[bucket.id] = assets
-                    self.cachedBuckets.remove(bucket.id)
-                    self.recentBuckets.removeAll { $0 == bucket.id }; self.recentBuckets.append(bucket.id)
-                    self.trimLoadedBuckets()
-                    self.updateMergedEntries(); self.revision += 1
+                    self.loaded[id] = assets
+                    self.cachedBuckets.remove(id)
+                    self.recentBuckets.removeAll { $0 == id }; self.recentBuckets.append(id)
+                    let trimmed = self.trimLoadedBuckets()
+                    self.updateMergedEntries(of: [id] + trimmed); self.revision += 1
                     FeedMonthProbe.committed()
                     if let epoch = self.cacheEpoch {
                         let snapshot = TimelineSnapshot(buckets: self.remoteBuckets, assets: self.loaded)
                         await TimelineCache.shared.save(snapshot, scope: api.cacheScope, filter: filter, epoch: epoch)
                     }
                 } catch is CancellationError {} catch {
-                    guard let self, self.generation == current else { return }
-                    self.bucketErrors[bucket.id] = error.localizedDescription; self.revision += 1
+                    // A load dropped for a month the scrub left behind fails as URLError.cancelled
+                    // when the server was answering it; that is not a month that failed.
+                    guard let self, self.generation == current, !Task.isCancelled else { return }
+                    self.bucketErrors[id] = error.localizedDescription; self.revision += 1
                 }
             }
         }
     }
 
-    private func trimLoadedBuckets() {
+    /// A scrub has moved on: a month left behind that is still loading gives its slot to the months
+    /// on screen. One whose load has not started yet is dropped before it starts, and one that has
+    /// started stops; the month is asked for again if it comes back.
+    private func dropLoadsLeftBehind(near sections: [Int]) {
+        guard let first = sections.first, let last = sections.last, !requests.isEmpty else { return }
+        let nearby = Set(buckets[max(0, first - 2)...min(buckets.count - 1, last + 2)].map(\.id))
+        for (id, task) in requests where !nearby.contains(id) && id != targetBucketID { task.cancel() }
+    }
+
+    /// Keeps the twelve most recently loaded months, and any on screen; returns the months let go.
+    private func trimLoadedBuckets() -> [String] {
         let protected = visibleBucketIDs.union(targetBucketID.map { [$0] } ?? [])
+        var trimmed: [String] = []
         while recentBuckets.count > 12,
               let index = recentBuckets.firstIndex(where: { !protected.contains($0) }) {
-            loaded[recentBuckets.remove(at: index)] = nil
+            let id = recentBuckets.remove(at: index)
+            loaded[id] = nil
+            trimmed.append(id)
         }
+        return trimmed
     }
 
     /// Actual viewport membership, including months that share the same visible row.
@@ -602,6 +622,7 @@ extension APIClient: LibraryAPI {}
         if let targetBucketID, visibleBucketIDs.contains(targetBucketID) { self.targetBucketID = nil }
         let ordered = indices.filter { buckets.indices.contains($0) }.sorted()
         let desired = ordered + ordered.flatMap { [$0 + 1, $0 - 1] }.filter { buckets.indices.contains($0) && !indices.contains($0) }
+        dropLoadsLeftBehind(near: ordered)
         pendingBuckets = []
         for section in desired { requestBucket(section) }
     }
@@ -609,7 +630,9 @@ extension APIClient: LibraryAPI {}
     func visibleSection(_ index: Int, visible: Set<Int>? = nil) {
         if isReplacingFeed || showingResults { return }
         guard buckets.indices.contains(index) else { return }
-        let next = Self.monthTitle(buckets[index].date)
+        // This runs on every scrolled frame; the sections already carry each month's title.
+        let next = timelineSections.indices.contains(index) && timelineSections[index].id == buckets[index].id
+            ? timelineSections[index].title : Self.monthTitle(buckets[index].date)
         if title != next { title = next }
         visibleSections(visible ?? [index])
     }
@@ -659,7 +682,7 @@ extension APIClient: LibraryAPI {}
             pendingBuckets = []
             requestBucket(index)
             while generation == current, !Task.isCancelled,
-                  pendingBuckets.contains(index) || requests[bucket] != nil {
+                  pendingBuckets.contains(bucket) || requests[bucket] != nil {
                 if let task = requests[bucket] { await task.value }
                 else { await Task.yield() }
             }
@@ -976,37 +999,53 @@ extension APIClient: LibraryAPI {}
         timelineSections = buckets.map { .init(id: $0.id, count: $0.count, title: Self.monthTitle($0.date)) }
     }
     private func updateMergedEntries() {
-        merged = [:]
-        if mergesDevicePhotos {
-            let remoteKeys = Set(remoteBuckets.map(\.id))
-            for bucket in buckets {
-                if let assets = loaded[bucket.id] { merged[bucket.id] = deviceTimeline.entries(remote: assets, bucket: bucket.id) }
-                else if !remoteKeys.contains(bucket.id) { merged[bucket.id] = deviceTimeline.entries(remote: [], bucket: bucket.id) }
-            }
-        }
-        dayGroupCache = [:]
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        var style = Date.FormatStyle().month(.wide).day().year()
-        style.timeZone = calendar.timeZone
+        var entries: [String: [LibraryEntry]] = [:], days: [String: [TimelineDayGroup]] = [:]
+        let remoteKeys = Set(remoteBuckets.map(\.id)), merging = mergesDevicePhotos
         for bucket in buckets {
-            let entries: [LibraryEntry]?
-            if mergesDevicePhotos { entries = merged[bucket.id] }
-            else { entries = loaded[bucket.id]?.map { .remote($0) } }
-            guard let entries, !entries.isEmpty else { continue }
-            var groups: [TimelineDayGroup] = []
-            var currentDay: Date?
-            for (item, entry) in entries.enumerated() {
-                let day = calendar.startOfDay(for: entry.date)
-                if currentDay == day {
-                    groups[groups.count - 1].count += 1
-                } else {
-                    groups.append(TimelineDayGroup(startItem: item, count: 1, title: day.formatted(style)))
-                    currentDay = day
-                }
-            }
-            dayGroupCache[bucket.id] = groups
+            let month = mergedMonth(bucket.id, remote: remoteKeys.contains(bucket.id), merging: merging)
+            entries[bucket.id] = month.entries; days[bucket.id] = month.days
         }
+        merged = entries; dayGroupCache = days
+    }
+    /// Only these months changed: one just loaded and those let go to make room. Redoing every
+    /// loaded month on each load took a large share of the main thread while scrubbing.
+    private func updateMergedEntries(of ids: [String]) {
+        let merging = mergesDevicePhotos
+        for id in ids {
+            let month = buckets.contains(where: { $0.id == id })
+                ? mergedMonth(id, remote: remoteBuckets.contains(where: { $0.id == id }), merging: merging) : (entries: nil, days: nil)
+            merged[id] = month.entries; dayGroupCache[id] = month.days
+        }
+    }
+    /// One month's rows merged with the photos only on this phone, when they are merged, and its days.
+    private func mergedMonth(_ id: String, remote: Bool, merging: Bool) -> (entries: [LibraryEntry]?, days: [TimelineDayGroup]?) {
+        let entries: [LibraryEntry]?
+        if !merging { entries = loaded[id]?.map { .remote($0) } }
+        else if let assets = loaded[id] { entries = deviceTimeline.entries(remote: assets, bucket: id) }
+        else if !remote { entries = deviceTimeline.entries(remote: [], bucket: id) }
+        else { entries = nil }
+        let days = entries.flatMap { $0.isEmpty ? nil : Self.dayGroups($0) }
+        return (merging ? entries : nil, days)
+    }
+    /// Runs of photos taken on the same day. Their dates are wall times stored as UTC, and a UTC
+    /// day is a whole 86,400 seconds from midnight, so the day is worked out by hand; asking the
+    /// calendar for the start of every photo's day was most of the cost of loading a month.
+    nonisolated static func dayGroups(_ entries: [LibraryEntry]) -> [TimelineDayGroup] {
+        var style = Date.FormatStyle().month(.wide).day().year()
+        style.timeZone = TimeZone(secondsFromGMT: 0)!
+        var groups: [TimelineDayGroup] = []
+        var currentDay: Double?
+        for (item, entry) in entries.enumerated() {
+            let day = (entry.date.timeIntervalSinceReferenceDate / 86_400).rounded(.down)
+            if currentDay == day {
+                groups[groups.count - 1].count += 1
+            } else {
+                groups.append(TimelineDayGroup(startItem: item, count: 1,
+                                               title: Date(timeIntervalSinceReferenceDate: day * 86_400).formatted(style)))
+                currentDay = day
+            }
+        }
+        return groups
     }
     private static func monthTitle(_ date: Date?) -> String {
         guard let date else { return "Library" }

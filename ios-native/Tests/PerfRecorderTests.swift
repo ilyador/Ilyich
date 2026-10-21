@@ -22,7 +22,7 @@ final class PerfRecorderTests: XCTestCase {
         for milliseconds in [12, 30, 48] { recorder.recordDisplay(.disk, nanoseconds: UInt64(milliseconds) * 1_000_000) }
         recorder.recordDisplay(.network, nanoseconds: 420_000_000)
         recorder.countPlaceholder(.sketch); recorder.countPlaceholder(.sketch); recorder.countPlaceholder(.empty)
-        recorder.countPlaceholder(.awaitingMonth)
+        recorder.countPlaceholder(.awaitingMonth); recorder.countPlaceholder(.color)
         recorder.countAbandoned()
         let thumbnails = recorder.measurements(at: 10 * second).thumbnails
         XCTAssertEqual(thumbnails.binds, 8)
@@ -31,7 +31,7 @@ final class PerfRecorderTests: XCTestCase {
         XCTAssertEqual(thumbnails.display["memoryOther"]?.count, 1)
         XCTAssertEqual(thumbnails.display["disk"], PerfSummary.Stats(count: 3, p50: 30, p95: 48, p99: 48, max: 48))
         XCTAssertEqual(thumbnails.display["network"]?.p50, 420)
-        XCTAssertEqual(thumbnails.placeholders, .init(sketch: 2, empty: 1, awaitingMonth: 1, total: 4))
+        XCTAssertEqual(thumbnails.placeholders, .init(sketch: 2, empty: 1, awaitingMonth: 1, color: 1, total: 5))
         XCTAssertEqual(thumbnails.abandoned, 1)
     }
 

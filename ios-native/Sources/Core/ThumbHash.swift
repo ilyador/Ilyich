@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Synchronization
 import UIKit
 
 /// Immich gives every photo a thumbhash: about 25 bytes that sketch it as a few blurred color
@@ -108,29 +109,104 @@ enum ThumbHash {
         return Pixels(width: width, height: height, rgba: rgba)
     }
 
+    /// The sketch in the format Core Animation draws without converting it: 32-bit little-endian
+    /// BGRA, premultiplied, and opaque when the photo has no transparency. Straight RGBA made Core
+    /// Animation convert every sketch on the main thread as it was committed.
     static func image(_ base64: String) -> CGImage? {
-        guard let data = Data(base64Encoded: base64), let pixels = pixels([UInt8](data)),
-              let provider = CGDataProvider(data: Data(pixels.rgba) as CFData) else { return nil }
+        guard let data = Data(base64Encoded: base64), let pixels = pixels([UInt8](data)) else { return nil }
+        var bgra = [UInt8](repeating: 0, count: pixels.rgba.count)
+        var opaque = true
+        for i in stride(from: 0, to: pixels.rgba.count, by: 4) {
+            let alpha = pixels.rgba[i + 3]
+            if alpha != 255 { opaque = false }
+            bgra[i] = premultiply(pixels.rgba[i + 2], alpha)
+            bgra[i + 1] = premultiply(pixels.rgba[i + 1], alpha)
+            bgra[i + 2] = premultiply(pixels.rgba[i], alpha)
+            bgra[i + 3] = alpha
+        }
+        guard let provider = CGDataProvider(data: Data(bgra) as CFData) else { return nil }
+        let alpha = opaque ? CGImageAlphaInfo.noneSkipFirst : .premultipliedFirst
         return CGImage(width: pixels.width, height: pixels.height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: pixels.width * 4,
                        space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
-                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Little.rawValue | alpha.rawValue),
                        provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+    }
+
+    private static func premultiply(_ channel: UInt8, _ alpha: UInt8) -> UInt8 {
+        UInt8((UInt16(channel) * UInt16(alpha) + 127) / 255)
+    }
+
+    /// The sketch's average colour, read from the hash's header alone: what a cell shows for the
+    /// moment before its sketch is decoded. A port of the reference `thumbHashToAverageRGBA`.
+    static func averageColor(_ hash: [UInt8]) -> (red: Double, green: Double, blue: Double, alpha: Double)? {
+        guard hash.count >= 5 else { return nil }
+        let header = Int(hash[0]) | Int(hash[1]) << 8 | Int(hash[2]) << 16
+        let l = Double(header & 63) / 63
+        let p = Double((header >> 6) & 63) / 31.5 - 1
+        let q = Double((header >> 12) & 63) / 31.5 - 1
+        let hasAlpha = header >> 23 != 0
+        guard !hasAlpha || hash.count > 5 else { return nil }
+        let b = l - 2 / 3 * p
+        let r = (3 * l - b + q) / 2
+        let g = r - q
+        return (max(0, min(1, r)), max(0, min(1, g)), max(0, min(1, b)), hasAlpha ? Double(hash[5] & 15) / 15 : 1)
+    }
+
+    static func averageColor(_ base64: String) -> UIColor? {
+        guard let data = Data(base64Encoded: base64), let color = averageColor([UInt8](data)) else { return nil }
+        return UIColor(red: color.red, green: color.green, blue: color.blue, alpha: color.alpha)
     }
 }
 
-/// Decoded sketches are tiny (about 2 KB), so thousands stay in memory for scrolling back.
-@MainActor enum ThumbHashImages {
-    private static let cache: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>()
-        cache.countLimit = 6_000
-        return cache
-    }()
+/// Decoded sketches are tiny (about 2 KB), so thousands stay in memory for scrolling back. They
+/// decode on a queue of their own, never on the main thread: a scrub binds hundreds of cells a
+/// second, and decoding each sketch as its cell was bound took a large share of every frame.
+final class ThumbHashSketches: Sendable {
+    static let shared = ThumbHashSketches()
 
-    static func image(for asset: Asset) -> UIImage? {
-        guard let hash = asset.thumbhash, !hash.isEmpty else { return nil }
-        if let image = cache.object(forKey: hash as NSString) { return image }
-        guard let cgImage = ThumbHash.image(hash) else { return nil }
-        let image = UIImage(cgImage: cgImage)
+    /// NSCache is thread-safe.
+    private nonisolated(unsafe) let cache = NSCache<NSString, CGImage>()
+    private let queue = DispatchQueue(label: "ilyich.thumbhash-sketches", qos: .userInitiated)
+    /// Callers waiting for a sketch that is being decoded, by hash.
+    private let waiting = Mutex<[String: [CheckedContinuation<CGImage?, Never>]]>([:])
+
+    init(countLimit: Int = 6_000) { cache.countLimit = countLimit }
+
+    /// The sketch, if it has been decoded. Never waits.
+    func cached(_ hash: String) -> CGImage? { cache.object(forKey: hash as NSString) }
+
+    /// The sketch, decoded off the main thread, or nil for a damaged hash.
+    func sketch(_ hash: String) async -> CGImage? {
+        if let image = cached(hash) { return image }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<CGImage?, Never>) in
+            let first = waiting.withLock { waiting -> Bool in
+                waiting[hash, default: []].append(continuation)
+                return waiting[hash]?.count == 1
+            }
+            guard first else { return }
+            queue.async { [self] in
+                let image = decode(hash)
+                for waiter in waiting.withLock({ $0.removeValue(forKey: hash) ?? [] }) { waiter.resume(returning: image) }
+            }
+        }
+    }
+
+    /// The sketch decoded on the calling thread, for a grid moving slowly enough that few cells
+    /// bind a frame; nil for a damaged hash.
+    func decodeNow(_ hash: String) -> CGImage? { decode(hash) }
+
+    /// Decodes the sketches of photos about to scroll in, so their cells have them at once.
+    func prefetch(_ hashes: [String]) {
+        let missing = hashes.filter { !$0.isEmpty && cached($0) == nil }
+        guard !missing.isEmpty else { return }
+        queue.async { [self] in
+            for hash in missing { _ = decode(hash) }
+        }
+    }
+
+    private func decode(_ hash: String) -> CGImage? {
+        if let image = cached(hash) { return image }
+        guard let image = autoreleasepool(invoking: { ThumbHash.image(hash) }) else { return nil }
         cache.setObject(image, forKey: hash as NSString)
         return image
     }

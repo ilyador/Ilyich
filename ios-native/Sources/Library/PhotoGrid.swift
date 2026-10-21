@@ -331,9 +331,12 @@ struct PhotoGrid: UIViewRepresentable {
         func collectionView(_ view: UICollectionView, prefetchItemsAt paths: [IndexPath]) {
             guard !parent.store.isReplacingFeed else { return }
             for section in Set(paths.map(\.section)) { parent.store.requestBucket(section) }
+            let assets = remoteAssets(at: paths)
+            // Sketches of photos about to scroll in decode now, off the main thread, so their cells have them at once.
+            ThumbHashSketches.shared.prefetch(assets.compactMap(\.thumbhash))
             // Photos about to scroll in move from disk to memory, so they draw in their first frame.
             guard let pixels = thumbnailPixels(view) else { return }
-            parent.pipeline.prefetchThumbnails(remoteAssets(at: paths), pixelSize: pixels)
+            parent.pipeline.prefetchThumbnails(assets, pixelSize: pixels)
         }
         func collectionView(_ view: UICollectionView, cancelPrefetchingForItemsAt paths: [IndexPath]) {
             guard let pixels = thumbnailPixels(view) else { return }
@@ -634,19 +637,33 @@ struct PhotoGrid: UIViewRepresentable {
 }
 
 @MainActor final class PhotoCell: UICollectionViewCell {
-    private let image = UIImageView()
-    private let badge = UILabel()
-    private let month = UILabel()
+    /// A server photo's sketch and thumbnail draw straight into this layer: an image view does a
+    /// good deal of work for every new image, and a scrub brings a cell several a second. Changes
+    /// show at once unless a cross-dissolve is added.
+    private let photo: CALayer = {
+        let layer = CALayer()
+        layer.contentsGravity = .resizeAspectFill
+        layer.masksToBounds = true
+        layer.actions = ["contents": NSNull(), "backgroundColor": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        return layer
+    }()
+    /// What the photo layer draws.
+    private var drawn: CGImage?
+    /// A photo only on this phone, which needs its orientation, or a status symbol, which needs its
+    /// tint, in an image view made when first needed.
+    private var image: UIImageView?
+    /// The length of a video or LIVE, the month chip and the selection check are made when first
+    /// needed and sit in the cell only while they show. UIKit walks every view of a cell each time
+    /// it reuses it, and the glass chip alone is several, so hidden overlays in every cell cost a
+    /// scrub more than its photos did.
+    private var badge: UILabel?
     /// The first photo of a month carries the month as a small glass chip, as in the design. The
     /// glass is dark and tinted, so the white label stays legible over a white photo too.
-    private let monthChip: UIVisualEffectView = {
-        let glass = UIGlassEffect(style: .regular)
-        glass.tintColor = UIColor(white: 0, alpha: 0.38)
-        let chip = UIVisualEffectView(effect: glass)
-        chip.overrideUserInterfaceStyle = .dark
-        return chip
-    }()
-    private let check = UIImageView()
+    private var monthChip: (glass: UIVisualEffectView, label: UILabel)?
+    private var monthText: String?
+    private var check: UIImageView?
+    private static let checked = UIImage(systemName: "checkmark.circle.fill")
+    private static let unchecked = UIImage(systemName: "circle")
     private var localMedia: LocalPhotoMedia?
     private var task: Task<Void, Never>?
     private var identity: String?
@@ -661,40 +678,118 @@ struct PhotoGrid: UIViewRepresentable {
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.backgroundColor = UIColor(white: 0.08, alpha: 1)
-        image.contentMode = .scaleAspectFill; image.clipsToBounds = true
-        image.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(image)
-        NSLayoutConstraint.activate([image.leadingAnchor.constraint(equalTo: contentView.leadingAnchor), image.trailingAnchor.constraint(equalTo: contentView.trailingAnchor), image.topAnchor.constraint(equalTo: contentView.topAnchor), image.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)])
-        // Durations are bare monospaced text with a shadow, legible on any photo.
-        badge.textColor = .white
-        badge.font = UIFontMetrics(forTextStyle: .caption2).scaledFont(for: .monospacedDigitSystemFont(ofSize: 10, weight: .medium))
-        badge.adjustsFontForContentSizeCategory = true
-        badge.layer.shadowColor = UIColor.black.cgColor; badge.layer.shadowOpacity = 0.8; badge.layer.shadowRadius = 3; badge.layer.shadowOffset = CGSize(width: 0, height: 1)
-        badge.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview(badge)
-        month.textColor = .white
-        month.font = UIFontMetrics(forTextStyle: .caption2).scaledFont(for: .monospacedSystemFont(ofSize: 9.5, weight: .medium))
-        month.adjustsFontForContentSizeCategory = true
-        month.layer.shadowColor = UIColor.black.cgColor; month.layer.shadowOpacity = 0.45; month.layer.shadowRadius = 1.5; month.layer.shadowOffset = CGSize(width: 0, height: 0.5)
-        month.translatesAutoresizingMaskIntoConstraints = false
-        monthChip.cornerConfiguration = .capsule()
-        monthChip.translatesAutoresizingMaskIntoConstraints = false
-        monthChip.contentView.addSubview(month)
-        contentView.addSubview(monthChip)
-        check.tintColor = .systemCyan; check.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview(check)
-        NSLayoutConstraint.activate([
-            badge.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -4), badge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
-            monthChip.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6), monthChip.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6), monthChip.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -4),
-            month.leadingAnchor.constraint(equalTo: monthChip.contentView.leadingAnchor, constant: 8), month.trailingAnchor.constraint(equalTo: monthChip.contentView.trailingAnchor, constant: -7),
-            month.topAnchor.constraint(equalTo: monthChip.contentView.topAnchor, constant: 4), month.bottomAnchor.constraint(equalTo: monthChip.contentView.bottomAnchor, constant: -4),
-            check.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -5), check.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5), check.widthAnchor.constraint(equalToConstant: 24), check.heightAnchor.constraint(equalToConstant: 24)
-        ])
+        photo.frame = contentView.bounds
+        contentView.layer.insertSublayer(photo, at: 0)
         isAccessibilityElement = true
+        // The overlays are placed by hand, so a new text size lays them out again.
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (cell: PhotoCell, _: UITraitCollection) in
+            cell.setNeedsLayout()
+        }
     }
     required init?(coder: NSCoder) { fatalError("PhotoCell is created programmatically") }
+    /// The grid gives every photo its size. Left to the default, UIKit asked Auto Layout for each
+    /// cell's fitting size on every bind, which took a sixth of the main thread while scrubbing.
+    override func preferredLayoutAttributesFitting(_ layoutAttributes: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
+        layoutAttributes
+    }
+    /// The overlays sit where their constraints used to put them: the length 4 points in from the
+    /// bottom right, the month chip 6 in from the top left and no closer than 4 to the right edge,
+    /// the check 5 in from the top right.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let bounds = contentView.bounds
+        photo.frame = bounds
+        if let image, image.superview != nil { image.frame = bounds }
+        if let badge, badge.superview != nil {
+            let size = badge.intrinsicContentSize
+            badge.frame = CGRect(x: bounds.maxX - 4 - size.width, y: bounds.maxY - 4 - size.height, width: size.width, height: size.height)
+        }
+        if let chip = monthChip, chip.glass.superview != nil {
+            let size = chip.label.intrinsicContentSize
+            let width = max(0, min(size.width + 15, bounds.width - 10))
+            chip.glass.frame = CGRect(x: bounds.minX + 6, y: bounds.minY + 6, width: width, height: size.height + 8)
+            chip.label.frame = CGRect(x: 8, y: 4, width: max(0, width - 15), height: size.height)
+        }
+        if let check, check.superview != nil {
+            check.frame = CGRect(x: bounds.maxX - 29, y: bounds.minY + 5, width: 24, height: 24)
+        }
+    }
     override func prepareForReuse() {
-        super.prepareForReuse(); task?.cancel(); task = nil; localMedia?.cancel(); localMedia = nil
-        identity = nil; mediaID = nil; image.image = nil; showsThumbnail = false; waitsForNetwork = false; pending = nil
+        // The next bind always sets the image, so it is not cleared here as well. UIKit removes
+        // the animations of the cell's views, not of a layer of its own.
+        super.prepareForReuse(); photo.removeAllAnimations()
+        task?.cancel(); task = nil; localMedia?.cancel(); localMedia = nil
+        identity = nil; mediaID = nil; showsThumbnail = false; waitsForNetwork = false; pending = nil
         displayProbe.reset()
+    }
+    /// Puts a view into the cell, under any that stack above it: image, length, month, check.
+    private func attach(_ view: UIView) {
+        guard view.superview !== contentView else { return }
+        let order: [UIView?] = [image, badge, monthChip?.glass, check]
+        if let above = order.drop(while: { $0 !== view }).dropFirst().compactMap({ $0 }).first(where: { $0.superview === contentView }) {
+            contentView.insertSubview(view, belowSubview: above)
+        } else {
+            contentView.addSubview(view)
+        }
+        setNeedsLayout()
+    }
+    private func detach(_ view: UIView?) {
+        if let view, view.superview != nil { view.removeFromSuperview() }
+    }
+    /// A video's length or LIVE.
+    private func showBadge(_ text: String?) {
+        guard let text else { detach(badge); return }
+        let badge = self.badge ?? makeBadge()
+        if badge.text != text { badge.text = text; setNeedsLayout() }
+        attach(badge)
+    }
+    /// Lengths are bare monospaced text with a shadow, legible on any photo.
+    private func makeBadge() -> UILabel {
+        let label = UILabel()
+        label.textColor = .white
+        label.font = UIFontMetrics(forTextStyle: .caption2).scaledFont(for: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), compatibleWith: traitCollection)
+        label.adjustsFontForContentSizeCategory = true
+        label.layer.shadowColor = UIColor.black.cgColor; label.layer.shadowOpacity = 0.8; label.layer.shadowRadius = 3; label.layer.shadowOffset = CGSize(width: 0, height: 1)
+        badge = label
+        return label
+    }
+    private func showMonth(_ text: String?) {
+        guard let text else { detach(monthChip?.glass); return }
+        let chip = monthChip ?? makeMonthChip()
+        if monthText != text {
+            monthText = text
+            chip.label.attributedText = NSAttributedString(string: text, attributes: [.kern: 0.95])
+            setNeedsLayout()
+        }
+        attach(chip.glass)
+    }
+    private func makeMonthChip() -> (glass: UIVisualEffectView, label: UILabel) {
+        let effect = UIGlassEffect(style: .regular)
+        effect.tintColor = UIColor(white: 0, alpha: 0.38)
+        let glass = UIVisualEffectView(effect: effect)
+        glass.overrideUserInterfaceStyle = .dark
+        glass.cornerConfiguration = .capsule()
+        let label = UILabel()
+        label.textColor = .white
+        label.font = UIFontMetrics(forTextStyle: .caption2).scaledFont(for: .monospacedSystemFont(ofSize: 9.5, weight: .medium), compatibleWith: traitCollection)
+        label.adjustsFontForContentSizeCategory = true
+        label.layer.shadowColor = UIColor.black.cgColor; label.layer.shadowOpacity = 0.45; label.layer.shadowRadius = 1.5; label.layer.shadowOffset = CGSize(width: 0, height: 0.5)
+        glass.contentView.addSubview(label)
+        monthChip = (glass, label)
+        return (glass, label)
+    }
+    private func showCheck(selected: Bool, selecting: Bool) {
+        guard selecting else { detach(check); return }
+        let check = self.check ?? makeCheck()
+        let symbol = selected ? Self.checked : Self.unchecked
+        if check.image !== symbol { check.image = symbol }
+        attach(check)
+    }
+    private func makeCheck() -> UIImageView {
+        let view = UIImageView()
+        view.tintColor = .systemCyan
+        check = view
+        return view
     }
     var needsImage: Bool { identity == nil }
     /// Drops a thumbnail that has not arrived yet; one already shown stays.
@@ -704,11 +799,51 @@ struct PhotoGrid: UIViewRepresentable {
         if waitsForNetwork { waitsForNetwork = false; identity = nil }
         if let localMedia, localMedia.loading { localMedia.cancel(); self.localMedia = nil; identity = nil }
     }
-    /// Swaps in the next stage of the photo: nothing, its sketch, a stored or downloaded thumbnail.
-    private func show(_ next: UIImage?, thumbnail: Bool, animated: Bool) {
+    /// Swaps in the next stage of a server photo: nothing, its sketch's average colour, its sketch,
+    /// a stored or downloaded thumbnail.
+    private func show(_ next: CGImage?, thumbnail: Bool, animated: Bool, color: UIColor? = nil) {
         showsThumbnail = thumbnail && next != nil
-        guard animated, image.image !== next, !UIAccessibility.isReduceMotionEnabled else { image.image = next; return }
-        UIView.transition(with: image, duration: 0.18, options: [.transitionCrossDissolve, .allowUserInteraction]) { self.image.image = next }
+        detach(image)
+        let fill = next == nil ? color?.cgColor : nil
+        guard drawn !== next || photo.backgroundColor != fill else { return }
+        if animated && !UIAccessibility.isReduceMotionEnabled {
+            // The cross-dissolve UIView.transition made, added straight to the layer: UIKit's
+            // animation setup for each thumbnail cost more than the fade itself.
+            let fade = CATransition()
+            fade.type = .fade
+            fade.duration = 0.18
+            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            photo.add(fade, forKey: kCATransition)
+        }
+        photo.backgroundColor = fill
+        if drawn !== next { photo.contents = next; drawn = next }
+    }
+    /// A photo only on this phone, or a status symbol in the given tint, in the image view.
+    private func show(_ next: UIImage?, thumbnail: Bool, tint: UIColor? = nil) {
+        showsThumbnail = thumbnail && next != nil
+        if drawn != nil || photo.backgroundColor != nil { photo.contents = nil; photo.backgroundColor = nil; drawn = nil }
+        guard let next else { detach(image); return }
+        let view = image ?? {
+            let view = UIImageView(frame: contentView.bounds)
+            view.contentMode = .scaleAspectFill; view.clipsToBounds = true
+            image = view
+            return view
+        }()
+        if let tint { view.tintColor = tint }
+        if view.image !== next { view.image = next }
+        attach(view)
+    }
+    /// The photo's sketch: decoded already, or decoded here while the grid moves slowly and few
+    /// cells bind a frame. While it moves fast, as a scrub does, the sketch decodes off the main
+    /// thread and the cell shows its average colour meanwhile. Returns the hash still to decode.
+    private func showSketch(of asset: Asset, decodeNow: Bool) -> String? {
+        guard let hash = asset.thumbhash, !hash.isEmpty else { show(nil, thumbnail: false, animated: false); return nil }
+        if let sketch = ThumbHashSketches.shared.cached(hash) ?? (decodeNow ? ThumbHashSketches.shared.decodeNow(hash) : nil) {
+            show(sketch, thumbnail: false, animated: false)
+            return nil
+        }
+        show(nil, thumbnail: false, animated: false, color: ThumbHash.averageColor(hash))
+        return hash
     }
     /// Starts the download the cell has been waiting for, once the grid has slowed down.
     func loadFromNetworkIfWaiting() {
@@ -718,7 +853,7 @@ struct PhotoGrid: UIViewRepresentable {
             do {
                 let prepared = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: pixels)
                 guard !Task.isCancelled, let self, self.identity == key else { return }
-                self.show(prepared.uiImage, thumbnail: true, animated: true)
+                self.show(prepared.cgImage, thumbnail: true, animated: true)
                 self.displayProbe.displayed(.network)
                 self.task = nil
             } catch is CancellationError {
@@ -727,9 +862,7 @@ struct PhotoGrid: UIViewRepresentable {
             } catch {
                 guard let self, self.identity == key else { return }
                 self.displayProbe.failed()
-                self.image.image = UIImage(systemName: "photo.badge.exclamationmark")
-                self.image.tintColor = .secondaryLabel
-                self.showsThumbnail = false
+                self.show(UIImage(systemName: "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
                 self.accessibilityLabel = "Preview unavailable, \(asset.displayName)"
                 // Permit retry when the row is next configured after connectivity returns.
                 self.identity = nil
@@ -737,20 +870,18 @@ struct PhotoGrid: UIViewRepresentable {
         }
     }
     func configure(entry: LibraryEntry?, pipeline: MediaPipeline, selected: Bool, selecting: Bool, month: String?, network: Bool = true) {
-        check.isHidden = !selecting
-        check.image = UIImage(systemName: selected ? "checkmark.circle.fill" : "circle")
-        self.month.attributedText = month.map { NSAttributedString(string: $0, attributes: [.kern: 0.95]) }
-        monthChip.isHidden = month == nil
-        accessibilityTraits = selected ? [.button, .selected] : [.button]
+        showCheck(selected: selected, selecting: selecting)
+        showMonth(month)
+        let traits: UIAccessibilityTraits = selected ? [.button, .selected] : [.button]
+        if accessibilityTraits != traits { accessibilityTraits = traits }
         if case .local(let photo) = entry {
             accessibilityLabel = photo.title + ", on this phone"
-            badge.isHidden = !photo.video && !photo.live
-            badge.text = photo.video ? Self.duration(Int(photo.duration * 1000)) : "LIVE"
+            showBadge(photo.video ? Self.duration(Int(photo.duration * 1000)) : photo.live ? "LIVE" : nil)
             let key = "local:\(photo.id)|\(photo.modified?.timeIntervalSince1970 ?? 0)"
             guard key != identity else { return }
             displayProbe.reset()
-            task?.cancel(); localMedia?.cancel(); identity = key; mediaID = key; image.image = nil
-            showsThumbnail = false; waitsForNetwork = false; pending = nil
+            task?.cancel(); localMedia?.cancel(); identity = key; mediaID = key
+            show(nil as UIImage?, thumbnail: false); waitsForNetwork = false; pending = nil
             let media = LocalPhotoMedia(); localMedia = media
             media.load(photo, full: false, network: false)
             observeLocal(media, key: key)
@@ -759,14 +890,13 @@ struct PhotoGrid: UIViewRepresentable {
         localMedia?.cancel(); localMedia = nil
         let asset = entry?.remote
         guard let asset else {
-            task?.cancel(); identity = nil; mediaID = nil; image.image = nil; badge.isHidden = true
-            showsThumbnail = false; waitsForNetwork = false; pending = nil
+            task?.cancel(); identity = nil; mediaID = nil; showBadge(nil)
+            show(nil, thumbnail: false, animated: false); waitsForNetwork = false; pending = nil
             displayProbe.awaitMonth()
             accessibilityLabel = "Loading photo"; return
         }
         accessibilityLabel = asset.displayName + (asset.isVideo ? ", video" : "")
-        badge.isHidden = !asset.isVideo && asset.livePhotoVideoId == nil
-        badge.text = asset.isVideo ? Self.duration(asset.duration ?? 0) : "LIVE"
+        showBadge(asset.isVideo ? Self.duration(asset.duration ?? 0) : asset.livePhotoVideoId != nil ? "LIVE" : nil)
         let pixels = max(128, Int(bounds.width * traitCollection.displayScale))
         let source = "\(asset.id)|\(asset.cacheRevision)"
         let key = "\(source)|\(pixels)"
@@ -779,24 +909,32 @@ struct PhotoGrid: UIViewRepresentable {
         displayProbe.bind()
         // A thumbnail still in memory draws in this frame instead of after an empty one.
         if let cached = pipeline.cachedImage(for: asset, size: .thumbnail, pixelSize: pixels) {
-            show(cached.uiImage, thumbnail: true, animated: false); mediaID = source; task = nil
+            show(cached.cgImage, thumbnail: true, animated: false); mediaID = source; task = nil
             displayProbe.displayed(.memory); return
         }
         // Never an empty brick: a density change keeps the current thumbnail, a recycled cell
-        // shows this photo at another size if memory has one, and otherwise its thumbhash sketch.
-        if mediaID != source {
+        // shows this photo at another size if memory has one, and otherwise its thumbhash sketch,
+        // or for a frame or two the sketch's average colour while the sketch decodes.
+        var sketch: String?
+        if mediaID != source || (drawn == nil && image?.superview == nil) {
             if let latest = pipeline.latestImage(assetID: asset.id, size: .thumbnail, revision: asset.cacheRevision) {
-                show(latest.uiImage, thumbnail: true, animated: false)
+                show(latest.cgImage, thumbnail: true, animated: false)
             } else {
-                show(ThumbHashImages.image(for: asset), thumbnail: false, animated: false)
+                // The grid is slow enough to download exactly when it is slow enough to decode here.
+                sketch = showSketch(of: asset, decodeNow: network)
             }
         }
-        if showsThumbnail { displayProbe.displayed(.memoryOther) } else { displayProbe.placeholder(sketch: image.image != nil) }
+        if showsThumbnail { displayProbe.displayed(.memoryOther) }
+        else { displayProbe.placeholder(drawn != nil ? .sketch : sketch != nil ? .color : .empty) }
         mediaID = source
         task = Task { [weak self] in
+            if let sketch, let decoded = await ThumbHashSketches.shared.sketch(sketch) {
+                guard !Task.isCancelled, let self, self.identity == key else { return }
+                self.show(decoded, thumbnail: false, animated: false)
+            }
             if let stored = await pipeline.storedThumbnail(for: asset, pixelSize: pixels) {
                 guard !Task.isCancelled, let self, self.identity == key else { return }
-                self.show(stored.uiImage, thumbnail: true, animated: true)
+                self.show(stored.cgImage, thumbnail: true, animated: true)
                 self.displayProbe.displayed(.disk)
                 self.task = nil
                 return
@@ -810,11 +948,10 @@ struct PhotoGrid: UIViewRepresentable {
     private func observeLocal(_ media: LocalPhotoMedia, key: String) {
         guard identity == key else { return }
         withObservationTracking {
-            image.image = media.image
-            showsThumbnail = media.image != nil
             if media.image == nil && !media.loading {
-                image.image = UIImage(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark")
-                image.tintColor = .secondaryLabel
+                show(UIImage(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
+            } else {
+                show(media.image, thumbnail: true)
             }
         } onChange: { [weak self, weak media] in
             Task { @MainActor in

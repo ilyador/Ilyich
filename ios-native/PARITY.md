@@ -285,6 +285,19 @@ Source status: **53 done, 0 partial, 0 missing**. These are source-audit labels,
     | relaunch-check, 5 launches | 10-67 / 25-97 | — | — | 71-88 (launch window) | 167-175 | 149-161 | 1498, then 773-792 |
 
     Ordinary scrolling is smooth; scrubbing the rail is not: a sweep spends about a fifth of its frames hitching, and disk hits after rail jumps miss the 50 ms p95 target.
+- Build `3040062` (the viewer's thumbnail strip and zoom, owner request; built from an integration checkout on top of 3040061):
+  - **Thumbnail strip.** A Photos-style strip between the photo and the bottom bar shows the viewer's loaded photos. A tap or swipe jumps, and paging moves it along. The current photo is wider at its own shape, its neighbours are ordinary tiles, and the extra width passes from tile to tile only mid-swipe.
+  - **Zoom in and out of the grid.** From the library, the viewer opens out of the photo's grid cell and closes back into the cell of the photo it shows, scrolling the grid there first. Closing is the system's drag, only when the photo isn't zoomed in. Viewers opened from other screens keep their cover or sheet and today's swipe down.
+  - **Install.** Installed on the phone over Wi-Fi and confirmed by `devicectl` as build 3040062.
+  - **Regression.** 256/256 unit tests. 36 of 37 UI tests; the long-press selection test failed once at LibraryTests.swift:82 and passed when rerun, a race with month loading, not the viewer.
+- Build `3040063` (scrubbing, step 3: hitches while scrubbing and black squares after a far jump, owner report):
+  - **Where the main thread went.** Time Profiler on a Release simulator build, running the rail sweep, found these main-thread costs. UIKit's Auto Layout sizing of every cell on every bind took 17%. Image-view swaps took 10%. Reuse walking hidden overlays, glass chip included, took 11%. Month commits that redid all twelve loaded months took 8%. Sketches decoded on the main thread took 7-11% with real thumbhashes.
+  - **Cells.** Cells place their overlays by hand and no longer ask Auto Layout for a size. Overlays are created on first use. Server sketches and thumbnails draw straight into a layer, with the same crossfade.
+  - **Sketches.** They are now stored premultiplied, the format Core Animation draws without converting. While the grid moves fast they decode on their own queue, and the cell shows the thumbhash's average colour for a frame or two. Ordinary scrolling decodes them in place as before.
+  - **Months.** A month commit redoes only that month. A month loads through an index on its month, built once on the store's executor after the first month is answered (5-6 ms instead of 93-116 ms for 24k photos in a unit test). The month on screen loads first, and loads for months a scrub passed are cancelled. FEED-4 is unwrapped. A cancelled server load no longer shows the "Some photos couldn't load" banner.
+  - **Simulator, Release.** Main-thread time during a sweep fell 50-65%. Rail-random hitches fell from about 60 to about 24 ms/s, and the longest from 100-117 to 33 ms. Rail-random month loads fell from p50 61-63 to 24-26 ms. On the phone the after-numbers are still to be recorded.
+  - **Install.** INSTALL_PENDING
+  - **Regression.** REGRESSION_PENDING
 
 - Earlier device build `3040003` at `fa9a49c38` built locally, was checksum verified, and iLoader reported **Operation completed** for its Wi-Fi replacement. It fixes the administrator password-change exemption and sign-in layout. It predates the current library/globe fixes; installation of the new preview is tracked separately.
 - PhotoKit permission transitions/cloud resources, true background uploads, biometrics, Cast hardware, share/widgets and signed-device performance remain unverified end to end. No deletion test has run on user photos. Cleanup retains unverified/edited/auxiliary variants.
