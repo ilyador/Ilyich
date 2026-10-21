@@ -847,6 +847,56 @@ final class LibraryTests: XCTestCase {
         tapPhoto(grid.cells.element(boundBy: 1))
         XCTAssertTrue(app.buttons["Photo actions"].waitForExistence(timeout: 10))
     }
+    /// A locked photo's menu offers only what the Locked Folder allows: no album, shared link, Cast,
+    /// similar photos, browser, profile photo or archive, while sharing, downloading, saving and
+    /// moving it out of the folder stay. A library photo's menu shows them all first, so their
+    /// absence means something.
+    @MainActor func testLockedFolderViewerMenuOffersOnlyPermittedActions() throws {
+        let hiddenWhenLocked = ["Add to album", "Create shared link", "Cast", "Find similar photos", "Open in browser", "Set profile photo", "Archive"]
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 15))
+        tapPhoto(grid.cells.element(boundBy: 1))
+        let actions = app.buttons["Photo actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        requireHittable(actions, in: app); actions.tap()
+        for name in hiddenWhenLocked { XCTAssertTrue(app.buttons[name].waitForExistence(timeout: 5), "A library photo offers \(name).") }
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        requireHittable(app.buttons["Close"], in: app); app.buttons["Close"].tap()
+        requireHittable(app.textFields["library.search"], in: app)
+
+        openShelves(app); app.buttons["More"].tap()
+        let browse = app.buttons["Browse more"]
+        XCTAssertTrue(browse.waitForExistence(timeout: 10))
+        requireHittable(browse, in: app); browse.tap()
+        XCTAssertTrue(app.navigationBars["More"].waitForExistence(timeout: 10))
+        // The folder's row is low in the list, which builds its rows as they scroll in.
+        let folder = app.buttons["Locked folder"]
+        for _ in 0..<4 where !folder.isHittable { app.swipeUp() }
+        requireHittable(folder, in: app); folder.tap()
+        let pin = app.secureTextFields["6-digit PIN"], refused = app.alerts["Couldn’t unlock folder"]
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in pin.exists || refused.exists }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed, "The Locked Folder asks for its PIN.")
+        if refused.exists {
+            throw XCTSkip("The shared UI fixture has no Locked Folder yet; rebuild milestone W1's report lists the fixture change that adds one.")
+        }
+        pin.tap(); pin.typeText("123456")
+        app.buttons["Unlock"].tap()
+        // A timeline row carries no file name, so the folder's one photo is just "Photo".
+        XCTAssertTrue(app.navigationBars["Locked folder"].buttons["Lock"].waitForExistence(timeout: 10), "The folder unlocks.")
+        let locked = app.buttons["Photo"].firstMatch
+        XCTAssertTrue(locked.waitForExistence(timeout: 10), "The unlocked folder shows its photo.")
+        requireHittable(locked, in: app); locked.tap()
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        requireHittable(actions, in: app); actions.tap()
+        let moveOut = app.buttons["Move out of Locked Folder"]
+        XCTAssertTrue(moveOut.waitForExistence(timeout: 5), "A locked photo can leave the folder.")
+        for name in ["Slideshow", "Share displayed version", "Download original", "Save to Photos"] {
+            XCTAssertTrue(app.buttons[name].exists, "A locked photo keeps \(name).")
+        }
+        for name in hiddenWhenLocked { XCTAssertFalse(app.buttons[name].exists, "A locked photo has no \(name).") }
+        capture(app, "Locked Folder — viewer menu")
+    }
     @MainActor func testDarkGlobeSupportsDragAndPinchWithoutBlockingLibrary() {
         let app = launch(appearance: "dark")
         capture(app, "Library — dark native glass")

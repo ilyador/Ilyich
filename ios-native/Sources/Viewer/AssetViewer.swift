@@ -22,6 +22,8 @@ struct AssetViewer: View {
     @State private var controls = true
     @State private var info = false
     @State private var editing = false
+    /// Edit was tapped before the photo's details said whether it can be edited.
+    @State private var editWhenLoaded: String?
     @State private var chooseAlbum = false
     @State private var deleteConfirmation = false
     @State private var deletePermanently = false
@@ -32,8 +34,11 @@ struct AssetViewer: View {
     @State private var pendingLocation: PlaceFocus?
     @State private var locationCollection: InfoCollection?
     @State private var error: String?
+    /// A change to the photo is running; exports keep their own state.
     @State private var working = false
-    @State private var export: ViewerExport?
+    /// Share, Download original and Save to Photos.
+    @State private var exports: ExportTracker
+    @State private var shared: ExportedFiles?
     @State private var playingLive = false
     @State private var slideshow = false
     @State private var sharedLink = false
@@ -46,11 +51,6 @@ struct AssetViewer: View {
     @State private var profilePhoto = false
     @State private var localPhotoActions = false
     @State private var changedLocalCopies: Set<String> = []
-    @State private var transferTask: Task<Void, Never>?
-    @State private var transferID: UUID?
-    @State private var transferLabel = ""
-    @State private var transferProgress: Double?
-    @State private var transferSaving = false
     /// Where the bars leave room for the LIVE badge and the video pill, kept while the bars are hidden.
     @State private var chromeInsets = EdgeInsets()
     @State private var playback = VideoPlaybackState()
@@ -83,14 +83,17 @@ struct AssetViewer: View {
         _selectedID = State(initialValue: initial.id)
         _pagePosition = State(initialValue: ScrollPosition(id: initial.id, anchor: .leading))
         _replacements = State(initialValue: [initial.id: initial])
+        _exports = State(initialValue: ExportTracker(api: api))
     }
 
     private var selectedIndex: Int { assets.firstIndex(where: { $0.id == selectedID }) ?? 0 }
     private var current: Asset { replacements[selectedID] ?? assets[selectedIndex] }
-    private var ownsAsset: Bool { current.ownerId != nil && current.ownerId == api.userID }
-    private var canEdit: Bool {
-        ownsAsset && current.type == .image && !current.isAnimatedImage && current.livePhotoVideoId == nil && current.exifInfo?.projectionType != "equirectangular" && !["gif", "svg"].contains((current.originalFileName as NSString).pathExtension.lowercased())
+    /// What the photo on screen offers. Every button and menu item renders from it.
+    private var capabilities: AssetCapabilities {
+        AssetCapabilityPolicy.evaluate(current, context: CapabilityContext(api: api, features: features, album: albumID))
     }
+    /// A change or an export is running, so the other actions wait.
+    private var busy: Bool { working || exports.isRunning }
 
     private func matchedLocalCopy(for asset: Asset) -> LocalPhoto? { changedLocalCopies.contains(asset.id) ? nil : matchedLocalPhotos[asset.id] }
 
@@ -99,11 +102,11 @@ struct AssetViewer: View {
             Color.black.ignoresSafeArea()
             pager
             pageChrome
-            if transferID != nil {
+            if let progress = exports.progress, let request = exports.request {
                 VStack(spacing: 12) {
-                    if let transferProgress { ProgressView(value: transferProgress) } else { ProgressView() }
-                    Text(transferSaving ? "Saving to Photos…" : transferLabel).font(.subheadline)
-                    if !transferSaving { Button("Cancel") { cancelTransfer() }.buttonStyle(.glass).accessibilityIdentifier("viewer.cancelTransfer") }
+                    if let fraction = progress.fraction { ProgressView(value: fraction) } else { ProgressView() }
+                    Text(progress.committing ? "Saving to Photos…" : Self.exportLabel(request)).font(.subheadline)
+                    if !progress.committing { Button("Cancel") { exports.cancel() }.buttonStyle(.glass).accessibilityIdentifier("viewer.cancelTransfer") }
                 }.frame(width: 220).padding(20).glassEffect(in: .rect(cornerRadius: 24))
                     .accessibilityElement(children: .contain)
             } else if working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
@@ -116,20 +119,22 @@ struct AssetViewer: View {
         .navigationBarTitleDisplayMode(.inline)
         // Monochrome glyphs, as in Photos, whatever the app's accent.
         .tint(.primary)
-        .onChange(of: selectedID) { if !transferSaving { cancelTransfer() } }
-        .onDisappear { if !transferSaving { cancelTransfer() } }
+        // An export is for the photo it started on; one already writing to Photos finishes.
+        .onChange(of: selectedID) { if !exports.isCommitting { exports.cancel() } }
+        .onDisappear { if !exports.isCommitting { exports.cancel() } }
         .preferredColorScheme(.dark)
         .statusBarHidden(!controls)
         .task { features = try? await api.serverFeatures() }
-        .onChange(of: selectedID) { playingLive = false }
+        .onChange(of: selectedID) { playingLive = false; editWhenLoaded = nil }
         .onChange(of: selectedID, initial: true) {
             // Closing zooms back into the cell of the photo on screen, lined up with the photo.
             transition?.currentID = selectedID
             transition?.aspectRatio = CGFloat(current.aspectRatio)
         }
         // Scrubbing the strip passes many photos; only the one it stops on is refreshed and cast.
+        // A photo that can't be cast, such as a locked one, never reaches the TV.
         .task(id: settledID) {
-            guard settledID != nil else { return }
+            guard settledID != nil, capabilities.offers(.cast) else { return }
             CastController.shared.select(api: api, asset: current)
         }
         .task(id: (settledID ?? "") + "|" + String(refreshRevision)) { if settledID != nil { await refreshCurrentAsset() } }
@@ -266,8 +271,8 @@ struct AssetViewer: View {
         .sheet(isPresented: $albumActivity) {
             if let albumID { NavigationStack { AlbumActivityView(api: api, albumID: albumID, assetID: current.id) } }
         }
-        .sheet(item: $export) { item in
-            ViewerShareSheet(url: item.url).onDisappear { item.removeTemporaryFile() }
+        .sheet(item: $shared) { files in
+            ShareSheet(urls: files.urls).onDisappear { files.remove() }
         }
     }
 
@@ -300,77 +305,95 @@ struct AssetViewer: View {
 
     /// The bars, laid out as in Photos: back, the title and the actions menu along the top; Share,
     /// a group of Favorite, Info and Edit, and Delete along the bottom. Glyphs only, in system glass.
+    /// Favorite keeps its place for every photo, dimmed where it can't be used.
     @ToolbarContentBuilder private var viewerToolbar: some ToolbarContent {
+        let can = capabilities
         ToolbarItem(placement: .topBarLeading) {
             Button("Close", systemImage: "chevron.left") { close() }
         }
         ToolbarItem(placement: .principal) { titleCapsule }
             .sharedBackgroundVisibility(.hidden)
-        ToolbarItem(placement: .topBarTrailing) { actionsMenu }
+        ToolbarItem(placement: .topBarTrailing) { actionsMenu(can) }
         ToolbarItem(placement: .bottomBar) {
             Button("Share", systemImage: "square.and.arrow.up") { exportAsset(original: shareFileType != "preview") }
-                .disabled(working)
+                .disabled(busy || !can.offers(.share))
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
         ToolbarItemGroup(placement: .bottomBar) {
             Button(current.isFavorite ? "Remove favorite" : "Favorite", systemImage: current.isFavorite ? "heart.fill" : "heart") { toggleFavorite() }
-                .requiresWriteAccess().tint(current.isFavorite ? .red : .primary).disabled(!ownsAsset || working)
-            Button("Info", systemImage: "info.circle") { info = true }.disabled(working)
-            if canEdit {
-                Button("Edit", systemImage: "slider.horizontal.3") { editing = true }.requiresWriteAccess().disabled(working)
+                .tint(current.isFavorite ? .red : .primary).disabled(!can.offers(.favorite) || busy)
+            Button("Info", systemImage: "info.circle") { info = true }.disabled(busy)
+            if can.shows(.edit) {
+                // Until the photo's details arrive Edit stays lit, so the bar doesn't flicker as
+                // photos pass, and a tap waits for them.
+                Button("Edit", systemImage: "slider.horizontal.3") { openEditor() }
+                    .disabled(!(can.offers(.edit) || can[.edit].awaitsDetails) || busy)
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
-        if ownsAsset {
+        if can.shows(.trash) || can.shows(.deletePermanently) {
             ToolbarItem(placement: .bottomBar) {
-                Button("Delete", systemImage: "trash") { requestDeletion() }.requiresWriteAccess().disabled(working)
+                Button("Delete", systemImage: "trash") { requestDeletion() }
+                    .disabled(!(can.offers(.trash) || can.offers(.deletePermanently)) || busy)
             }
         }
     }
 
     /// Every action that has no button of its own, in sections as in the Photos menu.
-    private var actionsMenu: some View {
+    private func actionsMenu(_ can: AssetCapabilities) -> some View {
         Menu {
             Section {
-                Button("Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }.requiresWriteAccess()
-                Button("Create shared link", systemImage: "link") { sharedLink = true }.requiresWriteAccess()
+                menuItem(.addToAlbum, can, "Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }
+                menuItem(.sharedLink, can, "Create shared link", systemImage: "link") { sharedLink = true }
                 if let albumID {
-                    Button("Set album cover", systemImage: "photo.on.rectangle.angled") {
+                    menuItem(.albumCover, can, "Set album cover", systemImage: "photo.on.rectangle.angled") {
                         let id = current.id
                         run { let _: Album = try await api.request(.patch, path: "albums/\(albumID)", body: ["albumThumbnailAssetId": id]) }
-                    }.requiresWriteAccess()
-                    Button("Comments and likes", systemImage: "bubble") { albumActivity = true }
+                    }
                 }
+                menuItem(.comments, can, "Comments and likes", systemImage: "bubble") { albumActivity = true }
             }
             Section {
                 Button("Slideshow", systemImage: "play.rectangle") { slideshow = true }
-                Button("Cast", systemImage: "tv") { castPresented = true }
-                if features?.ocr == true, current.type == .image { Button("Select text", systemImage: "text.viewfinder") { ocrPresented = true } }
-                if features?.smartSearch == true { Button("Find similar photos", systemImage: "photo.on.rectangle.angled") { similarPresented = true } }
-                if let stack = current.stack { Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { showStack = true } }
+                menuItem(.cast, can, "Cast", systemImage: "tv") { castPresented = true }
+                menuItem(.selectText, can, "Select text", systemImage: "text.viewfinder") { ocrPresented = true }
+                menuItem(.findSimilar, can, "Find similar photos", systemImage: "photo.on.rectangle.angled") { similarPresented = true }
+                // Opening the stack only reads it; the stack's own screen disables what read-only
+                // mode stops.
+                if let stack = current.stack, can.shows(.stack) {
+                    Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { showStack = true }
+                }
             }
             Section {
-                Button("Share displayed version", systemImage: "square.and.arrow.up") { exportAsset(original: false) }
-                Button("Download original", systemImage: "arrow.down.document") { exportAsset(original: true) }
-                Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }.requiresWriteAccess()
+                menuItem(.share, can, "Share displayed version", systemImage: "square.and.arrow.up") { exportAsset(original: false) }
+                menuItem(.download, can, "Download original", systemImage: "arrow.down.document") { exportAsset(original: true) }
+                menuItem(.saveToPhotos, can, "Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }
                 if matchedLocalPhotos[current.id] != nil, !changedLocalCopies.contains(current.id) {
                     Button("On this phone", systemImage: "iphone") { localPhotoActions = true }
                 }
-                Button("Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
-                if !current.isVideo { Button("Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true }.requiresWriteAccess() }
+                menuItem(.openInBrowser, can, "Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
+                menuItem(.profilePhoto, can, "Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true }
             }
-            if ownsAsset {
+            if can.shows(.restore) || can.shows(.archive) || can.shows(.lock) {
                 Section {
-                    if current.isTrashed, features?.trash == true {
-                        Button("Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }.requiresWriteAccess()
-                    } else if !current.isTrashed {
-                        Button(current.visibility == .archive ? "Unarchive" : "Archive", systemImage: "archivebox") { changeVisibility(current.visibility == .archive ? .timeline : .archive) }.requiresWriteAccess()
-                        Button(current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") { changeVisibility(current.visibility == .locked ? .timeline : .locked) }.requiresWriteAccess()
+                    menuItem(.restore, can, "Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }
+                    menuItem(.archive, can, current.visibility == .archive ? "Unarchive" : "Archive", systemImage: "archivebox") {
+                        changeVisibility(current.visibility == .archive ? .timeline : .archive)
+                    }
+                    menuItem(.lock, can, current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") {
+                        changeVisibility(current.visibility == .locked ? .timeline : .locked)
                     }
                 }
             }
         } label: { Label("Photo actions", systemImage: "ellipsis") }
-            .disabled(working)
+            .disabled(busy)
+    }
+
+    /// A menu item for `action`: missing where the photo doesn't have it, dimmed where it can't be
+    /// used now.
+    @ViewBuilder private func menuItem(_ action: AssetAction, _ can: AssetCapabilities, _ title: String, systemImage: String,
+                                       perform: @escaping () -> Void) -> some View {
+        if can.shows(action) { Button(title, systemImage: systemImage, action: perform).disabled(!can.offers(action)) }
     }
 
     /// The title hugs its text, as in Photos. Tapping it explores the photo's location.
@@ -495,6 +518,10 @@ struct AssetViewer: View {
         withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.25)) { controls.toggle() }
     }
     private func update(_ asset: Asset) { replacements[asset.id] = asset; onUpdated(asset) }
+    private func openEditor() {
+        if capabilities.offers(.edit) { editing = true }
+        else if capabilities[.edit].awaitsDetails { editWhenLoaded = selectedID }
+    }
     private func close() { if let onClose { onClose() } else { dismiss() } }
     private func handlePhotoTap(_ horizontalFraction: Double) {
         if tapToNavigate && horizontalFraction < 0.33 && selectedIndex > 0 { showPage(selectedIndex - 1) }
@@ -502,16 +529,17 @@ struct AssetViewer: View {
         else { toggleControls() }
     }
     private func run(_ operation: @escaping @MainActor () async throws -> Void) {
-        guard !working else { return }; working = true
+        guard !busy else { return }; working = true
         Task { defer { working = false }; do { try await operation() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
     }
     private func toggleFavorite() {
-        guard ownsAsset else { return }
+        guard capabilities.offers(.favorite) else { return }
         let asset = current
         run { update(try await api.updateFavorite(assetID: asset.id, value: !asset.isFavorite)) }
     }
     private func changeVisibility(_ visibility: AssetVisibility) {
-        guard ownsAsset else { return }
+        let locking = visibility == .locked || current.visibility == .locked
+        guard capabilities.offers(locking ? .lock : .archive) else { return }
         let id = current.id
         run {
             let updated = try await api.updateAsset(id: id, update: .init(visibility: visibility))
@@ -523,7 +551,7 @@ struct AssetViewer: View {
         }
     }
     private func requestDeletion() {
-        guard ownsAsset else { return }
+        guard capabilities.offers(.trash) || capabilities.offers(.deletePermanently) else { return }
         let asset = current
         run {
             let latest = try await api.serverFeatures()
@@ -538,7 +566,7 @@ struct AssetViewer: View {
         run { try await api.trashAssets(ids: [asset.id], permanently: permanently); onDeleted(); close() }
     }
     private func restoreAsset() {
-        guard ownsAsset, features?.trash == true else { return }
+        guard capabilities.offers(.restore) else { return }
         let id = current.id
         run { _ = try await api.restoreAssets(ids: [id]); onDeleted(); close() }
     }
@@ -556,6 +584,7 @@ struct AssetViewer: View {
             }
             replacements[id] = asset
             accessRefreshRevision = -1
+            if editWhenLoaded == id { editWhenLoaded = nil; if capabilities.offers(.edit) { editing = true } }
             if asset != previous { onUpdated(asset) }
         } catch is CancellationError { }
         catch {
@@ -574,76 +603,31 @@ struct AssetViewer: View {
             }
         }
     }
-    /// Tracked download pipeline for export and Save to Photos only; ordinary mutations keep using `run`.
-    /// `working` stays the shared guard, and `transferID` fences late progress and completions.
-    private func transfer(label: String, notificationKind: String,
-                          _ operation: @escaping @MainActor (UUID, @escaping @Sendable (Double?) -> Void) async throws -> Void) {
-        guard !working else { return }
-        let id = UUID()
-        working = true; transferID = id; transferLabel = label; transferProgress = nil; transferSaving = false
-        let report: @Sendable (Double?) -> Void = { value in
-            Task { @MainActor in if transferID == id { transferProgress = value } }
-        }
-        transferTask = Task {
-            defer { if transferID == id { finishTransfer() } }
-            await TransferNotifications.started(id: id, kind: notificationKind, total: 1)
-            guard transferID == id, !Task.isCancelled else { TransferNotifications.cancel(id: id); return }
-            do {
-                try await operation(id, report)
-                guard transferID == id, !Task.isCancelled else { TransferNotifications.cancel(id: id); return }
-                await TransferNotifications.finished(id: id, kind: notificationKind, total: 1, completed: 1, failed: 0)
-                if Task.isCancelled || transferID != id { TransferNotifications.cancel(id: id) }
-            } catch is CancellationError { TransferNotifications.cancel(id: id) }
-            catch {
-                if transferID == id, !Task.isCancelled {
-                    await TransferNotifications.finished(id: id, kind: notificationKind, total: 1, completed: 0, failed: 1)
-                    if Task.isCancelled || transferID != id { TransferNotifications.cancel(id: id) }
-                    if transferID == id, !Task.isCancelled { self.error = error.localizedDescription }
-                } else { TransferNotifications.cancel(id: id) }
-            }
-        }
-    }
-    private func finishTransfer() {
-        transferTask = nil; transferID = nil; transferProgress = nil; transferSaving = false; working = false
-    }
-    private func cancelTransfer() {
-        guard transferID != nil else { return }
-        if let transferID { TransferNotifications.cancel(id: transferID) }
-        transferTask?.cancel()
-        finishTransfer()
-    }
+    /// Shares the photo on screen: its original or, with its edits, the version shown. The share
+    /// sheet opens only if the photo is still the one on screen.
     private func exportAsset(original: Bool) {
+        guard !busy else { return }
         let asset = current
-        transfer(label: original || asset.isVideo ? "Downloading original…" : "Preparing photo…", notificationKind: "Download") { id, report in
-            let file = ViewerExport(url: try await api.download(asset: asset, original: original, progress: report))
-            guard !Task.isCancelled, transferID == id, selectedID == asset.id else { file.removeTemporaryFile(); throw CancellationError() }
-            export = file
+        exports.start(.share([asset], original: original)) { outcome in
+            switch outcome {
+            case .files(let files): if selectedID == asset.id { shared = files }
+            case .failed(let failure, _): error = failure.localizedDescription
+            case .saved, .cancelled: break
+            }
         }
     }
     private func saveToPhotos() {
-        let asset = current
-        transfer(label: "Downloading…", notificationKind: "Save to Photos") { id, report in
-            try await PhotoLibrarySave.requestPermission(api: api)
-            try await PhotoLibrarySave.save(asset, api: api, original: false, progress: report) {
-                guard transferID == id else { throw CancellationError() }
-                transferSaving = true
-            }
+        guard !busy, capabilities.offers(.saveToPhotos) else { return }
+        exports.start(.saveToPhotos([current], original: false)) { outcome in
+            if case .failed(let failure, _) = outcome { error = failure.localizedDescription }
         }
     }
-}
-
-final class ViewerExport: Identifiable, Sendable {
-    let id = UUID()
-    let url: URL
-    init(url: URL) { self.url = url }
-    deinit { removeTemporaryFile() }
-    func removeTemporaryFile() { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-}
-
-struct ViewerShareSheet: UIViewControllerRepresentable {
-    let url: URL
-    func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: [url], applicationActivities: nil) }
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) { }
+    private static func exportLabel(_ request: ExportRequest) -> String {
+        switch request.destination {
+        case .photos: "Downloading…"
+        case .files: request.original || request.assets.contains(where: \.isVideo) ? "Downloading original…" : "Preparing photo…"
+        }
+    }
 }
 
 private struct ViewerAlbumPicker: View {

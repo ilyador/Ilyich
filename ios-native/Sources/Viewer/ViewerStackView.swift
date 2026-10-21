@@ -12,6 +12,11 @@ struct ViewerStackView: View {
     @State private var confirmUnstack = false
     @State private var busy = false
     @Environment(\.dismiss) private var dismiss
+    private var context: CapabilityContext { CapabilityContext(api: api, features: nil) }
+    /// Whether this photo's place in the stack can be changed: only its owner can.
+    private func stacking(_ asset: Asset) -> ActionAvailability { AssetCapabilityPolicy.evaluate(asset, context: context)[.stack] }
+    /// Unstacking changes every photo in it.
+    private var unstacking: ActionAvailability { AssetCapabilityPolicy.evaluate(selection: stack?.assets ?? [], context: context)[.stack] }
     var body: some View {
         List {
             ForEach(stack?.assets ?? []) { asset in
@@ -26,11 +31,13 @@ struct ViewerStackView: View {
                         }
                     }.buttonStyle(.plain)
                     Spacer()
-                    if asset.ownerId == api.userID {
+                    let availability = stacking(asset)
+                    if availability != .hidden {
                         Menu {
                             Button("Set as stack cover") { run { let _: StackDetails = try await api.request(.put, path: "stacks/\(stackID)", body: ["primaryAssetId": asset.id]) } }
                             Button("Remove from stack") { run { try await api.requestVoid(.delete, path: "stacks/\(stackID)/assets/\(asset.id)") } }
-                        } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("Stack actions for \(asset.displayName)").requiresWriteAccess()
+                        } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("Stack actions for \(asset.displayName)")
+                            .disabled(availability != .offered)
                     }
                 }.disabled(busy)
             }
@@ -39,7 +46,9 @@ struct ViewerStackView: View {
             .overlay { if stack == nil && error == nil { ProgressView() } }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                if stack?.assets.first?.ownerId == api.userID { ToolbarItem(placement: .topBarTrailing) { Button("Unstack") { confirmUnstack = true }.disabled(busy).requiresWriteAccess() } }
+                if unstacking != .hidden {
+                    ToolbarItem(placement: .topBarTrailing) { Button("Unstack") { confirmUnstack = true }.disabled(busy || unstacking != .offered) }
+                }
             }
             .confirmationDialog("Unstack these photos?", isPresented: $confirmUnstack, titleVisibility: .visible) {
                 Button("Unstack") {

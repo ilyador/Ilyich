@@ -7,112 +7,146 @@ struct BulkActionsView: View {
     let onChanged: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var albums: [Album] = []
-    @State private var share: BulkExport?
+    @State private var share: ExportedFiles?
     @State private var publicLink = false
     @State private var failure: String?
+    /// A change to the selection is running; exports keep their own state.
     @State private var busy = false
-    @State private var progress = 0
-    @State private var shareFraction: Double?
-    @State private var shareToken: UUID?
+    /// Share files and Save to Photos.
+    @State private var exports: ExportTracker
     @AppStorage("shareFileType") private var shareFileType = "original"
     @State private var operation: Task<Void, Never>?
     @State private var confirmTrash = false
     @State private var features: ServerFeatures?
+    /// What every selected photo allows, worked out when the list appears and when the server's
+    /// features arrive, not on each redraw: the list redraws with every step of an export, and a
+    /// selection can hold thousands of photos.
+    @State private var evaluated: AssetCapabilities?
     private var ids: [String] { assets.map(\.id) }
     @State private var featuresFailure: String?
-    @State private var photosSaving = false
-    @State private var photosCommitting = false
-    @State private var photosSaved = 0
     @State private var photosOutcome: String?
-    private var owned: Bool {
-        guard let userID = api.userID, !assets.isEmpty else { return false }
-        return assets.allSatisfy { $0.ownerId == userID }
+
+    init(api: APIClient, pipeline: MediaPipeline, assets: [Asset], onChanged: @escaping () -> Void) {
+        self.api = api; self.pipeline = pipeline; self.assets = assets; self.onChanged = onChanged
+        _exports = State(initialValue: ExportTracker(api: api))
     }
+
+    private var working: Bool { busy || exports.isRunning }
+    private var savingToPhotos: Bool { exports.request?.destination == .photos }
     private var favorites: Bool { assets.allSatisfy(\.isFavorite) }
     private var archived: Bool { assets.allSatisfy { $0.visibility == .archive } }
     private var allLocked: Bool { !assets.isEmpty && assets.allSatisfy { $0.visibility == .locked } }
+    private func evaluate(features: ServerFeatures?) -> AssetCapabilities {
+        AssetCapabilityPolicy.evaluate(selection: assets, context: CapabilityContext(api: api, features: features))
+    }
     private var writableAlbums: [Album] { albums.filter { $0.albumUsers?.contains(where: { $0.user.id == api.userID && ["owner", "editor"].contains($0.role) }) == true } }
 
     var body: some View {
+        let can = evaluated ?? evaluate(features: features)
+        // Deleting from a server without Trash, or photos already in it, can't be undone.
+        let permanently = !can.shows(.trash)
         List {
             if let failure { Section { Text(failure).foregroundStyle(.red) } }
-            if let photosOutcome, !busy { Section { Text(photosOutcome) } }
-            if busy {
+            if let photosOutcome, !working { Section { Text(photosOutcome) } }
+            if working {
                 Section {
                     HStack {
-                        if let shareFraction { ProgressView(value: shareFraction).frame(width: 60) } else { ProgressView() }
-                        if photosSaving {
-                            Text("Saved \(photosSaved) of \(assets.count)" + (photosCommitting ? " · Saving to Photos…" : ""))
+                        if let fraction = exports.progress?.fraction { ProgressView(value: fraction).frame(width: 60) } else { ProgressView() }
+                        if let progress = exports.progress, savingToPhotos {
+                            Text("Saved \(progress.completed) of \(progress.total)" + (progress.committing ? " · Saving to Photos…" : ""))
+                        } else if let progress = exports.progress, progress.completed > 0 {
+                            Text("Prepared \(progress.completed) of \(progress.total)")
                         } else {
-                            Text(progress > 0 ? "Prepared \(progress) of \(assets.count)" : "Working…")
+                            Text("Working…")
                         }
                     }
                 }
             }
-            shareSection
-            if !allLocked { albumSection }
-            if owned { organizeSection }
+            shareSection(can)
+            if can.shows(.addToAlbum) { albumSection(can) }
+            if ([.favorite, .archive, .lock, .stack, .trash, .deletePermanently] as [AssetAction]).contains(where: can.shows) {
+                organizeSection(can, permanently: permanently)
+            }
         }
         .navigationTitle("\(assets.count) selected").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-        .disabled(busy)
+        .disabled(working)
         .overlay(alignment: .bottom) {
-            if busy { Button(photosCommitting ? "Saving to Photos" : "Cancel") { operation?.cancel() }.buttonStyle(.glass).padding().disabled(photosCommitting) }
+            if working {
+                Button(exports.isCommitting ? "Saving to Photos" : "Cancel") { operation?.cancel(); exports.cancel() }
+                    .buttonStyle(.glass).padding().disabled(exports.isCommitting)
+            }
         }
-        .task { if !allLocked { albums = (try? await api.albums()) ?? [] }; await loadFeatures() }
-        .onDisappear { operation?.cancel() }
-        .sheet(item: $share, onDismiss: { share?.clean(); share = nil }) { item in
-            BulkShareSheet(urls: item.files).onDisappear { item.clean() }
+        .onAppear { if evaluated == nil { evaluated = can } }
+        .task { if can.shows(.addToAlbum) { albums = (try? await api.albums()) ?? [] }; await loadFeatures() }
+        .onDisappear { operation?.cancel(); exports.cancel() }
+        .sheet(item: $share, onDismiss: { share?.remove(); share = nil }) { files in
+            ShareSheet(urls: files.urls).onDisappear { files.remove() }
         }
         .sheet(isPresented: $publicLink) { NavigationStack { SharedLinkEditor(api: api, album: nil, assetIDs: ids) } }
-        .confirmationDialog(features?.trash == false ? "Permanently delete \(assets.count) items?" : "Move \(assets.count) items to Trash?", isPresented: $confirmTrash) {
-            Button(features?.trash == false ? "Delete permanently" : "Move to Trash", role: .destructive) {
-                run { try await api.trashAssets(ids: ids, permanently: features?.trash == false) }
+        .confirmationDialog(permanently ? "Permanently delete \(assets.count) items?" : "Move \(assets.count) items to Trash?", isPresented: $confirmTrash) {
+            Button(permanently ? "Delete permanently" : "Move to Trash", role: .destructive) {
+                run { try await api.trashAssets(ids: ids, permanently: permanently) }
             }
-        } message: { Text(features?.trash == false ? "This cannot be undone." : "Photos on your phone are kept.") }
+        } message: { Text(permanently ? "This cannot be undone." : "Photos on your phone are kept.") }
     }
-    private var shareSection: some View {
+    private func shareSection(_ can: AssetCapabilities) -> some View {
         Section {
             if !assets.allSatisfy(\.isVideo) {
                 Picker("Photo quality", selection: $shareFileType) { Text("Original").tag("original"); Text("Displayed").tag("preview") }
             }
-            Button("Share files", systemImage: "square.and.arrow.up") { prepareShare(original: shareFileType != "preview") }
-            Button("Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos(original: shareFileType != "preview") }.requiresWriteAccess()
-            if !allLocked { Button("Create shared link", systemImage: "link") { publicLink = true }.requiresWriteAccess() }
+            action(.share, can, "Share files", systemImage: "square.and.arrow.up") { prepareShare(original: shareFileType != "preview") }
+            action(.saveToPhotos, can, "Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos(original: shareFileType != "preview") }
+            action(.sharedLink, can, "Create shared link", systemImage: "link") { publicLink = true }
         } header: { Text("Share") } footer: {
             if !assets.allSatisfy(\.isVideo) { Text("Displayed keeps the edits you see. Videos use originals. Saving a Live Photo keeps its original photo and motion.") }
         }
     }
-    private var albumSection: some View {
+    private func albumSection(_ can: AssetCapabilities) -> some View {
         Section("Albums") {
             Menu("Add to album") {
                 ForEach(writableAlbums) { album in Button(album.albumName) { add(to: album) } }
-            }.disabled(writableAlbums.isEmpty).requiresWriteAccess()
+            }.disabled(writableAlbums.isEmpty || !can.offers(.addToAlbum))
         }
     }
-    private var organizeSection: some View {
+    private func organizeSection(_ can: AssetCapabilities, permanently: Bool) -> some View {
         Section("Organize") {
+            // The Locked Folder's selection only leaves the folder or goes to Trash.
             if allLocked {
-                Button("Move to Timeline", systemImage: "lock.open") { update(.init(ids: ids, visibility: .timeline)) }
+                action(.lock, can, "Move to Timeline", systemImage: "lock.open") { update(.init(ids: ids, visibility: .timeline)) }
             } else {
-                Button(favorites ? "Remove favorites" : "Favorite", systemImage: "heart") { update(.init(ids: ids, isFavorite: !favorites)) }
-                Button(archived ? "Unarchive" : "Archive", systemImage: "archivebox") { update(.init(ids: ids, visibility: archived ? .timeline : .archive)) }
-                Button("Move to Locked Folder", systemImage: "lock") { update(.init(ids: ids, visibility: .locked)) }
+                action(.favorite, can, favorites ? "Remove favorites" : "Favorite", systemImage: "heart") { update(.init(ids: ids, isFavorite: !favorites)) }
+                action(.archive, can, archived ? "Unarchive" : "Archive", systemImage: "archivebox") { update(.init(ids: ids, visibility: archived ? .timeline : .archive)) }
+                action(.lock, can, "Move to Locked Folder", systemImage: "lock") { update(.init(ids: ids, visibility: .locked)) }
             }
-            if assets.count > 1 && !allLocked { Button("Stack photos", systemImage: "square.stack.3d.up", action: stack) }
-            Button(features?.trash == false ? "Delete permanently" : "Move to Trash", systemImage: "trash", role: .destructive) { confirmTrash = true }
-                .disabled(features == nil)
+            // A stack needs two photos or more.
+            if assets.count > 1 { action(.stack, can, "Stack photos", systemImage: "square.stack.3d.up", perform: stack) }
+            let deletion: AssetAction = permanently ? .deletePermanently : .trash
+            if can.shows(deletion) {
+                Button(permanently ? "Delete permanently" : "Move to Trash", systemImage: "trash", role: .destructive) { confirmTrash = true }
+                    .disabled(features == nil || !can.offers(deletion))
+            }
             if features == nil, let featuresFailure {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Couldn’t check whether Trash is available, so delete is unavailable. \(featuresFailure)").font(.footnote).foregroundStyle(.secondary)
                     Button("Retry", systemImage: "arrow.clockwise") { Task { await loadFeatures() } }
                 }
             }
-        }.requiresWriteAccess()
+        }
+    }
+    /// A button for `action`: missing where a selected photo doesn't have it, dimmed where it can't
+    /// be used now.
+    @ViewBuilder private func action(_ action: AssetAction, _ can: AssetCapabilities, _ title: String, systemImage: String,
+                                     perform: @escaping () -> Void) -> some View {
+        if can.shows(action) { Button(title, systemImage: systemImage, action: perform).disabled(!can.offers(action)) }
     }
     private func loadFeatures() async {
         featuresFailure = nil
-        do { let loaded = try await api.serverFeatures(); try Task.checkCancellation(); features = loaded }
+        do {
+            let loaded = try await api.serverFeatures(); try Task.checkCancellation()
+            features = loaded
+            evaluated = evaluate(features: loaded)
+        }
         catch is CancellationError { }
         catch { featuresFailure = error.localizedDescription }
     }
@@ -139,82 +173,28 @@ struct BulkActionsView: View {
         }
     }
     private func saveToPhotos(original: Bool) {
-        guard !busy, !assets.isEmpty else { return }
-        busy = true; failure = nil; photosOutcome = nil; progress = 0
-        photosSaving = true; photosCommitting = false; photosSaved = 0
-        let token = UUID(); shareToken = token; shareFraction = 0
+        guard !working, !assets.isEmpty else { return }
+        failure = nil; photosOutcome = nil
         let total = assets.count
-        operation = Task {
-            defer {
-                busy = false; photosSaving = false; photosCommitting = false
-                if shareToken == token { shareToken = nil; shareFraction = nil }
-            }
-            do {
-                try await PhotoLibrarySave.requestPermission(api: api)
-                await TransferNotifications.started(id: token, kind: "Save to Photos", total: total)
-                try Task.checkCancellation()
-                for asset in assets {
-                    try Task.checkCancellation()
-                    let completed = photosSaved
-                    try await PhotoLibrarySave.save(asset, api: api, original: original, progress: { fraction in
-                        guard let fraction else { return }
-                        Task { @MainActor in if shareToken == token { shareFraction = (Double(completed) + fraction) / Double(total) } }
-                    }, beforeCommit: { photosCommitting = true })
-                    photosCommitting = false
-                    photosSaved += 1
-                    shareFraction = Double(photosSaved) / Double(total)
-                }
-                photosOutcome = "Saved \(photosSaved) of \(total) to Photos."
-                await TransferNotifications.finished(id: token, kind: "Save to Photos", total: total, completed: photosSaved, failed: 0)
-                if Task.isCancelled { TransferNotifications.cancel(id: token) }
-            } catch {
-                photosCommitting = false
-                if error is CancellationError || Task.isCancelled {
-                    TransferNotifications.cancel(id: token)
-                    photosOutcome = "Cancelled. Saved \(photosSaved) of \(total) to Photos."
-                } else {
-                    await TransferNotifications.finished(id: token, kind: "Save to Photos", total: total,
-                                                         completed: photosSaved, failed: total - photosSaved)
-                    if Task.isCancelled { TransferNotifications.cancel(id: token) }
-                    failure = error.localizedDescription
-                    photosOutcome = "Stopped. Saved \(photosSaved) of \(total) to Photos. Saving again may create duplicates."
-                }
+        exports.start(.saveToPhotos(assets, original: original)) { outcome in
+            switch outcome {
+            case .saved(let saved): photosOutcome = "Saved \(saved) of \(total) to Photos."
+            case .cancelled(let saved): photosOutcome = "Cancelled. Saved \(saved) of \(total) to Photos."
+            case .failed(let error, let saved):
+                failure = error.localizedDescription
+                photosOutcome = "Stopped. Saved \(saved) of \(total) to Photos. Saving again may create duplicates."
+            case .files: break
             }
         }
     }
     private func prepareShare(original: Bool) {
-        guard !busy, !assets.isEmpty else { return }
-        busy = true; failure = nil; progress = 0
-        let token = UUID(); shareToken = token; shareFraction = nil
-        let total = Double(assets.count)
-        operation = Task {
-            defer { busy = false; if shareToken == token { shareToken = nil; shareFraction = nil } }
-            var files: [URL] = []
-            do {
-                await TransferNotifications.started(id: token, kind: "Download", total: assets.count)
-                for asset in assets {
-                    try Task.checkCancellation()
-                    let completed = Double(files.count)
-                    let file = try await api.download(asset: asset, original: original) { fraction in
-                        guard let fraction else { return }
-                        Task { @MainActor in if shareToken == token { shareFraction = (completed + fraction) / total } }
-                    }
-                    guard !Task.isCancelled else { BulkExport(files: [file]).clean(); throw CancellationError() }
-                    files.append(file); progress += 1
-                    shareFraction = Double(files.count) / total
-                }
-                try Task.checkCancellation(); share = BulkExport(files: files)
-                await TransferNotifications.finished(id: token, kind: "Download", total: assets.count, completed: files.count, failed: 0)
-                if Task.isCancelled { TransferNotifications.cancel(id: token) }
-            } catch {
-                BulkExport(files: files).clean()
-                if error is CancellationError || Task.isCancelled { TransferNotifications.cancel(id: token) }
-                else {
-                    await TransferNotifications.finished(id: token, kind: "Download", total: assets.count,
-                                                         completed: files.count, failed: assets.count - files.count)
-                    if Task.isCancelled { TransferNotifications.cancel(id: token) }
-                    failure = error.localizedDescription
-                }
+        guard !working, !assets.isEmpty else { return }
+        failure = nil
+        exports.start(.share(assets, original: original)) { outcome in
+            switch outcome {
+            case .files(let files): share = files
+            case .failed(let error, _): failure = error.localizedDescription
+            case .saved, .cancelled: break
             }
         }
     }
@@ -224,16 +204,4 @@ struct SelectionUpdate: Encodable, Sendable {
     let ids: [String]
     var isFavorite: Bool?
     var visibility: AssetVisibility?
-}
-private final class BulkExport: Identifiable {
-    let id = UUID()
-    let files: [URL]
-    init(files: [URL]) { self.files = files }
-    deinit { clean() }
-    func clean() { for file in files { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) } }
-}
-private struct BulkShareSheet: UIViewControllerRepresentable {
-    let urls: [URL]
-    func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: urls, applicationActivities: nil) }
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) { }
 }
