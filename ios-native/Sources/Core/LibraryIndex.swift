@@ -22,7 +22,15 @@ final class LibraryIndex: Sendable {
     let writer: IndexWriter
     let viewport: IndexReader
     let aggregate: IndexReader
-    private let backfill = Mutex<Task<Void, Never>?>(nil)
+    private let backfill = Mutex(Backfill())
+    private struct Backfill {
+        var task: Task<Void, Never>?
+        /// Whether the app started the backfill and has not stopped it, so a restart runs it again.
+        var enabled = false
+        /// A restart came while a pass was running; it makes one more pass before ending.
+        var rerun = false
+        var pause: Duration = .milliseconds(15)
+    }
     private static let log = Logger(subsystem: PerfSignpost.subsystem, category: PerfSignpost.Category.index)
 
     init(scope: String, userID: String, directory: URL? = nil, backfillBatchSize: Int = 5_000) throws {
@@ -42,7 +50,7 @@ final class LibraryIndex: Sendable {
         aggregate = IndexReader(path: url.path, userID: userID, label: "ilyich.index.aggregate", qos: .utility)
     }
 
-    deinit { backfill.withLock { $0?.cancel() } }
+    deinit { backfill.withLock { $0.task?.cancel() } }
 
     // MARK: Backfill
 
@@ -50,24 +58,51 @@ final class LibraryIndex: Sendable {
     /// utility priority, a batch at a time with a pause between batches so sync and reading go on.
     /// A kill resumes from the last batch committed.
     func startBackfill(after delay: Duration = .seconds(2), pause: Duration = .milliseconds(15)) {
-        backfill.withLock { task in
-            guard task == nil else { return }
-            task = Task(priority: .utility) { [writer] in
-                if delay > .zero { try? await Task.sleep(for: delay) }
-                await Self.runBackfill(writer, pause: pause)
-            }
+        backfill.withLock { state in
+            guard state.task == nil else { return }
+            state.enabled = true; state.pause = pause
+            state.task = makeBackfillTask(after: delay, pause: pause)
         }
     }
 
     /// Stops the backfill and waits for the batch under way to commit or roll back.
     func stopBackfill() async {
-        let task = backfill.withLock { task in defer { task = nil }; return task }
+        let task = backfill.withLock { state in
+            defer { state.task = nil; state.enabled = false; state.rerun = false }
+            return state.task
+        }
         task?.cancel()
         await task?.value
     }
 
     /// Waits for a backfill started earlier to end, for tests.
-    func backfillFinished() async { await backfill.withLock { $0 }?.value }
+    func backfillFinished() async { await backfill.withLock { $0.task }?.value }
+
+    /// A pass, again while a restart asked for one during it. The task clears itself when it ends.
+    private func makeBackfillTask(after delay: Duration, pause: Duration) -> Task<Void, Never> {
+        Task(priority: .utility) { [weak self, writer] in
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            repeat { await Self.runBackfill(writer, pause: pause) } while !Task.isCancelled && self?.backfillPassEnded() == true
+        }
+    }
+
+    private func backfillPassEnded() -> Bool {
+        backfill.withLock { state in
+            if state.rerun { state.rerun = false; return true }
+            state.task = nil
+            return false
+        }
+    }
+
+    /// A sync batch whose derived rows failed restarted the backfill: run it again this session,
+    /// if the app runs it at all, rather than leave the index unqueryable until the next launch.
+    private func resumeBackfillIfRestarted() {
+        guard writer.backfillRestarted.exchange(false, ordering: .acquiringAndReleasing) else { return }
+        backfill.withLock { state in
+            guard state.enabled else { return }
+            if state.task != nil { state.rerun = true } else { state.task = makeBackfillTask(after: .zero, pause: state.pause) }
+        }
+    }
 
     private static func runBackfill(_ writer: IndexWriter, pause: Duration) async {
         guard let state = try? await writer.backfillState(), state.kind != nil else { return }
@@ -95,8 +130,6 @@ final class LibraryIndex: Sendable {
     func epoch() async -> UUID { await writer.epoch() }
     var revision: UInt64 { get async { await writer.revision } }
     func isQueryable() async throws -> Bool { try await mapped { try await writer.isQueryable() } }
-    func isComplete() async throws -> Bool { try await mapped { try await writer.isComplete() } }
-    func lastSyncDate() async throws -> Date? { try await mapped { try await writer.lastSyncDate() } }
     func persistCachedServerFeatures(_ features: ServerFeatures) async throws { try await mapped { try await writer.persistCachedServerFeatures(features) } }
     func cachedServerFeatures() async throws -> ServerFeatures? { try await mapped { try await writer.cachedServerFeatures() } }
     func takeAccessInvalidation() async throws -> Bool { try await mapped { try await writer.takeAccessInvalidation() } }
@@ -107,10 +140,18 @@ final class LibraryIndex: Sendable {
     func pendingAcknowledgements() async throws -> [String] { try await mapped { try await writer.pendingAcknowledgements() } }
     func acknowledged(_ acks: [String]) async throws { try await mapped { try await writer.acknowledged(acks) } }
     func clear() async throws { try await mapped { try await writer.clear() } }
-    func apply(_ events: [EntitySyncEvent], epoch: UUID) async throws -> IndexChange { try await mapped { try await writer.apply(events, epoch: epoch) } }
+    func apply(_ events: [EntitySyncEvent], epoch: UUID) async throws -> IndexChange {
+        defer { resumeBackfillIfRestarted() }
+        return try await mapped { try await writer.apply(events, epoch: epoch) }
+    }
     func mediaRevisions(of ids: [String]) async throws -> [String: String] { try await mapped { try await writer.mediaRevisions(of: ids) } }
 
     // MARK: Viewport reads
+
+    /// Read on the viewport's connection, not the writer's, since every month the feed loads asks
+    /// first: it never queues behind a backfill batch or a sync batch.
+    func isComplete() async throws -> Bool { try await mapped { try await viewport.isComplete() } }
+    func lastSyncDate() async throws -> Date? { try await mapped { try await viewport.lastSyncDate() } }
 
     func entityData(kind: String, id: String) async throws -> Data? { try await mapped { try await viewport.entityData(kind: kind, id: id) } }
     func asset(id: String) async throws -> Asset? { try await mapped { try await viewport.asset(id: id) } }

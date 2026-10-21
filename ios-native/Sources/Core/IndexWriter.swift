@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Synchronization
 
 /// The offline library's only read-write connection, on its own serial queue at utility
 /// priority. It commits each sync batch with its acknowledgements, all or nothing, and in the same
@@ -20,6 +21,9 @@ actor IndexWriter {
     private var touched = DerivedTouch()
     /// Entity rows of one kind a backfill batch derives.
     nonisolated let backfillBatchSize: Int
+    /// Set when a batch's derived rows failed and the backfill was restarted, until LibraryIndex
+    /// takes it and runs the backfill again.
+    nonisolated let backfillRestarted = Atomic<Bool>(false)
     private static let cachedServerFeaturesKey = "cache.serverFeatures.v1"
 
     /// Opens the file, creating it if needed, and migrates it in place: the derived tables are
@@ -184,7 +188,7 @@ actor IndexWriter {
         do {
             try database.savepoint("derived") { try LibraryIndexSchema.maintain(database, touched) }
         } catch {
-            try? LibraryIndexSchema.restartBackfill(database)
+            if (try? LibraryIndexSchema.restartBackfill(database)) != nil { backfillRestarted.store(true, ordering: .releasing) }
         }
     }
 
