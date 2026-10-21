@@ -97,7 +97,6 @@ struct LocalLibraryView: View {
                     .onAppear { if library.isNearEnd(photo.id) { Task { await library.loadMore() } } }
                 }
             }
-            if library.photos.count < library.total { Button("Load more photos") { Task { await library.loadMore() } }.padding(24) }
             Text("\(library.total.formatted()) items").font(.caption).foregroundStyle(.secondary).padding()
         }.refreshable { await library.refresh() }
     }
