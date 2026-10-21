@@ -56,14 +56,18 @@ final class TransportRegistryTests: XCTestCase {
         backup.handler.taskDidComplete(CompletedTask(id: 1, description: key.descriptor.taskDescription, httpStatus: 503, failure: nil))
         share.handler.sessionDidFinishEvents()
         backup.handler.sessionDidFinishEvents()
+        backup.handler.sessionDidFinishEvents()
 
         var events = registry.events.makeAsyncIterator()
         guard case .finished(.backup, let completion)? = await events.next() else { return XCTFail("The backup's task was not reported first.") }
         XCTAssertEqual(completion.attempt, key.attempt)
         XCTAssertEqual(completion.journal, .recorded(OutcomeRecord(error: HTTPURLResponse.localizedString(forStatusCode: 503), httpStatus: 503, v: 2)))
-        let second = await events.next(), third = await events.next()
-        XCTAssertEqual(second, .drained(.shareUpload))
-        XCTAssertEqual(third, .drained(.backup))
+        var drains: [TransportEvent?] = []
+        for _ in 0..<3 { drains.append(await events.next()) }
+        XCTAssertEqual(drains, [.drained(.shareUpload, drain: 1), .drained(.backup, drain: 1), .drained(.backup, drain: 2)],
+                       "Each session numbers its own drains.")
+        XCTAssertEqual(registry.drains(identifier: TransferSessionID.backup.identifier), 2)
+        XCTAssertEqual(registry.drains(identifier: TransferSessionID.shareUpload.identifier), 1)
     }
 
     func testIdentifiersMapOnlyToThisBundlesSessions() {
@@ -78,7 +82,9 @@ final class TransportRegistryTests: XCTestCase {
             BackgroundTransport(session: session, journal: FileOutcomeJournal(layout: nil), emit: emit) { _ in FakeTransportSession() }
         }
         XCTAssertNil(registry.transport(identifier: "com.example.downloads"))
-        XCTAssertEqual(registry.connected, [], "Asking about another app's identifier creates nothing.")
+        XCTAssertNil(registry.drains(identifier: "com.example.downloads"))
+        XCTAssertEqual(registry.drains(identifier: TransferSessionID.backup.identifier), 0, "A session not yet created has not drained.")
+        XCTAssertEqual(registry.connected, [], "Asking about an identifier creates nothing.")
     }
 
     func testBackgroundSessionsAreConfiguredAsToday() {

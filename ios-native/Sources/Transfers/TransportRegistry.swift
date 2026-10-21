@@ -43,6 +43,14 @@ final class TransportRegistry: Sendable {
         TransferSessionID(identifier: identifier).map { transport($0) }
     }
 
+    /// How many times the session an identifier names has drained in this process: zero while it
+    /// does not exist, which asking does not change, and nil for an identifier this app never
+    /// created. BackgroundEventAcks reads it to tell which drain a handler waits for.
+    func drains(identifier: String) -> Int? {
+        guard let session = TransferSessionID(identifier: identifier) else { return nil }
+        return transports.withLock { $0[session] }?.drains ?? 0
+    }
+
     /// Creates every session, so iOS delivers what it queued for each.
     func connect() {
         for session in TransferSessionID.allCases { _ = transport(session) }

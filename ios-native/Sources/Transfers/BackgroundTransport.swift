@@ -14,6 +14,7 @@ final class BackgroundTransport: TransferTransport {
     let session: TransferSessionID
     private let tasks: any TransportSession
     private let journal: any OutcomeJournaling
+    private let events: TransportEventProcessor
     private let submitting = Mutex<Set<AttemptID>>([])
 
     /// `makeSession` is handed the event handler that the session's delegate must call.
@@ -22,8 +23,12 @@ final class BackgroundTransport: TransferTransport {
          makeSession: (any TaskEventHandling) -> any TransportSession) {
         self.session = session
         self.journal = journal
-        tasks = makeSession(TransportEventProcessor(session: session, journal: journal, emit: emit, uptime: uptime))
+        events = TransportEventProcessor(session: session, journal: journal, emit: emit, uptime: uptime)
+        tasks = makeSession(events)
     }
+
+    /// How many times the session has drained in this process: the number of its latest drained event.
+    var drains: Int { events.drains }
 
     /// The real transport for a session, recording outcomes in the App Group.
     static func live(_ session: TransferSessionID, emit: @escaping @Sendable (TransportEvent) -> Void) -> BackgroundTransport {
@@ -36,10 +41,14 @@ final class BackgroundTransport: TransferTransport {
         guard key.isValid, let description = key.descriptor.taskDescription else { throw .invalidKey }
         guard submitting.withLock({ $0.insert(key.attempt).inserted }) else { throw .alreadySubmitting }
         defer { submitting.withLock { _ = $0.remove(key.attempt) } }
-        if let existing = await inventory().task(for: key.attempt) {
-            await tasks.resumeTask(existing.taskID)
-            return existing.taskID
+        let held = await inventory().tasks(for: key.attempt)
+        if let live = held.first(where: \.isLive) {
+            await tasks.resumeTask(live.taskID)
+            return live.taskID
         }
+        // A cancelled or finished task writes its outcome to the attempt's file once iOS reports it,
+        // so a new task beside it would have its result overwritten or mistaken for the old one's.
+        guard held.isEmpty else { throw .outcomePending }
         // A new task would overwrite an outcome nobody applied, or a stale one would be read as its result.
         guard !journal.exists(key.outcomePath) else { throw .unacknowledgedOutcome }
         guard let body = journal.url(for: key.bodyPath) else { throw .unavailable }
@@ -49,9 +58,9 @@ final class BackgroundTransport: TransferTransport {
 
     func outcome(for key: AttemptKey) throws -> OutcomeRecord? { try journal.read(key.outcomePath) }
 
-    func acknowledge(_ key: AttemptKey) throws {
+    func acknowledge(_ key: AttemptKey, keepingBody: Bool) throws {
         try journal.remove(key.outcomePath)
-        try journal.remove(key.bodyPath)
+        if !keepingBody { try journal.remove(key.bodyPath) }
     }
 
     func inventory() async -> TransportInventory {
@@ -75,7 +84,7 @@ final class BackgroundTransport: TransferTransport {
 /// The delegate's work for one session, on its serial delegate queue. It buffers each answer up to
 /// 64 KiB and cancels a task whose answer is larger, writes a finished task's outcome file before
 /// reporting it, reports progress at most four times a second per task and reports the session
-/// drained once iOS has delivered everything it queued.
+/// drained, with the drain's number, once iOS has delivered everything it queued.
 final class TransportEventProcessor: TaskEventHandling {
     /// Upload answers are small JSON. An arbitrary answer is never buffered.
     static let responseLimit = 64 * 1024
@@ -90,6 +99,7 @@ final class TransportEventProcessor: TaskEventHandling {
         var responses: [Int: Data] = [:]
         var oversized: Set<Int> = []
         var progressSentAt: [Int: Duration] = [:]
+        var drains = 0
     }
     private let state = Mutex(State())
     private static let logger = Logger(subsystem: "app.ilyich.native", category: "Transfers")
@@ -153,10 +163,26 @@ final class TransportEventProcessor: TaskEventHandling {
         emit(.finished(session, TransportCompletion(taskID: task.id, attempt: attempt, outcomePath: descriptor.outcomePath, journal: journal)))
     }
 
-    func sessionDidFinishEvents() { emit(.drained(session)) }
+    /// How many times the session has drained in this process.
+    var drains: Int { state.withLock { $0.drains } }
+
+    func sessionDidFinishEvents() {
+        // Counted before it is reported, so whoever reads the count after the event sees it.
+        let drain = state.withLock { state in
+            state.drains += 1
+            return state.drains
+        }
+        emit(.drained(session, drain: drain))
+    }
 
     /// What a finished task's outcome file says: what happened, unclassified. The engine classifies.
     static func outcome(of task: CompletedTask, response: Data, oversized: Bool) -> OutcomeRecord {
+        // Another server's answer is never the upload's: a receipt from it confirms nothing, and its
+        // status would read as this server's (a 401 as being signed out, even in older builds).
+        guard !task.leftOrigin else {
+            return OutcomeRecord(error: "The upload was redirected to another server.", errorDomain: TransportOutcomeCode.domain,
+                                 errorCode: TransportOutcomeCode.redirected.rawValue, v: OutcomeRecord.version)
+        }
         var outcome = OutcomeRecord(httpStatus: task.httpStatus, v: OutcomeRecord.version)
         if oversized {
             outcome.error = "The server’s answer was too large to read."

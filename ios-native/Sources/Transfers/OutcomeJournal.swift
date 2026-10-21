@@ -66,6 +66,10 @@ enum TransportOutcomeCode: Int, Sendable {
     case invalidReceipt = 2
     /// The task ended with neither an error nor a response.
     case noResponse = 3
+    /// The session followed a redirect to another origin, which a background session does without
+    /// asking. The body may have gone there; what that server answered, its status included, is
+    /// not recorded, since it says nothing about this upload.
+    case redirected = 4
 
     static let domain = "app.ilyich.transport"
 }
