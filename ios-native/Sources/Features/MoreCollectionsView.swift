@@ -5,7 +5,8 @@ struct MoreCollectionsView: View {
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
     let onFilter: (TimelineFilter, String) -> Void
-    let onShowInTimeline: (Asset) -> Void
+    /// Plays memories over More.
+    let onPlayMemory: (MemoryPlayback) -> Void
     let onMetadataFilter: (SearchFilter, String) -> Void
     let onDeveloped: (String) -> Void
     var body: some View {
@@ -27,7 +28,7 @@ struct MoreCollectionsView: View {
                 Button { onMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO"), visibility: StringFilter(eq: "timeline")), "Videos") } label: { Label("Videos", systemImage: "video") }
                 Button { onMetadataFilter(SearchFilter(isMotion: BoolFilter(eq: true), visibility: StringFilter(eq: "timeline")), "Motion") } label: { Label("Motion", systemImage: "livephoto") }
                 Button { onDeveloped("Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
-                NavigationLink { MemoriesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset, onShowInTimeline: onShowInTimeline) } label: { Label("On this day", systemImage: "clock.arrow.circlepath") }
+                NavigationLink { MemoriesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset, onPlay: onPlayMemory) } label: { Label("On this day", systemImage: "clock.arrow.circlepath") }
             }
             Section("Shared") {
                 NavigationLink { PartnersView(api: api, onFilter: onFilter) } label: { Label("Partners", systemImage: "person.2") }
@@ -48,13 +49,13 @@ struct MemoriesView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
-    let onShowInTimeline: (Asset) -> Void
+    /// Plays memories over this screen. Opening a photo or showing it in the timeline from the
+    /// player goes through the library's navigator, which closes the player and this screen first.
+    let onPlay: (MemoryPlayback) -> Void
     var initialID: String? = nil
     @State private var openedInitial = false
     @State private var memories: [Memory] = []
     @State private var savedOnly = false
-    @State private var playingMemory: Memory?
-    @State private var pendingDestination: PhotoDestination?
     @State private var loading = true
     @State private var failure: FeatureFailure?
     var body: some View {
@@ -66,7 +67,7 @@ struct MemoriesView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text(memoryTitle(memory)).font(.title2.bold()); Spacer()
-                            Button("Play memory", systemImage: "play.fill") { playingMemory = memory }.labelStyle(.iconOnly).disabled(memory.assets.isEmpty)
+                            Button("Play memory", systemImage: "play.fill") { onPlay(MemoryPlayback(memories: memories, initialID: memory.id)) }.labelStyle(.iconOnly).disabled(memory.assets.isEmpty)
                             Button { Task { await toggleSaved(memory) } } label: { Image(systemName: memory.isSaved ? "bookmark.fill" : "bookmark") }
                                 .accessibilityLabel(memory.isSaved ? "Unsave memory" : "Save memory").requiresWriteAccess()
                         }.padding(.horizontal, 20)
@@ -77,18 +78,6 @@ struct MemoriesView: View {
         }.navigationTitle(savedOnly ? "Saved memories" : "On this day")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Toggle("Saved memories", isOn: $savedOnly).toggleStyle(.button) } }
         .task(id: savedOnly) { await load() }.refreshable { await load() }
-        .fullScreenCover(item: $playingMemory, onDismiss: {
-            guard let destination = pendingDestination else { return }
-            pendingDestination = nil
-            switch destination {
-            case .viewer(let asset): onOpenAsset(asset)
-            case .timeline(let asset): onShowInTimeline(asset)
-            }
-        }) { memory in
-            MemoryPlaybackView(api: api, pipeline: pipeline, memories: memories, initialID: memory.id) { destination in
-                pendingDestination = destination; playingMemory = nil
-            }
-        }
         .alert("Couldn’t update memories", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
@@ -103,7 +92,8 @@ struct MemoriesView: View {
             if let initialID, !openedInitial {
                 let memory: Memory = try await api.request(.get, path: "memories/\(initialID)")
                 try Task.checkCancellation()
-                memories = [memory]; playingMemory = memory; openedInitial = true
+                memories = [memory]; openedInitial = true
+                onPlay(MemoryPlayback(memories: [memory], initialID: memory.id))
             } else if savedOnly {
                 memories = try await api.request(.get, path: "memories", query: [.init(name: "isSaved", value: "true")])
             } else { memories = try await api.memories() }

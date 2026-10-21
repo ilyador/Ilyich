@@ -234,3 +234,7 @@ private extension ServerFailure {
         }
     }
 }
+
+extension ShareInboxStore: SharedFilesInbox {
+    var batchIDs: Set<UUID> { Set(batches.map(\.id)) }
+}

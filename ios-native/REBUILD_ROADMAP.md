@@ -740,6 +740,14 @@ The viewer menu and footer, BulkActionsView, AssetInfoView and ViewerStackView r
   - UI testDeepLinkOpensAssetOverOpenSheet
 - **Acceptance:**
   - On the phone, a widget tap opens the photo even with a sheet open; memory Show in timeline lands once
+- **As built:** `LibraryScreenModel` (Sources/Library) owns the `LibraryNavigator`, follows links, shows new shared files once nothing else is up, and warms up the Earth (the critic's correction). LibraryView keeps the shelves, the feed's filters and the search text; its shelves and Earth flags read and write the navigator's overlay, so the shelf code is unchanged. Where the code needed it, the contracts' sketch changed:
+  - `LibraryOverlay` holds two flags rather than one case, since the shelves come out over the Earth.
+  - Errors and confirmations sit in the alert slot rather than among the routes, as SwiftUI presents them apart from sheets.
+  - Routes carry what their screens need (the photo, the album, the phone photo, the memories) rather than IDs that nothing could look up yet. `more(path:)`, `albumEditor`, `apply(LibraryQuery)` and `openShelf` wait for the milestones that use them, and the settings routes gained the viewer's screen.
+  - Layers close one at a time from the top, as today's chained closes did, so each close is reported by its own host.
+  - A link closes everything at once, the viewer and any sheet it has open included, and opens once it has been looked up; the shelves and the Earth stay. Albums and people the shelves hold are used without asking the server, which also spares fetching an album with every photo in it. A link that can't be followed says why over the library, where before the alert could be lost under a sheet.
+  - While a full-screen viewer is up, the library is out of the window, and SwiftUI doesn't update it for a change from outside such as a link. A link that arrived then used to wait until the viewer was closed by hand. The screen model now watches the session for links, and the zoom presenter watches its own item.
+  - `XCUIApplication.open` relaunches the app, so UI tests send links to the running app through `XCUIDevice.shared.system.open`; the cold-launch test relaunches on purpose. The shared fixture serves no single memory or album, so `immich://memory?id=` and a cold-launch album link have no UI test, and phone photos have none in UI tests.
 
 ### N2 — Mutation service and typed results
 
@@ -1109,6 +1117,7 @@ Should a proxy 401 (no Immich error body) stop signing you out and show a connec
 - cleanup settings device-wide (default) or per account.
 - While a new filter loads, keep the old grid frozen for up to 1.5 s and then show the new feed with placeholders? Is SimilarPhotos allowed to keep its own grid, given DESIGN's one-grid rule?
 - Navigation, defaults keep today's behavior:
+- a link leaves the shelves and the Earth up, as today; since N1 it first closes any sheet or viewer, where a photo link under a sheet used to do nothing;
 - a viewer opened from More closes the sheet rather than stacking above it;
 - deleting in the viewer dismisses rather than moving to the next photo;
 - the two Trash experiences stay separate;

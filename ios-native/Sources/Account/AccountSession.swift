@@ -10,6 +10,8 @@ import IlyichPlatform
     private(set) var runtime: AccountRuntime?
     /// For the sign-in screen: why the last session ended, or why it couldn't be restored.
     private(set) var error: String?
+    /// A link the app was opened with, waiting for the library to follow it. The library takes
+    /// it as soon as it is up, and a link that arrives before sign-in waits for it.
     var pendingLink: AppLink?
     /// What the signed-in account may do, for views: the app puts it in the environment, where
     /// the controls that change things read it. Nil while nobody is signed in.
