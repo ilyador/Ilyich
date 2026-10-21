@@ -113,7 +113,9 @@ extension TransferStore {
     }
 
     /// Merges what discovery found, at commit time, in one transaction: each photo gets a job,
-    /// after the lane's last, unless a confirmation has its date or a job already has it. The
+    /// after the lane's last, unless a confirmation has its date or a job already has it. A failed
+    /// job whose stage has another date than the photo now has (the photo was edited) is queued
+    /// again from staging, its stage dropped; one that failed before staging waits for the user. The
     /// checks run against the tables as they are now, so a photo confirmed while discovery read
     /// Photos is not queued again. A photo Photos reports without a date is queued only if it was
     /// never confirmed, as it would otherwise be sent again every time.
@@ -131,6 +133,22 @@ extension TransferStore {
                 try db.run("INSERT OR REPLACE INTO temp.discovered(local_id,modification_date) VALUES(?,?)",
                            [.text(candidate.id), .optionalDate(candidate.modified)])
             }
+            // Failed jobs of photos edited since they were staged start again.
+            var edited: [Int64] = []
+            try db.run("""
+                SELECT DISTINCT j.id FROM jobs j JOIN stages s ON s.job_id=j.id JOIN temp.discovered d ON d.local_id=j.source_key \
+                WHERE j.lane='library' AND j.state='failed' AND j.lease_token IS NULL AND d.modification_date IS NOT NULL \
+                AND s.modification_date<>d.modification_date
+                """) { row in if let id = row.integer(0) { edited.append(id) } }
+            if !edited.isEmpty {
+                let match = "SELECT value FROM json_each(?)"
+                let ids = TransferSQLite.Value.text(TransferJSON.encode(edited))
+                try Self.dropStages(db, ofJobsIn: match, [ids])
+                try db.run("""
+                    UPDATE jobs SET state='queued',retry_count=0,not_before=NULL,error_class=NULL,error_message=NULL,error_at=NULL \
+                    WHERE id IN (\(match))
+                    """, [ids])
+            }
             var last: Int64 = -1
             try db.run("SELECT max(seq) FROM jobs WHERE lane='library'") { last = $0.integer(0) ?? -1 }
             try db.run("""
@@ -140,7 +158,7 @@ extension TransferStore {
                 (d.modification_date IS NULL OR c.modification_date=d.modification_date)) \
                 AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.lane='library' AND j.source_key=d.local_id)
                 """, [.text(origin.rawValue), .integer(last)])
-            let queued = db.changes
+            let queued = db.changes + edited.count
             var dropped = 0
             if !gone.isEmpty {
                 let match = """
@@ -160,6 +178,15 @@ extension TransferStore {
     }
 
     // MARK: -
+
+    /// Drops the stages of the jobs `match` selects, so they stage again, and abandons the
+    /// attempts left unanswered with them, whose bodies were made from those stages.
+    static func dropStages(_ db: TransferSQLite, ofJobsIn match: String, _ arguments: [TransferSQLite.Value]) throws {
+        try db.run("""
+            UPDATE attempts SET state='abandoned' WHERE job_id IN (\(match)) AND state IN ('created','bodyWritten','submitted','interrupted')
+            """, arguments)
+        try db.run("DELETE FROM stages WHERE job_id IN (\(match))", arguments)
+    }
 
     /// Whether the lease still holds the job.
     private static func holds(_ db: TransferSQLite, job: Int64, token: UUID) throws -> Bool {

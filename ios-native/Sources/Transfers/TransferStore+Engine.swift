@@ -180,22 +180,26 @@ extension TransferStore {
     }
 
     /// The user retries failed jobs of a lane: those named, or all of them for nil. Their retry
-    /// counts start again.
+    /// counts start again. A library job starts again from staging: its stage is dropped, as the
+    /// photo may have changed since, or its files may be what failed. The files are left for the
+    /// staging sweep (B6).
     @discardableResult
     func requeueFailed(lane: TransferLane, sourceKeys: [String]? = nil) throws -> Int {
         let db = try database()
-        if let sourceKeys {
+        return try db.transaction {
+            var match = "SELECT id FROM jobs WHERE lane=? AND state='failed' AND lease_token IS NULL"
+            var arguments: [TransferSQLite.Value] = [.text(lane.rawValue)]
+            if let sourceKeys {
+                match += " AND source_key IN (SELECT value FROM json_each(?))"
+                arguments.append(.text(TransferJSON.encode(sourceKeys)))
+            }
+            if lane == .library { try Self.dropStages(db, ofJobsIn: match, arguments) }
             try db.run("""
                 UPDATE jobs SET state='queued',retry_count=0,not_before=NULL,error_class=NULL,error_message=NULL,error_at=NULL \
-                WHERE lane=? AND state='failed' AND lease_token IS NULL AND source_key IN (SELECT value FROM json_each(?))
-                """, [.text(lane.rawValue), .text(TransferJSON.encode(sourceKeys))])
-        } else {
-            try db.run("""
-                UPDATE jobs SET state='queued',retry_count=0,not_before=NULL,error_class=NULL,error_message=NULL,error_at=NULL \
-                WHERE lane=? AND state='failed' AND lease_token IS NULL
-                """, [.text(lane.rawValue)])
+                WHERE id IN (\(match))
+                """, arguments)
+            return db.changes
         }
-        return db.changes
     }
 
     /// Removes jobs, with their stage and attempt rows, whatever lease holds them. Their files are
