@@ -150,6 +150,7 @@ final class LibraryIndex: Sendable {
         defer { resumeBackfillIfRestarted() }
         return try await mapped { try await writer.applyRepair(assetID: assetID, events) }
     }
+    func beginRepair(assetID: String) async throws { try await mapped { await writer.beginRepair(assetID: assetID) } }
     func failRepair(assetID: String, retryAt: Date?) async throws { try await mapped { try await writer.failRepair(assetID: assetID, retryAt: retryAt) } }
 
     // MARK: Viewport reads
