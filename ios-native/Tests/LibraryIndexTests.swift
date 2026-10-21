@@ -219,6 +219,33 @@ import XCTest
     // MARK: - Readers
 
     /// Reading takes its own connection and queue: a month, an asset and the month list load
+    /// A sync batch whose derived rows fail later in the session, after the launch backfill ended,
+    /// starts the backfill again, so the index is queryable again without waiting for a relaunch.
+    /// Once stopped, as at sign-out, it stays stopped.
+    func testDerivedRowFailureRunsTheBackfillAgainThisSession() async throws {
+        let (store, file) = try makeStore()
+        _ = try await store.prepare(sessionFingerprint: "session")
+        let epoch = await store.epoch()
+        store.startBackfill(after: .zero, pause: .zero)
+        await store.backfillFinished()
+        let ready = try await store.isQueryable()
+        XCTAssertTrue(ready)
+
+        // Only the writer's sync batches fail; the backfill, outside them, can insert.
+        try Self.execute(file, "CREATE TRIGGER broken BEFORE INSERT ON asset_index WHEN (SELECT writer_active FROM index_state WHERE id=1)=1 BEGIN SELECT RAISE(ABORT,'broken'); END")
+        _ = try await store.apply([SyncEvents.asset("one")], epoch: epoch)
+        await store.backfillFinished()
+        let again = try await store.isQueryable()
+        XCTAssertTrue(again, "The backfill ran again on its own.")
+        XCTAssertEqual(try Self.dump(file, "SELECT id FROM asset_index"), [["one"]])
+
+        await store.stopBackfill()
+        _ = try await store.apply([SyncEvents.asset("two")], epoch: epoch)
+        await store.backfillFinished()
+        let stopped = try await store.isQueryable()
+        XCTAssertFalse(stopped, "A stopped backfill does not start again.")
+    }
+
     /// while the writer is inside a batch, from what was committed before it.
     func testViewportReadRunsWhileWriterCommits() async throws {
         let (store, file) = try makeStore()
@@ -237,6 +264,9 @@ import XCTest
         let clock = ContinuousClock()
         var month: [Asset] = []
         let elapsed = try await clock.measure {
+            // The feed asks whether the library is complete before every month it loads.
+            _ = try await store.isComplete()
+            _ = try await store.lastSyncDate()
             month = try await store.timeBucket("2026-02-01T00:00:00Z")
             _ = try await store.asset(id: "before")
             _ = try await store.timeBuckets()
