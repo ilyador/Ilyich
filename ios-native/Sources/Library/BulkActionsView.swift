@@ -43,8 +43,10 @@ struct BulkActionsView: View {
 
     var body: some View {
         let can = evaluated ?? evaluate(features: features)
-        // Deleting from a server without Trash, or photos already in it, can't be undone.
-        let permanently = !can.shows(.trash)
+        // Deleting skips Trash only on a server without one. Photos already in Trash go to Trash
+        // again, as from the selection bar, until N2 gives a Trash selection its own restore and
+        // permanent delete together.
+        let permanently = features?.trash == false
         List {
             if let failure { Section { Text(failure).foregroundStyle(.red) } }
             if let photosOutcome, !working { Section { Text(photosOutcome) } }
@@ -121,10 +123,11 @@ struct BulkActionsView: View {
             }
             // A stack needs two photos or more.
             if assets.count > 1 { action(.stack, can, "Stack photos", systemImage: "square.stack.3d.up", perform: stack) }
-            let deletion: AssetAction = permanently ? .deletePermanently : .trash
-            if can.shows(deletion) {
+            // The policy's delete for these photos, whichever it is, says whether there is one.
+            let deletion = can.shows(.trash) ? can[.trash] : can[.deletePermanently]
+            if deletion != .hidden {
                 Button(permanently ? "Delete permanently" : "Move to Trash", systemImage: "trash", role: .destructive) { confirmTrash = true }
-                    .disabled(features == nil || !can.offers(deletion))
+                    .disabled(features == nil || deletion != .offered)
             }
             if features == nil, let featuresFailure {
                 VStack(alignment: .leading, spacing: 8) {

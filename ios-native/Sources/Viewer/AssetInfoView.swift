@@ -152,6 +152,8 @@ struct AssetInfoView: View {
         }
         .navigationTitle("Info").navigationBarTitleDisplayMode(.inline)
         .task { await loadDetails() }
+        // Download original is for this sheet: closing it, or going on to a place, stops it.
+        .onDisappear { exports.cancel() }
         .sheet(isPresented: $editingMetadata) { NavigationStack { MetadataEditor(api: api, asset: asset, onUpdated: update) } }
         .sheet(isPresented: $editingFaces) { NavigationStack { FaceAssignmentView(api: api, pipeline: pipeline, asset: asset, onChanged: { Task { if let fresh = try? await api.asset(id: asset.id) { update(fresh) } } }) } }
         .sheet(item: $collection) { selection in

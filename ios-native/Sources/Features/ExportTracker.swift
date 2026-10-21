@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// A screen's exports, one at a time. MediaExportService does the work; this holds what the screen
-/// shows while it runs. An export stops when its screen goes away, unless it is writing a photo to
-/// Photos then: that finishes, as the viewer's save always has. A screen with longer exports
-/// cancels them itself when it disappears.
+/// shows while it runs. Every screen cancels its export when it disappears: the handler a screen
+/// passes to `start` holds the screen's state, and so this tracker, until the export ends, so the
+/// tracker can't see the screen go. A photo already being written to Photos still finishes, as the
+/// viewer's save always has.
 @MainActor @Observable final class ExportTracker {
     /// The running export and how far it has got; nil when none runs.
     private(set) var request: ExportRequest?
@@ -16,6 +17,7 @@ import SwiftUI
     /// One service per screen, until the account runtime owns one per account (C7).
     convenience init(api: APIClient) { self.init(service: MediaExportService(api: api)) }
 
+    /// Only a tracker whose handler doesn't hold it can go mid-export; its export stops too.
     isolated deinit { if !isCommitting { job?.cancel() } }
 
     var isRunning: Bool { progress != nil }
