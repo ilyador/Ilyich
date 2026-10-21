@@ -34,6 +34,8 @@ struct LiveAccountDevice: AccountDevice {
 
     func readOnlyChanged(_ enabled: Bool) async { await AccountRuntime.uploadsFollow(readOnly: enabled) }
 
+    func recordTransferImport(_ report: LegacyImportReport) async { await DiagnosticsStore.shared.recordTransferImport(report) }
+
     /// Each time the phone's protected data becomes available after it was locked away, as after
     /// the first unlock since the phone started.
     @MainActor static func protectedDataAvailable() -> AsyncStream<Void> {

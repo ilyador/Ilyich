@@ -24,6 +24,23 @@ final class DiagnosticsTests: XCTestCase {
         let empty = await store.snapshot()
         XCTAssertTrue(empty.isEmpty)
     }
+    /// The backup state import's report joins the exported log as counts only, stays when the
+    /// request log is cleared, and goes at sign-out.
+    func testTransferImportReportIsCountsOnlyAndGoesAtSignOut() async {
+        let store = DiagnosticsStore(level: .errors)
+        let comparison = LegacyImportComparison(compared: [.receipts: 21_345, .confirmations: 59_877], mismatches: [.receipts: 0, .confirmations: 2])
+        let report = LegacyImportReport(mode: .shadow, outcome: .imported, date: Date(timeIntervalSinceReferenceDate: 800_000_000), milliseconds: 420,
+                                        comparison: comparison)
+        await store.recordTransferImport(report)
+        let exported = DiagnosticsStore.report(events: [], transferImport: await store.transferImportReport())
+        XCTAssertTrue(exported.contains("Backup state import (shadow): imported in 420 ms; 2 mismatches; receipts 0/21345, confirmations 2/59877"), exported)
+        await store.clearRequests()
+        let kept = await store.transferImportReport()
+        XCTAssertEqual(kept, report)
+        await store.clear()
+        let cleared = await store.transferImportReport()
+        XCTAssertNil(cleared)
+    }
     func testErrorsOnlyAndOffLevels() async {
         let errors = DiagnosticsStore(level: .errors)
         await errors.record(method: "GET", path: "assets", statusCode: 200, startedAt: Date(), outcome: .success)

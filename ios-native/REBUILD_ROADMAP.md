@@ -198,6 +198,12 @@ Every pass, including pull-to-refresh, mutation and background passes, returns a
 - **Acceptance:**
   - On the phone, shadow-importing the real state.json reports zero mismatches in receipts, confirmations, queue order, preferences, links, album adds, failures and notification batch, with every date bit-equal
   - Backup behavior unchanged
+- **As built:**
+  - The import runs 5 s after the runtime opens in front or the app comes out of the background (not when Control Center only makes it inactive), so a rebuild never competes with the first photos, and at once from Diagnostics; never on a write of state.json. The comparison is stored with the file's digest, so an unchanged file costs one hash and one read. Diagnostics has one section, Backup records copy: the mismatch total, when it was checked, the count per category (the ten above, stages and run intent included) and Compare again. The report also goes to the console and the exported log, as counts only.
+  - Beyond section 3: stages are keyed by stage ID and keep is_video and suspended; meta keeps the comparison; a job's error fields are error_class, error_message, error_at and display_name; date columns have no declared type, because a REAL column stores -0.0 as 0 (BM2).
+  - Nothing state.json holds is dropped. A suspended stage or a failure whose photo left the queue becomes a job, an album add for a photo never uploaded becomes an album upload job, and one for a photo with a receipt takes the receipt's server ID and can run at once. Stage IDs become interrupted attempts with their body paths, for B6 to adopt. Imported confirmations have no confirmed_at, which state.json never kept.
+  - Authoritative mode imports once, ignores the same digest, and moves an unreadable file aside. A later digest is reported and changes nothing: BM8's merge is left to B9, which also answers the rollback question. A shadow import never touches a database the transfer engine or a later schema owns.
+  - TransferStore.complete, the commit B2's engine will call with its lease, exists for the 60k-receipt test.
 
 ### W3 — Share inbox package
 
@@ -955,7 +961,7 @@ App side: WidgetRefreshCoordinator (typed changes, 60 s debounce, skipped in the
 - BGTask identifiers app.ilyich.native.backup.processing and app.ilyich.native.backup.refresh, and UIBackgroundModes. KEEP. A coverage identifier is added only if the owner approves.
 - Transfer notifications transfer.<UUID> and the terminal replay state. MIGRATE from state.json into notification_batches (B1, B9); IDs reused.
 - Share inbox. <AppGroup>/ShareInbox/<batch>/manifest.json plus files and <identity>.multipart and .receipt. v1 READ; new batches WRITTEN as v2 with relative names (W3). v2 keeps every v1 key, so a rolled-back build still reads it; readers since W3 use only the names. Upload identity derivation unchanged. Manifest-less folders collected after 24 h.
-- Transfers database. Application Support/IlyichTransfers/<digest>.sqlite. NEW in B1, in the private container (never the app group), excluded from iCloud backup. Holds jobs, attempts, receipts and the rest.
+- Transfers database. Application Support/IlyichTransfers/<digest>.sqlite. NEW in B1, in the private container (never the app group), excluded from iCloud backup. Holds jobs, attempts, receipts and the rest. Survives sign-out for either reason, as state.json does (pinned by C7's cleanup-list test).
 - Device database. Application Support/IlyichDevice/device.sqlite. NEW in P1 (mutation journal); fingerprints added in P5.
 - Fingerprint cache. Caches/IlyichFingerprints/<digest>.json. IMPORTED into device_fingerprint, then deleted (P5).
 - Thumbnail files. Caches/IlyichThumbnails/<digest32>/<stem2>/<stem>.<rev16>, about 0.7 GB. KEEP in place, plus a new index.sqlite (T1). Moving to Application Support is an owner decision.
@@ -1084,7 +1090,8 @@ Reported, not gated.
 - enqueue is allowed while a backup runs;
 - Back up selected no longer triggers full discovery;
 - photos deleted from Photos leave the queue;
-- failed items are shown apart from remaining.
+- failed items are shown apart from remaining;
+- what today's loop can no longer reach is uploaded at the cutover: a kept stage or a failure whose photo left the queue, and an album add for a photo never uploaded (B1 imports each as a job, so nothing is lost; no build is known to leave such a state).
 Accept each?
 - Should background backup's metadata sync stay a hard gate as today, or become best-effort before discovery so it never blocks queued uploads (the plan's default)? Should uploads respect Low Data Mode?
 - Read-only mode and uploads: today, turning it on pauses backup and shared uploads and switches automatic backup off, turning it off starts nothing again, and the footer says "Backup stays paused until you start it again". C6's acceptance asked for turning it off to resume backup, which changes that, so C6 keeps today's behavior until you answer. Should turning read-only mode off resume backup, with automatic backup left on, and the shared uploads it stopped? A yes needs what to resume kept on disk, so that a relaunch while it is on does not lose it.

@@ -27,6 +27,15 @@ struct AccountEnvironment: Sendable {
     var keepsShelvesOpen = false
     /// Where the offline library is kept: nil for Application Support, a folder for tests.
     var libraryDirectory: URL?
+    /// The backup state is copied into the account's transfers database and compared with it, in
+    /// shadow (REBUILD_ROADMAP.md B1). Backup itself still runs from the backup state.
+    var importsBackupState = true
+    /// Where the transfers databases are kept: nil for Application Support/IlyichTransfers, a
+    /// folder for tests.
+    var transfersDirectory: URL?
+    /// The folder that holds each account's Backup/<digest>/state.json: nil for the App Group
+    /// container, a folder for tests.
+    var backupContainer: URL?
 
     /// The app on the phone.
     static let live = AccountEnvironment()
@@ -45,7 +54,7 @@ struct AccountEnvironment: Sendable {
     static let fixtureUserID = "00000000-0000-4000-8000-000000000001"
 
     /// The environment a UI test launch asks for, or nil for any other launch. Nothing reaches the
-    /// Keychain, the App Group mirror, the phone's photos or backup. `--ui-testing-library` starts
+    /// Keychain, the App Group mirror, the phone's photos, backup or its state. `--ui-testing-library` starts
     /// signed in to the fixture, with the long People shelf for `--ui-testing-many-people`.
     static func uiTest(arguments: [String]) -> AccountEnvironment? {
         guard arguments.contains("--ui-testing") else { return nil }
@@ -54,6 +63,7 @@ struct AccountEnvironment: Sendable {
         environment.networkConfiguration = NetworkConfiguration()
         environment.syncsLibrary = false
         environment.usesDevicePhotos = false
+        environment.importsBackupState = false
         environment.resetsInterfaceState = true
         environment.keepsShelvesOpen = arguments.contains("--ui-testing-shelves-stay-open")
         environment.fixtureAccount = AccountID(server: fixtureServer, userID: fixtureUserID)
