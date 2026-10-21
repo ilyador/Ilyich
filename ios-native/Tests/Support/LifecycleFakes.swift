@@ -28,7 +28,16 @@ import XCTest
         return true
     }
 
-    func submit(_ request: WindowRequest, refused: @escaping @MainActor @Sendable () -> Void) { submitted.append(request) }
+    private var answers: [BackgroundWindowKind: @MainActor @Sendable (String?) -> Void] = [:]
+
+    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void) {
+        submitted.append(request)
+        answers[request.kind] = answered
+    }
+
+    /// iOS answers the kind's latest request: nil takes it, a message turns it down.
+    func answer(_ kind: BackgroundWindowKind, _ error: String?) { answers.removeValue(forKey: kind)?(error) }
+
     func cancel(identifier: String) { cancelled.append(identifier) }
     func pending() async -> [WindowRequest] { pendingAtLaunch }
 

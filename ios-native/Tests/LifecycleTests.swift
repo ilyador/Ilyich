@@ -289,23 +289,58 @@ import XCTest
         try await h.engine.start()
         await untilTransfers("The first plan.") { scheduler.plans.count == 1 }
         try await h.engine.setIntent(.automatic)
+        var preferences = TransferPreferences(Legacy.BackupPreferences())
+        preferences.automatic = true
+        try await h.engine.setPreferences(preferences)
         await untilTransfers("Automatic backup's plan.") { scheduler.plans.count == 2 }
         _ = try await h.engine.enqueue([h.photo("a"), h.photo("b")])
         try await untilTransfers("Both commit.") { try await h.allConfirmed("a", "b") }
         await h.engine.conditionsChanged()
-        try await h.engine.setIntent(.automatic)
-        var preferences = TransferPreferences(Legacy.BackupPreferences())
-        preferences.automatic = true
+        // Back up now, with automatic backup on: today's windows stay.
+        try await h.engine.setIntent(.manual)
         try await h.engine.setPreferences(preferences)
         try await Task.sleep(for: .milliseconds(50))
-        XCTAssertEqual(scheduler.plans, [.none, .automatic(requireCharging: false, triggerDelay: 30)], "Work and commands that change nothing schedule nothing.")
+        XCTAssertEqual(scheduler.plans, [.none, .automatic(requireCharging: false, triggerDelay: 30)],
+                       "A manual run, work and commands that change nothing schedule nothing.")
 
         preferences.requireCharging = true
         try await h.engine.setPreferences(preferences)
+        preferences.automatic = false
+        try await h.engine.setPreferences(preferences)
+        preferences.automatic = true
+        try await h.engine.setPreferences(preferences)
+        try await h.engine.setIntent(.paused)
+        try await h.engine.setIntent(.automatic)
         h.authorization.setReadOnly(true)
-        await untilTransfers("Read-only blocks the engine and its windows.") { scheduler.plans.count == 4 }
-        XCTAssertEqual(scheduler.plans.suffix(2), [.automatic(requireCharging: true, triggerDelay: 30), .none])
+        await untilTransfers("Read-only blocks the engine and its windows.") { scheduler.plans.count == 8 }
+        let charging = SchedulePlan.automatic(requireCharging: true, triggerDelay: 30)
+        XCTAssertEqual(scheduler.plans.suffix(6), [charging, .none, charging, .none, charging, .none],
+                       "The preference decides the windows; a pause and a block drop them.")
         await h.tearDown()
+    }
+
+    func testARefusedRequestIsAskedForAgainAndReported() async {
+        let scheduler = FakeTaskScheduler()
+        let source = LifecycleEventSource(initial: .launch(active: false), scheduler: scheduler)
+        XCTAssertTrue(source.register())
+        await source.schedule(.automatic(requireCharging: false, triggerDelay: 30))
+        XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing, .refresh])
+        scheduler.answer(.processing, nil)
+        scheduler.answer(.refresh, "Background App Refresh is off")
+        XCTAssertEqual(source.schedulingError,
+                       "iOS could not schedule automatic backup: Background App Refresh is off. You can still use Back up now.")
+
+        source.photoLibraryChanged()
+        XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing, .refresh, .refresh], "Only the refused request is asked for again.")
+        source.photoLibraryChanged()
+        source.applicationBecameActive()
+        XCTAssertEqual(scheduler.submitted.count, 3, "A request iOS has not answered is not replaced.")
+        scheduler.answer(.refresh, nil)
+        XCTAssertNil(source.schedulingError, "iOS took the request.")
+        source.applicationEnteredBackground()
+        source.photoLibraryChanged()
+        XCTAssertEqual(scheduler.submitted.count, 3, "Nothing more is asked for.")
+        source.finish()
     }
 }
 

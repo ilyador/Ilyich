@@ -192,6 +192,9 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var handoffs: [UUID: CheckedContinuation<WindowHandoff, Never>] = [:]
     /// Waits cancelled before they were stored.
     private var cancelledHandoffs: Set<UUID> = []
+    /// Counts jobs reaching the transport, so a hand-off that was reading the store meanwhile sees
+    /// one it would otherwise miss.
+    private var submissions = 0
 
     init(store: TransferStore, executor: any JobExecuting, authorization: any TransferAuthorizing, clock: C, concurrency: Int = 1,
          scheduler: (any WindowScheduling)? = nil,
@@ -387,13 +390,18 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// run. It waits on the loop, never polling: a background window finishes the moment its
     /// work is the daemon's. A part already with the transport returns at once.
     func handoff() async -> WindowHandoff {
-        if (try? await store.hasSubmittedJobs()) == true { return .handedToDaemon }
+        let seen = submissions
+        if (try? await store.hasSubmittedJobs()) == true || submissions != seen { return .handedToDaemon }
         guard loop != nil, !stopped, !Task.isCancelled else { return .nothingRunnable }
         let id = UUID()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 if cancelledHandoffs.remove(id) != nil {
                     continuation.resume(returning: .nothingRunnable)
+                } else if submissions != seen {
+                    // A job reached the transport while the store answered: its advance resolved
+                    // the waiters before this one was stored.
+                    continuation.resume(returning: .handedToDaemon)
                 } else {
                     handoffs[id] = continuation
                     wake()
@@ -424,10 +432,11 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         for waiter in waiters { waiter.resume(returning: handoff) }
     }
 
-    /// The windows this state asks for: automatic backup's while it is on and nothing blocks the
-    /// engine. A manual run or a share uses no windows, as today.
+    /// The windows this state asks for: automatic backup's while the preference is on and nothing
+    /// blocks the engine, as BackupLifecycle schedules today. A manual run keeps them; turning
+    /// automatic backup off drops them, and so does a pause, which turns it off today.
     private func currentPlan() -> SchedulePlan {
-        guard intent == .automatic, blocker == nil else { return .none }
+        guard preferences?.automatic == true, intent != .paused, blocker == nil else { return .none }
         return .automatic(requireCharging: preferences?.requireCharging ?? false, triggerDelay: preferences?.triggerDelay ?? 0)
     }
 
@@ -637,7 +646,10 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard try await store.advance(job: lease.job, token: lease.token, to: state, phase: phase) else { throw LeaseLost() }
         // ensureOwned after the await.
         guard owns(lease) else { throw LeaseLost() }
-        if state == .submitted { resolveHandoffs(.handedToDaemon) }
+        if state == .submitted {
+            submissions += 1
+            resolveHandoffs(.handedToDaemon)
+        }
     }
 
     private func progress(_ lease: Lease, sent: Int64, expected: Int64) async {

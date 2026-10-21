@@ -31,8 +31,9 @@ struct WindowRequest: Hashable, Sendable {
 @MainActor protocol BackgroundTaskScheduling: AnyObject {
     /// Registers the launch handler; iOS calls it on the main queue.
     func register(identifier: String, launch: @escaping @MainActor (any BackgroundTaskHandle) -> Void) -> Bool
-    /// Replaces the kind's request. iOS answers later; `refused` runs if it turned the request down.
-    func submit(_ request: WindowRequest, refused: @escaping @MainActor @Sendable () -> Void)
+    /// Replaces the kind's request. iOS answers later: `answered` gets nil once it took the request,
+    /// or why it turned it down.
+    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void)
     func cancel(identifier: String)
     /// The requests iOS holds, from this process or an earlier one.
     func pending() async -> [WindowRequest]
@@ -67,6 +68,12 @@ struct WindowRequest: Hashable, Sendable {
     private var plan = SchedulePlan.none
     /// The shape of each request iOS holds, as far as this process knows.
     private var held: [BackgroundWindowKind: WindowRequest.Shape] = [:]
+    /// Kinds whose last request iOS turned down. They are asked for again when the app comes
+    /// forward or goes to the background, or Photos changes, as BackupLifecycle asks again today.
+    private var refused: Set<BackgroundWindowKind> = []
+    /// Today's message while iOS turns a window down, for the cutover to show as BackupLifecycle
+    /// does; nil once iOS takes a request again.
+    private(set) var schedulingError: String?
     /// Reads what iOS held at launch, once.
     private var seeding: Task<[WindowRequest], Never>?
     private var seeded = false
@@ -115,17 +122,23 @@ struct WindowRequest: Hashable, Sendable {
     func applicationBecameActive() {
         guard !snapshot.appActive else { return }
         snapshot.appActive = true
+        retryRefused()
         continuation.yield(.becameActive)
     }
 
     func applicationEnteredBackground() {
         guard snapshot.appActive else { return }
         snapshot.appActive = false
+        retryRefused()
         continuation.yield(.enteredBackground)
     }
 
-    /// PhotoKitAdapter's coalesced changes. Passed on, never a reason to reschedule.
-    func photoLibraryChanged() { continuation.yield(.photoLibraryChanged) }
+    /// PhotoKitAdapter's coalesced changes. Passed on, never a reason to reschedule a window iOS
+    /// holds; only one it turned down is asked for again.
+    func photoLibraryChanged() {
+        retryRefused()
+        continuation.yield(.photoLibraryChanged)
+    }
     func urlSessionEvents(_ identifier: String) { continuation.yield(.urlSessionEvents(identifier)) }
     func preferencesChanged() { continuation.yield(.preferencesChanged) }
     func readOnlyChanged() { continuation.yield(.readOnlyChanged) }
@@ -168,24 +181,38 @@ struct WindowRequest: Hashable, Sendable {
         continuation.yield(.window(lease))
     }
 
+    private func retryRefused() {
+        guard seeded, !refused.isEmpty else { return }
+        apply()
+    }
+
     private func apply() {
         for kind in BackgroundWindowKind.allCases {
             let wanted = plan.request(kind)
             guard wanted?.shape != held[kind] else { continue }
+            refused.remove(kind)
             if let wanted {
                 let shape = wanted.shape
                 held[kind] = shape
-                scheduler.submit(WindowRequest(kind: kind, shape: shape, earliestBeginDate: now().addingTimeInterval(wanted.delay))) { [weak self] in
+                scheduler.submit(WindowRequest(kind: kind, shape: shape, earliestBeginDate: now().addingTimeInterval(wanted.delay))) { [weak self] error in
+                    // An answer to a request since replaced or cancelled says nothing about now.
+                    guard let self, self.held[kind] == shape, !self.refused.contains(kind) else { return }
+                    guard let error else {
+                        if self.refused.isEmpty { self.schedulingError = nil }
+                        return
+                    }
                     // iOS refused (too many requests, or background refresh is off): nothing is held,
-                    // so the next plan or window asks again.
-                    guard let self, self.held[kind] == shape else { return }
+                    // and the next plan, window or trigger asks again.
                     self.held[kind] = nil
+                    self.refused.insert(kind)
+                    self.schedulingError = "iOS could not schedule automatic backup: \(error). You can still use Back up now."
                 }
             } else {
                 scheduler.cancel(identifier: kind.identifier)
                 held[kind] = nil
             }
         }
+        if plan == .none { schedulingError = nil }
     }
 }
 
@@ -232,7 +259,7 @@ private final class CompletionBox: @unchecked Sendable {
         }
     }
 
-    func submit(_ request: WindowRequest, refused: @escaping @MainActor @Sendable () -> Void) {
+    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void) {
         let task: BGTaskRequest
         switch request.kind {
         case .processing:
@@ -247,7 +274,8 @@ private final class CompletionBox: @unchecked Sendable {
         // A new request of a kind replaces the one iOS held.
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: request.kind.identifier)
         BGTaskScheduler.shared.submitTaskRequest(task) { error in
-            if error != nil { Task { @MainActor in refused() } }
+            let message = error?.localizedDescription
+            Task { @MainActor in answered(message) }
         }
     }
 
