@@ -157,7 +157,8 @@ actor LegacyBackupImporter {
 // MARK: - Plan
 
 /// What state.json says, laid out as the transfers database keeps it. Built from the decoded file
-/// alone, without touching a file or the database, so the comparison can rebuild it.
+/// alone, without touching a file or the database. The comparison works its expectations out from
+/// state.json on its own, so a mistake here shows up as a mismatch.
 ///
 /// - Jobs: the photo being uploaded first, then the queue in its order (BM3), each once. Then,
 ///   sorted, photos the legacy loop could no longer reach, so nothing state.json holds is lost: a
@@ -365,7 +366,6 @@ enum LegacyBackupComparison {
             result.compared[category] = compared
             result.mismatches[category] = mismatches
         }
-        let plan = LegacyBackupPlan(state)
 
         // Receipts and confirmations, one row each (BM3), dates bit for bit (BM2).
         let receipts = state.receipts ?? [:]
@@ -387,12 +387,35 @@ enum LegacyBackupComparison {
         }
         record(.confirmations, confirmed.count, confirmationMismatches + storedConfirmations.count)
 
-        // The jobs, in order, with their origins and states.
-        let expectedJobs = plan.jobs.map { [$0.localID, $0.origin.rawValue, $0.state.rawValue] }
+        // The jobs, with their origins and states, worked out from state.json itself rather than
+        // from the plan that wrote them, so a planning mistake shows here. The photo being uploaded
+        // and the queue come first, in that order; then, in any order, the photos the legacy loop
+        // could no longer reach: a suspended stage or a failure off the queue, and an album add
+        // whose photo has no receipt.
+        let failures = state.failures ?? [:]
+        let suspended = state.suspended ?? [:]
+        let currentID = state.current?.localID
+        var queued: [String] = []
+        var queuedIDs = Set<String>()
+        for id in [currentID].compactMap({ $0 }) + (state.queue ?? []) where queuedIDs.insert(id).inserted { queued.append(id) }
+        let stranded = (state.pendingAlbumAdds ?? [:]).filter { !$0.value.isEmpty && receipts[$0.key] == nil }.keys
+        let unreachable = Set(suspended.keys).union(failures.keys).union(stranded).subtracting(queuedIDs)
+        func expectedJob(_ id: String) -> [String] {
+            let origin: JobOrigin = queuedIDs.contains(id) || suspended[id] != nil || failures[id] != nil ? .legacy : .albumUpload
+            let jobState: JobState = if id == currentID { .staged }
+                else if failures[id] != nil { .failed }
+                else if suspended[id] != nil { .staged }
+                else { .queued }
+            return [id, origin.rawValue, jobState.rawValue]
+        }
         let storedJobs = contents.jobs.map { [$0.sourceKey, $0.origin, $0.state] }
-        var queueMismatches = abs(expectedJobs.count - storedJobs.count)
-        for (expected, stored) in zip(expectedJobs, storedJobs) where expected != stored { queueMismatches += 1 }
-        record(.queueOrder, expectedJobs.count, queueMismatches)
+        var queueMismatches = max(0, queued.count - storedJobs.count)
+        for (id, stored) in zip(queued, storedJobs) where expectedJob(id) != stored { queueMismatches += 1 }
+        // A wrong job off the queue is both one too many and one missing: it counts once.
+        var expectedRest = Set(unreachable.map(expectedJob))
+        var extras = 0
+        for stored in storedJobs.dropFirst(queued.count) where expectedRest.remove(stored) == nil { extras += 1 }
+        record(.queueOrder, queued.count + unreachable.count, queueMismatches + max(extras, expectedRest.count))
 
         // The current and suspended stages, each with its attempt.
         let jobKeys = Dictionary(contents.jobs.map { ($0.id, $0.sourceKey) }, uniquingKeysWith: { first, _ in first })
@@ -413,7 +436,6 @@ enum LegacyBackupComparison {
         record(.stages, expectedStages.count, stageMismatches + storedStages.values.reduce(0) { $0 + $1.count })
 
         // Failures, on their photos' jobs.
-        let failures = state.failures ?? [:]
         var storedFailures: [String: TransferJobRow] = [:]
         for job in contents.jobs where job.errorClass != nil || job.errorMessage != nil || job.errorAt != nil || job.displayName != nil {
             storedFailures[job.sourceKey] = job
@@ -426,7 +448,7 @@ enum LegacyBackupComparison {
         record(.failures, failures.count, failureMismatches + storedFailures.count)
 
         // Album adds: every photo and album, pending, with the server ID that lets it run.
-        let jobIDs = Set(plan.jobs.map(\.localID))
+        let jobIDs = queuedIDs.union(unreachable)
         var storedDestinations: [String: AlbumDestinationRow] = [:]
         for row in contents.albumDestinations { storedDestinations[row.localID + "\u{0}" + row.albumID] = row }
         var albumMismatches = 0
@@ -448,11 +470,12 @@ enum LegacyBackupComparison {
         record(.preferences, 1, contents.preferences == TransferPreferences(state.preferences ?? Legacy.BackupPreferences()) ? 0 : 1)
 
         let engine = contents.engine
-        record(.runIntent, 1, engine?.intent == plan.intent && engine?.lastMessage == plan.lastMessage && engine?.blocker == nil ? 0 : 1)
+        record(.runIntent, 1, engine?.intent == LegacyBackupPlan.intent(state) && engine?.lastMessage == state.error && engine?.blocker == nil ? 0 : 1)
 
-        // The batch, and which jobs count towards it.
-        let expectedBatches = Dictionary(plan.jobs.map { ($0.localID, $0.batch?.uuidString) }, uniquingKeysWith: { first, _ in first })
-        let membership = contents.jobs.allSatisfy { (expectedBatches[$0.sourceKey] ?? nil) == $0.batchID }
+        // The batch, and which jobs count towards it: while it runs, the photo being uploaded and
+        // the queue's photos; none once it ended.
+        let running = state.transferNotification.flatMap { $0.terminalFailures == nil ? $0.id.uuidString : nil }
+        let membership = contents.jobs.allSatisfy { $0.batchID == (queuedIDs.contains($0.sourceKey) ? running : nil) }
         var batchMismatches = 0
         if let batch = state.transferNotification {
             let stored = contents.notificationBatches

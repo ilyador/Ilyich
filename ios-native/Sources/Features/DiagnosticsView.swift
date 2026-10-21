@@ -94,8 +94,11 @@ struct DiagnosticsView: View {
             }
             Section {
                 Picker("Record", selection: $level) { ForEach(DiagnosticLevel.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) } }
-                if !events.isEmpty {
+                // The backup records comparison goes out with the export even when the log is empty.
+                if !events.isEmpty || transferImport != nil {
                     ShareLink(item: report, preview: SharePreview("Ilyich diagnostics")) { Label("Export diagnostics", systemImage: "square.and.arrow.up") }
+                }
+                if !events.isEmpty {
                     Button("Clear log", role: .destructive) { Task { await DiagnosticsStore.shared.clearRequests(); await refresh() } }
                 }
                 if events.isEmpty { Text("No recorded events in this session.").foregroundStyle(.secondary) }
