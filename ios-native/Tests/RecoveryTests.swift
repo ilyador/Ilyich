@@ -220,6 +220,64 @@ final class RecoveryTests: XCTestCase {
         XCTAssertFalse(h.group.exists(Self.current + "/\(G.currentStage).receipt"))
     }
 
+    /// A photo that already failed waits for the user: a server error left on disk, or a task iOS
+    /// still holds, never makes it run again by itself. A retry already scheduled keeps its backoff.
+    func testFailedJobsStayFailedAndRetriesKeepTheirBackoff() async throws {
+        let stale = AttemptID(), later = AttemptID()
+        let h = try await RecoveryHarness.fresh()
+        addTeardownBlock { await h.tearDown() }
+        let staleFolder = try await h.seed("stale", attempts: { folder in
+            [LibraryAttempt(id: stale, part: .original, state: .submitted, bodyPath: folder + "/\(stale.rawValue).multipart", checksum: "sum-stale")]
+        })
+        let laterFolder = try await h.seed("later", attempts: { folder in
+            [LibraryAttempt(id: later, part: .original, state: .submitted, bodyPath: folder + "/\(later.rawValue).multipart", checksum: "sum-later")]
+        })
+        let outcome = try OutcomeRecord.encoded(OutcomeRecord(error: "Service Unavailable", httpStatus: 503, v: 2))
+        try outcome.write(to: h.group.url(staleFolder + "/\(stale.rawValue).receipt"))
+        try outcome.write(to: h.group.url(laterFolder + "/\(later.rawValue).receipt"))
+        try await h.store.advanceForTest("stale", to: .failed)
+        let backoff = h.now.addingTimeInterval(7_200)
+        try await h.store.scheduleRetryForTest("later", notBefore: backoff)
+
+        let report = try await h.recovery.reconcile()
+        XCTAssertEqual(report.retrying, 1, "Only the scheduled retry retries.")
+        let failed = try await h.job("stale")
+        XCTAssertEqual(failed?.state, .failed)
+        XCTAssertEqual(failed?.retryCount, 0)
+        let answered = try await h.attempt(stale.rawValue)
+        XCTAssertEqual(answered?.state, .failed, "The answer is recorded.")
+        XCTAssertFalse(h.group.exists(staleFolder + "/\(stale.rawValue).receipt"))
+        let retry = try await h.job("later")
+        XCTAssertEqual(retry?.state, .retryScheduled)
+        XCTAssertEqual(retry?.retryCount, 1)
+        let notBefore = try await h.store.notBeforeForTest("later")
+        XCTAssertEqual(notBefore, backoff, "The backoff is kept.")
+    }
+
+    /// A failed photo whose task iOS still holds is bound to it, so the task is neither cancelled
+    /// nor sent again, and stays failed until its answer lands.
+    func testFailedJobWithAHeldTaskStaysFailed() async throws {
+        let held = AttemptID()
+        let folder = "\(AccountStoragePaths(LegacyGoldens.account).backup)/\(UUID().uuidString)"
+        let description = TaskDescriptor.v2(attempt: held, scope: G.digest, outcome: folder + "/\(held.rawValue).receipt").taskDescription
+        let h = try await RecoveryHarness.fresh(backupTasks: [SessionTask(id: 5, description: description, state: .running, sent: 0, expected: 9)])
+        addTeardownBlock { await h.tearDown() }
+        try await h.seed("held", attempts: { folder in
+            [LibraryAttempt(id: held, part: .original, state: .submitted, bodyPath: folder + "/\(held.rawValue).multipart", checksum: "sum-held")]
+        })
+        try await h.store.advanceForTest("held", to: .failed)
+
+        let report = try await h.recovery.reconcile()
+        XCTAssertEqual(report.bound, 1)
+        XCTAssertEqual(report.cancelled, 0)
+        let job = try await h.job("held")
+        XCTAssertEqual(job?.state, .failed)
+        let attempt = try await h.attempt(held.rawValue)
+        XCTAssertEqual(attempt?.state, .submitted)
+        XCTAssertEqual(attempt?.taskID, 5)
+        XCTAssertTrue(h.backupSession.cancelled.isEmpty)
+    }
+
     // MARK: R3 and R4
 
     /// A new attempt's checksum is kept with its stage: resuming it after the app ended checks
@@ -444,5 +502,16 @@ extension TransferStore {
     /// Sets a job's state as an earlier run left it.
     func advanceForTest(_ id: String, to state: JobState) throws {
         try database().run("UPDATE jobs SET state=? WHERE lane='library' AND source_key=?", [.text(state.rawValue), .text(id)])
+    }
+
+    /// Schedules a job's retry as an earlier run left it.
+    func scheduleRetryForTest(_ id: String, notBefore: Date) throws {
+        try database().run("UPDATE jobs SET state='retryScheduled',not_before=? WHERE lane='library' AND source_key=?", [.date(notBefore), .text(id)])
+    }
+
+    func notBeforeForTest(_ id: String) throws -> Date? {
+        var found: Date?
+        try database().run("SELECT not_before FROM jobs WHERE lane='library' AND source_key=?", [.text(id)]) { found = $0.date(0) }
+        return found
     }
 }

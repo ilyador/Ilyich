@@ -56,8 +56,9 @@ extension TransferStore {
                 try db.run("UPDATE jobs SET state=?,phase=coalesce(?,phase) WHERE id=?", [.text(state.rawValue), .optionalText(phase), .integer(job)])
             case .retry(let notBefore, let message):
                 try db.run("""
-                    UPDATE jobs SET state='retryScheduled',not_before=?,retry_count=retry_count+1,error_class='transient',error_message=?,error_at=? \
-                    WHERE id=?
+                    UPDATE jobs SET state='retryScheduled',not_before=CASE WHEN state='retryScheduled' THEN max(coalesce(not_before,?1),?1) ELSE ?1 END,\
+                    retry_count=retry_count+1,error_class='transient',error_message=?2,error_at=?3 \
+                    WHERE id=?4
                     """, [.date(notBefore), .text(message), .date(date), .integer(job)])
             case .waiting(let reason):
                 try db.run("UPDATE jobs SET state='waiting',error_class='waiting',error_message=?,error_at=? WHERE id=?",
@@ -89,7 +90,7 @@ enum RecoveredJobChange: Hashable, Sendable {
     case keep
     /// A new state; nil keeps the phase.
     case state(JobState, phase: String?)
-    /// A transient failure: it runs again from `notBefore`.
+    /// A transient failure: it runs again from `notBefore`, or later when a retry already waits longer.
     case retry(notBefore: Date, message: String)
     /// Only this job waits for the condition.
     case waiting(WaitReason)

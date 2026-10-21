@@ -17,8 +17,10 @@ import os
 ///   an XMP sidecar fails the photo, as the executor does, and one that needs pairing with its
 ///   video stays on disk for the executor, which applies it without a check or an upload. A
 ///   status is classified (TransferFailureClassifier, never the message): an item failure fails
-///   the photo, a transient one retries now, an account one (a replayed 401) is reported and
-///   blames no photo. An answer without a status is no answer: the attempt is interrupted.
+///   the photo, a transient one retries now (a scheduled retry keeps its backoff), an account one
+///   (a replayed 401) is reported and blames no photo. A photo that already failed stays failed:
+///   its answers are recorded, and only a receipt changes it. An answer without a status is no
+///   answer: the attempt is interrupted.
 /// - R2, a task iOS still holds for the attempt, from this build or an earlier one (a legacy task
 ///   by its stage ID): the attempt is bound to it and the job waits for its outcome, never sent
 ///   again. Live tasks of the account that no unanswered attempt owns are cancelled. A legacy share
@@ -156,7 +158,10 @@ struct Recovery: Sendable {
                 var bound = attempt
                 bound.state = .submitted
                 bound.taskID = Int64(task.taskID)
-                guard try await store.recover(job: job.id, attempt: bound, change: .state(.submitted, phase: nil), at: date) else { return }
+                // A failed photo stays failed until the user retries it; the task's answer is
+                // still applied when it lands, and a receipt commits it.
+                let change: RecoveredJobChange = job.state == .failed ? .keep : .state(.submitted, phase: nil)
+                guard try await store.recover(job: job.id, attempt: bound, change: change, at: date) else { return }
                 if task.isLive { report.bound += 1 } else { report.pending += 1 }
                 withIOS = true
                 stateWritten = true
@@ -212,8 +217,12 @@ struct Recovery: Sendable {
             answered.remoteID = receipt.id
             answered.remoteStatus = receipt.status
             if attempt.part == .motion {
+                // Only a job the transport had runs on now; any other keeps its state (a failed
+                // one, a retry's backoff), with the video recorded.
+                let phase = LibraryJobExecutor.Phase.motionUploaded
+                let change: RecoveredJobChange = Self.withTransport.contains(job.state) ? .state(.staged, phase: phase) : .state(job.state, phase: phase)
                 guard try await store.recover(job: job.id, attempt: answered, motion: (stage.stageID, receipt.id),
-                                              change: .state(.staged, phase: LibraryJobExecutor.Phase.motionUploaded), at: date) else { return .skipped }
+                                              change: change, at: date) else { return .skipped }
                 stage.motionRemoteID = receipt.id
                 try? backup.acknowledge(key, keepingBody: false)
                 report.applied += 1
@@ -263,6 +272,9 @@ struct Recovery: Sendable {
         case .item(let message):
             change = .failed(message)
             report.failed += 1
+        case .transient where job.state == .failed, .waiting where job.state == .failed:
+            // An item failure only the user retries: the answer is recorded, the job stays failed.
+            change = .keep
         case .waiting(let reason, jobScoped: true):
             change = .waiting(reason)
             report.retrying += 1
