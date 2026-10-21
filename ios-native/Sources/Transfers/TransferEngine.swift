@@ -11,8 +11,10 @@ protocol JobExecuting: Sendable {
     func execute(_ job: LeasedJob, context: JobContext) async throws -> JobResult
 }
 
-/// A job under a lease, as the executor sees it. The state and phase are where an earlier lease
-/// left it: an interrupted job resumes from there.
+/// A job under a lease, as the executor sees it. An interrupted job (a released lease, a relaunch)
+/// keeps the state an earlier lease reached. A job that failed and is retried, or waited and was
+/// queued again, comes back as retryScheduled or queued: its phase and its stage rows, which both
+/// stay, say how far it got, so an executor resumes from those, never from the state alone.
 struct LeasedJob: Hashable, Sendable {
     let lease: Lease
     let lane: TransferLane
@@ -130,6 +132,12 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     private var loop: Task<Void, Never>?
     private var watcher: Task<Void, Never>?
+    /// The start in progress: a second start waits for it rather than loading again.
+    private var starting: Task<Void, any Error>?
+    /// Bumped by every cancel, and the sources a cancel is removing, so a lease taken while a
+    /// cancel ran is given back rather than run.
+    private var cancelGeneration = 0
+    private var cancelling: [TransferSource: Int] = [:]
     private var sleeper: CheckedContinuation<Void, Never>?
     private var woken = false
     private var stopped = false
@@ -161,6 +169,16 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     func start() async throws {
         guard !stopped else { return }
         if loop != nil { return wake() }
+        // A start already loading: the actor is reentrant at its awaits, so a second start would
+        // otherwise run a second loop and release the first one's lease.
+        if let starting { return try await starting.value }
+        let task = Task { try await self.begin() }
+        starting = task
+        defer { starting = nil }
+        try await task.value
+    }
+
+    private func begin() async throws {
         guard try await store.meta().engine == .transfer else { throw StartError.notOwned }
         // Leases of a process that ended are free again; jobs keep their state.
         try await store.releaseAllLeases()
@@ -173,6 +191,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         preferences = try await store.preferences()
         tokenDigest = authorization.current()?.tokenDigest
         await refreshCounts()
+        // A stop that came while this loaded wins: the engine stays stopped.
+        guard !stopped else { return }
         let updates = authorization.updates()
         watcher = Task { [weak self] in
             for await snapshot in updates { await self?.authorizationChanged(snapshot) }
@@ -236,6 +256,14 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     func cancel(_ sources: [TransferSource]) async throws {
+        cancelGeneration += 1
+        for source in sources { cancelling[source, default: 0] += 1 }
+        defer {
+            for source in sources {
+                let left = (cancelling[source] ?? 1) - 1
+                cancelling[source] = left > 0 ? left : nil
+            }
+        }
         if let running = active, sources.contains(running.job.source) { await releaseActive() }
         for lane in [TransferLane.library, .share] {
             let keys = sources.filter { $0.lane == lane }.map(\.key)
@@ -330,11 +358,14 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
         for lane in lanes {
             let token = UUID()
+            let generation = cancelGeneration
             if let stored = try await store.reserve(lane: lane, now: now(), token: token, epoch: snapshot.epoch.value) {
                 let lease = Lease(job: stored.id, token: token, epoch: snapshot.epoch)
                 // Checked again after the await: the fence or a pause may have moved meanwhile.
+                // A cancel meanwhile may have removed the row: the job must not run.
                 guard let current = authorization.current(), restriction(current) == nil, blocker == nil,
-                      current.writeGeneration == snapshot.writeGeneration, lane == .share || intent != .paused, !Task.isCancelled else {
+                      current.writeGeneration == snapshot.writeGeneration, lane == .share || intent != .paused, !Task.isCancelled,
+                      !stopped, cancelGeneration == generation, cancelling[stored.source] == nil else {
                     try await store.release(job: stored.id, token: token)
                     return nil
                 }
@@ -359,8 +390,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     private func perform(_ job: LeasedJob) async {
         await publish()
-        guard let task = active?.task else { return }
-        let result = await task.result
+        guard let running = active, running.job.lease == job.lease else { return }
+        let result = await running.task.result
         // A released lease drops whatever came back.
         guard active?.job.lease == job.lease else { return }
         active = nil
@@ -374,7 +405,9 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                 _ = try? await store.release(job: job.lease.job, token: job.lease.token)
             }
         case .failure(let error):
-            if error is LeaseLost || Task.isCancelled {
+            // A write fenced by a read-only toggle runs again under the new generation; it is
+            // not the photo's failure.
+            if error is LeaseLost || error is WriteFenced || Task.isCancelled {
                 _ = try? await store.release(job: job.lease.job, token: job.lease.token)
             } else {
                 await fail(job, error)

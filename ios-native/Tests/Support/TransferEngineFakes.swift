@@ -136,7 +136,8 @@ final class FakeJobExecutor: JobExecuting {
             state.script[key] = steps
             return step
         }
-        if job.state == .queued || job.state == .retryScheduled { try await context.advance(to: .staged, phase: "staged") }
+        // Like a real executor, it resumes from its phase: a job that staged before stages no more.
+        if job.phase == nil { try await context.advance(to: .staged, phase: "staged") }
         switch step {
         case .succeed:
             break

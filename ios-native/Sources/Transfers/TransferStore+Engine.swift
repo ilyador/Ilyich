@@ -138,7 +138,8 @@ extension TransferStore {
         return db.changes == 1
     }
 
-    /// A transient failure: the job runs again from `notBefore`, keeping its stage.
+    /// A transient failure: the job runs again from `notBefore` as retryScheduled. Its phase and
+    /// stage rows stay, so the next lease resumes from them.
     func scheduleRetry(job: Int64, token: UUID, notBefore: Date, message: String?, at date: Date) throws -> Bool {
         let db = try database()
         try db.run("""
@@ -148,7 +149,7 @@ extension TransferStore {
         return db.changes == 1
     }
 
-    /// Only this job waits, for `reason`, until a condition changes.
+    /// Only this job waits, for `reason`, until a condition changes. Its phase and stage rows stay.
     func markWaiting(job: Int64, token: UUID, reason: WaitReason, at date: Date) throws -> Bool {
         let db = try database()
         try db.run("""
