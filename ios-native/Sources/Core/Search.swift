@@ -13,6 +13,34 @@ struct DateFilter: Codable, Hashable, Sendable {
     var gte: Date?
     var lt: Date?
 }
+/// Whether a date is set, said with an explicit null as the V3 search schema needs:
+/// {"eq": null} for unset and {"ne": null} for set.
+struct NullDateFilter: Codable, Hashable, Sendable {
+    var isSet: Bool
+    static let unset = NullDateFilter(isSet: false)
+    static let set = NullDateFilter(isSet: true)
+
+    private enum CodingKeys: String, CodingKey { case eq, ne }
+    init(isSet: Bool) { self.isSet = isSet }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.contains(.ne) || container.contains(.eq) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Neither eq nor ne."))
+        }
+        isSet = container.contains(.ne)
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeNil(forKey: isSet ? .ne : .eq)
+    }
+}
+/// The order of a metadata search.
+struct SearchOrder: Codable, Hashable, Sendable {
+    enum Field: String, Codable, Sendable { case localDateTime, fileCreatedAt }
+    var field: Field
+    /// asc or desc.
+    var direction: String
+}
 struct OCRFilter: Codable, Hashable, Sendable { var matches: String }
 struct BoolFilter: Codable, Hashable, Sendable { var eq: Bool }
 struct IDFilter: Codable, Hashable, Sendable { var eq: String?; var ne: String? }
@@ -63,6 +91,7 @@ struct SearchFilter: Codable, Hashable, Sendable {
     var rating: RatingFilter?
     var hasAlbums: BoolFilter?
     var tagIds: IDsFilter?
+    var trashedAt: NullDateFilter?
 
     func matching(_ text: String, mode: SearchMode) -> Self {
         var filter = self
@@ -93,6 +122,7 @@ struct MetadataQuery: Encodable, Sendable {
     var cursor: String?
     var size = 100
     var withExif = true
+    var orderBy: SearchOrder?
 }
 
 struct SearchResponse: Decodable, Sendable {

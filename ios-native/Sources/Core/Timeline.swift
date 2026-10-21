@@ -8,18 +8,18 @@ struct TimeBucket: Codable, Hashable, Identifiable, Sendable {
 }
 
 /// The photos of one place. Only the local library index can lay them out by month, so the server
-/// never sees this filter. A place is known by its name and size, which keeps its feed and caches
-/// apart from the library's.
+/// never sees this filter. A place is known by its membership revision, which follows its photos,
+/// not their count, and keeps its feed and caches apart from the library's.
 struct TimelinePlace: Hashable, Sendable {
-    let key: String
-    let assetIDs: [String]
+    let membership: PlaceMembership
 
-    init(id: String, assetIDs: [String]) {
-        key = "\(id)#\(assetIDs.count)"; self.assetIDs = assetIDs
+    init(_ membership: PlaceMembership) { self.membership = membership }
+    init(id: String, assetIDs: [String], markerQuery: String = "") {
+        membership = PlaceMembership(placeID: id, assetIDs: assetIDs, markerQuery: markerQuery)
     }
-    // A place can hold thousands of photos; comparing and hashing them all would slow every lookup.
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.key == rhs.key }
-    func hash(into hasher: inout Hasher) { hasher.combine(key) }
+    var key: String { membership.placeID + "#" + membership.revision }
+    var assetIDs: [String] { membership.assetIDs }
+    // A place can hold thousands of photos; the membership compares and hashes its revision only.
 }
 
 struct TimelineFilter: Hashable, Sendable {

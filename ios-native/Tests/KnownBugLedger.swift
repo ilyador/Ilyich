@@ -340,10 +340,10 @@ import XCTest
 
     // MARK: - Queries
 
-    /// SEARCH-1. Searches never say whether trashed photos count, and the server's search includes
-    /// them unless asked not to: a library search shows trashed photos, and a search inside Trash
-    /// searches everything. Search options after Reset also drop the visibility, which brings
-    /// Locked Folder photos into results while the folder is unlocked.
+    /// SEARCH-1, fixed in Q4. Searches used to leave trash unsaid, and the server's search includes
+    /// trashed photos unless asked not to: a library search showed trashed photos, and a search
+    /// inside Trash searched everything. Search options after Reset also dropped the visibility,
+    /// which brought Locked Folder photos into results while the folder was unlocked.
     func testSearchesStateTrashAndVisibility() async throws {
         let server = makeStubServer()
         server.route("POST", "search/smart", .json(Self.emptySearchPage))
@@ -363,12 +363,10 @@ import XCTest
         store.applySearchOptions(mode: .filename, filter: SearchFilter())
         let options = try await searchFilter(server, "search/metadata", request: 1, store: store)
 
-        XCTExpectFailure("SEARCH-1: searches omit trash and visibility. Q4 removes this wrapper.", strict: true) {
-            XCTAssertEqual(library["trashedAt"], .object(["eq": .null]), "A library search leaves trashed photos out.")
-            XCTAssertEqual(trash["trashedAt"], .object(["ne": .null]), "A search inside Trash keeps to the trash.")
-            XCTAssertNotNil(options["visibility"], "Search options always say which photos they search.")
-            XCTAssertEqual(options["trashedAt"], .object(["eq": .null]), "Search options leave trashed photos out.")
-        }
+        XCTAssertEqual(library["trashedAt"], .object(["eq": .null]), "A library search leaves trashed photos out.")
+        XCTAssertEqual(trash["trashedAt"], .object(["ne": .null]), "A search inside Trash keeps to the trash.")
+        XCTAssertNotNil(options["visibility"], "Search options always say which photos they search.")
+        XCTAssertEqual(options["trashedAt"], .object(["eq": .null]), "Search options leave trashed photos out.")
     }
 
     /// The privacy half of SEARCH-1, fixed in S0 (build 3040055). While the Locked Folder is

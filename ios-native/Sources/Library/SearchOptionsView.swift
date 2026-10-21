@@ -69,7 +69,8 @@ struct SearchOptionsView: View {
                     Text("Any rating").tag(-1); Text("Unrated").tag(0)
                     ForEach(1...5, id: \.self) { Text("\($0) stars").tag($0) }
                 }
-                Picker("Visibility", selection: Binding(get: { filter.visibility?.eq ?? "" }, set: { filter.visibility = $0.isEmpty ? nil : .init(eq: $0) })) {
+                Picker("Visibility", selection: Binding(get: { filter.visibility.flatMap { $0.eq ?? ($0.in?.count == 1 ? $0.in?.first : nil) } ?? "" },
+                                                        set: { filter.visibility = $0.isEmpty ? nil : .init(eq: $0) })) {
                     Text("Library and archive").tag(""); Text("Library").tag("timeline"); Text("Archive").tag("archive")
                 }
             }

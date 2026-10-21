@@ -910,7 +910,7 @@ struct LibraryView: View {
     }
 
     private func selectPlace(_ place: PlaceCollection) {
-        store.setPlace(id: place.id, assetIDs: place.assetIDs, title: place.title); searchText = ""
+        store.setPlace(place.membership, title: place.title); searchText = ""
     }
 
     /// Hands the navigator what runs once everything over the library has closed: the timeline,

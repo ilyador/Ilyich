@@ -84,6 +84,8 @@ private struct FrozenFeed {
 
 protocol LibraryAPI: Sendable {
     var cacheScope: String { get }
+    /// The signed-in user, which names the account's own photos in a search. Nil when unknown.
+    var userID: String? { get }
     func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket]
     func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset]
     func search(_ query: SearchQuery) async throws -> SearchResponse
@@ -95,6 +97,7 @@ protocol LibraryAPI: Sendable {
     func supportsPlaceTimelines() async -> Bool
 }
 extension LibraryAPI {
+    var userID: String? { nil }
     /// Without an offline library the server is always up to date.
     func refresh() async throws -> LibraryChange? { nil }
     /// Only the local index can count places for every month at once.
@@ -167,7 +170,12 @@ extension APIClient: LibraryAPI {}
     /// The rail moves the grid through this directly, at the finger's pace.
     @ObservationIgnored let scroller = GridScroller()
     private(set) var timelineFilter = TimelineFilter()
-    private(set) var searchFilter = SearchFilter.library
+    /// What a search inside the feed shown searches: its scope, trash, visibility and filters.
+    private(set) var searchScope = LibraryStore.librarySearch {
+        didSet { searchFilter = ServerSearchRequest.filter(for: searchScope) }
+    }
+    /// The search scope as Search options edit it.
+    private(set) var searchFilter = ServerSearchRequest.filter(for: LibraryStore.librarySearch)
     private(set) var searchMode = SearchMode.context
     private var similarAssetID: String?
     private var cursor: String?
@@ -191,7 +199,6 @@ extension APIClient: LibraryAPI {}
     private var generation = UUID()
     @ObservationIgnored private var recentBuckets: [String] = []
     private var usesMetadata = false
-    private var developedOnlyResults = false
     private var showingResults = false
     private var timelineSections: [LibrarySection] = []
     private var frozenFeed: FrozenFeed?
@@ -558,7 +565,7 @@ extension APIClient: LibraryAPI {}
             // The offline library went away under a place, so its photos are found by search instead.
             guard generation == current, let place = timelineFilter.place else { return }
             canShowPlacesByMonth = false
-            searchPlace(assetIDs: place.assetIDs, title: filterTitle ?? "Place")
+            searchPlace(place.membership, title: filterTitle ?? "Place")
         } catch { if generation == current { self.error = error.localizedDescription } }
     }
 
@@ -702,7 +709,7 @@ extension APIClient: LibraryAPI {}
         let reuseTimeline = !isFiltered && !showingResults && !buckets.isEmpty
         let saved = originalTimeline
         beginScopeChange()
-        timelineFilter = TimelineFilter(); searchFilter = .library
+        timelineFilter = TimelineFilter(); searchScope = Self.librarySearch
         filterTitle = nil; query = ""; results = []; showingResults = false; usesMetadata = false; searchMode = .context
         originalTimeline = nil; scrollRequest = nil
         let restoreSaved = !reuseTimeline && saved?.0.buckets.isEmpty == false
@@ -757,7 +764,7 @@ extension APIClient: LibraryAPI {}
         rememberOriginal()
         beginScopeChange()
         timelineFilter = TimelineFilter(personID: person.id)
-        searchFilter = SearchFilter(personIds: IDsFilter(all: [person.id]), visibility: SearchFilter.library.visibility)
+        searchScope = Self.widened(.person(person.id))
         filterTitle = person.name.isEmpty ? "Person" : person.name
         query = ""; showingResults = false; usesMetadata = false
         scheduleReload()
@@ -768,7 +775,7 @@ extension APIClient: LibraryAPI {}
         beginScopeChange()
         timelineFilter = TimelineFilter(albumID: album.id)
         timelineFilter.order = album.order ?? "desc"
-        searchFilter = SearchFilter(albumIds: IDsFilter(all: [album.id]), visibility: SearchFilter.library.visibility)
+        searchScope = Self.widened(.album(album.id, ascending: timelineFilter.order == "asc"))
         filterTitle = album.albumName; query = ""; showingResults = false; usesMetadata = false
         scheduleReload()
     }
@@ -777,37 +784,48 @@ extension APIClient: LibraryAPI {}
     /// and the trips work there too. Without the offline library they are found by search instead.
     func setPlace(id: String, assetIDs: [String], title: String) {
         guard !assetIDs.isEmpty else { return }
-        guard canShowPlacesByMonth else { searchPlace(assetIDs: assetIDs, title: title); return }
+        setPlace(PlaceMembership(placeID: id, assetIDs: assetIDs, markerQuery: ""), title: title)
+    }
+
+    /// A place, known by its membership revision.
+    func setPlace(_ place: PlaceMembership, title: String) {
+        guard !place.assetIDs.isEmpty else { return }
+        guard canShowPlacesByMonth else { searchPlace(place, title: title); return }
         rememberOriginal()
         beginScopeChange()
-        timelineFilter = TimelineFilter(place: TimelinePlace(id: id, assetIDs: assetIDs))
-        searchFilter = Self.placeSearch(assetIDs)
+        timelineFilter = TimelineFilter(place: TimelinePlace(place))
+        searchScope = Self.widened(.place(place))
         filterTitle = title; query = ""; showingResults = false; usesMetadata = false
         scheduleReload()
     }
 
-    private func searchPlace(assetIDs: [String], title: String) {
+    private func searchPlace(_ place: PlaceMembership, title: String) {
         rememberOriginal()
         beginScopeChange()
         timelineFilter = TimelineFilter()
-        searchFilter = Self.placeSearch(assetIDs)
+        searchScope = Self.widened(.place(place))
         filterTitle = title; query = ""; usesMetadata = true; showingResults = true
         scheduleReload()
     }
 
-    private static func placeSearch(_ assetIDs: [String]) -> SearchFilter {
-        var filter = SearchFilter.library
-        if assetIDs.count == 1 { filter.id = IDFilter(eq: assetIDs[0]) }
-        else { filter.or = assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) } }
-        return filter
+    /// The library as it is searched: the timeline and the archive, active photos only.
+    static let librarySearch = widened(.library)
+    /// Searches inside the library, a person, an album or a place look in the archive too, as
+    /// they always have; the Locked Folder and hidden photos are never asked for.
+    private static func widened(_ query: LibraryQuery) -> LibraryQuery {
+        var query = query
+        query.visibility = [.timeline, .archive]
+        return query
     }
 
     func setMetadataFilter(_ filter: SearchFilter, title: String, developedOnly: Bool = false) {
         rememberOriginal()
         beginScopeChange()
-        timelineFilter = TimelineFilter(); searchFilter = filter
+        timelineFilter = TimelineFilter()
+        var scope = LibraryQuery(filter)
+        if developedOnly { scope.predicates.developed = true }
+        searchScope = scope
         filterTitle = title; query = ""; searchMode = .context
-        developedOnlyResults = developedOnly
         usesMetadata = true; showingResults = true
         queryTask = Task { await loadResults(reset: true) }
     }
@@ -816,19 +834,19 @@ extension APIClient: LibraryAPI {}
     /// within them keeps to developed photos.
     func setDeveloped(title: String) {
         setTimeline(TimelineFilter(isDeveloped: true), title: title)
-        developedOnlyResults = true
     }
 
     func setTimeline(_ filter: TimelineFilter, title: String) {
         rememberOriginal()
         beginScopeChange()
         timelineFilter = filter; filterTitle = title; query = ""; showingResults = false; usesMetadata = false
-        searchFilter = SearchFilter(visibility: filter.visibility.map { StringFilter(eq: $0.rawValue) } ?? SearchFilter.library.visibility, isFavorite: filter.isFavorite.map { BoolFilter(eq: $0) })
+        // A search inside the feed keeps its scope, trash, visibility and filters.
+        searchScope = LibraryQuery(filter, userID: api.userID) ?? Self.librarySearch
         scheduleReload()
     }
 
     func clearFilters() {
-        beginScopeChange(); timelineFilter = TimelineFilter(); searchFilter = .library
+        beginScopeChange(); timelineFilter = TimelineFilter(); searchScope = Self.librarySearch
         filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false; searchMode = .context
         selected = []; isSelecting = false
         if let saved = originalTimeline {
@@ -844,9 +862,7 @@ extension APIClient: LibraryAPI {}
 
     func search(_ text: String) {
         rememberOriginal()
-        let keepDevelopedOnly = developedOnlyResults
         beginScopeChange()
-        developedOnlyResults = keepDevelopedOnly
         query = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             if filterTitle == nil { clearFilters() }
@@ -859,14 +875,14 @@ extension APIClient: LibraryAPI {}
 
     func applySearchOptions(mode: SearchMode, filter: SearchFilter) {
         rememberOriginal(); beginScopeChange()
-        searchMode = mode; searchFilter = filter; usesMetadata = true; showingResults = true
+        searchMode = mode; searchScope = LibraryQuery(filter, base: searchScope); usesMetadata = true; showingResults = true
         filterTitle = mode == .context ? "Filtered library" : mode.rawValue
         queryTask = Task { await loadResults(reset: true) }
     }
 
     func findSimilar(to asset: Asset) {
         rememberOriginal(); beginScopeChange()
-        query = ""; searchMode = .context; searchFilter = .library; similarAssetID = asset.id
+        query = ""; searchMode = .context; searchScope = Self.librarySearch; similarAssetID = asset.id
         filterTitle = "Similar photos"; showingResults = true; usesMetadata = true
         queryTask = Task { await loadResults(reset: true) }
     }
@@ -886,16 +902,35 @@ extension APIClient: LibraryAPI {}
         else { scheduleReload() }
     }
 
+    /// The search the feed's scope, the text and its mode, or the similar photo, make.
+    private func searchRequest(text: String) throws(Unsupported) -> ServerSearchRequest {
+        var scope = searchScope
+        if let similarAssetID {
+            scope = scope.similar(to: similarAssetID)
+        } else {
+            // Search can't order by date added, so a field search inside Recently added is ordered by
+            // the time taken, as the server's search always ordered it.
+            if case .chronological(.createdAt, let ascending) = scope.ranking { scope.ranking = .chronological(.takenAt, ascending: ascending) }
+            scope = scope.refined(text: text, mode: searchMode)
+        }
+        return try ServerSearchRequest(scope, userID: api.userID)
+    }
+
     private func loadResults(reset: Bool, retry: (cursor: String?, prefix: [Asset])? = nil,
                              preservingPosition: Bool = false) async {
         let searchID = UUID(); searchGeneration = searchID
-        let text = query, filter = searchFilter.matching(query, mode: searchMode), requestGeneration = generation
-        let mode = searchMode, reference = similarAssetID, developedOnly = developedOnlyResults
+        let text = query, requestGeneration = generation
+        let request: ServerSearchRequest
+        do { request = try searchRequest(text: text) } catch {
+            self.error = error.localizedDescription; return
+        }
         let previousResultIDs = results.map(\.id)
-        // Developed photos can sit a thousand photos deep behind recent phone shots, so the
-        // developed shelf reads bigger pages and keeps going, up to 20,000 photos, until it finds some.
-        let pageSize = developedOnly ? 500 : 100
-        let requestLimit = preservingPosition ? max(1, loadedResultPageCount) : developedOnly ? 40 : 3
+        // Developed photos can sit a thousand photos deep behind recent phone shots, so a search the
+        // phone filters (developed, or one owner's photos) reads bigger pages and keeps going, up to
+        // its scan budget of 20,000 photos, until it finds some.
+        let scans = request.scanBudget != nil
+        let pageSize = scans ? 500 : 100
+        let requestLimit = preservingPosition ? max(1, loadedResultPageCount) : scans ? (request.scanBudget ?? 0) / 500 : 3
         let startCursor: String?
         if let retry { startCursor = retry.cursor } else { startCursor = reset ? nil : cursor }
         let prefix = retry?.prefix ?? (reset ? [] : results)
@@ -914,17 +949,13 @@ extension APIClient: LibraryAPI {}
             for _ in 0..<requestLimit {
                 try Task.checkCancellation()
                 failedBatch = (nextCursor, prefix + accumulated)
-                let response: SearchResponse
-                if reference != nil {
-                    response = try await api.search(SearchQuery(query: nil, queryAssetId: reference, filter: filter, cursor: nextCursor))
-                } else if text.isEmpty || mode != .context {
-                    response = try await api.metadataSearch(MetadataQuery(filter: filter, cursor: nextCursor, size: pageSize))
-                } else {
-                    response = try await api.search(SearchQuery(query: text, filter: filter, cursor: nextCursor))
+                let response = switch request.endpoint {
+                case .smart: request.page(try await api.search(request.smartBody(cursor: nextCursor)))
+                case .metadata: request.page(try await api.metadataSearch(request.metadataBody(cursor: nextCursor, size: pageSize)))
                 }
                 try Task.checkCancellation()
                 fetchedPageCount += 1
-                accumulated += response.assets.items.filter { !developedOnly || $0.isDeveloped }
+                accumulated += response.assets.items
                 latest = response.verification
                 // Structured filters select this server's cursor API. A legacy page
                 // number must never be sent back as an opaque cursor.
@@ -1029,7 +1060,6 @@ extension APIClient: LibraryAPI {}
         verification = nil; retryBatch = nil; cursor = nil; hasMore = false
         loadedResultPageCount = 0
         similarAssetID = nil
-        developedOnlyResults = false
         restorePosition = nil; error = nil
     }
     private func freezeCurrentFeedIfNeeded() {

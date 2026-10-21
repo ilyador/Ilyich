@@ -15,9 +15,18 @@ struct PlaceCollection: Identifiable, Hashable, Sendable {
     let latitude: Double
     let longitude: Double
     let assetIDs: [String]
+    /// What the place's feed is known by: its photos and the marker query that found them.
+    let membership: PlaceMembership
     var focus: PlaceFocus { .init(latitude: latitude, longitude: longitude, assetID: assetIDs.first) }
 
-    static func group(_ markers: [MapMarker]) -> [PlaceCollection] {
+    init(id: String, title: String, city: String?, country: String?, latitude: Double, longitude: Double,
+         assetIDs: [String], markerQuery: String = "") {
+        self.id = id; self.title = title; self.city = city; self.country = country
+        self.latitude = latitude; self.longitude = longitude; self.assetIDs = assetIDs
+        membership = PlaceMembership(placeID: id, assetIDs: assetIDs, markerQuery: markerQuery)
+    }
+
+    static func group(_ markers: [MapMarker], markerQuery: String = "") -> [PlaceCollection] {
         let valid = markers.filter { $0.lat.isFinite && $0.lon.isFinite && (-90...90).contains($0.lat) && (-180...180).contains($0.lon) }
         let grouped = Dictionary(grouping: valid) { marker in
             if let city = marker.city, !city.isEmpty { return [marker.country ?? "", marker.state ?? "", city].joined(separator: "|") }
@@ -30,7 +39,8 @@ struct PlaceCollection: Identifiable, Hashable, Sendable {
             let radians = markers.map { $0.lon * .pi / 180 }
             let longitude = atan2(radians.reduce(0) { $0 + sin($1) }, radians.reduce(0) { $0 + cos($1) }) * 180 / .pi
             return PlaceCollection(id: key, title: title, city: first.city, country: first.country,
-                latitude: markers.reduce(0) { $0 + $1.lat } / Double(markers.count), longitude: longitude, assetIDs: Array(Set(markers.map(\.id))).sorted())
+                latitude: markers.reduce(0) { $0 + $1.lat } / Double(markers.count), longitude: longitude, assetIDs: Array(Set(markers.map(\.id))).sorted(),
+                markerQuery: markerQuery)
         }.sorted { $0.assetIDs.count == $1.assetIDs.count ? $0.title < $1.title : $0.assetIDs.count > $1.assetIDs.count }
     }
 }
@@ -192,10 +202,11 @@ struct PlacesView: View {
                                        isArchived: includeArchived, isFavorite: favoritesOnly ? true : nil,
                                        fileCreatedAfter: fileCreatedAfter, fileCreatedBefore: fileCreatedBefore)
             let markers = try await api.mapMarkers(query)
+            let markerQuery = query.queryItems.map { $0.name + "=" + ($0.value ?? "") }.joined(separator: "&")
             try Task.checkCancellation()
             guard generation == requestGeneration else { return }
             let (grouped, glow) = await Task.detached(priority: .userInitiated) {
-                (PlaceCollection.group(markers), GlobePhotoLights(markers: markers))
+                (PlaceCollection.group(markers, markerQuery: markerQuery), GlobePhotoLights(markers: markers))
             }.value
             try Task.checkCancellation(); guard generation == requestGeneration else { return }
             places = grouped; lights = glow
