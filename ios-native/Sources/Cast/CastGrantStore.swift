@@ -97,6 +97,23 @@ actor CastGrantStore {
         return try await task.value
     }
 
+    /// Stops handing out `grant` once the server refused it, so the next ask makes a new one. It is
+    /// still revoked with the others, in case only the media check refused it.
+    func discard(_ grant: CastGrant) {
+        guard current?.id == grant.id else { return }
+        superseded.append(grant)
+        current = nil
+    }
+
+    /// Whether a media check's failure means the server refused the grant's token itself: a 401,
+    /// whether Immich or something in front of it wrote it.
+    static func rejectsGrant(_ error: any Error) -> Bool {
+        switch error as? ServerFailure {
+        case .sessionExpired, .proxyRejected(401): true
+        default: false
+        }
+    }
+
     /// Revokes every grant made so far, and one still being made once it arrives. Returns when the
     /// server has been asked; a failure is ignored, since a grant expires on its own.
     func revoke() async {

@@ -120,8 +120,7 @@ final class CastSessionService: ObservableObject, CastLinkEvents {
         loading = true; error = nil
         operation = Task { [weak self] in
             do {
-                let grant = try await account.grants.grant(covering: CastEligibility.need(for: asset))
-                let media = try await account.resolver.media(for: asset, grant: grant)
+                let media = try await Self.media(for: asset, account: account)
                 try Task.checkCancellation()
                 guard let self, self.generation == generation, self.connected else { return }
                 self.currentAssetID = asset.id
@@ -136,6 +135,21 @@ final class CastSessionService: ObservableObject, CastLinkEvents {
                 self.loading = false; self.error = error.localizedDescription
             }
         }
+    }
+
+    /// The receiver's media for `asset`. A grant the server refused is never handed out again;
+    /// one new grant is tried, and a second refusal is shown.
+    private nonisolated static func media(for asset: Asset, account: CastAccount) async throws -> CastMedia {
+        let need = CastEligibility.need(for: asset)
+        for attempt in 1...2 {
+            let grant = try await account.grants.grant(covering: need)
+            do { return try await account.resolver.media(for: asset, grant: grant) } catch where CastGrantStore.rejectsGrant(error) {
+                await account.grants.discard(grant)
+                if attempt == 2 { throw error }
+                try Task.checkCancellation()
+            }
+        }
+        throw CancellationError()
     }
 
     static let receiverFailure = "The Cast device couldn’t open this media. It must reach your server directly; proxy-only headers and client certificates cannot be forwarded to the receiver. Check the server address or try another item."

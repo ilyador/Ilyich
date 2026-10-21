@@ -190,6 +190,41 @@ final class CastTests: XCTestCase {
     }
 
     @MainActor
+    func testAGrantTheServerRejectsIsReplaced() async throws {
+        let harness = CastHarness()
+        harness.service.select(api: harness.api, asset: Asset(id: "photo-1"), start: true)
+        try await until("Photo 1 reached the TV.") { harness.link.loads.count == 1 }
+        harness.link.loads[0].finished(true)
+
+        // The owner ended the Cast session in the web session list.
+        harness.resolver.reject("token-1")
+        harness.service.select(api: harness.api, asset: Asset(id: "photo-2"))
+        try await until("Photo 2 reached the TV with a new grant.") { harness.link.loads.count == 2 }
+        harness.link.loads[1].finished(true)
+        XCTAssertEqual(harness.server.created.count, 2, "One new grant replaced the rejected one.")
+        XCTAssertEqual(harness.resolver.tokens, ["token-1", "token-1", "token-2"])
+        XCTAssertNil(harness.service.error)
+        let current = await harness.grants.currentGrant
+        XCTAssertEqual(current?.id, "grant-2")
+
+        // A server that refuses every grant: one new grant per load, then the failure is shown.
+        harness.resolver.reject("token-2")
+        harness.resolver.reject("token-3")
+        harness.service.select(api: harness.api, asset: Asset(id: "photo-3"))
+        try await until("The refusal is shown.") { harness.service.error != nil }
+        XCTAssertEqual(harness.server.created.count, 3)
+        XCTAssertEqual(harness.link.loads.count, 2)
+
+        harness.resolver.allowAll()
+        harness.service.retry()
+        try await until("Retry loaded photo 3 with a new grant.") { harness.link.loads.count == 3 }
+        XCTAssertEqual(harness.server.created.count, 4, "Retry did not reuse the rejected grant.")
+
+        await harness.grants.revoke()
+        XCTAssertEqual(Set(harness.server.revoked), ["grant-1", "grant-2", "grant-3", "grant-4"], "Rejected grants are still revoked.")
+    }
+
+    @MainActor
     func testFollowingIntoLockedAssetKeepsCurrentMedia() async throws {
         let harness = CastHarness()
         harness.service.select(api: harness.api, asset: Asset(id: "photo-1"), start: true)
@@ -258,13 +293,22 @@ private final class FakeCastServer: CastGrantServer {
 
 /// Media at https://tv.test/<asset id>. An asset can be held back and then fail.
 private final class FakeCastResolver: CastMediaResolving {
-    private let state = Mutex<(asked: [String], held: [String: (StubServer.Gate, Bool)])>(([], [:]))
+    private let state = Mutex<(asked: [String], tokens: [String], rejected: Set<String>, held: [String: (StubServer.Gate, Bool)])>(([], [], [], [:]))
 
     var asked: [String] { state.withLock { $0.asked } }
+    /// The grant token each check used.
+    var tokens: [String] { state.withLock { $0.tokens } }
     func hold(_ assetID: String, until gate: StubServer.Gate, thenFail: Bool) { state.withLock { $0.held[assetID] = (gate, thenFail) } }
+    /// Checks with `token` get the bodiless 401 of a session the server ended.
+    func reject(_ token: String) { state.withLock { _ = $0.rejected.insert(token) } }
+    func allowAll() { state.withLock { $0.rejected = [] } }
 
     func media(for asset: Asset, grant: CastGrant) async throws -> CastMedia {
-        let held = state.withLock { state in state.asked.append(asset.id); return state.held[asset.id] }
+        let (held, rejected) = state.withLock { state in
+            state.asked.append(asset.id); state.tokens.append(grant.token)
+            return (state.held[asset.id], state.rejected.contains(grant.token))
+        }
+        if rejected { throw ServerFailure.proxyRejected(401) }
         if let held {
             await held.0.wait()
             if held.1 { throw URLError(.timedOut) }
