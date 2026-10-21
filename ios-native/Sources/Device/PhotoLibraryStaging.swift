@@ -38,6 +38,8 @@ protocol PhotoLibraryStaging: Sendable {
                progress: @escaping @Sendable (Double) -> Void) async throws -> PreparedPhoto
     /// The photos and videos in one album and in none of `excluded`, in identifier order.
     func albumMembers(_ albumID: String, excluded: Set<String>) async -> [String]
+    /// Those of `localIDs` that Photos still has. With limited access, only those selected.
+    func existing(_ localIDs: [String]) async throws -> Set<String>
 }
 
 /// The synchronous reads discovery makes, which tests fake. Safe on any thread; the adapter runs
@@ -99,6 +101,14 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         }
         continuation.onTermination = { _ in producer.cancel() }
         return stream
+    }
+
+    nonisolated func existing(_ localIDs: [String]) async throws -> Set<String> {
+        var found = Set<String>()
+        for start in stride(from: 0, to: localIDs.count, by: Self.batchSize) {
+            found.formUnion(try await readCandidates(Array(localIDs[start..<min(start + Self.batchSize, localIDs.count)])).map(\.id))
+        }
+        return found
     }
 
     nonisolated func albumMembers(_ albumID: String, excluded: Set<String>) async -> [String] {

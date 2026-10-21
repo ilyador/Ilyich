@@ -9,6 +9,13 @@ import IlyichPlatform
 /// commit, or throws what went wrong for the classifier.
 protocol JobExecuting: Sendable {
     func execute(_ job: LeasedJob, context: JobContext) async throws -> JobResult
+    /// The engine committed what `execute` returned for the job: its files can go. Never awaited
+    /// by anything that has to finish first, and a failure here changes nothing committed.
+    func committed(_ job: LeasedJob, result: JobResult) async
+}
+
+extension JobExecuting {
+    func committed(_ job: LeasedJob, result: JobResult) async {}
 }
 
 /// A job under a lease, as the executor sees it. An interrupted job (a released lease, a relaunch)
@@ -84,7 +91,9 @@ struct JobContext: Sendable {
 ///
 /// Commands only write rows and wake the loop. One owned loop leases the next job, runs it
 /// through the executor, then commits the result or records the failure, each WHERE the lease
-/// still holds (BM12). A result that arrives after its lease was released is dropped.
+/// still holds (BM12). A result that arrives after its lease was released is dropped. Up to
+/// `concurrency` jobs run at once, each under its own lease: one by default, and the library
+/// executor's pipeline for it (B3), which takes the turns within it.
 ///
 /// The run intent gates only the library lane. An account block stops both lanes until the user
 /// acts; nothing automatic lifts it. An engine-wide wait lasts until a condition changes. A
@@ -127,8 +136,15 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         let tokenDigest: String
         let writeGeneration: UInt64
     }
-    private var active: Active?
-    private var fileProgress: (sent: Int64, expected: Int64)?
+    /// The running jobs, by job ID.
+    private var active: [Int64: Active] = [:]
+    /// Bytes sent of each running job's current file.
+    private var fileProgress: [Int64: (sent: Int64, expected: Int64)] = [:]
+    private let concurrency: Int
+    /// Each running job's wait for its result and commit, by lease token.
+    private var finishing: [UUID: Task<Void, Never>] = [:]
+    /// Discovery passes under way.
+    private var discovering = 0
 
     private var loop: Task<Void, Never>?
     private var watcher: Task<Void, Never>?
@@ -152,9 +168,10 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var lastSentAt: C.Instant?
     private var flush: Task<Void, Never>?
 
-    init(store: TransferStore, executor: any JobExecuting, authorization: any TransferAuthorizing, clock: C,
+    init(store: TransferStore, executor: any JobExecuting, authorization: any TransferAuthorizing, clock: C, concurrency: Int = 1,
          now: @escaping @Sendable () -> Date = { Date() }, random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }) {
         self.store = store
+        self.concurrency = max(concurrency, 1)
         self.executor = executor
         self.authorization = authorization
         self.clock = clock
@@ -211,6 +228,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         wake()
         await releaseActive()
         await loop?.value
+        for task in finishing.values { await task.value }
         loop = nil
         watcher = nil
         flush?.cancel()
@@ -243,7 +261,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             waitUntil = nil
         }
         try await saveEngineState()
-        if intent == .paused, active?.job.lane == .library { await releaseActive() }
+        if intent == .paused { await releaseActive { $0.job.lane == .library } }
         await changed()
     }
 
@@ -264,7 +282,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                 cancelling[source] = left > 0 ? left : nil
             }
         }
-        if let running = active, sources.contains(running.job.source) { await releaseActive() }
+        await releaseActive { sources.contains($0.job.source) }
         for lane in [TransferLane.library, .share] {
             let keys = sources.filter { $0.lane == lane }.map(\.key)
             if !keys.isEmpty { try await store.removeJobs(lane: lane, sourceKeys: keys) }
@@ -306,6 +324,24 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         return stream
     }
 
+    /// Runs a discovery pass and wakes the loop for the jobs it queued; the snapshot says
+    /// discovering meanwhile. Nil, with nothing read, while an account block or the session's
+    /// authorization refuses transfers, as enqueue refuses.
+    func discover(_ discovery: LibraryDiscovery) async throws -> DiscoveryMerge? {
+        if blocker != nil || restriction(authorization.current()) != nil { return nil }
+        discovering += 1
+        await publish()
+        let merge: DiscoveryMerge
+        do { merge = try await discovery.run() } catch {
+            discovering -= 1
+            await changed()
+            throw error
+        }
+        discovering -= 1
+        await changed()
+        return merge
+    }
+
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem] {
         try await store.queuePage(lane: lane, after: seq, limit: limit)
     }
@@ -333,22 +369,38 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                 await sleep(until: wait == nil ? nil : waitUntil)
                 continue
             }
-            let job: LeasedJob?
-            do { job = try await reserve() } catch {
-                if Task.isCancelled { return }
-                lastMessage = error.localizedDescription
-                await publish()
-                await sleep(until: now().addingTimeInterval(30))
-                continue
+            if active.count < concurrency {
+                let job: LeasedJob?
+                do { job = try await reserve() } catch {
+                    if Task.isCancelled { return }
+                    lastMessage = error.localizedDescription
+                    await publish()
+                    await sleep(until: now().addingTimeInterval(30))
+                    continue
+                }
+                if let job {
+                    launch(job)
+                    continue
+                }
             }
-            guard let job else {
-                await publish()
-                let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
-                await sleep(until: try? await store.nextRetry(lanes: lanes))
-                continue
-            }
-            await perform(job)
+            await publish()
+            // Full, or nothing runnable: a finished job, a command or the next retry wakes it.
+            let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
+            await sleep(until: active.count < concurrency ? try? await store.nextRetry(lanes: lanes) : nil)
         }
+    }
+
+    /// Waits for the job's result, and commits it, beside the loop.
+    private func launch(_ job: LeasedJob) {
+        let token = job.lease.token
+        finishing[token] = Task { [weak self] in
+            await self?.perform(job)
+            await self?.finished(token)
+        }
+    }
+
+    private func finished(_ token: UUID) {
+        finishing[token] = nil
     }
 
     /// Leases the next job: the share lane first, as the user approved each share, then the
@@ -380,8 +432,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                     },
                     report: { [weak self] lease, sent, expected in await self?.progress(lease, sent: sent, expected: expected) })
                 let executor = self.executor
-                active = Active(job: job, task: Task { try await executor.execute(job, context: context) },
-                                tokenDigest: current.tokenDigest, writeGeneration: current.writeGeneration)
+                active[stored.id] = Active(job: job, task: Task { try await executor.execute(job, context: context) },
+                                           tokenDigest: current.tokenDigest, writeGeneration: current.writeGeneration)
                 return job
             }
         }
@@ -390,16 +442,20 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     private func perform(_ job: LeasedJob) async {
         await publish()
-        guard let running = active, running.job.lease == job.lease else { return }
+        let id = job.lease.job
+        guard let running = active[id], running.job.lease == job.lease else { return }
         let result = await running.task.result
         // A released lease drops whatever came back.
-        guard active?.job.lease == job.lease else { return }
-        active = nil
-        fileProgress = nil
+        guard active[id]?.job.lease == job.lease else { return }
+        active[id] = nil
+        fileProgress[id] = nil
         switch result {
         case .success(let outcome):
             do {
-                if try await commit(outcome, of: job) { consecutiveServerErrors = 0 }
+                if try await commit(outcome, of: job) {
+                    consecutiveServerErrors = 0
+                    await executor.committed(job, result: outcome)
+                }
             } catch {
                 lastMessage = error.localizedDescription
                 _ = try? await store.release(job: job.lease.job, token: job.lease.token)
@@ -470,7 +526,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// Whether `lease` is the running job's and the authorization it was taken under still allows
     /// uploads: the same session token and write generation, no read-only mode, no block.
     private func owns(_ lease: Lease) -> Bool {
-        guard let active, active.job.lease == lease, blocker == nil, !stopped else { return false }
+        guard let active = active[lease.job], active.job.lease == lease, blocker == nil, !stopped else { return false }
         guard let current = authorization.current(), restriction(current) == nil else { return false }
         if active.job.lane == .library, intent == .paused { return false }
         return current.tokenDigest == active.tokenDigest && current.writeGeneration == active.writeGeneration
@@ -484,8 +540,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     private func progress(_ lease: Lease, sent: Int64, expected: Int64) async {
-        guard active?.job.lease == lease else { return }
-        fileProgress = (sent, expected)
+        guard active[lease.job]?.job.lease == lease else { return }
+        fileProgress[lease.job] = (sent, expected)
         await publish(refreshingCounts: false)
     }
 
@@ -503,9 +559,9 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard !stopped else { return }
         if let refusal = restriction(snapshot) {
             await block(refusal)
-        } else if let active, active.writeGeneration != snapshot?.writeGeneration {
-            // Uploads taken under another write generation are fenced; the job runs again.
-            await releaseActive()
+        } else {
+            // Uploads taken under another write generation are fenced; the jobs run again.
+            await releaseActive { $0.writeGeneration != snapshot?.writeGeneration }
         }
         await changed()
     }
@@ -529,13 +585,17 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         self.blocker = nil
     }
 
-    /// Cancels the running job and gives its lease back. What it returns later is dropped.
-    private func releaseActive() async {
-        guard let running = active else { return }
-        active = nil
-        fileProgress = nil
-        running.task.cancel()
-        _ = try? await store.release(job: running.job.lease.job, token: running.job.lease.token)
+    /// Cancels the running jobs that match, every one by default, and gives their leases back.
+    /// What they return later is dropped.
+    private func releaseActive(where matches: (Active) -> Bool = { _ in true }) async {
+        let released = active.values.filter(matches)
+        guard !released.isEmpty else { return }
+        for running in released {
+            active[running.job.lease.job] = nil
+            fileProgress[running.job.lease.job] = nil
+            running.task.cancel()
+        }
+        for running in released { _ = try? await store.release(job: running.job.lease.job, token: running.job.lease.token) }
         wake()
     }
 
@@ -586,8 +646,10 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     private func snapshot() -> TransferSnapshot {
-        let phase: TransferPhase = if let blocker { .blocked(blocker) } else if let wait { .waiting(wait) } else if active != nil { .running } else { .idle }
-        let progress = fileProgress
+        let phase: TransferPhase = if let blocker { .blocked(blocker) } else if let wait { .waiting(wait) } else if !active.isEmpty { .running }
+            else if discovering > 0 { .discovering } else { .idle }
+        let progress: (sent: Int64, expected: Int64)? = fileProgress.isEmpty ? nil
+            : fileProgress.values.reduce((sent: Int64(0), expected: Int64(0))) { ($0.sent + $1.sent, $0.expected + max($1.expected, 0)) }
         return TransferSnapshot(intent: intent, phase: phase, remaining: counts.remaining, confirmed: counts.confirmed, failed: counts.failed,
                                 fileProgress: progress.flatMap { $0.expected > 0 ? min(Double($0.sent) / Double($0.expected), 1) : nil },
                                 bytesSent: progress?.sent ?? 0, bytesExpected: max(progress?.expected ?? 0, 0), bytesPerSecond: nil,
@@ -632,8 +694,10 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     // MARK: Testing
 
-    /// The running job's lease, for tests.
-    var runningLease: Lease? { active?.job.lease }
+    /// The running job's lease, the first by job ID when several run, for tests.
+    var runningLease: Lease? { active.keys.min().flatMap { active[$0]?.job.lease } }
+    /// Every running job's lease, for tests.
+    var runningLeases: [Lease] { active.values.map(\.job.lease) }
     /// The snapshot as it stands, unthrottled, for tests.
     var currentSnapshot: TransferSnapshot { snapshot() }
 }
