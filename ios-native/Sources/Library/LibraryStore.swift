@@ -294,6 +294,21 @@ extension APIClient: LibraryAPI {}
         if let asset = entry.remote { select(asset); if let local = entry.local { selectedMatchedCopies[asset.id] = local } }
         else if let photo = entry.local { selected.insert(entry.id); selectedLocalRecords[photo.id] = photo }
     }
+    /// One step of a drag across the grid, applied as a single change: the selection's records
+    /// are filtered once per step, not once per photo.
+    func changeSelection(adding: [LibraryEntry], removing: [LibraryEntry]) {
+        guard !adding.isEmpty || !removing.isEmpty else { return }
+        for entry in adding {
+            if let asset = entry.remote {
+                selectedRecords[asset.id] = asset
+                if let local = entry.local { selectedMatchedCopies[asset.id] = local }
+            } else if let photo = entry.local { selectedLocalRecords[photo.id] = photo }
+        }
+        var next = selected
+        next.subtract(removing.map(\.id))
+        next.formUnion(adding.map(\.id))
+        selected = next
+    }
 
     /// Resolve the whole date group before changing selection. A virtualized
     /// viewport or an evicted bucket must not silently select only visible cells.

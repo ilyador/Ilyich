@@ -488,8 +488,9 @@ struct LibraryShelfMomentum {
     }
 }
 
-/// Ticks once per screen refresh while a reordering list coasts.
-@MainActor private final class LibraryShelfFrameClock: NSObject {
+/// Ticks once per screen refresh while a reordering list coasts, or while a selecting drag holds
+/// the grid's edge.
+@MainActor final class LibraryShelfFrameClock: NSObject {
     private var link: CADisplayLink?
     private var last: CFTimeInterval = 0
     private var frame: ((CGFloat) -> Bool)?

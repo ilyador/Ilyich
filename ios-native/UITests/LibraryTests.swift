@@ -92,6 +92,43 @@ final class LibraryTests: XCTestCase {
         pressPhoto(photo)
         XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
     }
+    @MainActor func testDraggingSidewaysWhileSelectingSelectsARangeAndAgainDeselectsIt() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 15))
+        pressPhoto(grid.cells.element(boundBy: 1))
+        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
+        // Two full rows in the middle of the screen, in reading order.
+        let height = app.frame.height
+        let cells = grid.cells.allElementsBoundByIndex.map(\.frame)
+            .filter { $0.midY > height * 0.35 && $0.midY < height * 0.7 }
+        let rows = Dictionary(grouping: cells) { Int($0.minY.rounded()) }.sorted { $0.key < $1.key }.map { $0.value.sorted { $0.minX < $1.minX } }
+        guard rows.count >= 2 else { return XCTFail("Two rows of photos should fill the middle of the screen.") }
+        let columns = rows[0].count
+        XCTAssertGreaterThanOrEqual(columns, 3)
+        func point(_ frame: CGRect) -> XCUICoordinate {
+            app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: frame.midX, dy: frame.midY))
+        }
+        // From the first photo of one row to the third of the next: mostly sideways, and every
+        // photo between is selected, not only those the finger crossed.
+        let start = point(rows[0][0]), end = point(rows[1][2])
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertTrue(app.staticTexts["\(1 + columns + 3) selected"].waitForExistence(timeout: 5),
+                      "A sideways drag selects the range from the first photo to the one under the finger.")
+        capture(app, "Selection — dragged across a range")
+        // Starting on a selected photo deselects instead.
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5),
+                      "A drag that starts on a selected photo deselects the range.")
+        // A vertical drag still scrolls and selects nothing.
+        let first = grid.cells.allElementsBoundByIndex.first { $0.frame == rows[0][0] }
+        let label = first?.label ?? ""
+        XCTAssertFalse(label.isEmpty)
+        grid.swipeUp()
+        XCTAssertTrue(app.staticTexts["1 selected"].exists, "Scrolling while selecting changes nothing.")
+        let moved = grid.cells.matching(NSPredicate(format: "label == %@", label)).firstMatch
+        XCTAssertTrue(!moved.exists || moved.frame.minY < rows[0][0].minY - 40, "A vertical drag scrolls the grid.")
+    }
     @MainActor func testPinchingChangesDensityWhileTheFingersMove() {
         let app = launch()
         let grid = app.collectionViews["library.grid"]

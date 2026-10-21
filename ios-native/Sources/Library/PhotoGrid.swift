@@ -46,6 +46,16 @@ struct PhotoGrid: UIViewRepresentable {
         let selection = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.selectByDragging(_:)))
         selection.minimumPressDuration = 0.35
         view.addGestureRecognizer(selection)
+        // While selecting, a sideways drag from a photo selects a range of photos, as in Photos.
+        // Scrolling waits only for it to decide; a drag that starts vertical scrolls as before.
+        let drag = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.selectRange(_:)))
+        drag.maximumNumberOfTouches = 1
+        drag.delegate = context.coordinator
+        drag.isEnabled = false
+        view.addGestureRecognizer(drag)
+        view.panGestureRecognizer.require(toFail: drag)
+        context.coordinator.rangeDrag = drag
+        context.coordinator.dragSelector.collection = view
         view.addGestureRecognizer(UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.changeDensity(_:))))
         // Two fingers always pinch; scrolling takes one.
         view.panGestureRecognizer.maximumNumberOfTouches = 1
@@ -57,6 +67,8 @@ struct PhotoGrid: UIViewRepresentable {
         coordinator.parent = self
         view.isScrollEnabled = !store.isReplacingFeed
         view.isUserInteractionEnabled = !store.isReplacingFeed
+        coordinator.rangeDrag?.isEnabled = store.isSelecting && !store.isReplacingFeed
+        if !store.isSelecting || store.isReplacingFeed { coordinator.dragSelector.end() }
         let sections = store.sections
         let reset = coordinator.resetID != store.resetID
         let dayGroups = showsDayHeaders ? sections.indices.map { store.dayGroups(section: $0) } : Array(repeating: [], count: sections.count)
@@ -83,6 +95,12 @@ struct PhotoGrid: UIViewRepresentable {
         coordinator.dayGroups = dayGroups
         coordinator.showsDayHeaders = showsDayHeaders
         if needsReload {
+            // Index paths of a drag in progress no longer name the same photos, unless more
+            // search results were only added after the ones already shown.
+            let appended = !reset && sections.count == 1 && coordinator.sections.count == 1
+                && sections[0].id == "results" && coordinator.sections[0].id == "results"
+                && sections[0].count >= coordinator.sections[0].count
+            if !appended { coordinator.dragSelector.end() }
             coordinator.sections = sections; coordinator.resetID = store.resetID
             view.reloadData()
             if reset {
@@ -129,10 +147,14 @@ struct PhotoGrid: UIViewRepresentable {
         }
     }
 
-    @MainActor final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate, UICollectionViewDataSourcePrefetching {
+    @MainActor final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate, UICollectionViewDataSourcePrefetching, UIGestureRecognizerDelegate {
         var parent: PhotoGrid
         weak var collection: UICollectionView?
-        var sections: [LibrarySection] = []
+        var sections: [LibrarySection] = [] { didSet { sectionCounts = sections.map(\.count) } }
+        private var sectionCounts: [Int] = []
+        /// The sideways drag that selects a range while selecting.
+        weak var rangeDrag: UIPanGestureRecognizer?
+        let dragSelector = GridDragSelector()
         var dayGroups: [[TimelineDayGroup]] = []
         var resetID: UUID?
         var revision = -1
@@ -146,7 +168,20 @@ struct PhotoGrid: UIViewRepresentable {
         private var lastScroll: (offset: CGFloat, time: CFTimeInterval)?
         /// Any stop counts as rest, however the grid moved: a drag, a fling, the rail or a jump.
         private var rest: DispatchWorkItem?
-        init(_ parent: PhotoGrid) { self.parent = parent }
+        init(_ parent: PhotoGrid) {
+            self.parent = parent
+            super.init()
+            dragSelector.counts = { [weak self] in self?.sectionCounts ?? [] }
+            dragSelector.isSelected = { [weak self] index in
+                guard let store = self?.parent.store, let entry = store.entry(section: index.section, item: index.item) else { return nil }
+                return store.selected.contains(entry.id)
+            }
+            dragSelector.apply = { [weak self] change in
+                guard let store = self?.parent.store else { return }
+                let entries = { (paths: [IndexPath]) in paths.compactMap { store.entry(section: $0.section, item: $0.item) } }
+                store.changeSelection(adding: entries(change.select), removing: entries(change.deselect))
+            }
+        }
 
         func setAllowsNetwork(_ allowed: Bool) {
             guard allowed != allowsNetwork else { return }
@@ -208,11 +243,43 @@ struct PhotoGrid: UIViewRepresentable {
             } else if let asset = entry.remote { parent.onOpen(asset) }
             else if let photo = entry.local { parent.onOpenLocal?(photo) }
         }
+        /// A long press starts selecting with the photo under it; dragging on selects the photos
+        /// between, as the sideways drag does, but always selecting.
         @objc func selectByDragging(_ gesture: UILongPressGestureRecognizer) {
-            guard let collection, let index = collection.indexPathForItem(at: gesture.location(in: collection)),
-                  let entry = parent.store.entry(section: index.section, item: index.item) else { return }
-            if gesture.state == .began { parent.store.isSelecting = true; Haptics.selectionChanged() }
-            if gesture.state == .began || gesture.state == .changed { parent.store.select(entry) }
+            switch gesture.state {
+            case .began:
+                guard let collection, let index = collection.indexPathForItem(at: gesture.location(in: collection)),
+                      parent.store.entry(section: index.section, item: index.item) != nil else { return }
+                parent.store.isSelecting = true; Haptics.selectionChanged()
+                dragSelector.begin(at: index, selects: true, gesture: gesture, ticks: false)
+            case .changed: dragSelector.update()
+            default: dragSelector.end()
+            }
+        }
+        @objc func selectRange(_ gesture: UIPanGestureRecognizer) {
+            switch gesture.state {
+            case .began:
+                guard let index = dragStart(gesture) else { return }
+                dragSelector.begin(at: index, gesture: gesture)
+            case .changed: dragSelector.update()
+            default: dragSelector.end()
+            }
+        }
+        /// The photo under the point where the drag started.
+        private func dragStart(_ gesture: UIPanGestureRecognizer) -> IndexPath? {
+            guard let collection else { return nil }
+            let location = gesture.location(in: collection), moved = gesture.translation(in: collection)
+            let index = collection.indexPathForItem(at: CGPoint(x: location.x - moved.x, y: location.y - moved.y))
+            return index.flatMap { parent.store.entry(section: $0.section, item: $0.item) != nil ? $0 : nil }
+        }
+        /// The range drag takes only a drag that starts on a photo and moves mostly sideways;
+        /// anything else fails it at once and the grid scrolls.
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard gesture === rangeDrag, let pan = gesture as? UIPanGestureRecognizer, let collection else { return true }
+            guard parent.store.isSelecting, !parent.store.isReplacingFeed else { return false }
+            let moved = pan.translation(in: collection), speed = pan.velocity(in: collection)
+            let sideways = moved == .zero ? abs(speed.x) > abs(speed.y) : abs(moved.x) > abs(moved.y)
+            return sideways && dragStart(pan) != nil
         }
         /// The gesture scale at the last density change, so one pinch can step several times.
         private var pinchBase: CGFloat = 1
