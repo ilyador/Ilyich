@@ -1,10 +1,12 @@
 import Foundation
 import IlyichPlatform
+import IlyichShareInbox
 import XCTest
 @testable import Ilyich
 
 /// The signed-in account's authorization: which generation each change moves, the App Group
-/// mirror the extensions and upload delegates read, and the updates stream.
+/// mirror the extensions and upload delegates read, the updates stream, and what a read-only
+/// toggle does to uploads.
 final class AuthorizationTests: XCTestCase {
     private let account = LegacyGoldens.account
 
@@ -83,6 +85,54 @@ final class AuthorizationTests: XCTestCase {
 
         // Without a mirror the state still works, from the first generation.
         XCTAssertEqual(state(mirror: nil).snapshot.writeGeneration, 1)
+    }
+
+    /// The access epoch goes on across launches too. A relaunch keeps it, so what was kept under it
+    /// stays current, but never brings back one from before an access change, and the next change
+    /// gives out an epoch never given out before.
+    func testTheAccessEpochNeverRepeatsAcrossLaunches() {
+        let mirror = makeMirror()
+        let first = state(mirror: mirror)
+        let before = first.snapshot.epoch
+        let revoked = first.accessChanged().epoch
+
+        let relaunched = state(mirror: mirror)
+        XCTAssertEqual(relaunched.snapshot.epoch, revoked, "A relaunch keeps the epoch from after the change.")
+        XCTAssertFalse(relaunched.isCurrent(before), "What was kept before the change stays refused.")
+        XCTAssertEqual(relaunched.snapshot.writeGeneration, first.snapshot.writeGeneration, "Writes begun before the relaunch still count.")
+        let next = relaunched.accessChanged().epoch
+        XCTAssertGreaterThan(next.value, revoked.value, "The next change gives out an epoch never given out before.")
+
+        // A read-only toggle moves only the write generation, and a relaunch keeps both.
+        let toggled = relaunched.setReadOnly(true)
+        let again = state(readOnly: true, mirror: mirror)
+        XCTAssertEqual(again.snapshot.epoch, next)
+        XCTAssertEqual(again.snapshot.writeGeneration, toggled.writeGeneration)
+
+        // Another account starts after every generation given out before, access epochs included.
+        let other = state(AccountID(server: account.server, userID: "someone-else"), mirror: mirror)
+        XCTAssertGreaterThan(other.snapshot.epoch.value, max(next.value, toggled.writeGeneration))
+        XCTAssertGreaterThan(other.snapshot.writeGeneration, max(next.value, toggled.writeGeneration))
+    }
+
+    /// Turning read-only mode on stops shared uploads and pauses backup, switching automatic
+    /// backup off, as the toggle always has; turning it off starts nothing again. Whether it
+    /// should carry on with them is an owner question, so neither may change before it is answered.
+    @MainActor func testReadOnlyModePausesUploadsAndSwitchesAutomaticBackupOff() async {
+        let backup = BackupCoordinator()
+        backup.preferences.automatic = true
+        let shares = ShareInboxStore(repository: ShareInboxRepository(root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AuthorizationTests-\(UUID().uuidString)", isDirectory: true)))
+
+        await SessionStore.uploadsFollow(readOnly: true, backup: backup, shares: shares)
+        XCTAssertFalse(backup.preferences.automatic, "Turning read-only mode on switches automatic backup off.")
+        XCTAssertEqual(backup.activity, "Backup paused")
+        XCTAssertFalse(backup.isRunning)
+        XCTAssertFalse(shares.isRunning)
+
+        await SessionStore.uploadsFollow(readOnly: false, backup: backup, shares: shares)
+        XCTAssertFalse(backup.preferences.automatic, "Turning it off leaves automatic backup off until it is turned on again.")
+        XCTAssertEqual(backup.activity, "Backup paused", "Nor does it start backup.")
     }
 
     /// Losing access to some photos makes what was read and kept stale, but not what may be written.

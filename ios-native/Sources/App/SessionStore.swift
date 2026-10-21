@@ -149,8 +149,8 @@ import IlyichPlatform
 
     /// Turns read-only mode on or off for the signed-in account. The setting and the write
     /// generation change at once, so the controls follow straight away and writes still waiting
-    /// to be sent are refused. Then turning it on pauses backup and shared uploads, and turning
-    /// it off carries on with what it paused. Changes are applied in the order they were made.
+    /// to be sent are refused. Then uploads follow, as `uploadsFollow(readOnly:)` says. Changes
+    /// are applied in the order they were made.
     func setReadOnly(_ enabled: Bool) {
         guard let api, let userID = api.userID, let state = authorizationState, !isSigningOut,
               state.snapshot.readOnly != enabled else { return }
@@ -160,20 +160,24 @@ import IlyichPlatform
         isApplyingReadOnly = true
         let task = Task { [weak self] in
             await previous?.value
-            if enabled {
-                // Both stop at once. Stopping uploads is right whatever happened since.
-                async let backup: Void = BackupCoordinator.shared.pauseForReadOnly()
-                async let shares: Void = ShareInboxStore.shared.pauseForReadOnly()
-                _ = await (backup, shares)
-            } else if self?.authorizationState === state, state.snapshot.allows(.upload) {
-                await BackupCoordinator.shared.resumeAfterReadOnly()
-                await ShareInboxStore.shared.resumeAfterReadOnly(api: api)
-            }
+            await SessionStore.uploadsFollow(readOnly: enabled)
             guard let self, self.readOnlyTransition?.id == id else { return }
             self.readOnlyTransition = nil
             self.isApplyingReadOnly = false
         }
         readOnlyTransition = (id, task)
+    }
+
+    /// What a read-only change does to uploads, as the toggle always has: turning it on stops
+    /// shared uploads and pauses backup, switching automatic backup off, and turning it off starts
+    /// nothing again, so backup stays paused until it is started again. Whether turning it off
+    /// should carry on with them is an owner question (REBUILD_ROADMAP.md, Open questions).
+    static func uploadsFollow(readOnly enabled: Bool, backup: BackupCoordinator = .shared,
+                              shares: ShareInboxStore = .shared) async {
+        guard enabled else { return }
+        shares.cancel()
+        await backup.pause()
+        await shares.waitUntilPaused()
     }
 
     /// What was read or kept for the account may show photos it can no longer see.
