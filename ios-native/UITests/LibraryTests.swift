@@ -878,7 +878,11 @@ final class LibraryTests: XCTestCase {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in pin.exists || refused.exists }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed, "The Locked Folder asks for its PIN.")
         if refused.exists {
-            throw XCTSkip("The shared UI fixture has no Locked Folder yet; rebuild milestone W1's report lists the fixture change that adds one.")
+            // Only a fixture without a Locked Folder excuses the refusal; against one that has it,
+            // the refusal is the app's.
+            try XCTSkipUnless(fixtureServesLockedFolder(),
+                              "The shared UI fixture has no Locked Folder yet; rebuild milestone W1's report gives the fixture change that adds one.")
+            return XCTFail("The Locked Folder refused to unlock, though the fixture serves one.")
         }
         pin.tap(); pin.typeText("123456")
         app.buttons["Unlock"].tap()
@@ -896,6 +900,12 @@ final class LibraryTests: XCTestCase {
         }
         for name in hiddenWhenLocked { XCTAssertFalse(app.buttons[name].exists, "A locked photo has no \(name).") }
         capture(app, "Locked Folder — viewer menu")
+    }
+    /// Whether the shared UI fixture serves a Locked Folder: its auth status says a PIN is set.
+    private func fixtureServesLockedFolder() -> Bool {
+        let status = (try? Data(contentsOf: URL(string: "http://127.0.0.1:18091/api/auth/status")!))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        return status?["pinCode"] as? Bool == true
     }
     @MainActor func testDarkGlobeSupportsDragAndPinchWithoutBlockingLibrary() {
         let app = launch(appearance: "dark")

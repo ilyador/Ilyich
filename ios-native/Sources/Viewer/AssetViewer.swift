@@ -22,8 +22,6 @@ struct AssetViewer: View {
     @State private var controls = true
     @State private var info = false
     @State private var editing = false
-    /// Edit was tapped before the photo's details said whether it can be edited.
-    @State private var editWhenLoaded: String?
     @State private var chooseAlbum = false
     @State private var deleteConfirmation = false
     @State private var deletePermanently = false
@@ -125,7 +123,7 @@ struct AssetViewer: View {
         .preferredColorScheme(.dark)
         .statusBarHidden(!controls)
         .task { features = try? await api.serverFeatures() }
-        .onChange(of: selectedID) { playingLive = false; editWhenLoaded = nil }
+        .onChange(of: selectedID) { playingLive = false }
         .onChange(of: selectedID, initial: true) {
             // Closing zooms back into the cell of the photo on screen, lined up with the photo.
             transition?.currentID = selectedID
@@ -325,7 +323,7 @@ struct AssetViewer: View {
             Button("Info", systemImage: "info.circle") { info = true }.disabled(busy)
             if can.shows(.edit) {
                 // Until the photo's details arrive Edit stays lit, so the bar doesn't flicker as
-                // photos pass, and a tap waits for them.
+                // photos pass, and a tap reads them first.
                 Button("Edit", systemImage: "slider.horizontal.3") { openEditor() }
                     .disabled(!(can.offers(.edit) || can[.edit].awaitsDetails) || busy)
             }
@@ -518,9 +516,19 @@ struct AssetViewer: View {
         withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.25)) { controls.toggle() }
     }
     private func update(_ asset: Asset) { replacements[asset.id] = asset; onUpdated(asset) }
+    /// Opens the editor. Before the photo's details say whether the server's editor takes it, the
+    /// tap reads them itself, as a change runs: the spinner shows, the other actions wait and a
+    /// failure is shown. The editor then opens only on the photo still on screen with nothing
+    /// opened over it, so a tap never opens it later on its own.
     private func openEditor() {
-        if capabilities.offers(.edit) { editing = true }
-        else if capabilities[.edit].awaitsDetails { editWhenLoaded = selectedID }
+        if capabilities.offers(.edit) { editing = true; return }
+        guard capabilities[.edit].awaitsDetails else { return }
+        let id = selectedID
+        run {
+            let asset = try await api.asset(id: id)
+            guard selectedID == id, showDetails(asset, over: current) else { return }
+            if capabilities.offers(.edit), !info, !locationPresented { editing = true }
+        }
     }
     private func close() { if let onClose { onClose() } else { dismiss() } }
     private func handlePhotoTap(_ horizontalFraction: Double) {
@@ -578,14 +586,8 @@ struct AssetViewer: View {
             if revision > 0 { try await Task.sleep(for: .milliseconds(250)) }
             let asset = try await api.asset(id: id)
             try Task.checkCancellation()
-            guard selectedID == id, refreshRevision == revision else { return }
-            if (asset.visibility == .locked && previous.visibility != .locked) || (asset.isTrashed && !previous.isTrashed) {
-                onDeleted(); close(); return
-            }
-            replacements[id] = asset
+            guard selectedID == id, refreshRevision == revision, showDetails(asset, over: previous) else { return }
             accessRefreshRevision = -1
-            if editWhenLoaded == id { editWhenLoaded = nil; if capabilities.offers(.edit) { editing = true } }
-            if asset != previous { onUpdated(asset) }
         } catch is CancellationError { }
         catch {
             guard selectedID == id, refreshRevision == revision, !Task.isCancelled else { return }
@@ -602,6 +604,16 @@ struct AssetViewer: View {
                 else if revision == 0 { self.error = error.localizedDescription }
             }
         }
+    }
+    /// Puts a photo's fresh details on screen, or closes the viewer on a photo locked or put in
+    /// Trash since `previous` was shown. Says whether the viewer stays.
+    private func showDetails(_ asset: Asset, over previous: Asset) -> Bool {
+        if (asset.visibility == .locked && previous.visibility != .locked) || (asset.isTrashed && !previous.isTrashed) {
+            onDeleted(); close(); return false
+        }
+        replacements[asset.id] = asset
+        if asset != previous { onUpdated(asset) }
+        return true
     }
     /// Shares the photo on screen: its original or, with its edits, the version shown. The share
     /// sheet opens only if the photo is still the one on screen.
