@@ -199,7 +199,8 @@ struct FreeUpSpaceView: View {
             }
         }.navigationTitle("Free up space").disabled(removing)
         .safeAreaInset(edge: .bottom) {
-            if !selection.isEmpty { Button("Remove \(selection.count) from Photos", role: .destructive) { confirming = true }.buttonStyle(.glassProminent).padding().disabled(loading || removing).requiresWriteAccess() }
+            // Off until P4's cleanup service (CleanupRemoval).
+            if !selection.isEmpty { Button("Remove \(selection.count) from Photos", role: .destructive) { confirming = true }.buttonStyle(.glassProminent).padding().disabled(loading || removing || !CleanupRemoval.isEnabled).requiresWriteAccess() }
         }
         .task {
             guard !filtersReady else { return }
@@ -233,7 +234,7 @@ struct FreeUpSpaceView: View {
         } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func remove() async {
-        guard !selection.isEmpty, !removing else { return }
+        guard CleanupRemoval.isEnabled, !selection.isEmpty, !removing else { return }
         removing = true; defer { removing = false }
         let requested = selection
         do {
