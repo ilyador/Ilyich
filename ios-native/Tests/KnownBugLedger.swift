@@ -185,9 +185,10 @@ import XCTest
 
     // MARK: - Account
 
-    /// AUTH-1. auth/login answers a wrong password with 401 and the reason in an Immich body.
-    /// APIClient turns every 401 into "Your session has expired", and SignInView shows the error's
-    /// description, so a mistyped password reads as an expired session.
+    /// AUTH-1, fixed in rebuild milestone C5. auth/login answers a wrong password with 401 and the
+    /// reason in an Immich body. APIClient used to turn every 401 into "Your session has expired",
+    /// and SignInView shows the error's description, so a mistyped password read as an expired
+    /// session. A 401 from a sign-in endpoint is now credentialsRejected, which shows the server's text.
     func testWrongPasswordShowsTheServerMessage() async throws {
         let server = makeStubServer()
         server.route("POST", "auth/login", .immichError(401, message: "Incorrect email or password"))
@@ -197,16 +198,15 @@ import XCTest
         catch { shown = error.localizedDescription }
         let message = try XCTUnwrap(shown, "A wrong password must not sign in.")
 
-        XCTExpectFailure("AUTH-1: a wrong password shows the expired-session text. C5 removes this wrapper.", strict: true) {
-            XCTAssertEqual(message, "Incorrect email or password", "Sign-in shows the server's reason.")
-        }
+        XCTAssertEqual(message, "Incorrect email or password", "Sign-in shows the server's reason.")
     }
 
-    /// AUTH-2. With automatic endpoint switching on, requests wait for one shared resolution of
-    /// the server's address. A request elsewhere that loses its route invalidates the connection,
-    /// which cancels that resolution, and every request waiting on it throws CancellationError.
-    /// Callers take it for their own cancellation and swallow it; SessionStore.startSync then
-    /// returns without clearing its sync state, so sync stays off.
+    /// AUTH-2, fixed in rebuild milestone C5. With automatic endpoint switching on, requests wait
+    /// for one shared resolution of the server's address. A request elsewhere that lost its route
+    /// used to invalidate the connection by cancelling that resolution, and every request waiting
+    /// on it threw CancellationError. Callers took it for their own cancellation and swallowed it;
+    /// SessionStore.startSync then returned without clearing its sync state, so sync stayed off.
+    /// Waiters now move to the new resolution.
     func testInvalidationDuringResolutionDoesNotCancelWaiters() async throws {
         let wifi = HeldWiFiName()
         let configuration = NetworkConfiguration(alternateEndpoints: [URL(string: "http://127.0.0.1:9")!],
@@ -223,9 +223,7 @@ import XCTest
         catch is CancellationError { cancelled = true }
         catch { /* No configured address answers here, which is an honest failure. */ }
 
-        XCTExpectFailure("AUTH-2: endpoint invalidation surfaces CancellationError. C5 removes this wrapper.", strict: true) {
-            XCTAssertFalse(cancelled, "A request nobody cancelled does not end with CancellationError.")
-        }
+        XCTAssertFalse(cancelled, "A request nobody cancelled does not end with CancellationError.")
     }
 
     // MARK: - Sync
@@ -472,10 +470,10 @@ import XCTest
 
     /// An APIClient whose requests reach only the stub server.
     private func stubClient(_ server: StubServer, token: String? = nil, userID: String? = nil) throws -> APIClient {
-        let session = URLSession(configuration: server.configuration())
-        addTeardownBlock { session.invalidateAndCancel() }
-        return try APIClient(baseURL: server.baseURL, accessToken: token, userID: userID, session: session,
-                             networkConfiguration: NetworkConfiguration())
+        let api = try APIClient(baseURL: server.baseURL, accessToken: token, userID: userID, sessionConfiguration: server.configuration(),
+                                networkConfiguration: NetworkConfiguration())
+        addTeardownBlock { await api.shutdown() }
+        return api
     }
 
     /// The filter of a search request, once the store has sent that many to the path and settled.
@@ -555,8 +553,8 @@ private actor LedgerLibrary: LibraryAPI {
         if wait > .zero { try await Task.sleep(for: wait) }
         return months[bucket] ?? []
     }
-    func search(_ query: SearchQuery) async throws -> SearchResponse { throw APIError.http(500) }
-    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { throw APIError.http(500) }
+    func search(_ query: SearchQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
+    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] {
         placesCalls += 1
         if let placesGate { await placesGate.wait() }

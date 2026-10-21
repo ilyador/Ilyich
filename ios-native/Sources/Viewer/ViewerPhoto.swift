@@ -131,7 +131,7 @@ struct ViewerPhoto: View {
     }
     /// A refused photo is not an expired session; only the session check signs out.
     private static func message(for error: Error) -> String {
-        if case APIError.unauthorized = error { return "The server refused this photo. Try again." }
+        if case ServerFailure.sessionExpired = error { return "The server refused this photo. Try again." }
         return error.localizedDescription
     }
     private func playAnimation(pixels: Int) async {

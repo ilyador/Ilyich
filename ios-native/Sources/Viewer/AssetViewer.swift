@@ -561,8 +561,13 @@ struct AssetViewer: View {
         catch {
             guard selectedID == id, refreshRevision == revision, !Task.isCancelled else { return }
             switch error {
-            case APIError.forbidden, APIError.notFound, APIError.unauthorized:
+            case ServerFailure.forbidden, ServerFailure.notFound:
                 onDeleted(); close()
+            case ServerFailure.sessionExpired, ServerFailure.proxyRejected:
+                // Not a deletion: the photo is most likely still there, and only the session check
+                // signs out. A photo whose access must be confirmed still closes.
+                if accessMustBeConfirmed { close() }
+                else if revision == 0 { self.error = error.localizedDescription }
             default:
                 if accessMustBeConfirmed { onDeleted(); close() }
                 else if revision == 0 { self.error = error.localizedDescription }

@@ -385,9 +385,9 @@ extension EntitySyncTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SyncTestURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-        let api = try APIClient(baseURL: URL(string: "https://sync-test.invalid")!, accessToken: "test-session", userID: "alice", session: session, networkConfiguration: .init())
+        let api = try APIClient(baseURL: URL(string: "https://sync-test.invalid")!, accessToken: "test-session", userID: "alice",
+                                sessionConfiguration: configuration, networkConfiguration: .init())
+        defer { Task { await api.shutdown() } }
         let store = try EntityStore(scope: api.cacheScope, userID: "alice", directory: root)
         let fingerprint = try await api.syncSessionFingerprint()
         let needsReset = try await store.prepare(sessionFingerprint: fingerprint)
@@ -419,9 +419,9 @@ extension EntitySyncTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SyncTestURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-        let api = try APIClient(baseURL: URL(string: "https://sync-test.invalid")!, accessToken: "test-session", userID: "alice", session: session, networkConfiguration: .init())
+        let api = try APIClient(baseURL: URL(string: "https://sync-test.invalid")!, accessToken: "test-session", userID: "alice",
+                                sessionConfiguration: configuration, networkConfiguration: .init())
+        defer { Task { await api.shutdown() } }
         let store = try EntityStore(scope: api.cacheScope, userID: "alice", directory: root)
         let sync = NativeSync(api: api, store: store)
         let partial = try JSONEncoder().encode(asset("photo")) + Data("\n".utf8)

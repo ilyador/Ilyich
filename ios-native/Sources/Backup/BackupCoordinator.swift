@@ -90,6 +90,19 @@ struct BackupState: Codable {
     private var stopping: Task<Void, Never>?
     private var generation = UUID()
     private var lastProgress: (id: Int, time: Date, sent: Int64)?
+    /// One client for the account's backup requests, kept while the account, token and network
+    /// settings stay the same, rather than a new client and its sessions for every request.
+    /// Temporary until the transfer engine owns its transport (B9).
+    private var client: (scope: String, token: String, settings: NetworkConfiguration, api: APIClient)?
+
+    private func backupClient(for session: StoredCredential) throws -> APIClient {
+        let settings = try NetworkConfigurationStore.connectionSettings(server: session.server)
+        if let client, client.scope == session.scope, client.token == session.token, client.settings == settings { return client.api }
+        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID, networkConfiguration: settings)
+        if let replaced = client?.api { Task { await replaced.shutdown() } }
+        client = (session.scope, session.token, settings, api)
+        return api
+    }
 
     func activate() async {
         do {
@@ -240,6 +253,7 @@ struct BackupState: Codable {
         await ShareInboxStore.shared.waitUntilPaused()
         saved = nil; directory = nil; state = BackupState(); preferences = BackupPreferences()
         albums = []; error = nil; refreshCounts()
+        if let replaced = client?.api { client = nil; await replaced.shutdown() }
     }
 
     func startAutomatically() async {
@@ -269,7 +283,7 @@ struct BackupState: Codable {
         await activate()
         let runID = generation
         let session = try currentSession(runID)
-        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
+        let api = try backupClient(for: session)
         var ids: [String] = []
         var measured: [String: BackupReceipt] = [:]
         for (localID, receipt) in state.receipts ?? [:] {
@@ -377,13 +391,13 @@ struct BackupState: Codable {
                     let original = try await transfer(file: prepared.original, sidecar: prepared.sidecar, fields: fields, prepared: prepared, session: session, runID: runID)
                     _ = try currentSession(runID)
                     if let previous = state.receipts?[localID]?.original, previous.id != original.id {
-                        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
+                        let api = try backupClient(for: session)
                         struct StackCreation: Encodable, Sendable { let assetIds: [String] }
                         let _: StackDetails = try await api.request(.post, path: "stacks", body: StackCreation(assetIds: [original.id, previous.id]))
                         _ = try currentSession(runID)
                     }
                     if let destinations = state.pendingAlbumAdds?[localID], !destinations.isEmpty {
-                        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
+                        let api = try backupClient(for: session)
                         for albumID in destinations.sorted() {
                             _ = try currentSession(runID)
                             let results = try await api.addToAlbum(id: albumID, assetIDs: [original.id])
@@ -511,7 +525,7 @@ struct BackupState: Codable {
         activity = "Checking \(file.filename)"; progress = nil
         let checksum = try await UploadBody.work { try UploadBody.checksum(file.url) }
         _ = try currentSession(runID)
-        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
+        let api = try backupClient(for: session)
         let check: UploadCheckResponse = try await api.request(.post, path: "assets/bulk-upload-check",
             body: UploadCheck(assets: [.init(id: prepared.localID, checksum: checksum)]))
         _ = try currentSession(runID)
@@ -593,7 +607,7 @@ struct BackupState: Codable {
 
     private func syncLinkedAlbums(runID: UUID) async throws {
         let session = try currentSession(runID)
-        let api = try APIClient(baseURL: session.server, accessToken: session.token, userID: session.userID)
+        let api = try backupClient(for: session)
         var remote: [Album] = try await api.request(.get, path: "albums", query: [.init(name: "isOwned", value: "true")])
         _ = try currentSession(runID)
         for local in albums where preferences.includedAlbums.contains(local.id) && !preferences.excludedAlbums.contains(local.id) {

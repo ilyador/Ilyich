@@ -310,7 +310,7 @@ Source status: **53 done, 0 partial, 0 missing**. These are source-audit labels,
 |---|---|---|
 | `server-login` | Done | [SignInView.swift](Sources/App/SignInView.swift), [SessionStore.swift](Sources/App/SessionStore.swift), [IlyichApp.swift](Sources/App/IlyichApp.swift) — URL validation, feature-aware password login/autofill, explicit errors and forced password change are implemented. |
 | `oauth` | Done | [OAuthSignIn.swift](Sources/App/OAuthSignIn.swift), [Info.plist](Config/Info.plist) — ASWebAuthenticationSession, state/PKCE and the compatible app.immich callback are implemented. Actual provider round-trip remains unverified. |
-| `session-lifecycle` | Done | [SessionStore.swift](Sources/App/SessionStore.swift), [SharedSession.swift](Sources/Backup/SharedSession.swift) — Keychain restoration, nonblocking validation, offline retention, 401 sign-out, upload cancellation and account/cache/widget/network-credential cleanup are implemented. |
+| `session-lifecycle` | Done | [SessionStore.swift](Sources/App/SessionStore.swift), [SharedSession.swift](Sources/Backup/SharedSession.swift) — Keychain restoration, nonblocking validation, offline retention, sign-out only when Immich reports the session expired and a second check agrees (a proxy's refusal never signs out), upload cancellation and account/cache/widget/network-credential cleanup are implemented. |
 | `profile` | Done | [SettingsView.swift](Sources/Features/SettingsView.swift), [ProfilePhotoView.swift](Sources/Features/ProfilePhotoView.swift) — Name/password/sign-out, user quota/storage, server usage/counts/version and cropped profile-photo upload/removal are implemented. |
 
 ### Networking and server compatibility

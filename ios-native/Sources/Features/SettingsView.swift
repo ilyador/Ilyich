@@ -347,7 +347,7 @@ private struct ServerStorageSection: View {
         guard !loading else { return }; loading = true; defer { loading = false }
         do { storage = try await api.request(.get, path: "server/storage"); failure = nil }
         catch is CancellationError { }
-        catch APIError.forbidden { failure = "Server storage information is unavailable for this account." }
+        catch ServerFailure.forbidden { failure = "Server storage information is unavailable for this account." }
         catch { failure = error.localizedDescription }
     }
 }

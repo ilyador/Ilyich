@@ -250,7 +250,8 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
         guard var transfer = transfers[dataTask.taskIdentifier] else { completionHandler(.cancel); return }
-        do { try APIClient.validate(response) }
+        // The body has not arrived yet; Immich's correlation header still tells it from a proxy.
+        do { try ServerFailure.check(response, body: nil) }
         catch {
             transfers.removeValue(forKey: dataTask.taskIdentifier); transfer.loading.finishLoading(with: error)
             completionHandler(.cancel); onFailure?(error); return

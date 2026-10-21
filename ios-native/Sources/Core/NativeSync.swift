@@ -23,7 +23,8 @@ enum SocketEventPacket: Sendable {
         if packet.hasPrefix("40") { return .invalidation(.init(configurationChanged: true)) }
         guard packet.hasPrefix("42"), let values = try? JSONDecoder().decode([EntityJSON].self, from: Data(packet.dropFirst(2).utf8)), let name = values.first?.string else { return .ignore }
         if name == "error" {
-            if values.dropFirst().first?.string == "unauthorized" { throw APIError.unauthorized }
+            // Immich's own socket says the session is gone; the session check confirms it.
+            if values.dropFirst().first?.string == "unauthorized" { throw ServerFailure.sessionExpired(nil) }
             throw APIError.invalidResponse("The server rejected the live connection. The library will reconnect.")
         }
         let recognized = ["AssetUploadReadyV2", "AssetEditReadyV2", "on_upload_success", "on_asset_update", "on_asset_delete", "on_asset_trash", "on_asset_restore", "on_asset_hidden", "on_asset_stack_update", "on_album_update", "on_person_thumbnail", "on_config_update", "on_user_delete", "on_session_delete", "AppRestartV1"]
@@ -96,7 +97,7 @@ actor NativeSync {
                 catch {
                     guard !Task.isCancelled else { break }
                     await onError(error)
-                    if case APIError.unauthorized = error { break }
+                    if case ServerFailure.sessionExpired = error { break }
                 }
                 do { try await Task.sleep(for: .seconds(retry)) } catch { break }
                 retry = min(retry * 2, 30)

@@ -146,7 +146,7 @@ struct LockedFolderView: View {
     private func loadUnlocked() async throws {
         let requestGeneration = generation
         let status = try await api.authStatus()
-        guard status.isElevated else { throw APIError.forbidden }
+        guard status.isElevated else { throw ServerFailure.forbidden(nil) }
         let result = try await api.timeBuckets(filter: filter)
         guard requestGeneration == generation else { return }
         self.status = status; buckets = result; nextBucket = 0; assets = []; unlocked = true

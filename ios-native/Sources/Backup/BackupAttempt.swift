@@ -6,7 +6,12 @@ import Photos
 enum BackupAttempt {
     static func canContinue(after error: any Error) -> Bool {
         if case BackupError.item = error { return true }
-        if case APIError.http(let status) = error { return [413, 415, 422].contains(status) }
+        if let failure = error as? ServerFailure {
+            // The server refused only this file: too large, of a type it can't take, or unreadable.
+            // Any other answer, an expired session or a proxy's refusal among them, stops the run.
+            if case .http(let status, _) = failure { return [413, 415, 422].contains(status) }
+            return false
+        }
         let details = error as NSError
         if details.domain == PHPhotosErrorDomain {
             return [PHPhotosError.networkAccessRequired, .identifierNotFound, .invalidResource,

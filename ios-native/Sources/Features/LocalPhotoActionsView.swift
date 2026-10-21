@@ -67,7 +67,7 @@ struct LocalPhotoActionsView: View {
         }
     }
     private func writeSession() throws -> StoredCredential {
-        guard let saved = try KeychainCredentialStore().load() else { throw APIError.unauthorized }
+        guard let saved = try KeychainCredentialStore().load() else { throw APIError.signedOut }
         guard !ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID) else { throw ReadOnlyPolicy.ReadOnlyError() }
         return saved
     }

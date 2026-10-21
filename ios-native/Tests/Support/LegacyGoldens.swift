@@ -114,7 +114,7 @@ enum LegacyGoldens {
                                             date: Dates.failure)]
         state.transferNotification = BackupTransferNotification(id: notificationID, total: 12, completed: 9, terminalFailures: 2)
         state.paused = false
-        state.error = APIError.unauthorized.localizedDescription
+        state.error = ServerFailure.sessionExpired(nil).localizedDescription
         return state
     }
 
@@ -126,7 +126,7 @@ enum LegacyGoldens {
     static let outcomes: [String: BackgroundUploads.Outcome] = [
         "created": .init(receipt: UploadReceipt(id: originalAsset, status: "created"), error: nil),
         "duplicate": .init(receipt: UploadReceipt(id: originalAsset, status: "duplicate"), error: nil),
-        "401": .init(receipt: nil, error: APIError.unauthorized.localizedDescription, httpStatus: 401),
+        "401": .init(receipt: nil, error: ServerFailure.sessionExpired(nil).localizedDescription, httpStatus: 401),
         "lost": .init(receipt: nil, error: lostConnectionText),
         "force-quit": .init(receipt: nil, error: forceQuitText),
     ]

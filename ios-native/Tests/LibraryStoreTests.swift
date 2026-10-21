@@ -785,7 +785,7 @@ private actor PlacesAPIFixture: LibraryAPI {
     func supportsPlaceTimelines() async -> Bool { byMonth }
     /// A place found by search, as without the offline library.
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { .page(["lisbon-1", "lisbon-2"]) }
-    func search(_ query: SearchQuery) async throws -> SearchResponse { throw APIError.http(500) }
+    func search(_ query: SearchQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] {
         if delay > .zero { try await Task.sleep(for: delay) }
         return places[filter.personID] ?? []
@@ -833,7 +833,7 @@ private actor LibraryAPIFixture: LibraryAPI {
         if bucketDelay > .zero { try await Task.sleep(for: bucketDelay) }
         let scope = scopeKey(filter)
         if delayedTimeline || delayedTimelineScopes.contains(scope) || slowBuckets.contains(bucket) { try await Task.sleep(for: .seconds(3)) }
-        if failingTimelineScopes.contains(scope) { throw APIError.http(500) }
+        if failingTimelineScopes.contains(scope) { throw ServerFailure.http(500, nil) }
         if let assets = bucketAssets[bucket] { return assets }
         return assets(for: filter)
     }
@@ -852,12 +852,12 @@ private actor LibraryAPIFixture: LibraryAPI {
     func search(_ query: SearchQuery) async throws -> SearchResponse {
         cursors.append(query.cursor)
         if delayed { try await Task.sleep(for: .seconds(3)) }
-        guard !pages.isEmpty else { throw APIError.http(500) }
+        guard !pages.isEmpty else { throw ServerFailure.http(500, nil) }
         return pages.removeFirst()
     }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse {
         metadataCalls += 1; metadataSizes.append(query.size)
-        guard !metadataPages.isEmpty else { throw APIError.http(500) }
+        guard !metadataPages.isEmpty else { throw ServerFailure.http(500, nil) }
         return metadataPages.removeFirst()
     }
     var metadataSizes: [Int] = []
