@@ -42,6 +42,10 @@ struct PlacesView: View {
     var focus: PlaceFocus? = nil
     var compact = false
     var bottomInset: CGFloat = 0
+    /// Asks this view to close its own sheets and alert, as a link does over the library.
+    var closesPresentations = false
+    /// Told when this view's own sheets and alert come up, and once they have all gone.
+    var onPresentation: (Bool) -> Void = { _ in }
     @State private var places: [PlaceCollection] = []
     @State private var lights: GlobePhotoLights?
     @State private var selected: PlaceCollection?
@@ -58,6 +62,8 @@ struct PlacesView: View {
     @State private var endDate = Date()
     @State private var showingDates = false
     @State private var showingLocations = false
+    /// A sheet is up or still on its way out; it has gone once its onDismiss runs.
+    @State private var sheetUp = false
     var body: some View {
         GeometryReader { geometry in
             if mapEnabled == false {
@@ -118,7 +124,7 @@ struct PlacesView: View {
         }
         .task(id: "\(favoritesOnly)|\(includeArchived)|\(includePartners)|\(dateFilter)|\(startDate)|\(endDate)") { await load() }
         .refreshable { await load() }
-        .sheet(isPresented: $showingDates) {
+        .sheet(isPresented: $showingDates, onDismiss: sheetDismissed) {
             NavigationStack {
                 Form {
                     Toggle("Use date range", isOn: $dateFilter)
@@ -128,8 +134,8 @@ struct PlacesView: View {
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingDates = false } } }
             }.presentationDetents([.medium])
         }
-        .sheet(item: $mapPlace) { place in NavigationStack { PlaceMapDetail(place: place, onSelect: onSelect) } }
-        .sheet(isPresented: $showingLocations) {
+        .sheet(item: $mapPlace, onDismiss: sheetDismissed) { place in NavigationStack { PlaceMapDetail(place: place, onSelect: onSelect) } }
+        .sheet(isPresented: $showingLocations, onDismiss: sheetDismissed) {
             NavigationStack {
                 PlacesListView(places: places, api: api, pipeline: pipeline) { place in
                     selected = place; showingLocations = false; onSelect(place)
@@ -142,6 +148,22 @@ struct PlacesView: View {
         .alert("Couldn’t load places", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
+        .onChange(of: presenting) { _, up in
+            if up { sheetUp = sheetUp || showingDates || showingLocations || mapPlace != nil; onPresentation(true) }
+            else if !sheetUp { onPresentation(false) }
+        }
+        .onChange(of: closesPresentations, initial: true) { _, close in
+            guard close else { return }
+            showingDates = false; showingLocations = false; mapPlace = nil; failure = nil
+        }
+        .onDisappear { onPresentation(false) }
+    }
+
+    private var presenting: Bool { showingDates || showingLocations || mapPlace != nil || failure != nil }
+
+    private func sheetDismissed() {
+        sheetUp = false
+        if !presenting { onPresentation(false) }
     }
     private var globeFocus: PlaceFocus? {
         selected?.focus ?? focus ?? places.first.map { .init(latitude: $0.latitude, longitude: $0.longitude) }

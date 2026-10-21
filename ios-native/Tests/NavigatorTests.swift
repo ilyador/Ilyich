@@ -106,6 +106,35 @@ import XCTest
         XCTAssertEqual(navigator.alert, .error(Lookup.Missing().localizedDescription))
     }
 
+    func testALinkClosesTheEarthsOwnSheetBeforeOpeningThePhoto() async throws {
+        let model = LibraryScreenModel(lookup: Lookup(assets: [photo]), inbox: Inbox())
+        let navigator = model.navigator
+        navigator.raiseEarth()
+        navigator.earthPresentationChanged(true)
+        XCTAssertFalse(navigator.isIdle, "The Earth's list of locations counts as presented.")
+
+        model.follow(.asset(photo.id), albums: [], people: [])
+        XCTAssertTrue(navigator.earthPresentationClosing, "The Earth is asked to close its sheet at once.")
+        try await until("The link was not looked up.") { navigator.deferred != nil }
+        XCTAssertNil(navigator.viewerRoute, "The photo waits while the Earth's sheet is still up.")
+
+        navigator.earthPresentationChanged(false)
+        XCTAssertFalse(navigator.earthPresentationClosing)
+        XCTAssertEqual(navigator.viewerRoute?.asset, photo, "The photo opens once the Earth's sheet has gone.")
+        XCTAssertTrue(navigator.overlay.earth, "The Earth itself stays.")
+    }
+
+    func testTheLibraryPresentingOverTheEarthsSheetClosesItFirst() {
+        let navigator = LibraryNavigator()
+        navigator.raiseEarth()
+        navigator.earthPresentationChanged(true)
+        navigator.present(.settings(.root))
+        XCTAssertTrue(navigator.earthPresentationClosing)
+        XCTAssertTrue(navigator.layers.isEmpty, "Nothing presents from the library while the Earth's sheet is up.")
+        navigator.earthPresentationChanged(false)
+        XCTAssertEqual(navigator.shown(at: 0, style: .sheet)?.route, .settings(.root))
+    }
+
     func testLinksUseWhatTheShelvesHoldBeforeAskingTheServer() async throws {
         let lookup = Lookup(people: [maya])
         let resolver = DeepLinkResolver(lookup: lookup)

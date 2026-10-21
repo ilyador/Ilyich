@@ -793,7 +793,8 @@ struct LibraryView: View {
     private var keepsShelvesForUITests: Bool { session.environment.keepsShelvesOpen }
 
     private func placesPanel(height: CGFloat, bottomInset: CGFloat) -> some View {
-        PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace, focus: navigator.overlay.earthFocus, compact: true, bottomInset: bottomInset)
+        PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace, focus: navigator.overlay.earthFocus, compact: true, bottomInset: bottomInset,
+                   closesPresentations: navigator.earthPresentationClosing, onPresentation: navigator.earthPresentationChanged)
             .frame(height: height)
             // Zoomed-in terrain fades out under the handle, so the handle always sits above the Earth's edge.
             .mask {
