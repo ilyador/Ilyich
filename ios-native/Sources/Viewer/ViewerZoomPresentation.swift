@@ -66,16 +66,51 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
                 return self?.parent?.sourceView(state.currentID)
             }
             host.onDismissed = { [weak self, weak host] in
-                guard let self, let host, self.host === host else { return }
-                self.host = nil; self.state = nil; self.presentedID = nil
-                if self.parent?.item != nil { self.parent?.item = nil }
-                self.parent?.onDismiss()
+                guard let self, let host else { return }
+                self.finish(host)
             }
             // Not in the middle of a view update: present once SwiftUI has finished this one.
             Task { @MainActor [weak self, weak anchor, weak host] in
-                guard let self, let anchor, let host, self.host === host, host.presentingViewController == nil else { return }
-                anchor.present(host, animated: true)
+                guard let self, let anchor, let host else { return }
+                await self.show(host, from: anchor)
             }
+            watchItem()
+        }
+
+        /// While the viewer is up, the screen under it is off the screen, and SwiftUI may not
+        /// update it for a change made from outside, such as a link. So the item is watched
+        /// here too: once it empties, the viewer closes.
+        private func watchItem() {
+            withObservationTracking { _ = parent?.item } onChange: { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.host != nil else { return }
+                    if self.parent?.item == nil { self.close() } else { self.watchItem() }
+                }
+            }
+        }
+
+        /// Presents once nothing else is presented over the library, such as an alert still on its
+        /// way out; UIKit would refuse it until then. If that never happens within two seconds,
+        /// the viewer counts as closed, so nothing waits on a viewer that never appeared.
+        private func show(_ host: ViewerHostingController, from anchor: UIViewController) async {
+            for _ in 0..<20 {
+                guard self.host === host, host.presentingViewController == nil else { return }
+                if let window = anchor.view.window, window.rootViewController?.presentedViewController == nil {
+                    anchor.present(host, animated: true)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            finish(host)
+        }
+
+        /// The viewer has gone, by its own close, a drag, or never having been shown: whoever
+        /// presented it hears so once.
+        private func finish(_ host: ViewerHostingController) {
+            guard self.host === host else { return }
+            self.host = nil; state = nil; presentedID = nil
+            if parent?.item != nil { parent?.item = nil }
+            parent?.onDismiss()
         }
 
         /// Keeps the viewer's inputs current, as a cover's content would be; another photo opened
@@ -88,10 +123,20 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
 
         func close() {
             guard let host else { return }
-            // Closed before it was shown: nothing to dismiss.
-            if host.presentingViewController == nil { self.host = nil; state = nil; presentedID = nil; return }
+            if host.presentingViewController == nil {
+                // Closed before it was shown: nothing to dismiss, but it has gone all the same,
+                // which is said outside the view update that closed it.
+                self.host = nil; state = nil; presentedID = nil
+                Task { @MainActor [weak self] in self?.parent?.onDismiss() }
+                return
+            }
             guard !host.isBeingDismissed else { return }
-            host.dismiss(animated: true)
+            if host.presentedViewController != nil {
+                // A sheet or cover the viewer opened, such as its details, closes with it.
+                host.presentingViewController?.dismiss(animated: true)
+            } else {
+                host.dismiss(animated: true)
+            }
         }
 
         private func root(_ asset: Asset) -> AnyView {

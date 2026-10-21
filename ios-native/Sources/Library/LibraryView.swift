@@ -20,35 +20,20 @@ struct LibraryView: View {
     let pipeline: MediaPipeline
     let session: AccountSession
     @State private var store: LibraryStore
+    /// What is presented over the library, following links, shared files and the Earth's warm-up.
+    @State private var model: LibraryScreenModel
     @State private var searchText = ""
-    @State private var shelves = false
     @State private var edgeInteraction = LibraryEdgeInteraction()
     @State private var librarySize: CGSize = .zero
     @State private var shelf: Shelf = .root
-    @State private var settingsDestination: SettingsDestination?
     @State private var people: [Person] = []
     @State private var albums: [Album] = []
     @State private var features: ServerFeatures?
-    @State private var screen: Screen?
-    @State private var viewing: Asset?
-    @State private var viewingLocal: LocalPhoto?
     @State private var deviceIndex = DeviceTimelineIndex()
     @State private var backup = BackupCoordinator.shared
-    @State private var viewingAlbumID: String?
-    @State private var linkedMemoryID: String?
-    @State private var pendingPhotoDestination: PhotoDestination?
-    @State private var activityAlbumID: String?
-    @State private var showPlaces = false
     @State private var placesDrag: CGFloat = 0
-    @State private var placeFocus: PlaceFocus?
-    @State private var pendingPlaceFocus: PlaceFocus?
-    @State private var actionError: String?
-    @State private var confirmDelete = false
-    @State private var confirmSignOut = false
+    /// The name typed for an album made from the selection.
     @State private var albumName = ""
-    @State private var creatingAlbum = false
-    /// The New album row on the Albums shelf.
-    @State private var creatingShelfAlbum = false
     /// Where the filter tag sits at the top, which a chosen person or album rises into.
     @State private var filterTagFrame: CGRect = .zero
     /// The filter chosen during the current stroke. It applies at once; once the finger lifts, a
@@ -58,17 +43,12 @@ struct LibraryView: View {
     @State private var tagHandoff = false
     /// A newer open or close makes a pending close stale.
     @State private var closeGeneration = 0
-    /// Sharing the album shown in the feed.
-    @State private var albumSharing: AlbumSharing?
     @State private var peopleOrder: [String] = []
     @State private var albumOrder: [String] = []
-    @State private var bulkSelection: BulkSelection?
     @State private var selectionBusy = false
     /// Height of the chips floating at the top: filter, uploads, search checking, selection.
     @State private var chromeHeight: CGFloat = 0
     @State private var shareInbox = ShareInboxStore.shared
-    @State private var sharedFilesPresented = false
-    @State private var seenShareBatches = Set<UUID>()
     @AppStorage("gridColumns") private var columns = 4
     @AppStorage("appearance") private var appearance = "system"
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
@@ -81,21 +61,21 @@ struct LibraryView: View {
     @Environment(\.authorization) private var authorization
 
     private enum Shelf { case root, people, albums, more, settings }
-    private enum AlbumSharing: Identifiable {
-        case link(Album), people(Album)
-        var id: String {
-            switch self {
-            case .link(let album): "link-" + album.id
-            case .people(let album): "people-" + album.id
-            }
-        }
-    }
-    private enum Screen: String, Identifiable { case people, albums, more, settings, searchOptions, memories, activity; var id: String { rawValue } }
 
     init(api: APIClient, pipeline: MediaPipeline, session: AccountSession) {
         self.api = api; self.pipeline = pipeline; self.session = session
         _store = State(initialValue: LibraryStore(api: session.libraryAPI ?? api, includesDevicePhotos: session.environment.usesDevicePhotos))
+        _model = State(initialValue: LibraryScreenModel(lookup: api, inbox: ShareInboxStore.shared))
     }
+
+    private var navigator: LibraryNavigator { model.navigator }
+    /// The shelves are out. The navigator keeps this beside the Earth, as what covers the grid.
+    private var shelves: Bool {
+        get { navigator.overlay.shelves }
+        nonmutating set { navigator.setShelves(newValue) }
+    }
+    /// The Earth has risen from the bottom edge.
+    private var showPlaces: Bool { navigator.overlay.earth }
 
     var body: some View {
         GeometryReader { geometry in
@@ -110,9 +90,10 @@ struct LibraryView: View {
                           bottomInset: geometry.safeAreaInsets.bottom + 90,
                           onDensityChange: { columns = $0 }, onOpenLocal: { photo in
                     // While typing, a tap on the grid only puts the keyboard away.
-                    if searchFocused { searchFocused = false } else { viewingLocal = photo }
+                    if searchFocused { searchFocused = false } else { navigator.present(.phoneViewer(photo)) }
                 }) { asset in
-                    if searchFocused { searchFocused = false } else { viewingAlbumID = nil; viewing = asset }
+                    if searchFocused { searchFocused = false }
+                    else { navigator.present(.viewer(ViewerRoute(asset: asset, source: .feed, albumContext: nil))) }
                 }.ignoresSafeArea()
                 if store.isLoading && store.totalCount == 0 { ProgressView("Loading library").frame(maxWidth: .infinity, maxHeight: .infinity).environment(\.colorScheme, .dark) }
                 if !store.isLoading && store.totalCount == 0 && store.error == nil && !store.isSearching {
@@ -214,65 +195,30 @@ struct LibraryView: View {
                 leadingEnabled: !shelves,
                 // The rail scrubs above the Earth too; its band ends where the Earth begins.
                 trailingEnabled: !shelves && store.canScrubTimeline && store.query.isEmpty,
-                enabled: screen == nil && viewing == nil && viewingLocal == nil && !sharedFilesPresented && !store.isSelecting && !searchFocused,
+                enabled: navigator.layers.isEmpty && !store.isSelecting && !searchFocused,
                 onChange: handleEdgePan))
             .onChange(of: geometry.size, initial: true) { _, size in librarySize = size }
-            .sheet(item: $screen, onDismiss: finishPhotoNavigation) { destination in
-                NavigationStack {
-                    destinationView(destination)
-                        .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { screen = nil } } }
-                }
-            }
+            // Sheets and covers, each presenting the level above it.
+            .modifier(PresentationHost(navigator: navigator, level: 0) { route, level in presented(route, level: level) })
             // The viewer zooms out of its grid cell and back into the cell of the photo it closes on.
             .background {
-                ViewerZoomPresenter(item: $viewing, sourceView: { store.zoomSourceView(for: $0) }, authorization: authorization,
-                                    onDismiss: finishViewerNavigation) { asset, transition, close in
+                ViewerZoomPresenter(item: viewerItem, sourceView: { store.zoomSourceView(for: $0) }, authorization: authorization,
+                                    onDismiss: { navigator.layerDidDismiss(level: 0) }) { asset, transition, close in
                     AnyView(assetViewer(asset, transition: transition, close: close))
                 }
             }
-            .fullScreenCover(item: $viewingLocal) { LocalPhotoViewer(photo: $0, photos: store.availableLocalPhotos(around: $0)) }
-            .sheet(item: $bulkSelection) { selection in
-                NavigationStack {
-                    SelectionActionsView(api: api, pipeline: pipeline, selection: selection) {
-                        store.selected = []; store.isSelecting = false
-                        Task { await store.refreshAfterMutation() }
-                    }
-                }
-            }
-            .sheet(isPresented: $sharedFilesPresented) { ShareInboxView(api: api) }
-            .alert("Couldn’t complete action", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
+            .alert("Couldn’t complete action", isPresented: alertShown { if case .error = $0 { true } else { false } }) {
                 Button("OK", role: .cancel) { }
-            } message: { Text(actionError ?? "") }
-            .confirmationDialog(features?.trash == false ? "Permanently delete \(store.selected.count) items?" : "Move \(store.selected.count) items to Trash?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            } message: { Text(errorMessage) }
+            .confirmationDialog(features?.trash == false ? "Permanently delete \(store.selected.count) items?" : "Move \(store.selected.count) items to Trash?", isPresented: alertShown { $0 == .confirm(.deleteSelection) }, titleVisibility: .visible) {
                 Button(features?.trash == false ? "Delete permanently" : "Move to Trash", role: .destructive) {
                     runSelection { ids in try await api.trashAssets(ids: ids, permanently: features?.trash == false) }
                 }
             } message: { Text(features?.trash == false ? "This cannot be undone. Photos on your phone are kept." : "This changes the server library. Photos on your phone are kept.") }
-            .confirmationDialog("Sign out of Ilyich?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+            .confirmationDialog("Sign out of Ilyich?", isPresented: alertShown { $0 == .confirm(.signOut) }, titleVisibility: .visible) {
                 Button("Sign out", role: .destructive) { store.stop(); Task { await session.signOut() } }
             } message: { Text("Backup will stop on this phone. Photos already on your server are kept.") }
-            .sheet(item: $albumSharing) { sharing in
-                NavigationStack {
-                    switch sharing {
-                    case .link(let album): SharedLinkEditor(api: api, album: album)
-                    case .people(let album):
-                        AlbumMembersView(api: api, album: album, onLeft: {
-                            albums.removeAll { $0.id == album.id }; store.clearFilters()
-                        })
-                        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { albumSharing = nil } } }
-                    }
-                }
-            }
-            .sheet(isPresented: $creatingShelfAlbum) {
-                NavigationStack {
-                    AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in
-                        albums.insert(album, at: 0)
-                        // An album made here leads the owner's order, as it leads the server's.
-                        if !albumOrder.isEmpty { saveOrder([album.id] + albumOrder, for: .albums) }
-                    }
-                }
-            }
-            .alert("New album", isPresented: $creatingAlbum) {
+            .alert("New album", isPresented: alertShown { $0 == .newAlbumFromSelection }) {
                 TextField("Album name", text: $albumName)
                 Button("Create") {
                     let name = albumName
@@ -283,34 +229,16 @@ struct LibraryView: View {
         }
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
         .task {
-            refreshSharedFiles()
+            model.refreshSharedFiles()
             if session.environment.usesDevicePhotos { await backup.activate(); refreshDeviceIndex() }
             guard !store.started else { return }; store.started = true
             await store.reload(); await loadShelfData()
         }
-        .task(id: session.pendingLink) {
-            guard let link = session.pendingLink else { return }
-            do {
-                switch link {
-                case .sharedFiles:
-                    await shareInbox.refresh()
-                    seenShareBatches.formUnion(shareInbox.batches.map(\.id))
-                    sharedFilesPresented = true
-                case .asset(let id, let albumID):
-                    let asset = try await api.asset(id: id)
-                    if let albumID { _ = try await api.album(id: albumID) }
-                    viewingAlbumID = albumID; viewing = asset
-                case .album(let id): store.setAlbum(try await api.album(id: id))
-                case .person(let id):
-                    let person: Person = try await api.request(.get, path: "people/\(id)")
-                    store.setPerson(person)
-                case .memory(let id): linkedMemoryID = id; screen = .memories
-                case .activity(let albumID):
-                    _ = try await api.album(id: albumID)
-                    activityAlbumID = albumID; screen = .activity
-                }
-            } catch is CancellationError {} catch { actionError = error.localizedDescription }
-            if session.pendingLink == link { session.pendingLink = nil }
+        .onAppear {
+            connectNavigator()
+            model.start()
+            // A link closes whatever is open, then opens its photo, filter or screen.
+            model.takeLinks(from: session) { [albums = $albums, people = $people] in (albums.wrappedValue, people.wrappedValue) }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in Task { await pipeline.trimMemory() } }
         .onReceive(NotificationCenter.default.publisher(for: .ilyichCachesReset)) { notification in
@@ -328,7 +256,7 @@ struct LibraryView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
-                refreshSharedFiles(); refreshDeviceIndex()
+                model.refreshSharedFiles(); refreshDeviceIndex()
                 if store.started, people.isEmpty || albums.isEmpty { Task { await loadShelfData() } }
             } else if phase == .background { deviceIndex.stop() }
         }
@@ -338,22 +266,13 @@ struct LibraryView: View {
         .onChange(of: backup.isRunning) { _, running in if !running { refreshDeviceIndex() } }
         .onDisappear { deviceIndex.stop() }
         .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session) }
-        .onChange(of: screen) { _, value in if value == nil { refreshSharedFiles() } }
-        .onChange(of: viewing) { _, value in
-            if value == nil { refreshSharedFiles() }
-            session.thumbnailWarmer?.isHeld = value != nil || viewingLocal != nil
-        }
-        .onChange(of: viewingLocal) { _, value in session.thumbnailWarmer?.isHeld = value != nil || viewing != nil }
+        // Everything presented has closed, so shared files that arrived meanwhile can show.
+        .onChange(of: navigator.layers.isEmpty) { _, empty in if empty { model.refreshSharedFiles() } }
+        .onChange(of: navigator.isViewing) { _, viewing in session.thumbnailWarmer?.isHeld = viewing }
         .onAppear {
             // Keeping the library's thumbnails offline waits whenever the user scrolls or scrubs.
             let position = store.navigation
             session.thumbnailWarmer?.isScrolling = { [weak position] in position.map { $0.isScrolling || $0.isScrubbing } ?? false }
-        }
-        .task {
-            // The Earth is built off the main thread a little after launch, so it is ready before
-            // anyone opens it, rather than while a finger crosses Places on the shelves.
-            try? await Task.sleep(for: .seconds(4))
-            await PlacesGlobeView.prepare()
         }
     }
 
@@ -365,12 +284,32 @@ struct LibraryView: View {
     }
 
     private func assetViewer(_ asset: Asset, transition: ViewerTransitionState, close: @escaping () -> Void) -> some View {
-        let explore: (PlaceFocus) -> Void = { focus in pendingPlaceFocus = focus; viewing = nil }
-        return AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
-                           onUpdated: store.update, onDeleted: { Task { await store.refreshAfterMutation() } },
-                           albumID: viewingAlbumID ?? store.timelineFilter.albumID,
-                           matchedLocalPhotos: store.matchingDevicePhotos, onExploreLocation: explore,
-                           transition: transition, onClose: close)
+        // Exploring the photo's place closes the viewer, then raises the Earth turned to it.
+        AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
+                    onUpdated: store.update, onDeleted: { Task { await store.refreshAfterMutation() } },
+                    albumID: navigator.viewerRoute?.albumContext ?? store.timelineFilter.albumID,
+                    matchedLocalPhotos: store.matchingDevicePhotos, onExploreLocation: { navigator.send(.exploreLocation($0)) },
+                    transition: transition, onClose: close)
+    }
+
+    /// The photo the viewer shows, until it is asked to close. Closing it from inside, by its
+    /// button or a drag, asks the navigator to close it too.
+    private var viewerItem: Binding<Asset?> {
+        Binding(get: { navigator.shown(at: 0, style: .zoom).flatMap { layer in
+                    if case .viewer(let route) = layer.route { route.asset } else { nil }
+                } },
+                set: { if $0 == nil, navigator.viewerRoute != nil { navigator.dismiss(level: 0) } })
+    }
+
+    /// Whether the alert slot holds an alert `matches` picks. Answering or dismissing it empties
+    /// the slot, unless another alert has taken it since.
+    private func alertShown(_ matches: @escaping (LibraryAlert) -> Bool) -> Binding<Bool> {
+        Binding(get: { navigator.alert.map(matches) ?? false },
+                set: { shown in if !shown, let alert = navigator.alert, matches(alert) { navigator.alertDidClose(alert) } })
+    }
+
+    private var errorMessage: String {
+        if case .error(let message) = navigator.alert { message } else { "" }
     }
 
     @ViewBuilder private var selectionTitle: some View {
@@ -498,8 +437,8 @@ struct LibraryView: View {
     /// An album in the feed keeps its sharing at hand, across from its title.
     private func albumShareButton(_ album: Album) -> some View {
         Menu {
-            Button("Create link", systemImage: "link") { albumSharing = .link(album) }
-            Button("Share with people", systemImage: "person.badge.plus") { albumSharing = .people(album) }
+            Button("Create link", systemImage: "link") { navigator.present(.albumSharing(album, .link)) }
+            Button("Share with people", systemImage: "person.badge.plus") { navigator.present(.albumSharing(album, .people)) }
         } label: {
             Image(systemName: "square.and.arrow.up").font(.body.weight(.semibold)).frame(width: 50, height: 50)
                 .modifier(TagContentFade(hidden: shelves, instant: reduceMotion))
@@ -537,7 +476,7 @@ struct LibraryView: View {
                     .accessibilityIdentifier("search.checking")
             }
             HStack(spacing: 12) {
-                Button { searchFocused = false; screen = .searchOptions } label: {
+                Button { searchFocused = false; navigator.present(.searchOptions) } label: {
                     Image(systemName: "magnifyingglass").frame(width: 44, height: 44)
                 }.buttonStyle(.plain).accessibilityLabel("Search options")
                 TextField("Search photos", text: $searchText,
@@ -585,10 +524,10 @@ struct LibraryView: View {
             Text("\(store.selected.count) selected").font(.subheadline.monospacedDigit())
             Spacer()
             if store.selectedLocalPhotos.isEmpty {
-            Button { creatingAlbum = true } label: { Image(systemName: "rectangle.stack.badge.plus").frame(width: 44, height: 44) }.accessibilityLabel("Create album from selection").requiresWriteAccess()
+            Button { navigator.show(.newAlbumFromSelection) } label: { Image(systemName: "rectangle.stack.badge.plus").frame(width: 44, height: 44) }.accessibilityLabel("Create album from selection").requiresWriteAccess()
             Button { runSelection { ids in try await api.requestVoid(.put, path: "assets", body: SelectionUpdate(ids: ids, isFavorite: true)) } }
                 label: { Image(systemName: "heart").frame(width: 44, height: 44) }.accessibilityLabel("Favorite selected photos").requiresWriteAccess().disabled(!ownsSelection)
-            Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel(features?.trash == false ? "Delete selection permanently" : "Move selection to Trash").requiresWriteAccess().disabled(features == nil || !ownsSelection)
+            Button(role: .destructive) { navigator.show(.confirm(.deleteSelection)) } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel(features?.trash == false ? "Delete selection permanently" : "Move selection to Trash").requiresWriteAccess().disabled(features == nil || !ownsSelection)
             } else {
                 Button {
                     let localIDs = store.selectedLocalPhotos.map(\.id)
@@ -596,7 +535,7 @@ struct LibraryView: View {
                 } label: { Image(systemName: "icloud.and.arrow.up").frame(width: 44, height: 44) }
                     .accessibilityLabel("Back up selected phone photos").requiresWriteAccess().disabled(backup.isRunning)
             }
-            Button { bulkSelection = BulkSelection(assets: store.selectedAssets, local: store.selectedDevicePhotos) } label: {
+            Button { navigator.present(.selectionActions(SelectionSnapshot(assets: store.selectedAssets, local: store.selectedDevicePhotos))) } label: {
                 Image(systemName: "ellipsis").frame(width: 44, height: 44)
             }.accessibilityLabel("Selection actions")
         }.padding(.horizontal, 14).padding(.vertical, 6).glassEffect().disabled(store.selected.isEmpty || selectionBusy)
@@ -636,7 +575,7 @@ struct LibraryView: View {
                 add("people", "People", "person.2", detail: people.isEmpty ? nil : people.count.formatted(), opens: .people)
             }
             if features?.map != false {
-                add("places", "Places", "globe.europe.africa") { if showPlaces { showPlaces = false } else { openPlaces() } }
+                add("places", "Places", "globe.europe.africa") { if showPlaces { navigator.lowerEarth() } else { openPlaces() } }
             }
             add("albums", "Albums", "rectangle.stack", detail: albums.isEmpty ? nil : albums.count.formatted(), opens: .albums)
             add("more", "More", "ellipsis", opens: .more)
@@ -647,15 +586,15 @@ struct LibraryView: View {
                     if store.timelineFilter.personID != person.id { store.setPerson(person) }; searchText = ""
                 }
             }
-            add("all-people", "Manage people", "person.2") { screen = .people }
+            add("all-people", "Manage people", "person.2") { navigator.present(.people) }
         case .albums:
             for album in orderedAlbums {
                 add("album-" + album.id, album.albumName, "rectangle.stack", detail: album.assetCount.formatted(), assetID: album.albumThumbnailAssetId, selected: store.timelineFilter.albumID == album.id, filters: true) {
                     if store.timelineFilter.albumID != album.id { store.setAlbum(album) }; searchText = ""
                 }
             }
-            add("new-album", "New album", "plus") { creatingShelfAlbum = true }
-            add("all-albums", "Manage albums", "square.grid.2x2") { screen = .albums }
+            add("new-album", "New album", "plus") { navigator.present(.newAlbum) }
+            add("all-albums", "Manage albums", "square.grid.2x2") { navigator.present(.albums) }
         case .more:
             var recentTaken = TimelineFilter(); recentTaken.userID = api.userID; recentTaken.isTrashed = false; recentTaken.orderBy = "takenAt"
             add("recent-taken", "Recently taken", "camera", selected: store.filterTitle == "Recently taken", filters: true) { store.setTimeline(recentTaken, title: "Recently taken"); searchText = "" }
@@ -675,17 +614,17 @@ struct LibraryView: View {
             if features?.trash != false {
                 add("trash", "Trash", "trash", selected: store.timelineFilter.isTrashed == true, filters: true) { store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash"); searchText = "" }
             }
-            add("browse-more", "Browse more", "square.grid.2x2") { screen = .more }
+            add("browse-more", "Browse more", "square.grid.2x2") { navigator.present(.more) }
             if !shareInbox.batches.isEmpty {
-                add("shared-files", "Shared files", "square.and.arrow.down") { sharedFilesPresented = true }
+                add("shared-files", "Shared files", "square.and.arrow.down") { navigator.present(.sharedFiles) }
             }
         case .settings:
             for destination in SettingsDestination.allCases {
                 add("settings-" + destination.rawValue, destination.title, destination.symbol) {
-                    settingsDestination = destination; screen = .settings
+                    navigator.present(.settings(SettingsRoute(rawValue: destination.rawValue) ?? .root))
                 }
             }
-            add("sign-out", "Sign out", "rectangle.portrait.and.arrow.right") { confirmSignOut = true }
+            add("sign-out", "Sign out", "rectangle.portrait.and.arrow.right") { navigator.show(.confirm(.signOut)) }
         }
         return items
     }
@@ -802,13 +741,17 @@ struct LibraryView: View {
         }
     }
 
-    /// The Earth slides up only once it is textured, instead of popping in as a blank sphere.
     private func openPlaces(focus: PlaceFocus? = nil) {
-        placeFocus = focus
+        Self.raiseEarth(navigator: navigator, placesDrag: $placesDrag, focus: focus)
+    }
+
+    /// The Earth slides up only once it is textured, instead of popping in as a blank sphere.
+    private static func raiseEarth(navigator: LibraryNavigator, placesDrag: Binding<CGFloat>, focus: PlaceFocus?) {
+        navigator.focusEarth(focus)
         Task {
             await PlacesGlobeView.prepare()
-            placesDrag = 0
-            showPlaces = true
+            placesDrag.wrappedValue = 0
+            navigator.raiseEarth()
         }
     }
 
@@ -850,7 +793,7 @@ struct LibraryView: View {
     private var keepsShelvesForUITests: Bool { session.environment.keepsShelvesOpen }
 
     private func placesPanel(height: CGFloat, bottomInset: CGFloat) -> some View {
-        PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace, focus: placeFocus, compact: true, bottomInset: bottomInset)
+        PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace, focus: navigator.overlay.earthFocus, compact: true, bottomInset: bottomInset)
             .frame(height: height)
             // Zoomed-in terrain fades out under the handle, so the handle always sits above the Earth's edge.
             .mask {
@@ -873,76 +816,116 @@ struct LibraryView: View {
             .gesture(DragGesture(minimumDistance: 3, coordinateSpace: .global)
                 .onChanged { placesDrag = max(0, $0.translation.height) }
                 .onEnded { value in
-                    if value.translation.height > 80 || value.predictedEndTranslation.height > 200 { showPlaces = false }
+                    if value.translation.height > 80 || value.predictedEndTranslation.height > 200 { navigator.lowerEarth() }
                     else { withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8)) { placesDrag = 0 } }
                 })
             .accessibilityElement().accessibilityLabel("Close globe").accessibilityAddTraits(.isButton)
             .accessibilityHint("Swipe down to close.")
-            .accessibilityAction { showPlaces = false }
+            .accessibilityAction { navigator.lowerEarth() }
     }
 
-    @ViewBuilder private func destinationView(_ destination: Screen) -> some View {
-        switch destination {
-        case .memories: MemoriesView(api: api, pipeline: pipeline,
-                                    onOpenAsset: { requestPhotoNavigation(.viewer($0)) },
-                                    onShowInTimeline: { requestPhotoNavigation(.timeline($0)) }, initialID: linkedMemoryID)
-        case .activity:
-            if let activityAlbumID { AlbumActivityView(api: api, albumID: activityAlbumID) }
-        case .searchOptions: SearchOptionsView(api: api, mode: store.searchMode, filter: store.searchFilter) { mode, filter in
-            store.applySearchOptions(mode: mode, filter: filter)
-        }
-        case .people: PeopleView(api: api, pipeline: pipeline) { store.setPerson($0); screen = nil; searchText = "" }
-        case .albums: AlbumsView(api: api, pipeline: pipeline) { store.setAlbum($0); screen = nil; searchText = "" }
-        case .settings:
-            if let settingsDestination { SettingsDestinationView(api: api, destination: settingsDestination, pipeline: pipeline, session: session) }
-            else { SettingsView(api: api, pipeline: pipeline, session: session, onSignOut: { store.stop(); Task { await session.signOut() } }) }
-        case .more: MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { requestPhotoNavigation(.viewer($0)) }, onFilter: { filter, title in
-            store.setTimeline(filter, title: title); screen = nil
-        }, onShowInTimeline: { requestPhotoNavigation(.timeline($0)) }, onMetadataFilter: { filter, title in
-            store.setMetadataFilter(filter, title: title); searchText = ""; screen = nil
-        }, onDeveloped: { title in
-            store.setDeveloped(title: title); searchText = ""; screen = nil
-        })
+    /// The screen for a route the navigator presents at `level`: 0 over the library, 1 over a
+    /// screen presented there, and so on.
+    private func presented(_ route: ModalRoute, level: Int) -> AnyView {
+        switch route {
+        case .people, .albums, .more, .settings, .searchOptions, .memories, .activity:
+            AnyView(NavigationStack {
+                screen(route, level: level)
+                    .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { navigator.dismiss(level: level) } } }
+            })
+        case .sharedFiles:
+            AnyView(ShareInboxView(api: api))
+        case .selectionActions(let selection):
+            AnyView(NavigationStack {
+                SelectionActionsView(api: api, pipeline: pipeline, selection: selection) {
+                    store.selected = []; store.isSelecting = false
+                    Task { await store.refreshAfterMutation() }
+                }
+            })
+        case .albumSharing(let album, let sharing):
+            AnyView(NavigationStack { albumSharing(album, sharing, level: level) })
+        case .newAlbum:
+            AnyView(NavigationStack {
+                AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in
+                    albums.insert(album, at: 0)
+                    // An album made here leads the owner's order, as it leads the server's.
+                    if !albumOrder.isEmpty { saveOrder([album.id] + albumOrder, for: .albums) }
+                }
+            })
+        case .phoneViewer(let photo):
+            AnyView(LocalPhotoViewer(photo: photo, photos: store.availableLocalPhotos(around: photo)))
+        case .memoryPlayer(let playback):
+            AnyView(MemoryPlaybackView(api: api, pipeline: pipeline, memories: playback.memories, initialID: playback.initialID) { intent in
+                navigator.send(intent)
+            })
+        case .viewer:
+            // The zoom presenter shows the viewer.
+            AnyView(EmptyView())
         }
     }
+
+    @ViewBuilder private func screen(_ route: ModalRoute, level: Int) -> some View {
+        switch route {
+        case .memories(let initialID):
+            MemoriesView(api: api, pipeline: pipeline, onOpenAsset: { navigator.send(.openAsset($0)) },
+                         onPlay: { navigator.present(.memoryPlayer($0), from: level + 1) }, initialID: initialID)
+        case .activity(let album, let asset):
+            AlbumActivityView(api: api, albumID: album, assetID: asset)
+        case .searchOptions:
+            SearchOptionsView(api: api, mode: store.searchMode, filter: store.searchFilter) { mode, filter in
+                store.applySearchOptions(mode: mode, filter: filter)
+            }
+        case .people: PeopleView(api: api, pipeline: pipeline) { store.setPerson($0); navigator.dismiss(level: level); searchText = "" }
+        case .albums: AlbumsView(api: api, pipeline: pipeline) { store.setAlbum($0); navigator.dismiss(level: level); searchText = "" }
+        case .settings(let route):
+            if let destination = SettingsDestination(rawValue: route.rawValue) {
+                SettingsDestinationView(api: api, destination: destination, pipeline: pipeline, session: session)
+            } else {
+                SettingsView(api: api, pipeline: pipeline, session: session, onSignOut: { store.stop(); Task { await session.signOut() } })
+            }
+        case .more:
+            // A photo opened from More closes it first, then opens in the viewer.
+            MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { navigator.send(.openAsset($0)) }, onFilter: { filter, title in
+                store.setTimeline(filter, title: title); navigator.dismiss(level: level)
+            }, onPlayMemory: { navigator.present(.memoryPlayer($0), from: level + 1) }, onMetadataFilter: { filter, title in
+                store.setMetadataFilter(filter, title: title); searchText = ""; navigator.dismiss(level: level)
+            }, onDeveloped: { title in
+                store.setDeveloped(title: title); searchText = ""; navigator.dismiss(level: level)
+            })
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder private func albumSharing(_ album: Album, _ sharing: AlbumSharing, level: Int) -> some View {
+        switch sharing {
+        case .link: SharedLinkEditor(api: api, album: album)
+        case .people:
+            AlbumMembersView(api: api, album: album, onLeft: {
+                albums.removeAll { $0.id == album.id }; store.clearFilters()
+            })
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { navigator.dismiss(level: level) } } }
+        }
+    }
+
     private func selectPlace(_ place: PlaceCollection) {
-        store.setPlace(id: place.id, assetIDs: place.assetIDs, title: place.title); searchText = ""; screen = nil
+        store.setPlace(id: place.id, assetIDs: place.assetIDs, title: place.title); searchText = ""
     }
-    private func finishViewerNavigation() {
-        guard let focus = pendingPlaceFocus else { return }
-        pendingPlaceFocus = nil
-        openPlaces(focus: focus)
-    }
-    private func requestPhotoNavigation(_ destination: PhotoDestination) {
-        let dismissing = screen != nil
-        pendingPhotoDestination = destination
-        screen = nil
-        if !dismissing { finishPhotoNavigation() }
-    }
-    private func finishPhotoNavigation() {
-        guard screen == nil else { return }
-        guard let destination = pendingPhotoDestination else { refreshSharedFiles(); return }
-        pendingPhotoDestination = nil
-        switch destination {
-        case .viewer(let asset): viewingAlbumID = nil; viewing = asset
-        case .timeline(let asset): searchText = ""; store.showInTimeline(asset)
+
+    /// Hands the navigator what runs once everything over the library has closed: the timeline,
+    /// a filter or the Earth. It keeps the feed, the search text and the Earth's drag, not this
+    /// screen, so the screen model never holds the view.
+    private func connectNavigator() {
+        navigator.perform = { [store = store, weak navigator = model.navigator, searchText = $searchText, placesDrag = $placesDrag] intent in
+            switch intent {
+            case .showInTimeline(let asset): searchText.wrappedValue = ""; store.showInTimeline(asset)
+            case .exploreLocation(let focus):
+                if let navigator { Self.raiseEarth(navigator: navigator, placesDrag: placesDrag, focus: focus) }
+            case .showAlbum(let album): store.setAlbum(album)
+            case .showPerson(let person): store.setPerson(person)
+            case .present, .openAsset, .alert: break
+            }
         }
-    }
-    /// Reads the share inbox off the main actor, then opens Shared files for batches not seen yet
-    /// when nothing else is on screen.
-    private func refreshSharedFiles() {
-        Task {
-            await shareInbox.refresh()
-            presentNewSharedFiles()
-        }
-    }
-    private func presentNewSharedFiles() {
-        let ids = Set(shareInbox.batches.map(\.id))
-        seenShareBatches.formIntersection(ids)
-        guard !ids.subtracting(seenShareBatches).isEmpty, screen == nil, viewing == nil, viewingLocal == nil,
-              pendingPhotoDestination == nil, bulkSelection == nil else { return }
-        seenShareBatches.formUnion(ids)
-        sharedFilesPresented = true
     }
     private func refreshDeviceIndex() {
         guard session.environment.usesDevicePhotos else { return }
@@ -1134,21 +1117,15 @@ struct LibraryView: View {
         Task {
             defer { selectionBusy = false }
             do { try await action(ids); store.selected = []; store.isSelecting = false; await store.refreshAfterMutation() }
-            catch { actionError = error.localizedDescription }
+            catch { navigator.show(.error(error.localizedDescription)) }
         }
     }
-}
-
-private struct BulkSelection: Identifiable {
-    let id = UUID()
-    let assets: [Asset]
-    let local: [LocalPhoto]
 }
 
 private struct SelectionActionsView: View {
     let api: APIClient
     let pipeline: MediaPipeline
-    let selection: BulkSelection
+    let selection: SelectionSnapshot
     let onChanged: () -> Void
     var body: some View {
         if selection.local.isEmpty {

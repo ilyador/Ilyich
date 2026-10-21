@@ -8,7 +8,9 @@ struct MemoryPlaybackView: View {
     let pipeline: MediaPipeline
     let memories: [Memory]
     var initialID: String? = nil
-    let onNavigate: (PhotoDestination) -> Void
+    /// Opens the photo, or shows it in the library's timeline, once the player and the screens
+    /// under it have closed.
+    let onNavigate: (NavigationIntent) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var cursor = MemoryCursor()
@@ -51,8 +53,8 @@ struct MemoryPlaybackView: View {
                         }
                         Spacer(minLength: 12)
                         Menu {
-                            Button("Open photo", systemImage: "arrow.up.right.square") { onNavigate(.viewer(asset)) }
-                            Button("Show in timeline", systemImage: "calendar") { onNavigate(.timeline(asset)) }
+                            Button("Open photo", systemImage: "arrow.up.right.square") { onNavigate(.openAsset(asset)) }
+                            Button("Show in timeline", systemImage: "calendar") { onNavigate(.showInTimeline(asset)) }
                         } label: {
                             Image(systemName: "ellipsis").frame(width: 44, height: 44)
                         }.accessibilityLabel("Memory photo actions")
