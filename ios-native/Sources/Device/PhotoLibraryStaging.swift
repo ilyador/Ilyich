@@ -116,11 +116,7 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
     }
 
     /// The modification date Photos reports for the asset, nil when it has none or is gone.
-    func revision(of localID: String) -> Date? { revisionNow(of: localID) }
-
-    /// The same, read on the calling thread: one fetch by identifier, for the viewer's synchronous
-    /// offline-fallback check until P3 gives it the adapter's revisions.
-    nonisolated func revisionNow(of localID: String) -> Date? {
+    func revision(of localID: String) -> Date? {
         stagingReader.candidates([localID]).first.flatMap(\.modified)
     }
 

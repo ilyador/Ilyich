@@ -94,6 +94,7 @@ final class PhotoKitChangeObserver: NSObject, PHPhotoLibraryChangeObserver, @unc
                     details.inserted = Self.ids(changes.insertedObjects)
                     details.removed = Self.ids(changes.removedObjects)
                     details.changed = Self.ids(changes.changedObjects)
+                    details.metadataOnly = Self.metadataOnly(changes.changedObjects, in: change)
                 } else {
                     details.requiresFullReload = true
                 }
@@ -109,6 +110,20 @@ final class PhotoKitChangeObserver: NSObject, PHPhotoLibraryChangeObserver, @unc
         // matter to whoever reads albums.
         if details == PhotoLibraryChangeDetails() { details.albumsChanged = true }
         onChange(details)
+    }
+
+    /// The changed assets whose photo or video Photos says stayed the same, with how their
+    /// modification date moved. A large burst is not looked into.
+    private static func metadataOnly(_ assets: [PHAsset], in change: PHChange) -> [DeviceAssetID: RevisionStep] {
+        guard assets.count <= ContentRevisions.limit else { return [:] }
+        var steps: [DeviceAssetID: RevisionStep] = [:]
+        for asset in assets {
+            guard let details = change.changeDetails(for: asset), !details.assetContentChanged, !details.objectWasDeleted else { continue }
+            steps[DeviceAssetID(rawValue: asset.localIdentifier)] = RevisionStep(
+                before: details.objectBeforeChanges.modificationDate.map(AssetRevision.init),
+                after: details.objectAfterChanges?.modificationDate.map(AssetRevision.init))
+        }
+        return steps
     }
 
     private static func ids(_ assets: [PHAsset]) -> Set<DeviceAssetID> {

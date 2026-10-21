@@ -743,7 +743,6 @@ struct PhotoGrid: UIViewRepresentable {
     private var check: UIImageView?
     private static let checked = UIImage(systemName: "checkmark.circle.fill")
     private static let unchecked = UIImage(systemName: "circle")
-    private var localMedia: LocalPhotoMedia?
     private var task: Task<Void, Never>?
     private var identity: String?
     private var mediaID: String?
@@ -797,7 +796,7 @@ struct PhotoGrid: UIViewRepresentable {
         // The next bind always sets the image, so it is not cleared here as well; a cross-dissolve
         // still running is dropped, so the next photo shows at once.
         super.prepareForReuse(); photo.layer.removeAllAnimations()
-        task?.cancel(); task = nil; localMedia?.cancel(); localMedia = nil
+        task?.cancel(); task = nil
         identity = nil; mediaID = nil; showsThumbnail = false; waitsForNetwork = false; pending = nil
         displayProbe.reset()
     }
@@ -876,7 +875,6 @@ struct PhotoGrid: UIViewRepresentable {
         displayProbe.abandon()
         if task != nil { task?.cancel(); task = nil; identity = nil }
         if waitsForNetwork { waitsForNetwork = false; identity = nil }
-        if let localMedia, localMedia.loading { localMedia.cancel(); self.localMedia = nil; identity = nil }
     }
     /// Swaps in the next stage of a server photo: nothing, its sketch's average colour, its sketch,
     /// a stored or downloaded thumbnail.
@@ -968,14 +966,25 @@ struct PhotoGrid: UIViewRepresentable {
             let key = "local:\(photo.id)|\(photo.modified?.timeIntervalSince1970 ?? 0)"
             guard key != identity else { return }
             displayProbe.reset()
-            task?.cancel(); localMedia?.cancel(); identity = key; mediaID = key
+            task?.cancel(); identity = key; mediaID = key
             show(nil as UIImage?, thumbnail: false); waitsForNetwork = false; pending = nil
-            let media = LocalPhotoMedia(); localMedia = media
-            media.load(photo, full: false, network: false)
-            observeLocal(media, key: key)
+            let stream = PhotoKitAdapter.shared.media(photo.id, .thumbnail(pixels: 420))
+            task = Task { [weak self] in
+                var shown = false
+                for await event in stream {
+                    guard let self, !Task.isCancelled, self.identity == key else { return }
+                    switch event {
+                    case .image(let image, _): self.show(image, thumbnail: true); shown = true
+                    case .unavailable(let inCloud, _) where !shown:
+                        self.show(UIImage(systemName: inCloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
+                    default: break
+                    }
+                }
+                guard let self, !Task.isCancelled, self.identity == key else { return }
+                self.task = nil
+            }
             return
         }
-        localMedia?.cancel(); localMedia = nil
         let asset = entry?.remote
         guard let asset else {
             task?.cancel(); identity = nil; mediaID = nil; showBadge(nil)
@@ -1028,21 +1037,6 @@ struct PhotoGrid: UIViewRepresentable {
             self.task = nil
             self.waitsForNetwork = true
             if network { self.loadFromNetworkIfWaiting() }
-        }
-    }
-    private func observeLocal(_ media: LocalPhotoMedia, key: String) {
-        guard identity == key else { return }
-        withObservationTracking {
-            if media.image == nil && !media.loading {
-                show(UIImage(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
-            } else {
-                show(media.image, thumbnail: true)
-            }
-        } onChange: { [weak self, weak media] in
-            Task { @MainActor in
-                guard let self, let media, self.identity == key else { return }
-                self.observeLocal(media, key: key)
-            }
         }
     }
     private static func duration(_ milliseconds: Int) -> String {

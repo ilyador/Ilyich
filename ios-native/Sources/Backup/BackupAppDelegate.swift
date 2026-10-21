@@ -6,6 +6,8 @@ import UIKit
         // observer and reconciles any change to Photos an earlier run left unfinished.
         let photos = PhotoKitAdapter.shared
         Task { await photos.start() }
+        // Share folders a killed app left behind; no share can be open this early.
+        Task.detached(priority: .utility) { DeviceShareExporter.sweep() }
         // UI tests run without the phone's photos and backup.
         if AccountEnvironment.current.usesDevicePhotos {
             BackupLifecycle.shared.register()

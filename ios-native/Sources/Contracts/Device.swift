@@ -100,8 +100,18 @@ struct PhotoLibraryChangeDetails: Hashable, Sendable {
     var inserted: Set<DeviceAssetID> = []
     var removed: Set<DeviceAssetID> = []
     var changed: Set<DeviceAssetID> = []
+    /// The changed assets whose photo or video stayed the same, as when favorited, with the
+    /// revision each moved from and to. A changed asset missing here had its content changed, or
+    /// Photos didn't say.
+    var metadataOnly: [DeviceAssetID: RevisionStep] = [:]
     var albumsChanged = false
     var requiresFullReload = false
+}
+
+/// How an asset's modification date moved in one change.
+struct RevisionStep: Hashable, Sendable {
+    let before: AssetRevision?
+    let after: AssetRevision?
 }
 
 /// A change to the Photos library. Deletion names the revision each asset must still have, and

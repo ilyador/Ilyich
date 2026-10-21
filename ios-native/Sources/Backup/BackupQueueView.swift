@@ -1,5 +1,4 @@
 import SwiftUI
-import Photos
 
 struct BackupQueueView: View {
     var showCompleted = false
@@ -64,16 +63,12 @@ private struct BackupQueueRow: View {
             }
         }.disabled(photo == nil)
         .task(id: localID) {
-            guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil).firstObject else {
+            guard let details = await PhotoKitAdapter.shared.details(of: localID) else {
                 filename = "No longer available in Photos"; return
             }
-            photo = LocalPhoto(asset)
-            filename = PHAssetResource.assetResources(for: asset).first(where: { [.photo, .video, .alternatePhoto].contains($0.type) })?.originalFilename ?? photo?.title ?? filename
-            var titles: [String] = []
-            PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album, options: nil).enumerateObjects { album, _, _ in
-                if let title = album.localizedTitle { titles.append(title) }
-            }
-            sourceAlbums = titles.sorted().joined(separator: " · ")
+            photo = details.photo
+            filename = details.filename ?? details.photo.title
+            sourceAlbums = details.albumTitles.sorted().joined(separator: " · ")
         }
     }
 }
