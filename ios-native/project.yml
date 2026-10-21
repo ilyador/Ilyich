@@ -33,6 +33,8 @@ targets:
         product: GoogleCastDynamic
       - package: IlyichKit
         product: IlyichPlatform
+      - package: IlyichKit
+        product: IlyichShareInbox
       - target: ShareExtension
       - target: WidgetExtension
     settings:
@@ -48,13 +50,11 @@ targets:
     sources:
       - path: Extensions/Share
         excludes: [Info.plist]
-      - Sources/Backup/UploadBody.swift
-      - Sources/Backup/SharedInbox.swift
-      - Sources/Backup/PhotoResourceExport.swift
-      - Sources/Backup/BackupReceipt.swift
     dependencies:
       - package: IlyichKit
         product: IlyichPlatform
+      - package: IlyichKit
+        product: IlyichShareInbox
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.alextran.immich.ShareExtension

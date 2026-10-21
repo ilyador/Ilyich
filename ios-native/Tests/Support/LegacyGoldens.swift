@@ -1,5 +1,6 @@
 import Foundation
 import IlyichPlatform
+import IlyichShareInbox
 @testable import Ilyich
 
 /// The values behind the golden fixtures in Tests/Fixtures, built with today's production types.
@@ -148,14 +149,34 @@ enum LegacyGoldens {
         URL(fileURLWithPath: "\(container)/ShareInbox/\(batchID.uuidString)/\(name)")
     }
 
-    /// A plain photo, a Live Photo, and a RAW file with its XMP sidecar.
-    static let manifest = SharedBatch(id: batchID, createdAt: Dates.manifest, attachments: [
-        SharedAttachment(original: UploadFile(url: sharedFile(sharedFiles[0]), filename: "IMG_2001.JPG", contentType: "image/jpeg")),
-        SharedAttachment(original: UploadFile(url: sharedFile(sharedFiles[1]), filename: "IMG_2002.HEIC", contentType: "image/heic"),
-                         motion: UploadFile(url: sharedFile(sharedFiles[2]), filename: "IMG_2002.MOV", contentType: "video/quicktime")),
-        SharedAttachment(original: UploadFile(url: sharedFile(sharedFiles[3]), filename: "DSC_0042.NEF", contentType: "image/x-nikon-nef"),
-                         sidecar: UploadFile(url: sharedFile(sharedFiles[4]), filename: "DSC_0042.xmp", contentType: "application/rdf+xml")),
-    ])
+    /// A plain photo, a Live Photo, and a RAW file with its XMP sidecar, as a build before W3 wrote
+    /// their version 1 manifest on a phone whose container is `container`.
+    static func legacyManifest(container: String = container) -> Legacy.SharedBatch {
+        func file(_ index: Int, _ filename: String, _ type: String) -> Legacy.UploadFile {
+            Legacy.UploadFile(url: sharedFile(sharedFiles[index], container: container), filename: filename, contentType: type)
+        }
+        return Legacy.SharedBatch(id: batchID, createdAt: Dates.manifest, attachments: [
+            Legacy.SharedAttachment(original: file(0, "IMG_2001.JPG", "image/jpeg")),
+            Legacy.SharedAttachment(original: file(1, "IMG_2002.HEIC", "image/heic"), motion: file(2, "IMG_2002.MOV", "video/quicktime")),
+            Legacy.SharedAttachment(original: file(3, "DSC_0042.NEF", "image/x-nikon-nef"), sidecar: file(4, "DSC_0042.xmp", "application/rdf+xml")),
+        ])
+    }
+    static let manifest = legacyManifest()
+
+    /// The same batch's folder on that phone.
+    static let sharedFolder = URL(fileURLWithPath: "\(container)/ShareInbox/\(batchID.uuidString)", isDirectory: true)
+
+    /// The same batch as today's types hold it, which the version 2 manifest fixture encodes.
+    static let manifestV2: SharedBatch = {
+        func file(_ index: Int, _ filename: String, _ type: String) -> SharedFile {
+            SharedFile(name: sharedFiles[index], filename: filename, contentType: type, folder: sharedFolder)
+        }
+        return SharedBatch(id: batchID, createdAt: Dates.manifest, attachments: [
+            SharedAttachment(original: file(0, "IMG_2001.JPG", "image/jpeg")),
+            SharedAttachment(original: file(1, "IMG_2002.HEIC", "image/heic"), motion: file(2, "IMG_2002.MOV", "video/quicktime")),
+            SharedAttachment(original: file(3, "DSC_0042.NEF", "image/x-nikon-nef"), sidecar: file(4, "DSC_0042.xmp", "application/rdf+xml")),
+        ])
+    }()
 
     /// The first attachment's SHA-1, as ShareInboxStore computes it before uploading.
     static let sharedChecksum = "3Hx2v0Vv7mbuIQ0lU2T8E6xgBNs="

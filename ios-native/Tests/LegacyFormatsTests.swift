@@ -1,4 +1,5 @@
 import IlyichPlatform
+import IlyichShareInbox
 import UIKit
 import XCTest
 @testable import Ilyich
@@ -13,7 +14,7 @@ final class LegacyFormatsTests: XCTestCase {
 
     func testEveryFixtureDecodes() throws {
         let files = try FixtureLoader.files(in: "")
-        XCTAssertEqual(files.count, 27, "Every fixture reached the test bundle.")
+        XCTAssertEqual(files.count, 28, "Every fixture reached the test bundle.")
         for path in files {
             let data = try FixtureLoader.data(path)
             let name = (path as NSString).lastPathComponent
@@ -24,6 +25,7 @@ final class LegacyFormatsTests: XCTestCase {
                 _ = try JSONDecoder().decode(OutcomeRecord.self, from: data)
             case _ where name.hasPrefix("descriptor-"): _ = try Legacy.decoder().decode(Legacy.Descriptor.self, from: data)
             case "share/manifest-v1.json": _ = try Legacy.decoder().decode(Legacy.SharedBatch.self, from: data)
+            case "share/manifest-v2.json": _ = try ShareManifest.decode(data, batch: G.batchID, folder: G.sharedFolder)
             case _ where path.hasPrefix("widget/") && name.hasSuffix("_metadata.json"): _ = try Legacy.decoder().decode(Legacy.WidgetMetadata.self, from: data)
             case _ where path.hasPrefix("widget/") && name.hasSuffix(".png"): XCTAssertNotNil(UIImage(data: data), path)
             case "widget/flutter/defaults.json": _ = try JSONDecoder().decode([String: String].self, from: data)
@@ -96,6 +98,8 @@ final class LegacyFormatsTests: XCTestCase {
 
         let manifest = try FixtureLoader.decode(Legacy.SharedBatch.self, from: "share/manifest-v1.json")
         XCTAssertEqual(bits(manifest.createdAt), G.Bits.manifest)
+        let manifestV2 = try ShareManifest.decode(FixtureLoader.data("share/manifest-v2.json"), batch: G.batchID, folder: G.sharedFolder)
+        XCTAssertEqual(bits(manifestV2.createdAt), G.Bits.manifest)
         let fingerprints = try FixtureLoader.decode([String: Legacy.Fingerprint].self, from: "caches/" + Legacy.fingerprintsPath(scope: G.account.cacheScope))
         XCTAssertEqual(bits(fingerprints[G.l4]?.modified), G.Bits.l4)
         XCTAssertEqual(bits(fingerprints[G.l5]?.modified), G.Bits.l5)
@@ -140,7 +144,9 @@ final class LegacyFormatsTests: XCTestCase {
             ("backup/descriptor-backup.json", try encoder.encode(G.backupDescriptor), []),
             ("share/descriptor-share-private-var.json", try encoder.encode(G.shareDescriptor(container: G.container)), []),
             ("share/descriptor-share-var.json", try encoder.encode(G.shareDescriptor(container: G.varContainer)), []),
+            // Builds since W3 write version 2 manifests; the verbatim mirror stands in for the version 1 writer.
             ("share/manifest-v1.json", try encoder.encode(G.manifest), []),
+            ("share/manifest-v2.json", try ShareManifest.encode(G.manifestV2), []),
             ("session/network-config-v1.json", try encoder.encode(G.networkConfiguration.validated()), []),
             ("session/saved-session-v1.json", try encoder.encode(G.credential), []),
             // The widget's writer is compiled only into the Swift 5 widget extension; its verbatim mirror stands in.
@@ -152,6 +158,9 @@ final class LegacyFormatsTests: XCTestCase {
             XCTAssertEqual(try FixtureLoader.canonicalJSON(entry.produced, unorderedArrays: entry.sets),
                            try FixtureLoader.canonicalJSON(FixtureLoader.data(entry.path), unorderedArrays: entry.sets), entry.path)
         }
+        // A version 2 manifest is written with sorted keys, so the fixture is its exact bytes.
+        XCTAssertEqual(String(decoding: try ShareManifest.encode(G.manifestV2), as: UTF8.self),
+                       String(decoding: try FixtureLoader.data("share/manifest-v2.json"), as: UTF8.self))
         // What JSONEncoder does to URLs: absolute strings with escaped slashes.
         let descriptor = String(decoding: try FixtureLoader.data("backup/descriptor-backup.json"), as: UTF8.self)
         XCTAssertTrue(descriptor.contains(#""receipt":"file:\/\/\/private\/var\/mobile\/Containers\/Shared\/AppGroup\/"#), descriptor)
@@ -222,9 +231,35 @@ final class LegacyFormatsTests: XCTestCase {
         XCTAssertEqual(manifest.attachments[2].sidecar?.filename, "DSC_0042.xmp")
         XCTAssertEqual(manifest.attachments.compactMap { AppGroupLayout.relativePath(of: $0.original.url) },
                        [0, 1, 3].map { "ShareInbox/\(G.batchID.uuidString)/\(G.sharedFiles[$0])" })
-        // The app reads it with today's type.
-        let production = try JSONDecoder().decode(SharedBatch.self, from: FixtureLoader.data("share/manifest-v1.json"))
+        // The app reads it with today's reader, into the batch the version 2 fixture holds.
+        let production = try ShareManifest.decode(FixtureLoader.data("share/manifest-v1.json"), batch: G.batchID, folder: G.sharedFolder)
         XCTAssertEqual(production.attachments.map(\.id), [G.sharedFiles[0], G.sharedFiles[1], G.sharedFiles[3]])
+        XCTAssertEqual(production, G.manifestV2)
+        XCTAssertEqual(production.attachments.flatMap(\.files).map(\.url.path),
+                       manifest.attachments.flatMap { [$0.original, $0.motion, $0.sidecar].compactMap { $0?.url.path } },
+                       "On the phone that wrote it, every file resolves to the path it recorded.")
+    }
+
+    func testShareManifestV2() throws {
+        let data = try FixtureLoader.data("share/manifest-v2.json")
+        XCTAssertEqual(try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])["v"] as? Int, 2)
+        XCTAssertEqual(try ShareManifest.decode(data, batch: G.batchID, folder: G.sharedFolder), G.manifestV2)
+        // Files are found by name: the URLs a version 2 manifest also records are ignored, so the
+        // batch survives a moved container.
+        let moved = URL(fileURLWithPath: "/private/var/mobile/Containers/Shared/AppGroup/11111111-2222-4333-8444-555555555555/ShareInbox/\(G.batchID.uuidString)",
+                        isDirectory: true)
+        XCTAssertEqual(try ShareManifest.decode(data, batch: G.batchID, folder: moved).attachments.first?.original.url.path,
+                       moved.path + "/" + G.sharedFiles[0])
+        // A build before W3 reads it as version 1, so a rollback keeps every shared file.
+        let old = try Legacy.decoder().decode(Legacy.SharedBatch.self, from: data)
+        let v1 = try FixtureLoader.decode(Legacy.SharedBatch.self, from: "share/manifest-v1.json")
+        XCTAssertEqual(old.id, v1.id)
+        XCTAssertEqual(bits(old.createdAt), bits(v1.createdAt))
+        func files(_ batch: Legacy.SharedBatch) -> [[String?]] {
+            batch.attachments.map { [$0.original, $0.motion, $0.sidecar].map { $0.map { "\($0.url.absoluteString) \($0.filename) \($0.contentType)" } } }
+        }
+        XCTAssertEqual(files(old), files(v1))
+        XCTAssertThrowsError(try ShareManifest.decode(data, batch: UUID(), folder: G.sharedFolder), "A manifest belongs to its own folder.")
     }
 
     func testWidgetCacheV1AndFlutterWidgetKeys() throws {

@@ -284,7 +284,7 @@ struct LibraryView: View {
             do {
                 switch link {
                 case .sharedFiles:
-                    shareInbox.refresh()
+                    await shareInbox.refresh()
                     seenShareBatches.formUnion(shareInbox.batches.map(\.id))
                     sharedFilesPresented = true
                 case .asset(let id, let albumID):
@@ -925,8 +925,15 @@ struct LibraryView: View {
         case .timeline(let asset): searchText = ""; store.showInTimeline(asset)
         }
     }
+    /// Reads the share inbox off the main actor, then opens Shared files for batches not seen yet
+    /// when nothing else is on screen.
     private func refreshSharedFiles() {
-        shareInbox.refresh()
+        Task {
+            await shareInbox.refresh()
+            presentNewSharedFiles()
+        }
+    }
+    private func presentNewSharedFiles() {
         let ids = Set(shareInbox.batches.map(\.id))
         seenShareBatches.formIntersection(ids)
         guard !ids.subtracting(seenShareBatches).isEmpty, screen == nil, viewing == nil, viewingLocal == nil,

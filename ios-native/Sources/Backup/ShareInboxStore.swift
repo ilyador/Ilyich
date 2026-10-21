@@ -2,10 +2,14 @@ import Foundation
 import Observation
 import CryptoKit
 import IlyichPlatform
+import IlyichShareInbox
 
 @MainActor @Observable final class ShareInboxStore {
     static let shared = ShareInboxStore()
+    /// Batches ready to upload, oldest first.
     private(set) var batches: [SharedBatch] = []
+    /// Batches whose manifest or files can't be used. They stay on disk and out of the list.
+    private(set) var unreadableBatches = 0
     private(set) var isRunning = false
     private(set) var currentID: String?
     private(set) var progress: Double?
@@ -15,10 +19,24 @@ import IlyichPlatform
     private var worker: Task<Void, Never>?
     private var stopping: Task<Void, Never>?
     private var generation = UUID()
+    @ObservationIgnored private var loads = 0
+    @ObservationIgnored private var inbox: ShareInboxRepository?
 
-    func refresh() {
-        do { batches = try SharedInbox.load() }
-        catch { self.error = "Shared files couldn’t be read: \(error.localizedDescription)" }
+    init(repository: ShareInboxRepository? = nil) { inbox = repository }
+
+    /// Reads the inbox off the main actor. Only the latest of overlapping reads is kept.
+    func refresh() async {
+        loads += 1
+        let load = loads
+        do {
+            let states = try await repository().load()
+            guard load == loads else { return }
+            batches = states.compactMap(\.batch)
+            unreadableBatches = states.count - batches.count
+        } catch {
+            guard load == loads else { return }
+            self.error = "Shared files couldn’t be read: \(error.localizedDescription)"
+        }
     }
 
     func cancel() {
@@ -31,7 +49,7 @@ import IlyichPlatform
             await activeWorker?.value
             worker = nil; stopping = nil
             isRunning = false; currentID = nil; progress = nil
-            refresh()
+            await refresh()
         }
     }
 
@@ -39,8 +57,11 @@ import IlyichPlatform
 
     func discard(_ batch: SharedBatch) {
         guard !isRunning, stopping == nil else { return }
-        do { try SharedInbox.remove(batch.id); refresh() }
-        catch { self.error = error.localizedDescription }
+        Task {
+            guard !isRunning, stopping == nil else { return }
+            do { try await repository().remove(batch.id); await refresh() }
+            catch { self.error = error.localizedDescription }
+        }
     }
 
     func upload(selected: Set<String>, api: APIClient) {
@@ -54,9 +75,6 @@ import IlyichPlatform
         worker = Task {
             var notificationCompleted: [UUID: Int] = [:]
             var notificationsStarted = false
-            defer {
-                if generation == runID { isRunning = false; worker = nil; currentID = nil; progress = nil; refresh() }
-            }
             do {
                 guard let saved = try KeychainCredentialStore().load(), saved.server == api.baseURL, saved.userID == api.userID else {
                     throw BackupError.message("Sign in before uploading these shared files.")
@@ -75,12 +93,14 @@ import IlyichPlatform
                         fields["fileModifiedAt"] = (dates.contentModificationDate ?? Date()).ISO8601Format()
                         if let motion = item.motion {
                             var hidden = fields; hidden["visibility"] = "hidden"
-                            fields["livePhotoVideoId"] = try await transfer(motion, sidecar: nil, fields: hidden, api: api, saved: saved, runID: runID)
+                            fields["livePhotoVideoId"] = try await transfer(UploadFile(motion), sidecar: nil, fields: hidden, api: api, saved: saved, runID: runID)
                         }
-                        _ = try await transfer(item.original, sidecar: item.sidecar, fields: fields, api: api, saved: saved, runID: runID)
+                        _ = try await transfer(UploadFile(item.original), sidecar: item.sidecar.map(UploadFile.init), fields: fields,
+                                               api: api, saved: saved, runID: runID)
                         try checkSession(saved, runID: runID)
-                        try consume(item, batchID: batchID)
-                        completed += 1; refresh()
+                        try await repository().consume(item.id, from: batchID)
+                        completed += 1
+                        await refresh()
                         notificationCompleted[batchID, default: 0] += 1
                     } catch is CancellationError { throw CancellationError() }
                     // An ended session or a proxy's refusal stops every upload, not only this one.
@@ -101,12 +121,32 @@ import IlyichPlatform
                     if Task.isCancelled || generation != runID { TransferNotifications.cancel(id: batchID) }
                 }
             }
+            guard generation == runID else { return }
+            await refresh()
+            guard generation == runID else { return }
+            isRunning = false; worker = nil; currentID = nil; progress = nil
         }
     }
 
     func refreshProgress() async {
         guard isRunning, let value = await BackgroundUploads.sharing.progressSnapshot(), value.expected > 0 else { return }
         progress = min(1, Double(value.sent) / Double(value.expected))
+    }
+
+    /// The share upload identity. It names the attempt's <identity>.multipart and .receipt files
+    /// in the batch folder, the multipart boundary and the background task, so it must not
+    /// change for a file already being uploaded: the account digest, the file's absolute path in
+    /// this container, its checksum, its sidecar's checksum and the Live Photo video ID, hashed.
+    nonisolated static func uploadIdentity(scope: String, file: URL, checksum: String, sidecarChecksum: String, livePhotoVideoID: String) -> String {
+        let identity = [scope, file.path, checksum, sidecarChecksum, livePhotoVideoID].joined(separator: "|")
+        return SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func repository() throws -> ShareInboxRepository {
+        if let inbox { return inbox }
+        let repository = try ShareInboxRepository.appGroup()
+        inbox = repository
+        return repository
     }
 
     private func checkSession(_ expected: StoredCredential, runID: UUID) throws {
@@ -121,8 +161,8 @@ import IlyichPlatform
                           saved: StoredCredential, runID: UUID) async throws -> String {
         let checksum = try await UploadBody.work { try UploadBody.checksum(file.url) }
         let sidecarChecksum = try await UploadBody.work { try sidecar.map { try UploadBody.checksum($0.url) } ?? "" }
-        let identity = [saved.scope, file.url.path, checksum, sidecarChecksum, fields["livePhotoVideoId"] ?? ""].joined(separator: "|")
-        let id = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        let id = Self.uploadIdentity(scope: saved.scope, file: file.url, checksum: checksum, sidecarChecksum: sidecarChecksum,
+                                     livePhotoVideoID: fields["livePhotoVideoId"] ?? "")
         let folder = file.url.deletingLastPathComponent()
         let body = folder.appendingPathComponent(id + ".multipart")
         let receipt = folder.appendingPathComponent(id + ".receipt")
@@ -164,16 +204,11 @@ import IlyichPlatform
         }
         return response.id
     }
+}
 
-    private func consume(_ item: SharedAttachment, batchID: UUID) throws {
-        guard var batch = try SharedInbox.load().first(where: { $0.id == batchID }) else { throw CocoaError(.fileNoSuchFile) }
-        batch.attachments.removeAll { $0.id == item.id }
-        if batch.attachments.isEmpty { try SharedInbox.remove(batch.id) }
-        else {
-            try SharedInbox.save(batch)
-            for file in [item.original, item.motion, item.sidecar].compactMap({ $0 }) { try? FileManager.default.removeItem(at: file.url) }
-        }
-    }
+extension UploadFile {
+    /// A shared file as the multipart writer takes it.
+    init(_ file: SharedFile) { self.init(url: file.url, filename: file.filename, contentType: file.contentType) }
 }
 
 private extension ServerFailure {
