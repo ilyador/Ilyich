@@ -1,7 +1,6 @@
 import CryptoKit
 import Foundation
 import Observation
-@preconcurrency import Photos
 
 /// Only backup-selected albums join the main timeline, matching the incumbent
 /// client. Discovery and cloud-ID lookup run off the UI thread; hashing is serial,
@@ -42,13 +41,14 @@ import Observation
         worker?.cancel(); generation = UUID()
         guard let source else { return }
         let current = generation
-        guard [.authorized, .limited].contains(DevicePhotos.authorization), !source.preferences.includedAlbums.isEmpty else {
+        guard PhotoKitAdapter.canRead(PhotoKitAdapter.shared.authorization), !source.preferences.includedAlbums.isEmpty else {
             snapshot = MergedTimeline(); revision += 1; isIndexing = false; return
         }
         isIndexing = true
         worker = Task.detached(priority: .utility) { [weak self] in
             do {
-                let locals = try DeviceTimelineSource.read(source.preferences)
+                let locals = try await PhotoKitAdapter.shared.timelineItems(included: source.preferences.includedAlbums,
+                                                                            excluded: source.preferences.excludedAlbums)
                 try Task.checkCancellation()
                 var remotes: [LocalAssetMatch] = []
                 if let entities = source.entities, try await entities.isComplete() {
@@ -94,9 +94,9 @@ import Observation
                     let photo = local.photo
                     if cached[photo.id]?.modified == photo.modified { continue }
                     do {
-                        let checksum = try await DevicePhotos.localFingerprint(id: photo.id)
+                        let checksum = try await PhotoKitAdapter.shared.fingerprint(of: photo.id)
                         try Task.checkCancellation()
-                        guard await DevicePhotos.modificationDate(for: photo.id) == photo.modified else { continue }
+                        guard await PhotoKitAdapter.shared.revision(of: photo.id) == photo.modified else { continue }
                         cached[photo.id] = .init(modified: photo.modified, checksum: checksum)
                         fingerprintsSinceSave += 1
                         if fingerprintsSinceSave >= 25 {
@@ -135,31 +135,6 @@ enum LocalIdentityMatch {
         guard remote.adjustmentTime == nil, let localDate = photo.date, let remoteDate = remote.createdAt else { return false }
         return Int64(localDate.timeIntervalSince1970) == Int64(remoteDate.timeIntervalSince1970)
             && photo.latitude == remote.latitude && photo.longitude == remote.longitude
-    }
-}
-
-private struct DeviceTimelineItem: Sendable {
-    let photo: LocalPhoto
-    let cloudID: String?
-    let unadjusted: Bool
-}
-private enum DeviceTimelineSource {
-    static func read(_ preferences: BackupPreferences) throws -> [DeviceTimelineItem] {
-        let ids = DevicePhotos.candidates(included: preferences.includedAlbums, excluded: preferences.excludedAlbums)
-        var result: [DeviceTimelineItem] = []
-        for start in stride(from: 0, to: ids.count, by: 250) {
-            try Task.checkCancellation()
-            let batch = Array(ids[start..<min(start + 250, ids.count)])
-            let clouds = PHPhotoLibrary.shared().cloudIdentifierMappings(forLocalIdentifiers: batch)
-            let assets = PHAsset.fetchAssets(withLocalIdentifiers: batch, options: nil)
-            for index in 0..<assets.count {
-                let asset = assets.object(at: index)
-                let resources = PHAssetResource.assetResources(for: asset)
-                let unadjusted = !resources.contains { [.adjustmentData, .adjustmentBasePhoto, .adjustmentBaseVideo, .fullSizePhoto, .fullSizeVideo, .alternatePhoto].contains($0.type) }
-                result.append(.init(photo: LocalPhoto(asset), cloudID: (try? clouds[asset.localIdentifier]?.get())?.stringValue, unadjusted: unadjusted))
-            }
-        }
-        return result
     }
 }
 

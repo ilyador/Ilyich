@@ -41,7 +41,7 @@ final class ResourceShapeTests: XCTestCase {
     }
 
     /// Only single originals and Live Photos can ever be removed after backup, and never an asset
-    /// today's DevicePhotos.canRemove would keep.
+    /// the rule before P2 (DevicePhotos.canRemove) would keep.
     func testRemovableShapesAreNoWiderThanToday() {
         func today(_ types: [PHAssetResourceType]) -> Bool {
             types.filter { $0 == .photo || $0 == .video }.count == 1 && types.allSatisfy { [.photo, .video, .pairedVideo].contains($0) }

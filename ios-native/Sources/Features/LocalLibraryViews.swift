@@ -119,7 +119,7 @@ struct FreeUpSpaceView: View {
     @State private var cutoff = Date()
     @State private var albums: [DeviceAlbum] = []
     @State private var filtersReady = false
-    @State private var permission = DevicePhotos.authorization
+    @State private var permission = PhotoKitAdapter.shared.authorization
     @State private var photos: [LocalPhoto] = []
     @State private var selection = Set<String>()
     @State private var loading = false
@@ -146,7 +146,7 @@ struct FreeUpSpaceView: View {
                 VStack(spacing: 12) {
                     Text("Allow Photos access to check originals stored on this phone.").foregroundStyle(.secondary)
                     if permission == .notDetermined {
-                        Button("Choose Photos access") { Task { permission = await PhotoKitAdapter.shared.requestAccess().status; initializeFilters() } }
+                        Button("Choose Photos access") { Task { permission = await PhotoKitAdapter.shared.requestAccess().status; await initializeFilters() } }
                     } else { Button("Open Settings") { openPhotoSettings() } }
                 }.padding(20)
             }
@@ -204,11 +204,11 @@ struct FreeUpSpaceView: View {
         }
         .task {
             guard !filtersReady else { return }
-            initializeFilters()
+            await initializeFilters()
             cutoff = Calendar.current.startOfDay(for: Calendar.current.date(byAdding: .day, value: -(cutoffDays < 0 ? 30 : cutoffDays), to: Date()) ?? Date())
             filtersReady = true
         }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { initializeFilters() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await initializeFilters() } } }
         .onChange(of: policy) { _, _ in invalidate() }
         .onChange(of: keepAlbumData) { _, _ in invalidate() }
         .onDisappear { operation?.cancel(); operation = nil }
@@ -223,7 +223,7 @@ struct FreeUpSpaceView: View {
         loading = true; defer { loading = false }
         selection = []; photos = []; checked = false; message = nil; scan = UUID()
         do {
-            guard [.authorized, .limited].contains(DevicePhotos.authorization) else { throw BackupError.message("Allow Photos access before checking local items.") }
+            guard PhotoKitAdapter.canRead(PhotoKitAdapter.shared.authorization) else { throw BackupError.message("Allow Photos access before checking local items.") }
             cutoffDays = max(0, Calendar.current.dateComponents([.day], from: cutoff, to: Date()).day ?? 0)
             let ids = try await BackupCoordinator.shared.verifiedLocalDeletionCandidates()
             try Task.checkCancellation()
@@ -278,8 +278,8 @@ struct FreeUpSpaceView: View {
     }
     private static let libraryChanged = BackupError.message("Your photo library changed. Nothing was removed. Check again before continuing.")
     private func invalidate() { operation?.cancel(); selection = []; photos = []; checked = false; message = nil }
-    private func initializeFilters() {
-        permission = DevicePhotos.authorization; albums = DevicePhotos.albums()
+    private func initializeFilters() async {
+        permission = PhotoKitAdapter.shared.authorization; albums = await PhotoKitAdapter.shared.albums()
         if !defaultsInitialized, [.authorized, .limited].contains(permission) {
             let messaging = ["whatsapp", "telegram", "signal", "messenger", "viber", "wechat", "line"]
             let defaults = albums.filter { album in messaging.contains { album.title.localizedCaseInsensitiveContains($0) } }.map(\.id)

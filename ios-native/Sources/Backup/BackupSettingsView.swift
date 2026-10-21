@@ -81,7 +81,7 @@ struct BackupSettingsView: View {
             }
         }
         .onChange(of: backup.preferences) { _, _ in backup.savePreferences() }
-        .onChange(of: scenePhase) { _, value in if value == .active { backup.refreshLibrary() } }
+        .onChange(of: scenePhase) { _, value in if value == .active { Task { await backup.refreshLibrary() } } }
     }
 
     private func selection(for id: String) -> Int {

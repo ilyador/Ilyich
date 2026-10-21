@@ -44,7 +44,7 @@ actor PhotoKitAdapter {
     /// The process's adapter, as iOS gives the app one Photos library.
     static let shared: PhotoKitAdapter = {
         let photos = SystemPhotoKit()
-        return PhotoKitAdapter(library: photos, assets: photos, journal: DeviceDatabase(url: DeviceDatabase.standardURL))
+        return PhotoKitAdapter(library: photos, assets: photos, journal: DeviceDatabase(url: DeviceDatabase.standardURL), staging: photos)
     }()
 
     private nonisolated let queue = DispatchSerialQueue(label: "app.ilyich.photokit", qos: .userInitiated)
@@ -52,6 +52,8 @@ actor PhotoKitAdapter {
 
     private nonisolated let library: any PhotoLibraryPerforming
     private nonisolated let assets: any AssetFetching
+    /// What backup staging and discovery read (PhotoLibraryStaging.swift).
+    nonisolated let stagingReader: any PhotoStagingReading
     private nonisolated let journal: DeviceDatabase
     private nonisolated let window: Duration
     private nonisolated let sleep: @Sendable (Duration) async throws -> Void
@@ -66,6 +68,11 @@ actor PhotoKitAdapter {
     /// person never answers a second prompt for the same photos.
     private var removing: Set<DeviceAssetID> = []
     private var reconciled = false
+    /// The album list as last read, with the album generation it was read at
+    /// (PhotoLibraryStaging.swift).
+    var albumCache: (generation: UInt64, albums: [DeviceAlbum])?
+    /// Moves whenever Photos reports a change that may add, remove, rename or resize an album.
+    nonisolated let albumGeneration = Mutex<UInt64>(0)
 
     private struct Observation {
         /// Generation 0 until access is first read.
@@ -78,11 +85,13 @@ actor PhotoKitAdapter {
 
     /// `sleep` waits out the coalescing window; tests pass a clock of their own.
     init(library: any PhotoLibraryPerforming, assets: any AssetFetching, journal: DeviceDatabase,
+         staging: any PhotoStagingReading = SystemPhotoKit(),
          coalescing window: Duration = .milliseconds(250),
          sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.library = library
         self.assets = assets
         self.journal = journal
+        self.stagingReader = staging
         self.window = window
         self.sleep = sleep
     }
@@ -98,6 +107,12 @@ actor PhotoKitAdapter {
         refreshAccess()
         await reconcileInterrupted()
     }
+
+    /// Photos access as Photos reports it now. Cheap, and safe on any thread.
+    nonisolated var authorization: PHAuthorizationStatus { library.authorizationStatus() }
+
+    /// Whether the change observer runs, which an album list read now can rely on to go stale.
+    var isObserving: Bool { observing }
 
     /// Reads Photos access again. The first reading only learns it, as generation 1. A change
     /// after that moves the generation and reaches subscribers as a change that needs a full
@@ -151,6 +166,10 @@ actor PhotoKitAdapter {
     /// Adds what Photos reported to the burst subscribers will hear, which goes out one window
     /// after the burst began. Photos calls this on its own queue.
     private nonisolated func ingest(_ details: PhotoLibraryChangeDetails) {
+        // Adding or removing photos changes album counts; an edit or favorite alone needn't.
+        if details.albumsChanged || details.requiresFullReload || !details.inserted.isEmpty || !details.removed.isEmpty {
+            albumGeneration.withLock { $0 &+= 1 }
+        }
         let starts = observation.withLock { state -> Bool in
             var change = state.pending ?? DeviceLibraryChange(access: state.access)
             change.merge(details)
