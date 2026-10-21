@@ -121,7 +121,7 @@ import XCTest
         store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash")
         XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility, "And the trash.")
         store.setTimeline(TimelineFilter(visibility: .archive), title: "Archive")
-        XCTAssertEqual(store.searchFilter.visibility, StringFilter(eq: "archive"))
+        XCTAssertEqual(store.searchFilter.visibility, StringFilter(in: ["archive"]))
         store.clearFilters()
         XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility)
         store.stop()

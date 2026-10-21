@@ -40,3 +40,20 @@ struct FeedSnapshot: Hashable, Sendable {
     /// The server's total, when it gave one.
     let totalCount: Int?
 }
+
+/// Feeds by month: the index or the server timeline, as the plan says.
+protocol TimelineSource: Sendable {
+    func plan(_ query: LibraryQuery) async throws -> QueryPlan
+    /// The query's months and their counts, newest first unless it asks otherwise.
+    func summary(_ query: LibraryQuery) async throws -> [TimeBucket]
+    /// One month's photos, by the time taken (or added) and then ID.
+    func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset]
+    /// Each month's places, counted by the index; none without it.
+    func monthPlaces(_ query: LibraryQuery) async throws -> [MonthPlaceCount]
+}
+
+/// Search results by page, with only the photos that belong to the request.
+protocol SearchSource: Sendable {
+    func smart(_ request: ServerSearchRequest, cursor: String?) async throws -> SearchResponse
+    func metadata(_ request: ServerSearchRequest, cursor: String?, size: Int) async throws -> SearchResponse
+}

@@ -112,7 +112,7 @@ actor APIClient {
             if let entityStore { try? await entityStore.persistCachedServerFeatures(features) }
             return features
         } catch {
-            guard canReadOffline(error), let entityStore, try await entityStore.isComplete() else { throw error }
+            guard let entityStore = try await OfflineFallback.index(after: error, entityStore, requires: .complete) else { throw error }
             let saved: ServerFeatures?
             if let cachedServerFeatures {
                 saved = cachedServerFeatures
@@ -150,24 +150,29 @@ actor APIClient {
         }
     }
     func syncStatistics() async throws -> EntityStoreStatistics? { try await entityStore?.statistics() }
-    private func canReadOffline(_ error: any Error) -> Bool {
-        TransportFailure.isDefinite(error) && !Task.isCancelled
-    }
     func asset(id: String) async throws -> Asset {
         do { return try await request(.get, path: "assets/\(id)") }
-        catch { if canReadOffline(error), let cached = try await entityStore?.asset(id: id) { return cached }; throw error }
+        catch {
+            // A single asset is read from the index whatever its state, as it always was.
+            guard OfflineFallback.allows(error), let cached = try await entityStore?.asset(id: id) else { throw error }
+            return cached
+        }
     }
     func assetStatistics() async throws -> AssetStatistics { try await request(.get, path: "assets/statistics") }
     func search(_ query: SearchQuery) async throws -> SearchResponse { try await request(.post, path: "search/smart", body: query) }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { try await request(.post, path: "search/metadata", body: query) }
     func albums() async throws -> [Album] {
         do { return try await request(.get, path: "albums") }
-        catch { if canReadOffline(error), let store = entityStore, try await store.isReadable() { return try await store.albums() }; throw error }
+        catch {
+            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .readable) else { throw error }
+            return try await store.albums()
+        }
     }
     func album(id: String) async throws -> Album {
         do { return try await request(.get, path: "albums/\(id)") }
         catch {
-            guard canReadOffline(error), let store = entityStore, try await store.isReadable(), let cached = try await store.album(id: id) else { throw error }
+            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .readable),
+                  let cached = try await store.album(id: id) else { throw error }
             return cached
         }
     }
@@ -177,7 +182,7 @@ actor APIClient {
         if !name.isEmpty { query.append(.init(name: "name", value: name)) }
         do { return try await request(.get, path: "people", query: query) }
         catch {
-            guard canReadOffline(error), let store = entityStore, try await store.isComplete() else { throw error }
+            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .complete) else { throw error }
             let all = try await store.people().filter { name.isEmpty || $0.name.localizedStandardContains(name) }
             let visible = all.filter { $0.isHidden != true }
             let safeSize = min(max(size, 1), 1_000), start = min(max(page - 1, 0), visible.count) * min(max(size, 1), 1_000)
@@ -187,15 +192,16 @@ actor APIClient {
     func person(id: String) async throws -> Person {
         do { return try await request(.get, path: "people/\(id)") }
         catch {
-            guard canReadOffline(error), let store = entityStore, try await store.isComplete(), let cached = try await store.person(id: id) else { throw error }
+            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .complete),
+                  let cached = try await store.person(id: id) else { throw error }
             return cached
         }
     }
     func mapMarkers(_ query: MapMarkerQuery = .init()) async throws -> [MapMarker] {
         do { return try await request(.get, path: "map/markers", query: query.queryItems) }
         catch {
-            guard canReadOffline(error), let entityStore, try await entityStore.isReadable() else { throw error }
-            return try await entityStore.mapMarkers(query)
+            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .readable) else { throw error }
+            return try await store.mapMarkers(query)
         }
     }
     func updateFavorite(assetID: String, value: Bool) async throws -> Asset {
@@ -228,14 +234,17 @@ actor APIClient {
             return try await request(.get, path: "memories", query: [.init(name: "for", value: day)])
         }
         catch {
-            guard canReadOffline(error), let store = entityStore, try await store.isComplete() else { throw error }
+            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .complete) else { throw error }
             return try await store.memories(onCivilDate: day)
         }
     }
     func partners(direction: String = "shared-with") async throws -> [Partner] {
         guard ["shared-with", "shared-by"].contains(direction) else { throw APIError.invalidResponse("Unsupported partner direction.") }
         do { return try await request(.get, path: "partners", query: [.init(name: "direction", value: direction)]) }
-        catch { if canReadOffline(error), let store = entityStore, try await store.isComplete() { return try await store.partners(direction: direction) }; throw error }
+        catch {
+            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .complete) else { throw error }
+            return try await store.partners(direction: direction)
+        }
     }
     /// All of the owner's links, or only those sharing one album.
     func sharedLinks(albumID: String? = nil) async throws -> [SharedLink] {
@@ -248,7 +257,11 @@ actor APIClient {
     func folderAssets(path: String) async throws -> [Asset] { try await request(.get, path: "view/folder", query: [.init(name: "path", value: path)]) }
     func assetOCR(id: String) async throws -> [RecognizedText] {
         do { return try await request(.get, path: "assets/\(id)/ocr") }
-        catch { if canReadOffline(error), let store = entityStore, try await store.isComplete(), try await store.asset(id: id) != nil { return try await store.assetOCR(id: id) }; throw error }
+        catch {
+            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .complete),
+                  try await store.asset(id: id) != nil else { throw error }
+            return try await store.assetOCR(id: id)
+        }
     }
     func assetAlbums(id: String) async throws -> [Album] { try await request(.get, path: "albums", query: [.init(name: "assetId", value: id)]) }
     func assetEdits(id: String) async throws -> AssetEdits { try await request(.get, path: "assets/\(id)/edits") }
