@@ -966,7 +966,13 @@ extension APIClient: LibraryAPI {}
     }
     func refreshAfterMutation() async {
         originalTimeline = nil
-        do { _ = try await api.refresh(); await reload(preservingPosition: true) }
+        do {
+            let change = try await api.refresh()
+            // A change the pass found was published, and LibraryView reloads the feed on it unless a
+            // search is showing. Reloading here as well would load every month twice.
+            if let change, !change.isEmpty, query.isEmpty { return }
+            await reload(preservingPosition: true)
+        }
         catch is CancellationError { }
         catch { self.error = error.localizedDescription }
     }

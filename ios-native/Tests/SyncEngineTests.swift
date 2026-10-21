@@ -210,7 +210,7 @@ import XCTest
 
     /// Coming to the front syncs, and so does the live connection's connect, but when the server
     /// has nothing new the screens hear nothing, so the feed doesn't reload. Returning from
-    /// Control Center, which never left the front, doesn't sync at all.
+    /// Control Center, which never left the front, syncs once too, and reloads nothing either.
     func testForegroundingWithNoServerChangeReloadsNothing() async throws {
         let harness = try makeSyncHarness(foreground: true)
         try await harness.primeIndex()
@@ -230,12 +230,15 @@ import XCTest
         await harness.engine.presenceChanged()
         let returned = await becomesTrue { harness.streamRequests.count == 3 }
         XCTAssertTrue(returned, "Coming back to the front synced.")
+        // Becoming active again without leaving the front, after Control Center, syncs once.
         await harness.engine.presenceChanged()
+        let reactivated = await becomesTrue { harness.streamRequests.count == 4 }
+        XCTAssertTrue(reactivated, "Becoming active without leaving the front synced.")
         let idle = await becomesTrue { !harness.status.status.isSyncing }
         XCTAssertTrue(idle)
         try await Task.sleep(for: .milliseconds(150))
 
-        XCTAssertEqual(harness.streamRequests.count, 3, "Becoming active without leaving the front doesn't sync.")
+        XCTAssertEqual(harness.streamRequests.count, 4)
         XCTAssertTrue(harness.notifications.all.isEmpty, "Nothing reloaded: \(harness.notifications.all)")
         XCTAssertNil(harness.status.status.error)
     }
