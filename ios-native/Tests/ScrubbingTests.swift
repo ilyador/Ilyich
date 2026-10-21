@@ -298,6 +298,6 @@ private actor MonthLibrary: LibraryAPI {
         }
         return months[bucket] ?? []
     }
-    func search(_ query: SearchQuery) async throws -> SearchResponse { throw APIError.http(500) }
-    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { throw APIError.http(500) }
+    func search(_ query: SearchQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
+    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
 }
