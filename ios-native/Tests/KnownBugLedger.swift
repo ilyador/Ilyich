@@ -450,12 +450,12 @@ import XCTest
     //
     // BACKUP-1 (a 5xx blocks automatic backup, B9) and BACKUP-2 (an album failure keeps a photo
     // queued, B9). BackupCoordinator uploads only with the signed-in account's Keychain credential,
-    // a real PHAsset (DevicePhotos.prepare) and the background URLSession, which URLProtocol stubs
+    // a real PHAsset (PhotoKitAdapter.stage) and the background URLSession, which URLProtocol stubs
     // cannot serve. In this test host that means the simulator's own saved session and Photos
     // library. From B2 on, the transfer engine runs behind fakes, where B9 pins both.
     //
     // CLEAN-1 (one 404 aborts the cleanup check, P4). verifiedLocalDeletionCandidates needs the
-    // same Keychain credential, and DevicePhotos.canRemove must find a real PHAsset before the GET
+    // same Keychain credential, and PhotoKitAdapter.removalShape must find a real PHAsset before the GET
     // that fails, so it cannot run without a device's photos. P4's CleanupService takes its PhotoKit
     // adapter and its remote verifier as seams.
 

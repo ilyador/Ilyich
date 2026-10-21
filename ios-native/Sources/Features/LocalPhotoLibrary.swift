@@ -58,7 +58,7 @@ struct LocalPhoto: Identifiable, Hashable, Sendable {
     func refresh() {
         permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard [.authorized, .limited].contains(permission) else { photos = []; albums = []; total = 0; return }
-        albums = DevicePhotos.albums()
+        Task { albums = await PhotoKitAdapter.shared.albums() }
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d", PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)

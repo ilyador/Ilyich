@@ -84,7 +84,7 @@ struct BackupClientCache {
     static let shared = BackupCoordinator()
     var preferences = BackupPreferences()
     private(set) var albums: [DeviceAlbum] = []
-    private(set) var permission = DevicePhotos.authorization
+    private(set) var permission = PhotoKitAdapter.shared.authorization
     private(set) var isRunning = false
     private(set) var remaining = 0
     private(set) var confirmed = 0
@@ -129,14 +129,14 @@ struct BackupClientCache {
     func activate() async {
         do {
             guard let session = try KeychainCredentialStore().load() else { return }
-            guard session.scope != saved?.scope else { refreshLibrary(); return }
+            guard session.scope != saved?.scope else { await refreshLibrary(); return }
             guard !isRunning else { throw BackupError.message("Pause the active backup before switching accounts.") }
             guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try AppGroup.identifier) else {
                 throw BackupError.message("The app’s shared storage is unavailable. Check the app’s signing and reinstall.")
             }
             let folder = group.appendingPathComponent("Backup", isDirectory: true).appendingPathComponent(session.scope, isDirectory: true)
             try load(session, folder: folder)
-            refreshLibrary()
+            await refreshLibrary()
             BackupLifecycle.shared.configure()
             if state.transferNotification?.terminalFailures != nil { await replayFinishedTransferNotification() }
             // A backup still marked running under read-only mode: the app ended before the pause
@@ -175,13 +175,14 @@ struct BackupClientCache {
 
     func requestAccess() async {
         permission = await PhotoKitAdapter.shared.requestAccess().status
-        refreshLibrary()
+        await refreshLibrary()
         BackupLifecycle.shared.configure()
     }
 
-    func refreshLibrary() {
-        permission = DevicePhotos.authorization
-        albums = DevicePhotos.albums()
+    /// Access and the album list, which the Photos adapter keeps until an album changes.
+    func refreshLibrary() async {
+        permission = PhotoKitAdapter.shared.authorization
+        albums = await PhotoKitAdapter.shared.albums()
     }
 
     func savePreferences() {
@@ -203,7 +204,13 @@ struct BackupClientCache {
         let runID = generation
         let selection = preferences, confirmations = state.confirmed
         let discovery = Task.detached(priority: .utility) {
-            try DevicePhotos.pendingCandidates(included: selection.includedAlbums, excluded: selection.excludedAlbums, confirmed: confirmations)
+            // The adapter reads Photos on its own queue, a batch at a time.
+            var found: [DeviceCandidate] = []
+            for try await batch in PhotoKitAdapter.shared.candidates(included: selection.includedAlbums, excluded: selection.excludedAlbums) {
+                found += batch
+            }
+            try Task.checkCancellation()
+            return StagingRules.pending(found, confirmed: confirmations)
         }
         self.discovery = discovery; isRunning = true; activity = "Finding new photos"
         do {
@@ -330,7 +337,7 @@ struct BackupClientCache {
         var measured: [String: BackupReceipt] = [:]
         for (localID, receipt) in state.receipts ?? [:] {
             _ = try currentSession(runID)
-            guard DevicePhotos.canRemove(localID, revision: receipt.modificationDate) else { continue }
+            guard await Self.canRemove(localID, revision: receipt.modificationDate) else { continue }
             let remote: BackupRemoteAsset = try await api.request(.get, path: "assets/\(receipt.original.id)")
             guard receipt.original.matches(remote, ownerID: session.userID) else { continue }
             var counted = receipt
@@ -342,7 +349,7 @@ struct BackupClientCache {
                 counted.motion?.byteCount = remoteMotion.knownByteCount
             }
             _ = try currentSession(runID)
-            if DevicePhotos.canRemove(localID, revision: receipt.modificationDate) { ids.append(localID); measured[localID] = counted }
+            if await Self.canRemove(localID, revision: receipt.modificationDate) { ids.append(localID); measured[localID] = counted }
         }
         // Record sizes only for receipts that are unchanged since verification began.
         var changed = false
@@ -357,6 +364,14 @@ struct BackupClientCache {
         }
         if changed { try? persist() }
         return ids.sorted()
+    }
+
+    /// Keeps adjusted, RAW+JPEG and auxiliary resources until all their variants have verified
+    /// server receipts, which a plain original receipt cannot prove: only a single original or a
+    /// Live Photo, still at the receipt's revision, may be removed.
+    private static func canRemove(_ localID: String, revision: Date) async -> Bool {
+        let shape = await PhotoKitAdapter.shared.removalShape(of: localID, revision: revision)
+        return shape == .singleOriginal || shape == .livePhoto
     }
 
     /// Total original bytes (still/video plus paired motion) from the last verification, or nil if any is unknown.
@@ -406,8 +421,9 @@ struct BackupClientCache {
                         let folder = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
                         let prepared: PreparedPhoto
                         do {
-                            prepared = try await DevicePhotos.prepare(localID, directory: folder, allowCloud: preferences.downloadCloudOriginals,
-                                cellularPhotos: preferences.cellularPhotos, cellularVideos: preferences.cellularVideos) { value in
+                            let policy = StagingPolicy(allowCloud: preferences.downloadCloudOriginals,
+                                                       cellularPhotos: preferences.cellularPhotos, cellularVideos: preferences.cellularVideos)
+                            prepared = try await PhotoKitAdapter.shared.stage(localID, into: folder, policy: policy) { value in
                                 Task { @MainActor in
                                     if self.generation == runID { self.progress = value }
                                 }
@@ -661,7 +677,7 @@ struct BackupClientCache {
         _ = try currentSession(runID)
         for local in albums where preferences.includedAlbums.contains(local.id) && !preferences.excludedAlbums.contains(local.id) {
             try requireTransferConditions()
-            let localIDs = DevicePhotos.candidates(included: [local.id], excluded: preferences.excludedAlbums)
+            let localIDs = await PhotoKitAdapter.shared.albumMembers(local.id, excluded: preferences.excludedAlbums)
             let assetIDs = Set(localIDs.compactMap { state.receipts?[$0]?.original.id }).sorted()
             guard !assetIDs.isEmpty else { continue }
             activity = "Syncing album \(local.title)"

@@ -20,5 +20,5 @@ enum LocalMediaFallback {
     }
 
     @MainActor
-    static func isUnchanged(_ photo: LocalPhoto) -> Bool { DevicePhotos.modificationDate(for: photo.id) == photo.modified }
+    static func isUnchanged(_ photo: LocalPhoto) -> Bool { PhotoKitAdapter.shared.revisionNow(of: photo.id) == photo.modified }
 }

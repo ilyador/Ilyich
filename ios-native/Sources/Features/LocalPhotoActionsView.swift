@@ -171,11 +171,7 @@ private struct LocalSharePackage: Identifiable {
                     let data = try await LocalSharePreview().jpeg(asset: asset, allowCloud: allowCloud, progress: itemProgress)
                     try data.write(to: file, options: .completeFileProtectionUntilFirstUserAuthentication)
                 } else {
-                    let resource = try await DevicePhotos.currentResource(for: asset, allowCloud: allowCloud, allowCellular: true, progress: itemProgress)
-                    let name = (resource.originalFilename as NSString).lastPathComponent
-                    file = itemFolder.appendingPathComponent(name.isEmpty ? "Photo.\(resource.contentType.preferredFilenameExtension ?? "dat")" : name)
-                    let options = PHAssetResourceRequestOptions(); options.isNetworkAccessAllowed = allowCloud; options.progressHandler = itemProgress
-                    try await PhotoResourceExport(destination: file).write(resource, options: options)
+                    file = try await PhotoKitAdapter.shared.exportCurrent(of: asset.localIdentifier, into: itemFolder, allowCloud: allowCloud, progress: itemProgress)
                 }
                 try Task.checkCancellation(); urls.append(file); progress(Double(index + 1) / Double(total))
             }

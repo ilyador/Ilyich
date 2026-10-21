@@ -67,7 +67,7 @@ enum Legacy {
         }
     }
 
-    /// A photo staged for upload by DevicePhotos.prepare, kept in state.json while it uploads.
+    /// A photo staged for upload by PhotoKitAdapter.stage, kept in state.json while it uploads.
     /// Its files are in <AppGroup>/Backup/<digest>/<folder>/, beside <stageID>.multipart and
     /// <stageID>.receipt. It records no checksum of the original.
     struct PreparedPhoto: Codable, Sendable {

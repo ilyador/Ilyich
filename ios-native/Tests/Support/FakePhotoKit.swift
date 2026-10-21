@@ -7,7 +7,7 @@ import XCTest
 /// Photos for the adapter's tests. Assets live in a table. A change block runs on a serial queue of
 /// the fake's own, as Photos runs it, and what it asks for applies only once the change commits. A
 /// test can hold a change at iOS's prompt, fail it, or change an asset just before its block runs.
-final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching {
+final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingReading {
     struct Favorite: Equatable, Sendable {
         let ids: [DeviceAssetID]
         let value: Bool
@@ -42,6 +42,9 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching {
         var nextFailure: (any Error)?
         var prompt: StubServer.Gate?
         var beforeBlock: (@Sendable () async -> Void)?
+        /// Albums by identifier, with their titles and members.
+        var albums: [String: (title: String, members: [String])] = [:]
+        var albumReads = 0
     }
 
     private let state: Mutex<State>
@@ -71,6 +74,12 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching {
     func setDeletable(_ id: String, _ value: Bool) {
         update(id) { DeviceAssetState(id: $0.id, revision: $0.revision, isFavorite: $0.isFavorite, canDelete: value, canEditProperties: $0.canEditProperties) }
     }
+
+    /// Puts an album holding `members` in the library, or replaces it.
+    func addAlbum(_ id: String, title: String, members: [String]) { state.withLock { $0.albums[id] = (title, members) } }
+
+    /// Times the album list was read from Photos.
+    var albumReads: Int { state.withLock { $0.albumReads } }
 
     func remove(_ id: String) { state.withLock { _ = $0.assets.removeValue(forKey: DeviceAssetID(rawValue: id)) } }
 
@@ -180,6 +189,31 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching {
         return state.withLock { state in
             if onMain { state.readsOnMainThread += 1 }
             return Set(ids).compactMap { state.assets[$0] }
+        }
+    }
+
+    // MARK: - PhotoStagingReading
+
+    func albums() -> [DeviceAlbum] {
+        read { state in
+            state.albumReads += 1
+            return state.albums.map { DeviceAlbum(id: $0.key, title: $0.value.title, count: $0.value.members.count, isShared: false) }
+        }
+    }
+
+    func members(of albumIDs: Set<String>) -> Set<String> {
+        read { state in Set(albumIDs.flatMap { state.albums[$0]?.members ?? [] }) }
+    }
+
+    func candidates(_ ids: [String]) -> [DeviceCandidate] {
+        read { state in ids.compactMap { id in state.assets[DeviceAssetID(rawValue: id)].map { DeviceCandidate(id: id, modified: $0.revision?.date) } } }
+    }
+
+    private func read<T>(_ body: (inout State) -> T) -> T {
+        let onMain = Thread.isMainThread
+        return state.withLock { state in
+            if onMain { state.readsOnMainThread += 1 }
+            return body(&state)
         }
     }
 
