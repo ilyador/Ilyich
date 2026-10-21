@@ -1,7 +1,7 @@
 import SwiftUI
 
 extension EnvironmentValues {
-    /// What the signed-in account may do. The app sets it at its root from SessionStore, so the
+    /// What the signed-in account may do. The app sets it at its root from AccountSession, so the
     /// views below follow a read-only change in the same frame. Nil while nobody is signed in.
     @Entry var authorization: AuthorizationSnapshot? = nil
 }

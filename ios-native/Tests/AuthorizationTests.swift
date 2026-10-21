@@ -124,13 +124,13 @@ final class AuthorizationTests: XCTestCase {
         let shares = ShareInboxStore(repository: ShareInboxRepository(root: FileManager.default.temporaryDirectory
             .appendingPathComponent("AuthorizationTests-\(UUID().uuidString)", isDirectory: true)))
 
-        await SessionStore.uploadsFollow(readOnly: true, backup: backup, shares: shares)
+        await AccountRuntime.uploadsFollow(readOnly: true, backup: backup, shares: shares)
         XCTAssertFalse(backup.preferences.automatic, "Turning read-only mode on switches automatic backup off.")
         XCTAssertEqual(backup.activity, "Backup paused")
         XCTAssertFalse(backup.isRunning)
         XCTAssertFalse(shares.isRunning)
 
-        await SessionStore.uploadsFollow(readOnly: false, backup: backup, shares: shares)
+        await AccountRuntime.uploadsFollow(readOnly: false, backup: backup, shares: shares)
         XCTAssertFalse(backup.preferences.automatic, "Turning it off leaves automatic backup off until it is turned on again.")
         XCTAssertEqual(backup.activity, "Backup paused", "Nor does it start backup.")
     }

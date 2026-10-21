@@ -115,8 +115,8 @@ actor NativeSync {
         resyncRequested = false
         events?.cancel()
         sync?.cancel()
-        // An event callback can call signOut(), which calls stop() again; joining
-        // the event task here would make that callback wait for itself.
+        // An event callback can begin sign-out, which calls stop() again; joining
+        // the event task here could make that callback wait for itself.
         if let sync { _ = try? await sync.value }
     }
     private func run(epoch: UUID) async throws -> SyncChangeSummary {

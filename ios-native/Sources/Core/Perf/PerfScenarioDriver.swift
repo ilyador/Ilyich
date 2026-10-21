@@ -112,7 +112,7 @@ struct SplitMix64 {
     private let memory: MemorySampler
     private let watchdog: HangWatchdog
     private weak var store: LibraryStore?
-    private weak var session: SessionStore?
+    private weak var session: AccountSession?
     private var task: Task<Void, Never>?
     private var launchInterval: OSSignpostIntervalState?
     private var launchedAt = Date()
@@ -132,7 +132,7 @@ struct SplitMix64 {
     static func arm() { shared?.start() }
 
     /// The library's store and session, once the library is on screen.
-    func attach(store: LibraryStore, session: SessionStore) {
+    func attach(store: LibraryStore, session: AccountSession) {
         self.store = store
         self.session = session
     }

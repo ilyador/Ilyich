@@ -30,7 +30,7 @@ struct SettingsDestinationView: View {
     let api: APIClient
     let destination: SettingsDestination
     var pipeline: MediaPipeline? = nil
-    var session: SessionStore? = nil
+    var session: AccountSession? = nil
 
     @ViewBuilder var body: some View {
         switch destination {
@@ -66,7 +66,7 @@ struct SettingsDestinationView: View {
 struct SettingsView: View {
     let api: APIClient
     var pipeline: MediaPipeline? = nil
-    var session: SessionStore? = nil
+    var session: AccountSession? = nil
     let onSignOut: () -> Void
     @State private var user: User?
     @State private var failure: FeatureFailure?
@@ -107,7 +107,7 @@ struct SettingsView: View {
 /// Read-only mode, shown in Settings and as its own row on the Settings shelf. The setting is the
 /// session's: the toggle shows the account's authorization and asks the session to change it.
 private struct ReadOnlySettingsSection: View {
-    let session: SessionStore?
+    let session: AccountSession?
     @Environment(\.authorization) private var authorization
 
     var body: some View {

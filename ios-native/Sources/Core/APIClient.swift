@@ -26,8 +26,8 @@ actor APIClient {
     nonisolated let userID: String?
     private nonisolated let anonymousScope = UUID().uuidString
     nonisolated var cacheScope: String { baseURL.absoluteString + "|" + (userID ?? anonymousScope) }
-    /// The signed-in account's authorization, for the client SessionStore makes. Other clients
-    /// follow the account's read-only flag.
+    /// The signed-in account's authorization, for the client its AccountRuntime makes. Other
+    /// clients follow the account's read-only flag.
     nonisolated let authorization: AuthorizationState?
     nonisolated var isReadOnly: Bool {
         if let authorization { return authorization.snapshot.readOnly }

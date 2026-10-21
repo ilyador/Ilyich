@@ -14,7 +14,7 @@ import Synchronization
 /// - both move when the session ends.
 /// A read-only toggle never moves the access epoch, so it never discards a library read.
 ///
-/// SessionStore owns it until AccountManager owns the account (C7).
+/// The account's AccountRuntime owns it, and ends it first when the runtime is torn down.
 final class AuthorizationState: Sendable {
     let account: AccountID
     /// Held only to read or update the snapshot, never while calling out.

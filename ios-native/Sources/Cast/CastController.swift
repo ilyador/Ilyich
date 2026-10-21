@@ -45,10 +45,12 @@ final class CastController: NSObject, ObservableObject, @preconcurrency GCKSessi
         currentAssetID = nil; loading = false
         connected = false
     }
-    func signOut() {
+    /// Stops casting for sign-out and revokes the receiver's server session while the account's
+    /// token still works. Sign-out waits for it, before it ends the session on the server.
+    func signOut() async {
         let previous = api
         disconnect(); api = nil; desiredAsset = nil; error = nil
-        Task { await previous?.revokeCastAuthorization() }
+        await previous?.revokeCastAuthorization()
     }
 
     private func updateConnection() {

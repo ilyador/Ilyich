@@ -20,7 +20,7 @@ import XCTest
         warmer.start(when: { checking.open(); await answer.wait(); return true }, entities: entities, pipeline: pipeline)
         await checking.wait()
 
-        // Sign-out ends the session and stops the warmer, as SessionStore.signOut does.
+        // Sign-out ends the session and stops the warmer, as AccountManager's sign-out does.
         session.end()
         warmer.stop()
         answer.open()

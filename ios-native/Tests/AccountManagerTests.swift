@@ -1,0 +1,643 @@
+import Foundation
+import IlyichPlatform
+import Synchronization
+import XCTest
+@testable import Ilyich
+
+/// The account runtime: restoring the saved session, the session checks that may and may not
+/// end it, the order sign-out works in, and sign-in after sign-out. Nothing here touches the
+/// Keychain, the App Group or the device-wide services: they are fakes that record what they
+/// are asked.
+@MainActor final class AccountManagerTests: XCTestCase {
+    // MARK: - Restore
+
+    /// Earlier native builds saved the server's password-change flag without the administrator
+    /// exemption. Restoring repairs the flag and keeps the session: same token, no sign-in.
+    func testRestoreRepairsAnAdministratorsPasswordChangeFlag() async throws {
+        let server = makeStubServer()
+        server.route("GET", "users/me", .json(#"{"id":"admin","name":"Admin","email":"admin@example.test","isAdmin":true}"#))
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        var saved = credential("admin", on: server)
+        saved.requiresPasswordChange = true
+        let harness = makeHarness(saved, server: server)
+
+        await harness.manager.restore()
+
+        let phase = await harness.manager.phase
+        XCTAssertEqual(phase, .active)
+        XCTAssertEqual(harness.credentials.credential?.requiresPasswordChange, false, "The flag is repaired.")
+        XCTAssertEqual(harness.credentials.credential?.token, saved.token, "The session is the same one: nothing re-syncs.")
+        XCTAssertTrue(server.requests("POST", "auth/login").isEmpty)
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+        XCTAssertFalse(runtime.requiresPasswordChange)
+        await signOutAfterwards(harness)
+    }
+
+    /// Someone who isn't an administrator stays at the password change, and the flag is kept.
+    func testRestoreKeepsOthersAtThePasswordChange() async throws {
+        let server = makeStubServer()
+        server.route("GET", "users/me", .json(#"{"id":"member","name":"Member","email":"member@example.test","isAdmin":false}"#))
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        var saved = credential("member", on: server)
+        saved.requiresPasswordChange = true
+        let harness = makeHarness(saved, server: server, environment: environment(library: true))
+
+        await harness.manager.restore()
+
+        let phase = await harness.manager.phase
+        XCTAssertEqual(phase, .passwordChangeRequired)
+        XCTAssertEqual(harness.credentials.credential, saved, "The saved session is untouched.")
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+        XCTAssertNil(runtime.library, "Nothing syncs until the password is changed.")
+        XCTAssertTrue(harness.log.all.isEmpty, "Restoring signs nobody out: \(harness.log.all)")
+        await signOutAfterwards(harness)
+    }
+
+    /// Before the phone's first unlock the Keychain is closed. Restoring waits, removes nothing,
+    /// and opens the session once the phone is unlocked.
+    func testRestoreWaitsForTheKeychainToUnlock() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        let saved = credential("alice", on: server)
+        let harness = makeHarness(saved, server: server, locked: true)
+
+        await harness.manager.restore()
+        var phase = await harness.manager.phase
+        XCTAssertEqual(phase, .waitingForUnlock)
+        let waiting = await harness.manager.runtime
+        XCTAssertNil(waiting)
+        await harness.manager.restore()
+        phase = await harness.manager.phase
+        XCTAssertEqual(phase, .waitingForUnlock, "Restoring again while locked still waits.")
+
+        harness.credentials.unlock()
+        harness.unlock.yield()
+        try await until("The session did not open after the unlock.") { await harness.manager.phase == .active }
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+        XCTAssertEqual(runtime.credential, saved)
+        XCTAssertEqual(harness.credentials.credential, saved)
+        XCTAssertTrue(harness.log.all.isEmpty, "Nothing was removed while waiting: \(harness.log.all)")
+        XCTAssertEqual(harness.recorder.phases.first, .waitingForUnlock)
+        await signOutAfterwards(harness)
+    }
+
+    // MARK: - Session checks
+
+    /// A check that can't reach the server keeps the session, and with it the offline library.
+    func testOfflineValidationKeepsTheSession() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .transportFailure(.notConnectedToInternet))
+        let harness = makeHarness(credential("alice", on: server), server: server)
+
+        await harness.manager.restore()
+        try await until("The session was not checked.") { server.requests("POST", "auth/validateToken").count >= 1 }
+        let session = try await XCTUnwrapAsync(await harness.manager.runtime)
+        session.check.validate()
+        try await until("The session was not checked again.") { server.requests("POST", "auth/validateToken").count >= 2 }
+        try await Task.sleep(for: .milliseconds(200))
+
+        let phase = await harness.manager.phase
+        XCTAssertEqual(phase, .active)
+        XCTAssertNotNil(harness.credentials.credential)
+        XCTAssertTrue(server.requests("POST", "auth/logout").isEmpty)
+        XCTAssertTrue(harness.log.all.isEmpty, "\(harness.log.all)")
+        await signOutAfterwards(harness)
+    }
+
+    /// Forbidden, a proxy's refusal, and an expiry the second check doesn't confirm never sign out.
+    func testForbiddenAndUnconfirmedRefusalsNeverSignOut() async throws {
+        let answers: [(String, [StubServer.Response])] = [
+            ("forbidden", [.immichError(403, message: "Forbidden")]),
+            ("proxy", [.proxyError(401)]),
+            ("expired once", [.immichError(401, message: "Invalid user token"), .json(#"{"authStatus":true}"#)]),
+        ]
+        for (name, responses) in answers {
+            let server = makeStubServer()
+            server.route("POST", "auth/validateToken", responses: responses)
+            let harness = makeHarness(credential("alice", on: server), server: server)
+            await harness.manager.restore()
+            try await until("\(name): the session was not checked.") { server.requests("POST", "auth/validateToken").count >= responses.count }
+            try await Task.sleep(for: .milliseconds(200))
+
+            let phase = await harness.manager.phase
+            XCTAssertEqual(phase, .active, name)
+            XCTAssertNotNil(harness.credentials.credential, name)
+            XCTAssertTrue(harness.log.all.isEmpty, "\(name): \(harness.log.all)")
+            await signOutAfterwards(harness)
+        }
+    }
+
+    /// Immich says the session is gone and the second check agrees: sign-out runs to the end,
+    /// though it cancels and waits for the very check that started it, and the sign-in screen
+    /// says why.
+    func testAnExpiredSessionSignsOutWithoutCancellingItself() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .immichError(401, message: "Invalid user token"))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let harness = makeHarness(credential("alice", on: server), server: server)
+
+        await harness.manager.restore()
+        try await until("The expired session was not signed out.") { await harness.manager.phase == .signedOut(.sessionExpired) }
+
+        XCTAssertEqual(server.requests("POST", "auth/validateToken").count, 2, "Once, then the second check.")
+        XCTAssertEqual(server.requests("POST", "auth/logout").count, 1, "Sign-out reached the server, so nothing cancelled it.")
+        XCTAssertNil(harness.credentials.credential)
+        XCTAssertEqual(harness.log.all, Self.signOutSteps)
+        XCTAssertEqual(harness.recorder.states.last?.message, ServerFailure.sessionExpired(nil).localizedDescription)
+        XCTAssertNil(harness.recorder.states.last?.runtime)
+    }
+
+    // MARK: - Sign-out
+
+    /// The cast session is revoked and the session logged out while the token still works, before
+    /// the credential goes.
+    func testSignOutRevokesCastAndLogsOutBeforeTheCredentialIsRemoved() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("POST", "sessions", .json(#"{"id":"cast-1","token":"cast-token","expiresAt":"2099-01-01T00:00:00.000Z"}"#))
+        server.route("HEAD", "assets/photo-1/thumbnail", StubServer.Response(status: 200, headers: ["Content-Type": "image/jpeg"]))
+        server.route("DELETE", "sessions/cast-1", .empty())
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let harness = makeHarness(credential("alice", on: server), server: server)
+        let seenAtRemoval = Mutex<[String]>([])
+        harness.credentials.onRemove { seenAtRemoval.withLock { $0 = server.requests.map { $0.method + " " + $0.path } } }
+        await harness.manager.restore()
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+        _ = try await runtime.api.prepareCast(asset: Asset(id: "photo-1"))
+
+        await harness.manager.signOut(.user)
+
+        let seen = seenAtRemoval.withLock { $0 }
+        let revoke = try XCTUnwrap(seen.firstIndex(of: "DELETE sessions/cast-1"), "The cast session was revoked before the credential went: \(seen)")
+        let logout = try XCTUnwrap(seen.firstIndex(of: "POST auth/logout"), "The session was logged out before the credential went: \(seen)")
+        XCTAssertLessThan(revoke, logout, "The revoke needs the token, so it goes first.")
+        let log = harness.log.all
+        XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "endCasting")), try XCTUnwrap(log.firstIndex(of: "removeCredential")))
+        XCTAssertTrue(runtime.api.transport.isShutDown)
+    }
+
+    /// An explicit sign-out removes exactly its list, in order: what the account kept and the
+    /// device-wide services hold for it. The backup state with its receipts, the read-only flag
+    /// and the shelf order are not on it.
+    func testExplicitSignOutRemovesExactlyItsCleanupList() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let mirror = makeMirror()
+        let saved = credential("alice", on: server)
+        let harness = makeHarness(saved, server: server, environment: environment(library: true), mirror: mirror)
+        await harness.manager.restore()
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+        let library = try XCTUnwrap(runtime.library)
+        try await library.entities.persistCachedServerFeatures(ServerFeatures(passwordLogin: true, oauth: false, smartSearch: true, searchVerification: nil,
+                                                                              ocr: true, facialRecognition: true, map: true, trash: true, sidecar: true,
+                                                                              realtimeTranscoding: false))
+        XCTAssertEqual(mirror.read()?.digest, saved.account.digest)
+
+        await harness.manager.signOut(.user)
+
+        XCTAssertEqual(harness.log.all, Self.signOutSteps)
+        let phase = await harness.manager.phase
+        XCTAssertEqual(phase, .signedOut(.user))
+        XCTAssertNil(harness.recorder.states.last?.message)
+        XCTAssertEqual(harness.recorder.phases.suffix(2), [.signingOut, .signedOut(.user)])
+        XCTAssertNil(harness.credentials.credential)
+        XCTAssertEqual(mirror.read()?.digest, "", "The extensions see nobody signed in.")
+        XCTAssertTrue(runtime.authorization.hasEnded)
+        XCTAssertTrue(runtime.api.transport.isShutDown)
+        let features = try await library.entities.cachedServerFeatures()
+        XCTAssertNil(features, "The offline library is emptied.")
+        XCTAssertFalse(library.sync.isOpen)
+        // Owner question: keeping thumbnails and network settings after a session expiry. Until it
+        // is answered, an expiry removes what an explicit sign-out does.
+        XCTAssertEqual(SignOutPolicy(reason: .sessionExpired), SignOutPolicy(reason: .user))
+    }
+
+    /// Sign-out pauses backup without switching automatic backup off, and the backup state stays
+    /// on disk with its receipts, so signing in to the account again carries on as it was set.
+    func testSignOutKeepsTheAutomaticBackupPreference() async throws {
+        let folder = temporaryDirectory()
+        var state = BackupState()
+        state.preferences.automatic = true
+        state.paused = true
+        state.confirmed = ["L1": Date(timeIntervalSinceReferenceDate: 782_481_234.5)]
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try JSONEncoder().encode(state).write(to: folder.appendingPathComponent("state.json"))
+        let saved = LegacyGoldens.credential
+        let backup = BackupCoordinator()
+        try backup.load(saved, folder: folder)
+        XCTAssertTrue(backup.preferences.automatic)
+
+        await backup.disconnect()
+
+        XCTAssertFalse(backup.preferences.automatic, "Nobody is signed in, so nothing backs up.")
+        let kept = try JSONDecoder().decode(BackupState.self, from: Data(contentsOf: folder.appendingPathComponent("state.json")))
+        XCTAssertTrue(kept.preferences.automatic, "The preference is kept for the account.")
+        XCTAssertEqual(kept.confirmed.keys.sorted(), ["L1"], "So are the confirmations.")
+        let again = BackupCoordinator()
+        try again.load(saved, folder: folder)
+        XCTAssertTrue(again.preferences.automatic, "Signing in again carries on with automatic backup.")
+    }
+
+    /// A sign-in during sign-out waits for it to finish: the old session is gone, credential
+    /// included, before the new one opens.
+    func testSignInWaitsForSignOut() async throws {
+        let first = makeStubServer(), second = makeStubServer()
+        let logout = StubServer.Gate()
+        first.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        first.route("POST", "auth/logout", StubServer.Response.json(#"{"successful":true}"#).waiting(for: logout))
+        second.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        let harness = makeHarness(credential("alice", on: first), server: first)
+        await harness.manager.restore()
+
+        let signingOut = Task { await harness.manager.signOut(.user) }
+        try await until("Sign-out did not reach the server.") { logout.waiting == 1 }
+        let bob = login("bob")
+        let signingIn = Task { try await harness.manager.completeSSO(bob, server: second.baseURL) }
+        try await Task.sleep(for: .milliseconds(200))
+        var phase = await harness.manager.phase
+        XCTAssertEqual(phase, .signingOut, "The new session waits.")
+        XCTAssertEqual(harness.credentials.credential?.userID, "alice", "Bob's session isn't saved yet.")
+
+        logout.open()
+        await signingOut.value
+        try await signingIn.value
+        phase = await harness.manager.phase
+        XCTAssertEqual(phase, .active)
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+        XCTAssertEqual(runtime.credential.userID, bob.userId)
+        XCTAssertEqual(harness.recorder.phases.suffix(3), [.signingOut, .signedOut(.user), .active])
+        let log = harness.log.all
+        XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "clearDiagnostics")), try XCTUnwrap(log.firstIndex(of: "save(\(bob.userId))")),
+                          "The new credential is saved after sign-out has finished: \(log)")
+        await signOutAfterwards(harness)
+    }
+
+    /// Signing out and straight back in to the same account opens a new runtime only once the
+    /// old one has shut down, and the new one works.
+    func testTheSameAccountReopensOnlyAfterItsRuntimeShutDown() async throws {
+        let server = makeStubServer()
+        let logout = StubServer.Gate()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("POST", "auth/logout", StubServer.Response.json(#"{"successful":true}"#).waiting(for: logout))
+        server.route("GET", "users/me", .json(#"{"id":"alice","name":"Alice","email":"alice@example.test"}"#))
+        let saved = credential("alice", on: server)
+        let harness = makeHarness(saved, server: server, environment: environment(library: true))
+        await harness.manager.restore()
+        let old = try await XCTUnwrapAsync(await harness.manager.runtime)
+        let shutDownWhenReopened = Mutex<(transport: Bool, authorization: Bool)?>(nil)
+        harness.recorder.observe = { state in
+            guard let runtime = state.runtime, runtime.id != old.id else { return }
+            shutDownWhenReopened.withLock { $0 = (old.api.transport.isShutDown, old.authorization.hasEnded) }
+        }
+
+        let signingOut = Task { await harness.manager.signOut(.user) }
+        try await until("Sign-out did not reach the server.") { logout.waiting == 1 }
+        let again = LoginResponse(accessToken: "alice-second-session", userId: saved.userID, userEmail: "alice@example.test", name: "Alice",
+                                  isAdmin: false, shouldChangePassword: false, profileImagePath: nil, isOnboarded: true)
+        let signingIn = Task { try await harness.manager.completeSSO(again, server: server.baseURL) }
+        logout.open()
+        await signingOut.value
+        try await signingIn.value
+
+        let reopened = try XCTUnwrap(shutDownWhenReopened.withLock { $0 }, "The account reopened.")
+        XCTAssertTrue(reopened.transport, "The old transport had shut down.")
+        XCTAssertTrue(reopened.authorization, "The old authorization had ended.")
+        let new = try await XCTUnwrapAsync(await harness.manager.runtime)
+        XCTAssertNotEqual(new.id, old.id)
+        XCTAssertEqual(new.credential.account, old.credential.account)
+        XCTAssertFalse(new.api.transport.isShutDown)
+        XCTAssertFalse(new.authorization.hasEnded)
+        XCTAssertNotNil(new.library)
+        let user = try await new.api.currentUser()
+        XCTAssertEqual(user.id, "alice", "The reopened account works.")
+        let reopenedRequest = try XCTUnwrap(server.requests("GET", "users/me").last)
+        XCTAssertEqual(reopenedRequest.headers["Authorization"], "Bearer alice-second-session")
+        await signOutAfterwards(harness)
+    }
+
+    /// Switching accounts never lets the previous account's results reach the next: its requests
+    /// in flight end without an answer, its sync tells no screen anything, and nothing made under
+    /// its authorization is current for the next account.
+    func testAccountSwitchNeverServesThePreviousAccountsResults() async throws {
+        let first = makeStubServer(), second = makeStubServer()
+        let albums = StubServer.Gate(), stream = StubServer.Gate()
+        first.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        first.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        first.route("GET", "albums", StubServer.Response.json(Self.albums("Alice's trip")).waiting(for: albums))
+        first.route("POST", "sync/stream", StubServer.Response(status: 200, headers: ["Content-Type": "application/jsonlines+json"],
+                                                             body: Data(Self.completeStream.utf8)).waiting(for: stream))
+        second.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        second.route("GET", "albums", .json(Self.albums("Bob's garden")))
+        let harness = makeHarness(credential("alice", on: first), server: first, environment: environment(library: true), foreground: true)
+        await harness.manager.restore()
+        let alice = try await XCTUnwrapAsync(await harness.manager.runtime)
+        let aliceEpoch = alice.authorization.snapshot.epoch
+        let late = Task { try await alice.api.albums() }
+        try await until("Alice's requests did not start.") { albums.waiting == 1 && stream.waiting == 1 }
+        let aliceChanges = Mutex(0)
+        let observer = NotificationCenter.default.addObserver(forName: .ilyichLibraryChanged, object: nil, queue: nil) { note in
+            if note.userInfo?["scope"] as? String == alice.api.cacheScope { aliceChanges.withLock { $0 += 1 } }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        await harness.manager.signOut(.user)
+        try await harness.manager.completeSSO(login("bob"), server: second.baseURL)
+        albums.open()
+        stream.open()
+
+        do {
+            let served = try await late.value
+            XCTFail("Alice's albums arrived after the switch: \(served.map(\.albumName))")
+        } catch {
+            XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled, "\(error)")
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(aliceChanges.withLock { $0 }, 0, "Alice's sync told no screen anything.")
+        let bob = try await XCTUnwrapAsync(await harness.manager.runtime)
+        XCTAssertEqual(bob.credential.userID, "bob")
+        XCTAssertFalse(bob.api === alice.api)
+        XCTAssertFalse(bob.pipeline === alice.pipeline)
+        XCTAssertNotEqual(bob.api.cacheScope, alice.api.cacheScope)
+        let served = try await bob.api.albums()
+        XCTAssertEqual(served.map(\.albumName), ["Bob's garden"])
+        XCTAssertFalse(alice.library?.sync.isOpen ?? true)
+        XCTAssertFalse(alice.authorization.isCurrent(aliceEpoch))
+        let counted = Fenced<[String]>(epoch: aliceEpoch, value: ["Alice's trip"])
+        XCTAssertNil(counted.value(ifCurrent: bob.authorization.snapshot.epoch), "Nothing made under Alice's authorization is current for Bob.")
+        XCTAssertFalse(bob.authorization.isCurrent(aliceEpoch))
+        await signOutAfterwards(harness)
+    }
+
+    // MARK: - Session
+
+    /// The session shows what the manager publishes, and a read-only toggle changes the controls
+    /// at once while uploads follow afterwards.
+    func testTheSessionShowsTheAccountAndReadOnlyChangesAtOnce() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let log = AccountEventLog()
+        let saved = credential("alice", on: server)
+        let session = AccountSession(environment: environment(), dependencies: dependencies(saved, server: server, log: log),
+                                     presence: AppPresence(isForeground: false))
+        addTeardownBlock {
+            let key = AccountStoragePaths(AccountID(server: saved.server, userID: saved.userID)).readOnlyKey
+            (AppGroup.defaults ?? .standard).removeObject(forKey: key)
+        }
+        XCTAssertTrue(session.isRestoring)
+
+        await session.restore()
+        XCTAssertEqual(session.phase, .active)
+        XCTAssertEqual(session.api?.userID, saved.userID)
+        XCTAssertEqual(session.authorization?.readOnly, false)
+
+        session.setReadOnly(true)
+        XCTAssertEqual(session.authorization?.readOnly, true, "The controls follow at once.")
+        XCTAssertTrue(session.isApplyingReadOnly)
+        try await until("Uploads did not follow.") { !session.isApplyingReadOnly }
+        XCTAssertEqual(log.all, ["readOnly(true)"])
+        session.setReadOnly(false)
+        try await until("Uploads did not follow.") { !session.isApplyingReadOnly }
+
+        session.pendingLink = .album("00000000-0000-4000-8000-000000000003")
+        await session.signOut()
+        XCTAssertEqual(session.phase, .signedOut(.user))
+        XCTAssertNil(session.runtime)
+        XCTAssertNil(session.authorization)
+        XCTAssertNil(session.pendingLink, "A link for the account that signed out is dropped.")
+    }
+
+    /// The sign-in screen asks the server how it signs in only once typing pauses, and signs in
+    /// through the manager.
+    func testSignInAsksTheServerOnceTypingPausesAndSignsIn() async throws {
+        let server = makeStubServer()
+        server.route("GET", "server/features", .json(#"{"passwordLogin":true,"oauth":true,"smartSearch":true,"ocr":true,"facialRecognition":true,"map":true,"trash":true,"sidecar":true,"realtimeTranscoding":false}"#))
+        server.route("POST", "auth/login", .json(#"{"accessToken":"carol-session","userId":"carol","userEmail":"carol@example.test","name":"Carol","isAdmin":false,"shouldChangePassword":false,"profileImagePath":"","isOnboarded":true}"#, status: 201))
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let session = AccountSession(environment: environment(), dependencies: dependencies(nil, server: server, log: AccountEventLog()),
+                                     presence: AppPresence(isForeground: false))
+        await session.restore()
+        XCTAssertEqual(session.phase, .signedOut(nil))
+        let model = SignInModel(session: session)
+        let address = server.baseURL.absoluteString
+        model.server = String(address.dropLast(4))
+        model.serverChanged()
+        model.server = address
+        model.serverChanged()
+        try await until("The server was not asked.") { model.features != nil }
+        XCTAssertEqual(server.requests("GET", "server/features").count, 1, "Only the address typing paused on is asked.")
+        XCTAssertEqual(model.features?.oauth, true)
+
+        model.email = " carol@example.test "
+        model.password = "secret"
+        XCTAssertTrue(model.signIn())
+        try await until("Signing in did not open the account.") { session.phase == .active }
+        XCTAssertEqual(session.api?.userID, "carol")
+        let body = try XCTUnwrap(server.requests("POST", "auth/login").first?.body)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String], ["email": "carol@example.test", "password": "secret"])
+        try await until("The password was kept.") { model.password.isEmpty }
+
+        // The browsing cache is cleared through the account, and the feed hears of it.
+        let scope = try XCTUnwrap(session.api?.cacheScope)
+        let reset = expectation(forNotification: .ilyichCachesReset, object: nil) { $0.userInfo?["scope"] as? String == scope }
+        await session.clearBrowsingCache()
+        await fulfillment(of: [reset], timeout: 2)
+        await session.signOut()
+    }
+
+    /// Only a UI test launch runs against the fixture, and it never reaches the device's storage.
+    func testOnlyAUITestLaunchUsesTheFixture() {
+        XCTAssertNil(AccountEnvironment.uiTest(arguments: ["Ilyich"]))
+        XCTAssertTrue(AccountEnvironment.live.usesDeviceStorage)
+        XCTAssertTrue(AccountEnvironment.live.syncsLibrary)
+        XCTAssertNil(AccountEnvironment.live.fixtureCredential)
+
+        let signedOut = try? XCTUnwrap(AccountEnvironment.uiTest(arguments: ["Ilyich", "--ui-testing"]))
+        XCTAssertEqual(signedOut?.usesDeviceStorage, false)
+        XCTAssertNil(signedOut?.fixtureCredential)
+        XCTAssertTrue(signedOut?.credentialStore() is EphemeralCredentialStore)
+
+        let library = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-shelves-stay-open"])
+        XCTAssertEqual(library?.fixtureCredential?.token, "ui-test-session")
+        XCTAssertEqual(library?.keepsShelvesOpen, true)
+        XCTAssertEqual(library?.syncsLibrary, false)
+        XCTAssertEqual(library?.usesDevicePhotos, false)
+        XCTAssertEqual(try library?.credentialStore().load()?.userID, AccountEnvironment.fixtureUserID)
+        let people = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-many-people"])
+        XCTAssertEqual(people?.fixtureCredential?.token, "ui-test-many-people")
+    }
+
+    // MARK: - Support
+
+    /// What an ordinary sign-out records, in order.
+    private static let signOutSteps = ["stopUploads", "endCasting", "removeCredential", "reloadWidgets", "clearNotifications",
+                                       "removeLockedPIN", "clearTimelineCaches", "removeNetworkSettings", "clearDiagnostics"]
+
+    private static let completeStream = #"{"type":"SyncCompleteV1","data":{},"ack":"SyncCompleteV1|done"}"# + "\n"
+
+    private static func albums(_ name: String) -> String {
+        #"[{"id":"00000000-0000-4000-8000-000000000003","albumName":"\#(name)","assetCount":1,"shared":false,"albumUsers":[],"updatedAt":"2026-12-01T12:00:00Z"}]"#
+    }
+
+    private func credential(_ user: String, on server: StubServer) -> StoredCredential {
+        StoredCredential(server: server.baseURL, token: user + "-session", userID: user, name: user.capitalized)
+    }
+
+    private func login(_ user: String) -> LoginResponse {
+        LoginResponse(accessToken: user + "-session", userId: user, userEmail: user + "@example.test", name: user.capitalized,
+                      isAdmin: false, shouldChangePassword: false, profileImagePath: nil, isOnboarded: true)
+    }
+
+    private func environment(library: Bool = false) -> AccountEnvironment {
+        var environment = AccountEnvironment()
+        environment.usesDevicePhotos = false
+        environment.syncsLibrary = library
+        if library { environment.libraryDirectory = temporaryDirectory() }
+        return environment
+    }
+
+    private func dependencies(_ credential: StoredCredential?, server: StubServer, log: AccountEventLog, locked: Bool = false,
+                              mirror: AuthorizationMirror? = nil, unlockEvents: AsyncStream<Void> = AsyncStream { $0.finish() }) -> AccountDependencies {
+        let store = TestCredentialStore(credential, log: log, locked: locked)
+        let clients = AccountClients { address, credential, purpose in
+            let authorization: AuthorizationState? = if case .session(let state) = purpose { state } else { nil }
+            return try APIClient(baseURL: address, accessToken: credential?.token, userID: credential?.userID, sessionConfiguration: server.configuration(),
+                                 networkConfiguration: NetworkConfiguration(), wifiName: NoWiFi(), authorization: authorization)
+        }
+        return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log), clients: clients,
+                                   unlockEvents: { unlockEvents }, expiryRecheckDelay: .milliseconds(20))
+    }
+
+    private func makeHarness(_ credential: StoredCredential?, server: StubServer, environment: AccountEnvironment? = nil,
+                             locked: Bool = false, foreground: Bool = false, mirror: AuthorizationMirror? = nil) -> AccountHarness {
+        let log = AccountEventLog()
+        let (events, unlock) = AsyncStream.makeStream(of: Void.self)
+        let dependencies = dependencies(credential, server: server, log: log, locked: locked, mirror: mirror, unlockEvents: events)
+        let harness = AccountHarness(log: log, credentials: dependencies.credentials as! TestCredentialStore, unlock: unlock)
+        harness.presence.isForeground = foreground
+        let recorder = harness.recorder
+        harness.manager = AccountManager(environment: environment ?? self.environment(), dependencies: dependencies,
+                                         presence: harness.presence) { recorder.record($0) }
+        return harness
+    }
+
+    /// Ends a test's session, so its media and caches go with it.
+    private func signOutAfterwards(_ harness: AccountHarness) async {
+        await harness.manager.signOut(.user)
+    }
+
+    private func makeMirror() -> AuthorizationMirror {
+        let suite = "ilyich.tests.account." + UUID().uuidString
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        return AuthorizationMirror(appGroup: suite)
+    }
+
+    private func temporaryDirectory() -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("AccountManagerTests-" + UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root
+    }
+
+    private func until(_ message: String, timeout: Duration = .seconds(5), _ condition: () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else { return XCTFail(message) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    private func XCTUnwrapAsync<T>(_ value: T?, file: StaticString = #filePath, line: UInt = #line) async throws -> T {
+        try XCTUnwrap(value, file: file, line: line)
+    }
+}
+
+/// A manager over fakes, and what it published.
+@MainActor final class AccountHarness {
+    let log: AccountEventLog
+    let credentials: TestCredentialStore
+    let unlock: AsyncStream<Void>.Continuation
+    let presence = AppPresence(isForeground: false)
+    let recorder = StateRecorder()
+    var manager: AccountManager!
+
+    init(log: AccountEventLog, credentials: TestCredentialStore, unlock: AsyncStream<Void>.Continuation) {
+        self.log = log
+        self.credentials = credentials
+        self.unlock = unlock
+    }
+}
+
+/// The states a manager published, in order.
+@MainActor final class StateRecorder {
+    private(set) var states: [AccountState] = []
+    var observe: ((AccountState) -> Void)?
+
+    var phases: [AccountPhase] { states.map(\.phase) }
+
+    func record(_ state: AccountState) {
+        states.append(state)
+        observe?(state)
+    }
+}
+
+/// What the account layer did, in order, across the fake device and the credential store.
+final class AccountEventLog: Sendable {
+    private let events = Mutex<[String]>([])
+
+    func append(_ event: String) { events.withLock { $0.append(event) } }
+    var all: [String] { events.withLock { $0 } }
+}
+
+/// The device-wide services, recording what they are asked.
+final class FakeAccountDevice: AccountDevice {
+    let log: AccountEventLog
+
+    init(log: AccountEventLog) { self.log = log }
+
+    func stopUploads() async { log.append("stopUploads") }
+    func endCasting() async { log.append("endCasting") }
+    func reloadWidgets() async { log.append("reloadWidgets") }
+    func clearNotifications() async { log.append("clearNotifications") }
+    func removeLockedPIN(scope: String) async { log.append("removeLockedPIN") }
+    func removeNetworkSettings(server: URL) async throws { log.append("removeNetworkSettings") }
+    func clearTimelineCaches(scope: String) async { log.append("clearTimelineCaches") }
+    func clearDiagnostics() async { log.append("clearDiagnostics") }
+    func readOnlyChanged(_ enabled: Bool) async { log.append("readOnly(\(enabled))") }
+}
+
+/// A credential kept in memory that records saves and removals, and can stand for a Keychain
+/// that is still locked.
+final class TestCredentialStore: CredentialStore {
+    private let state: Mutex<(credential: StoredCredential?, locked: Bool)>
+    private let removal = Mutex<(@Sendable () -> Void)?>(nil)
+    private let log: AccountEventLog
+
+    init(_ credential: StoredCredential?, log: AccountEventLog, locked: Bool = false) {
+        state = Mutex((credential, locked))
+        self.log = log
+    }
+
+    var credential: StoredCredential? { state.withLock { $0.credential } }
+    func unlock() { state.withLock { $0.locked = false } }
+    /// Runs `action` as the credential is removed.
+    func onRemove(_ action: @escaping @Sendable () -> Void) { removal.withLock { $0 = action } }
+
+    func load() throws(CredentialError) -> StoredCredential? {
+        let (credential, locked) = state.withLock { ($0.credential, $0.locked) }
+        if locked { throw .locked }
+        return credential
+    }
+
+    func save(_ credential: StoredCredential) throws(CredentialError) {
+        state.withLock { $0.credential = credential }
+        log.append("save(\(credential.userID))")
+    }
+
+    func remove() throws(CredentialError) {
+        removal.withLock { $0 }?()
+        state.withLock { $0.credential = nil }
+        log.append("removeCredential")
+    }
+}

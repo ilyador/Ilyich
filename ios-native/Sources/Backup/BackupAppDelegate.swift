@@ -2,7 +2,8 @@ import UIKit
 
 @MainActor final class BackupAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        if !ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+        // UI tests run without the phone's photos and backup.
+        if AccountEnvironment.current.usesDevicePhotos {
             BackupLifecycle.shared.register()
             Task { await BackupCoordinator.shared.activate() }
         }

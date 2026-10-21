@@ -69,6 +69,10 @@ def memories():
     return result
 
 VIDEO_ID = asset(5)['id']
+# Sign-in UI tests: any password signs in, and an email starting with "expired" gets a session the
+# server then says has expired.
+SESSION_TOKEN = 'ui-test-session'
+EXPIRED_TOKEN = 'ui-test-expired'
 
 @functools.lru_cache(maxsize=1)
 def test_clip():
@@ -124,6 +128,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args): pass
     def send(self,value,status=200):
         data=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+    def send_immich_error(self,status,message):
+        # Immich stamps its own errors with a correlation ID, which tells them from a proxy's.
+        data=json.dumps({'message':message,'error':'Unauthorized' if status==401 else 'Error','statusCode':status}).encode()
+        self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('X-Correlation-ID',str(uuid.uuid4()))
+        self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+    def token(self):
+        return self.headers.get('x-immich-user-token') or self.headers.get('Authorization','').removeprefix('Bearer ')
     def do_GET(self):
         url=urllib.parse.urlsplit(self.path);path=url.path.removeprefix('/api');q=urllib.parse.parse_qs(url.query)
         if path.startswith('/assets/') and path.endswith('/original'):
@@ -185,6 +196,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.send([])
     def do_POST(self):
         size=int(self.headers.get('Content-Length','0'));body=json.loads(self.rfile.read(size) or b'{}');path=urllib.parse.urlsplit(self.path).path.removeprefix('/api')
+        if path=='/auth/login':
+            email=body.get('email','')
+            token=EXPIRED_TOKEN if email.startswith('expired') else SESSION_TOKEN
+            return self.send({'accessToken':token,'userId':OWNER,'userEmail':email,'name':'Test library','isAdmin':False,
+                              'shouldChangePassword':False,'profileImagePath':'','isOnboarded':True},201)
+        if path=='/auth/validateToken':
+            if self.token()==EXPIRED_TOKEN: return self.send_immich_error(401,'Invalid user token')
+            return self.send({'authStatus':True})
+        if path=='/auth/logout':return self.send({'successful':True,'redirectUri':'/auth/login?autoLaunch=0'})
         if path.startswith('/search/'):
             if 'unavailable' in body.get('query',''):return self.send({'error':'Fixture unavailable'},503)
             cursor=body.get('cursor');items=[] if cursor is None else [asset(i) for i in range(9)]

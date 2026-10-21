@@ -3,7 +3,7 @@ import SwiftUI
 struct DiagnosticsView: View {
     let api: APIClient
     let pipeline: MediaPipeline?
-    var session: SessionStore? = nil
+    var session: AccountSession? = nil
     @AppStorage(DiagnosticsStore.levelKey) private var level = DiagnosticLevel.errors.rawValue
     @State private var events: [DiagnosticEvent] = []
     @State private var media: MediaCacheUsage?
@@ -65,7 +65,7 @@ struct DiagnosticsView: View {
                     LabeledContent("Image requests", value: media.pendingLoads.formatted())
                 }
                 if let resetMessage { Text(resetMessage).font(.footnote).foregroundStyle(.secondary) }
-                if pipeline != nil { Button("Clear browsing cache", role: .destructive) { confirmReset = true }.disabled(clearing) }
+                if session != nil { Button("Clear browsing cache", role: .destructive) { confirmReset = true }.disabled(clearing) }
             } header: { Text("Browsing cache") } footer: {
                 Text("Clears downloaded previews and visited timeline metadata for this account. Offline previews will need to download again. Originals, backup receipts, your upload queue and photos on the server stay intact.")
             }
@@ -123,11 +123,9 @@ struct DiagnosticsView: View {
         catch { statisticsError = "Saved metadata counts could not be read. Refresh to try again." }
     }
     private func clearCache() async {
-        guard let pipeline, !clearing else { return }
+        guard let session, !clearing else { return }
         clearing = true; defer { clearing = false }
-        await pipeline.removeAll()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
-        NotificationCenter.default.post(name: .ilyichCachesReset, object: nil, userInfo: ["scope": api.cacheScope])
+        await session.clearBrowsingCache()
         resetMessage = "Browsing cache cleared. Visible photos may download again immediately."
         await refresh()
     }

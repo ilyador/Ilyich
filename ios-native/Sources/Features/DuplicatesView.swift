@@ -186,5 +186,5 @@ struct TrashView: View {
 @MainActor private func invalidateBrowsingCache(api: APIClient, pipeline: MediaPipeline, deleted: Set<String> = []) async {
     await TimelineCache.shared.removeAll(scope: api.cacheScope)
     await pipeline.forget(assetIDs: deleted)
-    NotificationCenter.default.post(name: .ilyichCachesReset, object: nil, userInfo: ["scope": api.cacheScope])
+    LegacyNotificationBridge.cachesReset(scope: api.cacheScope)
 }
