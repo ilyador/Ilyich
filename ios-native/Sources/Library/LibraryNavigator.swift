@@ -30,6 +30,11 @@ import SwiftUI
     private(set) var isFollowingLink = false
     /// Routes shown once nothing is presented, asked or covering the grid, oldest first.
     private(set) var waiting: [ModalRoute] = []
+    /// The Earth has a sheet or alert of its own up, such as its list of locations, which it
+    /// presents from the library's own controller.
+    private(set) var earthPresents = false
+    /// The Earth is asked to close what it has up; it reports when it has gone.
+    private(set) var earthPresentationClosing = false
     /// Runs the intents that change the library itself: the timeline, a filter, the Earth.
     @ObservationIgnored var perform: (NavigationIntent) -> Void = { _ in }
     /// The level the layers are closing down to.
@@ -40,7 +45,7 @@ import SwiftUI
 
     /// Nothing is presented, asked, covering the grid, waiting to run or being looked up.
     var isIdle: Bool {
-        layers.isEmpty && alert == nil && overlay.isEmpty && deferred == nil && !isFollowingLink
+        layers.isEmpty && alert == nil && overlay.isEmpty && deferred == nil && !isFollowingLink && !earthPresents
     }
 
     /// A photo is open in either viewer, until it has finished closing.
@@ -65,10 +70,10 @@ import SwiftUI
     // MARK: Commands
 
     /// Presents `route` from the screen at `level`, where 0 is the library itself. Over anything
-    /// already presented, the library's own presentation closes it first. A screen presents only
-    /// while it is the top layer and staying.
+    /// already presented, or what the Earth has up, the library's own presentation closes it
+    /// first. A screen presents only while it is the top layer and staying.
     func present(_ route: ModalRoute, from level: Int = 0) {
-        if level == 0, !layers.isEmpty { send(.present(route)); return }
+        if level == 0, !layers.isEmpty || earthPresents { send(.present(route)); return }
         guard level == layers.count, closingTo == nil else { return }
         generation += 1
         waiting.removeAll { $0 == route }
@@ -79,7 +84,7 @@ import SwiftUI
     func send(_ intent: NavigationIntent) {
         generation += 1
         deferred = intent
-        if layers.isEmpty { runDeferred() } else { close(downTo: 0) }
+        if layers.isEmpty, !earthPresents { runDeferred() } else { close(downTo: 0) }
     }
 
     /// Closes everything over the library, and drops the intent waiting and the alert. Returns
@@ -105,7 +110,18 @@ import SwiftUI
         layers.removeSubrange(level...)
         if let target = closingTo, layers.count > target { closeTop(); return }
         closingTo = nil
-        if layers.isEmpty { runDeferred() }
+        if layers.isEmpty, !earthPresents { runDeferred() }
+        idleMayHaveChanged()
+    }
+
+    /// The Earth has put up, or taken down, a sheet or alert of its own. Once it has gone, and
+    /// every layer with it, the intent waiting runs.
+    func earthPresentationChanged(_ up: Bool) {
+        guard earthPresents != up else { return }
+        earthPresents = up
+        guard !up else { return }
+        earthPresentationClosing = false
+        if layers.isEmpty, closingTo == nil { runDeferred() }
         idleMayHaveChanged()
     }
 
@@ -150,6 +166,8 @@ import SwiftUI
     // MARK: Closing and running
 
     private func close(downTo level: Int) {
+        // The Earth presents from the library's own controller, so it closes along with level 0.
+        if level == 0, earthPresents { earthPresentationClosing = true }
         guard layers.count > level else { return }
         closingTo = min(closingTo ?? level, level)
         closeTop()
