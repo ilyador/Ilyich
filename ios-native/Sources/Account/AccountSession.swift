@@ -53,9 +53,9 @@ import IlyichPlatform
     var entities: EntityStore? { runtime?.library?.entities }
     /// Fills the thumbnail store with the whole library while the app is open.
     var thumbnailWarmer: ThumbnailWarmer? { runtime?.library?.warmer }
-    var isSyncing: Bool { runtime?.library?.sync.isSyncing ?? false }
-    var syncError: String? { runtime?.library?.sync.syncError ?? runtime?.libraryError }
-    var lastSyncDate: Date? { runtime?.library?.sync.lastSyncDate }
+    var isSyncing: Bool { runtime?.library?.status.status.isSyncing ?? false }
+    var syncError: String? { runtime?.library?.status.status.error ?? runtime?.libraryError }
+    var lastSyncDate: Date? { runtime?.library?.status.status.lastSyncDate }
 
     // MARK: Commands
 
@@ -79,7 +79,10 @@ import IlyichPlatform
 
     func signOut() async { await manager.signOut(.user) }
 
-    func startSync() { runtime?.library?.sync.startSync() }
+    func startSync() {
+        guard let sync = runtime?.library?.sync else { return }
+        Task { await sync.syncNow() }
+    }
 
     func resetLibraryMetadata() async { await manager.resetLibraryMetadata() }
 
@@ -108,12 +111,12 @@ import IlyichPlatform
             presence.isForeground = true
             if let runtime, phase == .active || phase == .passwordChangeRequired {
                 runtime.check.validate()
-                runtime.library?.sync.enteredForeground()
+                if let sync = runtime.library?.sync { Task { await sync.presenceChanged() } }
             }
             if phase == .waitingForUnlock { Task { await manager.retryRestoreIfWaiting() } }
         } else if scene == .background {
             presence.isForeground = false
-            runtime?.library?.sync.enteredBackground()
+            if let sync = runtime?.library?.sync { Task { await sync.presenceChanged() } }
         }
     }
 

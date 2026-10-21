@@ -5,7 +5,8 @@ import Foundation
 struct NativeLibraryAPI: LibraryAPI {
     let client: APIClient
     let entities: EntityStore
-    let sync: NativeSync
+    /// The account's sync, which runs refreshes as its own passes. Nil where nothing syncs.
+    let sync: SyncEngine?
     var cacheScope: String { client.cacheScope }
 
     func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
@@ -33,5 +34,6 @@ struct NativeLibraryAPI: LibraryAPI {
     }
     func search(_ query: SearchQuery) async throws -> SearchResponse { try await client.search(query) }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { try await client.metadataSearch(query) }
-    func refresh() async throws { _ = try await sync.synchronize() }
+    /// A sync pass, published like every other, and what it changed.
+    func refresh() async throws -> LibraryChange? { try await sync?.refresh() }
 }

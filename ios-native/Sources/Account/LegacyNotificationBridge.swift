@@ -11,6 +11,14 @@ import Foundation
                                         userInfo: ["scope": scope, "collections": collections, "accessChanged": accessChanged])
     }
 
+    /// A change the account's sync published. The shelves reload for albums, people, partners,
+    /// memories, a configuration change or a reset; a change to photos alone reloads the feed.
+    static func libraryChanged(_ change: LibraryChange, scope: String, accessChanged: Bool) {
+        let collections = !change.albums.isEmpty || !change.people.isEmpty || change.partnersChanged || change.memoriesChanged
+            || change.configurationChanged || change.reset || change.overflow
+        libraryChanged(scope: scope, collections: collections, accessChanged: accessChanged)
+    }
+
     /// What the account `scope` names keeps on the phone was cleared or changed, so the feed reloads.
     static func cachesReset(scope: String) {
         NotificationCenter.default.post(name: .ilyichCachesReset, object: nil, userInfo: ["scope": scope])

@@ -50,8 +50,29 @@ struct LibraryChange: Sendable {
     /// The backend that serves some queries changed, for example when the index became complete.
     var routingChanged = false
     var configurationChanged = false
-    /// The mailbox gave up tracking items one by one; consumers reload.
+    /// The change gave up naming items one by one; consumers reload.
     var overflow = false
+
+    /// A change names at most this many items. Past it, it overflows: it keeps only the assets
+    /// whose access was lost, which are never forgotten, and consumers reload.
+    static let itemLimit = 50_000
+
+    /// Nothing changed, as after a sync pass whose stream held only its completion marker.
+    var isEmpty: Bool {
+        upserted.isEmpty && removed.isEmpty && accessLost.isEmpty && mediaRevisions.isEmpty && albums.isEmpty && people.isEmpty
+            && stacks.isEmpty && collections.isEmpty && !partnersChanged && !memoriesChanged && !reset && !routingChanged
+            && !configurationChanged && !overflow
+    }
+
+    /// Overflows once the change names more than `itemLimit` items.
+    mutating func limitItems() {
+        let count = upserted.count + removed.count + accessLost.count + mediaRevisions.count + albums.count + people.count
+            + stacks.count + collections.count
+        guard overflow || count > Self.itemLimit else { return }
+        overflow = true
+        upserted = [:]; removed = []; mediaRevisions = [:]
+        albums = []; people = []; stacks = []; collections = []
+    }
 
     /// Folds a later change into this one, so a subscriber that fell behind still sees every
     /// effect. The later change's identity wins. An asset removed and then upserted counts as
@@ -86,6 +107,7 @@ struct LibraryChange: Sendable {
         routingChanged = routingChanged || later.routingChanged
         configurationChanged = configurationChanged || later.configurationChanged
         overflow = overflow || later.overflow
+        limitItems()
     }
 }
 

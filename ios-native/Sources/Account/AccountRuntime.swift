@@ -29,6 +29,8 @@ final class AccountRuntime: Sendable {
         let native: NativeSync
         let libraryAPI: NativeLibraryAPI
         let sync: SyncEngine
+        /// The sync's status, where the screens read it.
+        let status: SyncStatusBoard
         let warmer: ThumbnailWarmer
     }
 
@@ -75,10 +77,11 @@ final class AccountRuntime: Sendable {
                 let device = dependencies.device
                 library = await MainActor.run {
                     let warmer = ThumbnailWarmer(session: authorization)
+                    let status = SyncStatusBoard()
                     let sync = SyncEngine(client: api, entities: entities, native: native, pipeline: pipeline, warmer: warmer,
-                                          presence: presence, check: check, authorization: authorization, device: device)
-                    return LibraryServices(entities: entities, native: native, libraryAPI: NativeLibraryAPI(client: api, entities: entities, sync: native),
-                                           sync: sync, warmer: warmer)
+                                          presence: presence, check: check, authorization: authorization, device: device, status: status)
+                    return LibraryServices(entities: entities, native: native, libraryAPI: NativeLibraryAPI(client: api, entities: entities, sync: sync),
+                                           sync: sync, status: status, warmer: warmer)
                 }
             } catch { libraryError = error.localizedDescription }
         }
@@ -88,11 +91,11 @@ final class AccountRuntime: Sendable {
 
     /// Starts the account's work once the screens show it: the warmer once the offline library is
     /// complete, sync while the app is in front, and the session check.
-    @MainActor func start() {
+    @MainActor func start() async {
         if let library {
             let entities = library.entities
             library.warmer.start(when: { (try? await entities.isComplete()) == true }, entities: entities, pipeline: pipeline)
-            library.sync.startSync()
+            await library.sync.start()
         }
         check.validate()
     }
@@ -224,9 +227,15 @@ final class OwnedWork: Sendable {
 }
 
 /// Whether the app is in front, which every account's sync follows. The session updates it as
-/// the scene changes.
-@MainActor final class AppPresence {
-    var isForeground: Bool
+/// the scene changes, and sync reads it from its own actor whenever it hears of a change, so
+/// changes that arrive out of order still end at the latest.
+final class AppPresence: Sendable {
+    private let foreground: Mutex<Bool>
 
-    init(isForeground: Bool) { self.isForeground = isForeground }
+    init(isForeground: Bool) { foreground = Mutex(isForeground) }
+
+    var isForeground: Bool {
+        get { foreground.withLock { $0 } }
+        set { foreground.withLock { $0 = newValue } }
+    }
 }

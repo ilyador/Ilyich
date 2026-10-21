@@ -228,10 +228,42 @@ import XCTest
 
     // MARK: - Sync
 
-    /// SYNC-2. The live event stream keeps only the newest invalidation, so hints that arrive while
-    /// a sync pass runs overwrite each other: a configuration change and the asset IDs of earlier
-    /// events are lost. on_asset_stack_update also spreads its IDs as separate arguments, while the
-    /// parser looks for one array, so those IDs are dropped too.
+    /// SYNC-1, fixed in rebuild milestone Q1. A request that reached NativeSync after its pass had
+    /// checked for follow-up requests for the last time, but before the pass's task was let go,
+    /// joined the finished pass and got its result: no pass ran for it, and what changed in
+    /// between waited for some later sync. Requests are now numbered, and a pass serves only those
+    /// made before it started, so a request during a pass gets a pass of its own.
+    func testARequestDuringAPassGetsAPassOfItsOwn() async throws {
+        let harness = try makeSyncHarness()
+        try await harness.primeIndex()
+        let held = StubServer.Gate()
+        harness.server.route("POST", "sync/stream", responses: [
+            SyncEvents.stream([SyncEvents.asset("early"), SyncEvents.complete(id: "first")]).waiting(for: held),
+            SyncEvents.stream([SyncEvents.asset("late"), SyncEvents.complete(id: "second")]),
+        ])
+        let first = Task { try await harness.engine.refresh() }
+        try await until("The first pass did not start its stream.") { held.waiting == 1 }
+        let second = Task { try await harness.engine.refresh() }
+        try await until("The second request was not made during the first pass.") { await harness.engine.waiting == 2 }
+        held.open()
+
+        let firstChange = try await first.value
+        let secondChange = try await second.value
+
+        XCTAssertEqual(harness.streamRequests.count, 2, "The request made during the first pass got a pass of its own.")
+        XCTAssertNotNil(firstChange.upserted["early"])
+        XCTAssertNil(firstChange.upserted["late"], "The first caller's pass ended before the late change.")
+        XCTAssertNotNil(secondChange.upserted["late"], "The second caller's pass started after it asked.")
+        let late = try await harness.entities.asset(id: "late")
+        XCTAssertNotNil(late)
+    }
+
+    /// SYNC-2, fixed in rebuild milestone Q1. The live event stream kept only the newest
+    /// invalidation, so hints that arrived while a sync pass ran overwrote each other: a
+    /// configuration change and the asset IDs of earlier events were lost. on_asset_stack_update
+    /// also spreads its IDs as separate arguments, while the parser looked for one array, so those
+    /// IDs were dropped too. Hints now wait merged until they are read, and the parser takes
+    /// spread arguments.
     func testSocketBurstKeepsEveryHint() async throws {
         let server = try SocketBurstServer(packets: [
             #"42["on_config_update"]"#,
@@ -256,10 +288,8 @@ import XCTest
         let ids = hints.reduce(into: Set<String>()) { $0.formUnion($1.assetIDs) }
         let configurationChanged = hints.contains { $0.configurationChanged }
 
-        XCTExpectFailure("SYNC-2: socket hints in a burst are dropped. Q1 removes this wrapper.", strict: true) {
-            XCTAssertTrue(configurationChanged, "The configuration change survives the burst.")
-            XCTAssertEqual(ids, ["x", "a", "b"], "Every asset ID in the burst survives it.")
-        }
+        XCTAssertTrue(configurationChanged, "The configuration change survives the burst.")
+        XCTAssertEqual(ids, ["x", "a", "b"], "Every asset ID in the burst survives it.")
     }
 
     // MARK: - Media
@@ -272,12 +302,12 @@ import XCTest
         let (sync, index, server) = try makeSyncedIndex()
         _ = try await pass([asset("kept"), asset("deleted"), complete()], through: sync, server: server)
         _ = try await index.takeAccessInvalidation()
-        let summary = try await pass([event("AssetDeleteV1", #"{"assetId":"deleted"}"#, ack: "AssetDeleteV1|deleted"), complete()],
-                                     through: sync, server: server)
+        let change = try await pass([event("AssetDeleteV1", #"{"assetId":"deleted"}"#, ack: "AssetDeleteV1|deleted"), complete()],
+                                    through: sync, server: server)
         let invalidated = try await index.takeAccessInvalidation()
         let purges = try await index.pendingMediaPurges()
-        XCTAssertEqual(summary.deletedAssetIDs, ["deleted"], "The deletion itself is reported.")
-        XCTAssertFalse(summary.accessChanged, "A deletion is not a change in what the account may see.")
+        XCTAssertEqual(change.removed, ["deleted"], "The deletion itself is reported.")
+        XCTAssertTrue(change.accessLost.isEmpty, "A deletion is not a change in what the account may see.")
         XCTAssertFalse(invalidated, "Nor is it kept as one for a later sync.")
         XCTAssertEqual(purges, [MediaPurge(assetID: "deleted", revoked: false)], "Only the deleted photo's media goes.")
     }
@@ -296,13 +326,14 @@ import XCTest
             complete(),
         ], through: sync, server: server)
         _ = try await index.takeAccessInvalidation()
-        let summary = try await pass([event("AlbumToAssetDeleteV1", #"{"albumId":"trip","assetId":"trip-photo"}"#, ack: "AlbumToAssetDeleteV1|trip-photo"),
-                                      complete()], through: sync, server: server)
+        let change = try await pass([event("AlbumToAssetDeleteV1", #"{"albumId":"trip","assetId":"trip-photo"}"#, ack: "AlbumToAssetDeleteV1|trip-photo"),
+                                     complete()], through: sync, server: server)
         let invalidated = try await index.takeAccessInvalidation()
         let kept = try await index.asset(id: "trip-photo")
         let purges = try await index.pendingMediaPurges()
         XCTAssertNotNil(kept, "The photo is still in my library.")
-        XCTAssertFalse(summary.accessChanged, "Removing my photo from my album changes nothing I may see.")
+        XCTAssertTrue(change.accessLost.isEmpty, "Removing my photo from my album changes nothing I may see.")
+        XCTAssertEqual(change.albums, ["trip"], "The album's contents changed.")
         XCTAssertFalse(invalidated, "Nor is it kept as an access change for a later sync.")
         XCTAssertEqual(purges, [], "Its media stays.")
     }
@@ -391,7 +422,7 @@ import XCTest
             asset("mine"), asset("bob-photo", owner: "bob", type: "PartnerAssetV2"), asset("carol-photo", owner: "carol", type: "PartnerAssetV2"),
             complete(),
         ], epoch: epoch)
-        let offline = LibraryStore(api: NativeLibraryAPI(client: api, entities: entities, sync: NativeSync(api: api, store: entities)))
+        let offline = LibraryStore(api: NativeLibraryAPI(client: api, entities: entities, sync: nil))
         defer { offline.stop() }
         await offline.reload()
         try await until("The offline library's month did not load.") { offline.loaded["2026-02-01"] != nil }
@@ -416,12 +447,6 @@ import XCTest
     }
 
     // MARK: - Not reproduced here
-    //
-    // SYNC-1 (lost tail pass, Q1). A trigger is lost only if it reaches the NativeSync actor
-    // after run() has checked resyncRequested for the last time and before the first caller clears
-    // the shared task. That window has no await in it, so no stub server or gate can hold a pass
-    // inside it, and a test would be a timing race. Q1's requested and completed sequence numbers
-    // make it testable with a gated transport.
     //
     // BACKUP-1 (a 5xx blocks automatic backup, B9) and BACKUP-2 (an album failure keeps a photo
     // queued, B9). BackupCoordinator uploads only with the signed-in account's Keychain credential,
@@ -496,11 +521,11 @@ import XCTest
     }
 
     /// One sync pass whose stream holds the given events.
-    private func pass(_ events: [EntitySyncEvent], through sync: NativeSync, server: StubServer) async throws -> SyncChangeSummary {
+    private func pass(_ events: [EntitySyncEvent], through sync: NativeSync, server: StubServer) async throws -> IndexChange {
         var body = Data()
         for event in events { body += try JSONEncoder().encode(event) + Data("\n".utf8) }
         server.route("POST", "sync/stream", StubServer.Response(status: 200, headers: ["Content-Type": "application/jsonlines+json"], body: body))
-        return try await sync.synchronize()
+        return try await sync.pass()
     }
 
     private func event(_ type: String, _ json: String, ack: String) throws -> EntitySyncEvent {

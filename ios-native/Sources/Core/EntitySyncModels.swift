@@ -36,22 +36,91 @@ struct EntitySyncEvent: Codable, Sendable {
     var ackType: String { String(ack.prefix(while: { $0 != "|" })) }
 }
 struct SyncAcknowledgement: Decodable, Sendable { let type: String; let ack: String }
-struct SyncChangeSummary: Sendable {
-    var changed = false
-    var reset = false
+
+/// What committed sync batches did to the offline library, item by item. SyncEngine names the
+/// account and authorization it happened under and publishes it as a LibraryChange.
+struct IndexChange: Sendable, Equatable {
+    typealias MonthMove = LibraryChange.MonthMove
+
+    /// Assets added or changed, with the months they left and joined. An asset whose details
+    /// changed (EXIF, edits, faces, text, metadata) stays in its month.
+    var upserted: [String: MonthMove] = [:]
+    var removed: Set<String> = []
+    /// Removed assets the account may no longer see, as opposed to deleted ones.
+    var accessLost: Set<String> = []
+    /// An asset already in the index to its new media revision.
+    var mediaRevisions: [String: String] = [:]
+    var albums: Set<String> = []
+    var people: Set<String> = []
+    var stacks: Set<String> = []
+    /// Partners, or the other users the library names, changed.
+    var partnersChanged = false
+    /// Memories, or the preferences that turn them on, changed.
+    var memoriesChanged = false
+    /// The server reset this session's sync: the index was emptied and fills again.
+    var serverReset = false
+    /// The index was emptied on the phone, for a new session or a first sync, and fills again.
+    var localReset = false
+    /// The index became complete, or stopped being complete, so feeds read from elsewhere.
+    var routingChanged = false
+    /// More items than a change names; consumers reload.
+    var overflow = false
+    /// The stream's completion marker arrived. The marker alone changes nothing.
     var completed = false
-    var assetIDs: Set<String> = []
-    var deletedAssetIDs: Set<String> = []
-    var collectionsChanged = false
-    var accessChanged = false
-    var configurationChanged = false
-    mutating func merge(_ other: Self) {
-        changed = changed || other.changed; reset = reset || other.reset
-        completed = completed || other.completed; collectionsChanged = collectionsChanged || other.collectionsChanged
-        accessChanged = accessChanged || other.accessChanged; configurationChanged = configurationChanged || other.configurationChanged
-        // Callers use IDs for invalidation, not as a second copy of the whole library.
-        if assetIDs.count < 2_000 { assetIDs.formUnion(other.assetIDs.prefix(2_000 - assetIDs.count)) }
-        if deletedAssetIDs.count < 2_000 { deletedAssetIDs.formUnion(other.deletedAssetIDs.prefix(2_000 - deletedAssetIDs.count)) }
+    /// The index's revision once these batches were in.
+    var revision: UInt64 = 0
+
+    var isEmpty: Bool {
+        upserted.isEmpty && removed.isEmpty && accessLost.isEmpty && mediaRevisions.isEmpty && albums.isEmpty && people.isEmpty
+            && stacks.isEmpty && !partnersChanged && !memoriesChanged && !serverReset && !localReset && !routingChanged && !overflow
+    }
+
+    /// The asset was written; `from` is where it was before this change began.
+    mutating func upsert(_ id: String, from: MonthKey?, to: MonthKey?) {
+        upserted[id] = MonthMove(from: upserted[id].map { $0.from } ?? from, to: to)
+        removed.remove(id)
+    }
+
+    /// The asset's details changed while it stayed in `month`.
+    mutating func touch(_ id: String, in month: MonthKey?) {
+        guard upserted[id] == nil else { return }
+        upsert(id, from: month, to: month)
+    }
+
+    mutating func remove(_ id: String, accessLost lost: Bool) {
+        upserted[id] = nil
+        mediaRevisions[id] = nil
+        removed.insert(id)
+        if lost { accessLost.insert(id) }
+    }
+
+    /// Folds a later change in, with the rules LibraryChange.merge follows.
+    mutating func merge(_ later: IndexChange) {
+        for (id, move) in later.upserted { upsert(id, from: move.from, to: move.to) }
+        for id in later.removed { remove(id, accessLost: false) }
+        accessLost.formUnion(later.accessLost)
+        mediaRevisions.merge(later.mediaRevisions) { _, newer in newer }
+        albums.formUnion(later.albums)
+        people.formUnion(later.people)
+        stacks.formUnion(later.stacks)
+        partnersChanged = partnersChanged || later.partnersChanged
+        memoriesChanged = memoriesChanged || later.memoriesChanged
+        serverReset = serverReset || later.serverReset
+        localReset = localReset || later.localReset
+        routingChanged = routingChanged || later.routingChanged
+        overflow = overflow || later.overflow
+        completed = completed || later.completed
+        revision = max(revision, later.revision)
+        limitItems()
+    }
+
+    /// Overflows past LibraryChange.itemLimit items, keeping lost access, as LibraryChange does.
+    mutating func limitItems() {
+        let count = upserted.count + removed.count + accessLost.count + mediaRevisions.count + albums.count + people.count + stacks.count
+        guard overflow || count > LibraryChange.itemLimit else { return }
+        overflow = true
+        upserted = [:]; removed = []; mediaRevisions = [:]
+        albums = []; people = []; stacks = []
     }
 }
 /// A photo the index removed, whose cached media must go too. Revoked when access to it was lost

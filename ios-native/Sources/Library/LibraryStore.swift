@@ -88,13 +88,15 @@ protocol LibraryAPI: Sendable {
     func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset]
     func search(_ query: SearchQuery) async throws -> SearchResponse
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse
-    func refresh() async throws
+    /// Brings the library up to date with the server, and says what that changed, when it knows.
+    func refresh() async throws -> LibraryChange?
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount]
     /// Whether a place's photos can be laid out by month, as a person's are.
     func supportsPlaceTimelines() async -> Bool
 }
 extension LibraryAPI {
-    func refresh() async throws {}
+    /// Without an offline library the server is always up to date.
+    func refresh() async throws -> LibraryChange? { nil }
     /// Only the local index can count places for every month at once.
     func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] { [] }
     /// Only the local index can lay out a place by month.
@@ -964,7 +966,7 @@ extension APIClient: LibraryAPI {}
     }
     func refreshAfterMutation() async {
         originalTimeline = nil
-        do { try await api.refresh(); await reload(preservingPosition: true) }
+        do { _ = try await api.refresh(); await reload(preservingPosition: true) }
         catch is CancellationError { }
         catch { self.error = error.localizedDescription }
     }

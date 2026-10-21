@@ -430,29 +430,30 @@ extension APIClient {
         request.url = components.url
         let socket = try transport.webSocket(with: request)
         socket.maximumMessageSize = 4 * 1_024 * 1_024
-        let events = AsyncThrowingStream<ServerInvalidation, any Error>(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let task = Task {
-                socket.resume()
-                do {
-                    try await withTaskCancellationHandler {
-                        while !Task.isCancelled {
-                            let message = try await socket.receive()
-                            let text: String
-                            switch message { case .string(let value): text = value; case .data(let data): text = String(decoding: data, as: UTF8.self); @unknown default: continue }
-                            switch try SocketEventPacket.parse(text) {
-                            case .open: try await socket.send(.string("40"))
-                            case .ping(let payload): try await socket.send(.string("3" + payload))
-                            case .invalidation(let event): continuation.yield(event)
-                            case .ignore: break
-                            }
+        // Pings are answered here as they arrive, however long the reader takes, and hints wait
+        // for it merged, so none is lost while a sync pass runs.
+        let mailbox = ServerHintMailbox()
+        let task = Task {
+            socket.resume()
+            do {
+                try await withTaskCancellationHandler {
+                    while !Task.isCancelled {
+                        let message = try await socket.receive()
+                        let text: String
+                        switch message { case .string(let value): text = value; case .data(let data): text = String(decoding: data, as: UTF8.self); @unknown default: continue }
+                        switch try SocketEventPacket.parse(text) {
+                        case .open: try await socket.send(.string("40"))
+                        case .ping(let payload): try await socket.send(.string("3" + payload))
+                        case .invalidation(let event): mailbox.post(event)
+                        case .ignore: break
                         }
-                    } onCancel: { socket.cancel(with: .goingAway, reason: nil) }
-                    continuation.finish()
-                } catch { continuation.finish(throwing: error) }
-                socket.cancel(with: .goingAway, reason: nil)
-            }
-            continuation.onTermination = { _ in task.cancel(); socket.cancel(with: .goingAway, reason: nil) }
+                    }
+                } onCancel: { socket.cancel(with: .goingAway, reason: nil) }
+                mailbox.finish()
+            } catch { mailbox.finish(throwing: error) }
+            socket.cancel(with: .goingAway, reason: nil)
         }
-        return ServerEventConnection(events: events, close: { socket.cancel(with: .goingAway, reason: nil) })
+        let events = AsyncThrowingStream<ServerInvalidation, any Error>(unfolding: { try await mailbox.next() })
+        return ServerEventConnection(events: events, close: { task.cancel(); socket.cancel(with: .goingAway, reason: nil) })
     }
 }

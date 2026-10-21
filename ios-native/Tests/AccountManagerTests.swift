@@ -227,7 +227,8 @@ import XCTest
             XCTAssertTrue(runtime.api.transport.isShutDown, name)
             let features = try await library.entities.cachedServerFeatures()
             XCTAssertNil(features, "\(name): the offline library is emptied.")
-            XCTAssertFalse(library.sync.isOpen, name)
+            let syncOpen = await library.sync.isOpen
+            XCTAssertFalse(syncOpen, name)
             XCTAssertEqual(try backup.state(), try Self.backupStateAfterSignOut(keepingAutomaticBackup: false),
                            "\(name): the backup state stays with its receipts, paused, and with automatic backup off.")
             XCTAssertTrue(ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID), "\(name): the read-only flag stays.")
@@ -440,7 +441,8 @@ import XCTest
         XCTAssertNotEqual(bob.api.cacheScope, alice.api.cacheScope)
         let served = try await bob.api.albums()
         XCTAssertEqual(served.map(\.albumName), ["Bob's garden"])
-        XCTAssertFalse(alice.library?.sync.isOpen ?? true)
+        let aliceSyncOpen = await alice.library?.sync.isOpen
+        XCTAssertEqual(aliceSyncOpen, false)
         XCTAssertFalse(alice.authorization.isCurrent(aliceEpoch))
         let counted = Fenced<[String]>(epoch: aliceEpoch, value: ["Alice's trip"])
         XCTAssertNil(counted.value(ifCurrent: bob.authorization.snapshot.epoch), "Nothing made under Alice's authorization is current for Bob.")
