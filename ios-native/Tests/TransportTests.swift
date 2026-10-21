@@ -230,6 +230,35 @@ final class TransportTests: XCTestCase {
         catch { XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled, "\(error)") }
     }
 
+    /// A sync pass that stops before its stream ends, here because a batch could not be saved,
+    /// ends the transfer. Left paused for a reader that is gone, the transfer would hold its
+    /// connection for good, and the server would wait to write the rest.
+    func testASyncPassThatStopsEarlyEndsItsTransfer() async throws {
+        let line = try JSONEncoder().encode(EntitySyncEvent(type: "AssetV2", data: [:], ack: "AssetV2|photo")) + Data("\n".utf8)
+        var block = Data()
+        while block.count < 1024 * 1024 { block.append(line) }
+        // Far more than a paused transfer holds.
+        var lines = Data()
+        for _ in 0..<64 { lines.append(block) }
+        let answer = lines
+        let server = try LoopbackHTTPServer { _ in
+            LoopbackHTTPServer.Response(status: 200, headers: ["Content-Type": "application/jsonlines+json"], body: answer)
+        }
+        let port = try await server.start()
+        defer { server.stop() }
+        let api = try APIClient(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:\(port)")), accessToken: "session-token", userID: "alice",
+                                networkConfiguration: NetworkConfiguration())
+        addTeardownBlock { await api.shutdown() }
+
+        struct Unsaved: Error {}
+        do {
+            try await api.consumeSyncStream(reset: false) { _ in throw Unsaved() }
+            XCTFail("A batch that can't be saved ends the pass.")
+        } catch { XCTAssertTrue(error is Unsaved, "\(error)") }
+        try await until { !server.endedAnswers.isEmpty }
+        XCTAssertEqual(server.endedAnswers, [false], "The phone let go of the answer before its end.")
+    }
+
     // MARK: - Downloads
 
     func testADownloadLandsInItsOwnFileAndARefusalLeavesNothing() async throws {

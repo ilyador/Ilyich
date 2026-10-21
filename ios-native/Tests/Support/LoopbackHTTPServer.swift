@@ -3,8 +3,9 @@ import Network
 import Synchronization
 
 /// A plain HTTP/1.1 server on the loopback interface, for tests that need a real connection: a
-/// redirect as URLSession follows it, or an answer too long to hold. Each connection serves one
-/// request, answered by the handler, and is closed after the answer.
+/// redirect as URLSession follows it, an answer too long to hold, or a client that goes away in
+/// the middle of one. Each connection serves one request, answered by the handler, and is closed
+/// after the answer.
 final class LoopbackHTTPServer: @unchecked Sendable {
     struct Request: Sendable {
         let method: String
@@ -29,7 +30,8 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "app.ilyich.tests.loopback-http")
     private let handler: @Sendable (Request) -> Response
-    private let state = Mutex<(start: CheckedContinuation<UInt16, any Error>?, requests: [Request], connections: [NWConnection])>((nil, [], []))
+    private let state = Mutex<(start: CheckedContinuation<UInt16, any Error>?, requests: [Request], connections: [NWConnection],
+                               answering: Set<ObjectIdentifier>, ended: [Bool])>((nil, [], [], [], []))
 
     init(handler: @escaping @Sendable (Request) -> Response) throws {
         let parameters = NWParameters.tcp
@@ -39,6 +41,10 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     }
 
     var requests: [Request] { state.withLock { $0.requests } }
+
+    /// How the answers sent so far ended, in order: true for one handed whole to the network, false
+    /// for one cut off because the client went away. An answer still on its way is not in it.
+    var endedAnswers: [Bool] { state.withLock { $0.ended } }
 
     /// Starts listening and returns the port.
     func start() async throws -> UInt16 {
@@ -71,6 +77,13 @@ final class LoopbackHTTPServer: @unchecked Sendable {
 
     private func accept(_ connection: NWConnection) {
         state.withLock { $0.connections.append(connection) }
+        // A client that goes away mid-answer fails the connection at once, while the answer's
+        // send hears of it only when the connection is cancelled.
+        connection.stateUpdateHandler = { [weak self, weak connection] update in
+            guard case .failed = update, let self, let connection else { return }
+            self.answerEnded(on: connection, whole: false)
+            connection.cancel()
+        }
         connection.start(queue: queue)
         receive(on: connection, buffer: Data())
     }
@@ -104,6 +117,18 @@ final class LoopbackHTTPServer: @unchecked Sendable {
         headers["Connection"] = "close"
         for (name, value) in headers { head += "\(name): \(value)\r\n" }
         head += "\r\n"
-        connection.send(content: Data(head.utf8) + response.body, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
+        state.withLock { _ = $0.answering.insert(ObjectIdentifier(connection)) }
+        connection.send(content: Data(head.utf8) + response.body, contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { [weak self, weak connection] error in
+                            guard let self, let connection else { return }
+                            self.answerEnded(on: connection, whole: error == nil)
+                        })
+    }
+
+    private func answerEnded(on connection: NWConnection, whole: Bool) {
+        state.withLock { state in
+            guard state.answering.remove(ObjectIdentifier(connection)) != nil else { return }
+            state.ended.append(whole)
+        }
     }
 }
