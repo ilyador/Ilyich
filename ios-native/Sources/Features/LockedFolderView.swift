@@ -7,9 +7,10 @@ import CryptoKit
 /// An unlocked local key never substitutes for successful server-side session elevation.
 enum LockedPINStore {
     private static let service = "Ilyich.LockedFolder.PIN"
-    private static func account(_ api: APIClient) -> String { SHA256.hash(data: Data(api.cacheScope.utf8)).map { String(format: "%02x", $0) }.joined() }
-    private static func query(_ api: APIClient) -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account(api)]
+    private static func account(_ cacheScope: String) -> String { SHA256.hash(data: Data(cacheScope.utf8)).map { String(format: "%02x", $0) }.joined() }
+    private static func query(_ api: APIClient) -> [String: Any] { query(cacheScope: api.cacheScope) }
+    private static func query(cacheScope: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account(cacheScope)]
     }
     static func save(_ pin: String, for api: APIClient) throws {
         var error: Unmanaged<CFError>?
@@ -37,7 +38,9 @@ enum LockedPINStore {
         }
         return pin
     }
-    static func remove(for api: APIClient) { SecItemDelete(query(api) as CFDictionary) }
+    static func remove(for api: APIClient) { remove(cacheScope: api.cacheScope) }
+    /// Forgets the PIN of the account `cacheScope` names, as sign-out does.
+    static func remove(cacheScope: String) { SecItemDelete(query(cacheScope: cacheScope) as CFDictionary) }
 }
 
 struct LockedFolderView: View {

@@ -2,13 +2,13 @@ import SwiftUI
 
 @main struct IlyichApp: App {
     @UIApplicationDelegateAdaptor(BackupAppDelegate.self) private var appDelegate
-    @State private var session: SessionStore
+    @State private var session: AccountSession
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     init() {
         // Inert unless launched with -IlyichPerfScenario; then it measures from the first frame.
         PerfScenarioDriver.arm()
-        let session = SessionStore()
+        let session = AccountSession(environment: .current)
         _session = State(initialValue: session)
         BackupLifecycle.shared.setBackgroundPreparation { await session.prepareForBackgroundBackup() }
         _ = CastController.shared
@@ -20,16 +20,17 @@ import SwiftUI
                     ProgressView("Opening Ilyich")
                 } else if session.isSigningOut {
                     ProgressView("Signing out")
-                } else if let api = session.api, let pipeline = session.pipeline {
+                } else if let runtime = session.runtime {
                     if session.requiresPasswordChange {
                         NavigationStack {
-                            RequiredPasswordChange(api: api, session: session, onChanged: { Task { await session.signOut() } })
+                            RequiredPasswordChange(api: runtime.api, session: session, onChanged: { Task { await session.signOut() } })
                                 .toolbar { ToolbarItem(placement: .cancellationAction) {
                                     Button("Sign out") { Task { await session.signOut() } }
                                 } }
                         }
                     } else {
-                        LibraryView(api: api, pipeline: pipeline, session: session).id(api.cacheScope)
+                        // A new runtime, even for the same account, starts the library afresh.
+                        LibraryView(api: runtime.api, pipeline: runtime.pipeline, session: session).id(runtime.id)
                     }
                 } else {
                     SignInView(session: session)
@@ -47,7 +48,7 @@ import SwiftUI
 
 private struct RequiredPasswordChange: View {
     let api: APIClient
-    let session: SessionStore
+    let session: AccountSession
     let onChanged: () -> Void
     @Environment(\.authorization) private var authorization
 

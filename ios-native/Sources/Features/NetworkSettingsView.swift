@@ -23,6 +23,8 @@ struct NetworkSettingsView: View {
     @State private var certificatePassword = ""
     @State private var certificatePresent = false
     @State private var confirmRemoveCertificate = false
+    /// Reads and writes the Keychain off the main actor.
+    private let service = NetworkConfigurationService()
     var body: some View {
         Form {
             Section("Server") { Text(server.absoluteString).font(.subheadline).textSelection(.enabled) }
@@ -91,9 +93,7 @@ struct NetworkSettingsView: View {
             } catch { failure = .init(error) }
         }
         .confirmationDialog("Remove this server’s client certificate?", isPresented: $confirmRemoveCertificate, titleVisibility: .visible) {
-            Button("Remove certificate", role: .destructive) {
-                do { try ClientCertificateStore.remove(server: server); certificatePresent = false; clearCertificate() } catch { failure = .init(error) }
-            }
+            Button("Remove certificate", role: .destructive) { Task { await removeCertificate() } }
         }
         .alert("Couldn’t update network settings", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             if wifiPermissionDenied {
@@ -108,15 +108,14 @@ struct NetworkSettingsView: View {
     private func load() async {
         guard !loaded else { return }
         do {
-            let configuration: NetworkConfiguration
-            if let api { configuration = await api.networkConfiguration() }
-            else { configuration = try NetworkConfigurationStore.load(server: server) }
+            let saved = try await service.load(server: server, client: api)
+            let configuration = saved.configuration
             headers = configuration.customHeaders.sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }.map { .init(name: $0.key, value: $0.value) }
             endpoints = configuration.alternateEndpoints.map { .init(address: $0.absoluteString) }
             switchEndpoints = configuration.automaticallySwitchEndpoints
             preferredWifiName = configuration.preferredWifiName ?? ""
             localEndpoint = configuration.localEndpoint?.absoluteString ?? ""
-            certificatePresent = try ClientCertificateStore.hasCertificate(server: server)
+            certificatePresent = saved.hasCertificate
             loaded = true
         } catch { failure = .init(error) }
     }
@@ -145,8 +144,7 @@ struct NetworkSettingsView: View {
             let configuration = try NetworkConfiguration(customHeaders: values, alternateEndpoints: addresses,
                                                           automaticallySwitchEndpoints: switchEndpoints,
                                                           preferredWifiName: preferredWifiName, localEndpoint: localURL).validated()
-            if let api { try await api.updateNetworkConfiguration(configuration) }
-            else { try NetworkConfigurationStore.save(configuration, server: server) }
+            try await service.save(configuration, server: server, client: api)
             WidgetCenter.shared.reloadAllTimelines()
             dismiss()
         } catch { failure = .init(error) }
@@ -155,9 +153,14 @@ struct NetworkSettingsView: View {
         guard let data = certificate else { return }
         busy = true; defer { busy = false }
         do {
-            let password = certificatePassword, target = server
-            try await Task.detached(priority: .userInitiated) { try ClientCertificateStore.importCertificate(data: data, password: password, server: target) }.value
+            try await service.importCertificate(data: data, password: certificatePassword, server: server)
             certificatePresent = true; clearCertificate()
+        } catch { failure = .init(error) }
+    }
+    private func removeCertificate() async {
+        do {
+            try await service.removeCertificate(server: server)
+            certificatePresent = false; clearCertificate()
         } catch { failure = .init(error) }
     }
     private func fillCurrentWifiName() async {

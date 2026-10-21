@@ -18,7 +18,7 @@ private struct FeedMonthHeading: View {
 struct LibraryView: View {
     let api: APIClient
     let pipeline: MediaPipeline
-    let session: SessionStore
+    let session: AccountSession
     @State private var store: LibraryStore
     @State private var searchText = ""
     @State private var shelves = false
@@ -92,9 +92,9 @@ struct LibraryView: View {
     }
     private enum Screen: String, Identifiable { case people, albums, more, settings, searchOptions, memories, activity; var id: String { rawValue } }
 
-    init(api: APIClient, pipeline: MediaPipeline, session: SessionStore) {
+    init(api: APIClient, pipeline: MediaPipeline, session: AccountSession) {
         self.api = api; self.pipeline = pipeline; self.session = session
-        _store = State(initialValue: LibraryStore(api: session.libraryAPI ?? api, includesDevicePhotos: !session.isUITesting))
+        _store = State(initialValue: LibraryStore(api: session.libraryAPI ?? api, includesDevicePhotos: session.environment.usesDevicePhotos))
     }
 
     var body: some View {
@@ -284,7 +284,7 @@ struct LibraryView: View {
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
         .task {
             refreshSharedFiles()
-            if !session.isUITesting { await backup.activate(); refreshDeviceIndex() }
+            if session.environment.usesDevicePhotos { await backup.activate(); refreshDeviceIndex() }
             guard !store.started else { return }; store.started = true
             await store.reload(); await loadShelfData()
         }
@@ -847,13 +847,7 @@ struct LibraryView: View {
     }
 
     /// UI tests tap rows, which needs the shelves to stay out after a stroke lifts.
-    private var keepsShelvesForUITests: Bool {
-        #if DEBUG
-        session.isUITesting && ProcessInfo.processInfo.arguments.contains("--ui-testing-shelves-stay-open")
-        #else
-        false
-        #endif
-    }
+    private var keepsShelvesForUITests: Bool { session.environment.keepsShelvesOpen }
 
     private func placesPanel(height: CGFloat, bottomInset: CGFloat) -> some View {
         PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace, focus: placeFocus, compact: true, bottomInset: bottomInset)
@@ -951,7 +945,7 @@ struct LibraryView: View {
         sharedFilesPresented = true
     }
     private func refreshDeviceIndex() {
-        guard !session.isUITesting else { return }
+        guard session.environment.usesDevicePhotos else { return }
         deviceIndex.configure(scope: api.cacheScope, entities: session.entities,
                               preferences: backup.preferences, receipts: backup.associations)
     }

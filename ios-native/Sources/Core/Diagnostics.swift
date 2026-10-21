@@ -55,7 +55,3 @@ actor DiagnosticsStore {
         return (["Ilyich request diagnostics", "Categories only. No URLs, identifiers, headers, queries, bodies, or error text are recorded."] + rows).joined(separator: "\n")
     }
 }
-
-extension Notification.Name {
-    static let ilyichCachesReset = Notification.Name("IlyichCachesReset")
-}

@@ -116,7 +116,7 @@ struct BackupClientCache {
     private var lastProgress: (id: Int, time: Date, sent: Int64)?
     private var clients = BackupClientCache()
 
-    /// The signed-in account's read-only flag, which SessionStore sets before it pauses backup.
+    /// The signed-in account's read-only flag, which AccountRuntime sets before it pauses backup.
     private var isReadOnly: Bool { saved.map { ReadOnlyPolicy.isEnabled(server: $0.server, userID: $0.userID) } ?? false }
 
     private func backupClient(for session: StoredCredential) throws -> APIClient {
@@ -135,15 +135,8 @@ struct BackupClientCache {
                 throw BackupError.message("The app’s shared storage is unavailable. Check the app’s signing and reinstall.")
             }
             let folder = group.appendingPathComponent("Backup", isDirectory: true).appendingPathComponent(session.scope, isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            var mutableFolder = folder
-            try mutableFolder.setResourceValues(values)
-            let file = folder.appendingPathComponent("state.json")
-            state = FileManager.default.fileExists(atPath: file.path) ? try JSONDecoder().decode(BackupState.self, from: Data(contentsOf: file)) : BackupState()
-            saved = session; directory = folder; preferences = state.preferences
-            error = state.error; refreshCounts(); refreshLibrary()
+            try load(session, folder: folder)
+            refreshLibrary()
             BackupLifecycle.shared.configure()
             if state.transferNotification?.terminalFailures != nil { await replayFinishedTransferNotification() }
             // A backup still marked running under read-only mode: the app ended before the pause
@@ -165,6 +158,19 @@ struct BackupClientCache {
                 run()
             }
         } catch { self.error = error.localizedDescription }
+    }
+
+    /// Takes up `session`'s backup state from `folder`, its Backup folder in the App Group.
+    func load(_ session: StoredCredential, folder: URL) throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableFolder = folder
+        try mutableFolder.setResourceValues(values)
+        let file = folder.appendingPathComponent("state.json")
+        state = FileManager.default.fileExists(atPath: file.path) ? try JSONDecoder().decode(BackupState.self, from: Data(contentsOf: file)) : BackupState()
+        saved = session; directory = folder; preferences = state.preferences
+        error = state.error; refreshCounts()
     }
 
     func requestAccess() async {
@@ -240,11 +246,14 @@ struct BackupClientCache {
         } catch { self.error = error.localizedDescription }
     }
 
-    func pause(disableAutomatic: Bool = true) async {
+    /// Pauses backup. `disableAutomatic` switches automatic backup off too. `endsBatch`, which
+    /// switching it off implies, ends the batch the transfer notifications count.
+    func pause(disableAutomatic: Bool = true, endsBatch: Bool? = nil) async {
+        let endsBatch = endsBatch ?? disableAutomatic
         if disableAutomatic { preferences.automatic = false; state.preferences = preferences }
         if let stopping {
             await stopping.value
-            if disableAutomatic, let id = state.transferNotification?.id {
+            if endsBatch, let id = state.transferNotification?.id {
                 TransferNotifications.cancel(id: id)
                 clearTransferNotificationState()
                 try? persist()
@@ -262,7 +271,7 @@ struct BackupClientCache {
             await activeWorker?.value
             _ = try? await activeDiscovery?.value
             self.stopping = nil; worker = nil; discovery = nil; isRunning = false; activity = "Backup paused"
-            if disableAutomatic, let id = state.transferNotification?.id {
+            if endsBatch, let id = state.transferNotification?.id {
                 TransferNotifications.cancel(id: id)
                 clearTransferNotificationState()
             }
@@ -273,14 +282,18 @@ struct BackupClientCache {
         await stopping.value
     }
 
-    /// Stops outgoing requests before the caller deletes the shared credentials.
+    /// Stops outgoing requests before the caller deletes the shared credentials. The backup state
+    /// stays on disk with its receipts, and so does the automatic-backup preference: signing in
+    /// to the account again carries on as it was set.
     func disconnect() async {
         ShareInboxStore.shared.cancel()
-        await pause()
+        await pause(disableAutomatic: false, endsBatch: true)
         await ShareInboxStore.shared.waitUntilPaused()
         saved = nil; directory = nil; state = BackupState(); preferences = BackupPreferences()
         albums = []; error = nil; refreshCounts()
         if let replaced = clients.removeClient() { await replaced.shutdown() }
+        // Nobody is signed in, so nothing is scheduled or observed for automatic backup.
+        BackupLifecycle.shared.configure()
     }
 
     func startAutomatically() async {

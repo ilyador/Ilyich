@@ -35,7 +35,3 @@ struct NativeLibraryAPI: LibraryAPI {
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { try await client.metadataSearch(query) }
     func refresh() async throws { _ = try await sync.synchronize() }
 }
-
-extension Notification.Name {
-    static let ilyichLibraryChanged = Notification.Name("ilyich.libraryChanged")
-}
