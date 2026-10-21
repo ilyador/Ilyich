@@ -78,7 +78,7 @@ final class EntitySyncTests: XCTestCase {
         let store = try makeStore(root), epoch = await store.epoch()
         _ = try await store.apply([asset("photo"), event("SyncCompleteV1", "{}")], epoch: epoch)
         let reset = try await store.apply([event("SyncResetV1", "{}", ack: "SyncResetV1|reset")], epoch: epoch)
-        XCTAssertTrue(reset.reset)
+        XCTAssertTrue(reset.serverReset)
         let removed = try await store.asset(id: "photo"), complete = try await store.isComplete()
         XCTAssertNil(removed); XCTAssertFalse(complete)
         let pending = try await store.pendingAcknowledgements()
@@ -229,8 +229,9 @@ final class EntitySyncTests: XCTestCase {
         let deletion = try await store.apply(try ids.map { try event("AssetDeleteV1", "{\"assetId\":\"\($0)\"}") }, epoch: epoch)
         let unshared = try await store.apply([event("AlbumUserDeleteV1", #"{"albumId":"shared","userId":"alice"}"#)], epoch: epoch)
         let queued = try await store.pendingMediaPurges(limit: 5_000)
-        XCTAssertFalse(deletion.accessChanged, "Deletions change nothing the account may see.")
-        XCTAssertTrue(unshared.accessChanged, "Bob's photo left the account.")
+        XCTAssertTrue(deletion.accessLost.isEmpty, "Deletions change nothing the account may see.")
+        XCTAssertEqual(deletion.removed.count, 2_100, "Every deletion is named: a change has no cap below 50,000.")
+        XCTAssertEqual(unshared.accessLost, ["bob-shared"], "Bob's photo left the account.")
         XCTAssertEqual(queued.count, 2_101, "Every removed photo is queued, past the summary's 2,000 IDs.")
         XCTAssertEqual(queued.filter(\.revoked).map(\.assetID), ["bob-shared"])
 
@@ -403,7 +404,7 @@ extension EntitySyncTests {
         SyncTestURLProtocol.fixture.set("/api/sync/stream", [.init(status: 200, body: replay)])
         SyncTestURLProtocol.fixture.set("/api/sync/ack", [.init(status: 204, body: Data())])
         let sync = NativeSync(api: api, store: store)
-        _ = try await sync.synchronize()
+        _ = try await sync.pass()
 
         let requests = try SyncTestURLProtocol.fixture.bodies("/api/sync/stream").map { try JSONDecoder().decode([String: EntityJSON].self, from: $0) }
         XCTAssertEqual(requests.map { $0["reset"] }, [.bool(true)])
@@ -429,11 +430,11 @@ extension EntitySyncTests {
         SyncTestURLProtocol.fixture.reset()
         SyncTestURLProtocol.fixture.set("/api/sync/stream", [.init(status: 200, body: partial), .init(status: 200, body: complete)])
         SyncTestURLProtocol.fixture.set("/api/sync/ack", [.init(status: 204, body: Data()), .init(status: 204, body: Data())])
-        do { _ = try await sync.synchronize(); XCTFail("A missing complete marker must fail") }
+        do { _ = try await sync.pass(); XCTFail("A missing complete marker must fail") }
         catch is APIError { }
         let firstSaved = try await store.asset(id: "photo"), initiallyComplete = try await store.isComplete()
         XCTAssertNotNil(firstSaved); XCTAssertFalse(initiallyComplete)
-        let resumed = try await sync.synchronize()
+        let resumed = try await sync.pass()
         XCTAssertTrue(resumed.completed)
         let requests = try SyncTestURLProtocol.fixture.bodies("/api/sync/stream").map { try JSONDecoder().decode([String: EntityJSON].self, from: $0) }
         XCTAssertEqual(requests.map { $0["reset"] }, [.bool(true), .bool(false)])
