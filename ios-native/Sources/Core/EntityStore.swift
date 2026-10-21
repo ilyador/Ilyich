@@ -11,7 +11,9 @@ actor EntityStore {
     private var generation = UUID()
     /// Whether each month index exists, by the date it indexes; absent until looked up.
     private var monthIndexes: [String: MonthIndex] = [:]
-    private enum MonthIndex { case ready, missing, unavailable }
+    private enum MonthIndex { case ready, missing, building, unavailable }
+    /// Each month index being built, by the date it indexes.
+    private var monthIndexBuilds: [String: Task<Void, Never>] = [:]
     private static let cachedServerFeaturesKey = "cache.serverFeatures.v1"
 
     init(scope: String, userID: String, directory: URL? = nil) throws {
@@ -179,9 +181,13 @@ actor EntityStore {
             return TimeBucket(timeBucket: bucket, count: count)
         }
     }
-    func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) throws -> [Asset] {
+    /// One month of a feed. With `buildingIndex`, as the library's feed asks, a month read the slow
+    /// way then starts building the index months are found by.
+    func timeBucket(_ bucket: String, filter: TimelineFilter = .init(), buildingIndex: Bool = false) throws -> [Asset] {
         let (sql, arguments) = timeBucketQuery(bucket, filter: filter)
-        return try decodeTimelineRows(try database.query(sql, arguments))
+        let assets = try decodeTimelineRows(try database.query(sql, arguments))
+        if buildingIndex { startMonthIndex(Self.monthDate(filter)) }
+        return assets
     }
 
     /// What SQLite plans for a month's query, for tests and diagnostics.
@@ -189,6 +195,9 @@ actor EntityStore {
         let (sql, arguments) = timeBucketQuery(bucket, filter: filter)
         return try database.query("EXPLAIN QUERY PLAN " + sql, arguments).compactMap { $0.last ?? nil }
     }
+
+    /// Whether a feed's months are found through their index, for tests and diagnostics.
+    func monthIndexIsReady(for filter: TimelineFilter = .init()) -> Bool { monthIndex(Self.monthDate(filter)) != nil }
 
     private func timeBucketQuery(_ bucket: String, filter: TimelineFilter) -> (String, [String?]) {
         let (whereSQL, arguments) = timelinePredicate(filter)
@@ -203,27 +212,44 @@ actor EntityStore {
     /// a large library. Until the index exists a month is found that way.
     private func monthIndex(_ date: String) -> String? {
         let name = Self.monthIndexName(date)
-        if monthIndexes[date] == nil {
-            let exists = (try? database.query("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", [name]).isEmpty) == false
-            monthIndexes[date] = exists ? .ready : .missing
+        // The lookup is tiny, so it runs even for a month load that has been cancelled, and only an
+        // answer is kept: a failed lookup is tried again by the next month.
+        if monthIndexes[date] == nil,
+           let rows = try? database.query("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", [name], cancellationChecks: false) {
+            monthIndexes[date] = rows.isEmpty ? .missing : .ready
         }
         return monthIndexes[date] == .ready ? name : nil
     }
 
-    /// Builds the index for months of the feed's date, when taken or when added, if it is missing.
-    /// It reads every photo once, so it never runs at launch or on the main thread: the library asks
-    /// for it on the store's own executor once a feed's first month has been answered, and months
-    /// load the old way until then. Once the index exists this returns at once.
-    func buildMonthIndex(for filter: TimelineFilter) {
+    /// Builds the index for months of the feed's date, when taken or when added, if it is missing,
+    /// and returns once it is in. Once the index exists this returns at once.
+    func buildMonthIndex(for filter: TimelineFilter) async {
         let date = Self.monthDate(filter)
-        guard monthIndex(date) == nil, monthIndexes[date] != .unavailable else { return }
-        do {
-            try database.execute("CREATE INDEX IF NOT EXISTS \(Self.monthIndexName(date)) ON entities(kind,strftime('%Y-%m',json_extract(payload,'$.\(date)'))) WHERE kind='asset'")
-            monthIndexes[date] = .ready
-        } catch {
-            // Months are still found by reading every photo; the next launch tries again.
-            monthIndexes[date] = .unavailable
+        startMonthIndex(date)
+        await monthIndexBuilds[date]?.value
+    }
+
+    /// Starts building a missing month index, once a session. Building reads every photo, so it
+    /// runs on a connection and a thread of its own: the store keeps answering on its own
+    /// connection meanwhile, months load the old way until the index is in, and writes wait for the
+    /// build as they would for any other writer.
+    private func startMonthIndex(_ date: String) {
+        guard monthIndex(date) == nil, monthIndexes[date] == .missing else { return }
+        monthIndexes[date] = .building
+        let database = self.database
+        let sql = "CREATE INDEX IF NOT EXISTS \(Self.monthIndexName(date)) ON entities(kind,strftime('%Y-%m',json_extract(payload,'$.\(date)'))) WHERE kind='asset'"
+        monthIndexBuilds[date] = Task.detached(priority: .utility) { [weak self] in
+            let built = await database.executeOnItsOwnConnection(sql)
+            await self?.finishMonthIndex(date, built: built)
         }
+    }
+
+    private func finishMonthIndex(_ date: String, built: Bool) {
+        monthIndexBuilds[date] = nil
+        // The next month looks the index up again, through this store's connection, which so learns
+        // of it. If it could not be built, months are still found by reading every photo, and the
+        // next launch tries again.
+        monthIndexes[date] = built ? nil : .unavailable
     }
 
     private static func monthDate(_ filter: TimelineFilter) -> String { filter.orderBy == "createdAt" ? "createdAt" : "localDateTime" }
@@ -563,7 +589,9 @@ actor EntityStore {
 /// This handle never escapes EntityStore; Sendable permits ownership transfer at init.
 private final class EntityDatabase: @unchecked Sendable {
     private let handle: OpaquePointer
+    private let path: String
     init(url: URL) throws {
+        path = url.path
         var opened: OpaquePointer?
         guard sqlite3_open_v2(url.path, &opened, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let opened else {
             if let opened { sqlite3_close(opened) }; throw Self.failure()
@@ -581,7 +609,9 @@ private final class EntityDatabase: @unchecked Sendable {
             try execute("CREATE INDEX IF NOT EXISTS entity_memory ON entities(kind,json_extract(payload,'$.memoryId'))")
             try execute("CREATE INDEX IF NOT EXISTS asset_stack ON entities(kind,json_extract(payload,'$.stackId'))")
             try execute("CREATE INDEX IF NOT EXISTS asset_timeline ON entities(kind,json_extract(payload,'$.ownerId'),json_extract(payload,'$.visibility'),json_extract(payload,'$.localDateTime'))")
-            sqlite3_busy_timeout(handle, 5_000)
+            // The only other writer builds a month index, which takes seconds on a large library; a
+            // write waits for it rather than failing.
+            sqlite3_busy_timeout(handle, 60_000)
         } catch { throw error }
     }
     deinit { sqlite3_close(handle) }
@@ -622,6 +652,27 @@ private final class EntityDatabase: @unchecked Sendable {
         try execute("BEGIN IMMEDIATE")
         do { try operation(); try execute("COMMIT") }
         catch { try? execute("ROLLBACK"); throw error }
+    }
+
+    /// Runs one long statement on a connection and a thread of its own, returning whether it
+    /// succeeded. The database is in WAL mode, so this connection keeps reading meanwhile; its
+    /// writes wait for the statement as for any other writer.
+    func executeOnItsOwnConnection(_ sql: String) async -> Bool {
+        let path = self.path
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                var connection: OpaquePointer?
+                guard sqlite3_open_v2(path, &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let connection else {
+                    if let connection { sqlite3_close(connection) }
+                    return continuation.resume(returning: false)
+                }
+                // A sync's write in progress is waited for, not given up on.
+                sqlite3_busy_timeout(connection, 60_000)
+                let status = sqlite3_exec(connection, "PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; " + sql, nil, nil, nil)
+                sqlite3_close(connection)
+                continuation.resume(returning: status == SQLITE_OK)
+            }
+        }
     }
     private static func failure() -> APIError { .invalidResponse("The offline library could not be saved. Free some device storage, then try again.") }
 }

@@ -637,15 +637,17 @@ struct PhotoGrid: UIViewRepresentable {
 }
 
 @MainActor final class PhotoCell: UICollectionViewCell {
-    /// A server photo's sketch and thumbnail draw straight into this layer: an image view does a
-    /// good deal of work for every new image, and a scrub brings a cell several a second. Changes
-    /// show at once unless a cross-dissolve is added.
-    private let photo: CALayer = {
-        let layer = CALayer()
-        layer.contentsGravity = .resizeAspectFill
-        layer.masksToBounds = true
-        layer.actions = ["contents": NSNull(), "backgroundColor": NSNull(), "bounds": NSNull(), "position": NSNull()]
-        return layer
+    /// A server photo's sketch and thumbnail draw straight into this view's layer: an image view
+    /// does a good deal of work for every new image, and a scrub brings a cell several a second. A
+    /// view's own layer moves with the cell when UIKit animates its size, as when the app turns
+    /// back upright, and has no animations of its own: changes show at once unless a cross-dissolve
+    /// is added.
+    private let photo: UIView = {
+        let view = UIView()
+        view.layer.contentsGravity = .resizeAspectFill
+        view.clipsToBounds = true
+        view.isUserInteractionEnabled = false
+        return view
     }()
     /// What the photo layer draws.
     private var drawn: CGImage?
@@ -679,7 +681,7 @@ struct PhotoGrid: UIViewRepresentable {
         super.init(frame: frame)
         contentView.backgroundColor = UIColor(white: 0.08, alpha: 1)
         photo.frame = contentView.bounds
-        contentView.layer.insertSublayer(photo, at: 0)
+        contentView.insertSubview(photo, at: 0)
         isAccessibilityElement = true
         // The overlays are placed by hand, so a new text size lays them out again.
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (cell: PhotoCell, _: UITraitCollection) in
@@ -715,9 +717,9 @@ struct PhotoGrid: UIViewRepresentable {
         }
     }
     override func prepareForReuse() {
-        // The next bind always sets the image, so it is not cleared here as well. UIKit removes
-        // the animations of the cell's views, not of a layer of its own.
-        super.prepareForReuse(); photo.removeAllAnimations()
+        // The next bind always sets the image, so it is not cleared here as well; a cross-dissolve
+        // still running is dropped, so the next photo shows at once.
+        super.prepareForReuse(); photo.layer.removeAllAnimations()
         task?.cancel(); task = nil; localMedia?.cancel(); localMedia = nil
         identity = nil; mediaID = nil; showsThumbnail = false; waitsForNetwork = false; pending = nil
         displayProbe.reset()
@@ -805,7 +807,7 @@ struct PhotoGrid: UIViewRepresentable {
         showsThumbnail = thumbnail && next != nil
         detach(image)
         let fill = next == nil ? color?.cgColor : nil
-        guard drawn !== next || photo.backgroundColor != fill else { return }
+        guard drawn !== next || photo.layer.backgroundColor != fill else { return }
         if animated && !UIAccessibility.isReduceMotionEnabled {
             // The cross-dissolve UIView.transition made, added straight to the layer: UIKit's
             // animation setup for each thumbnail cost more than the fade itself.
@@ -813,15 +815,15 @@ struct PhotoGrid: UIViewRepresentable {
             fade.type = .fade
             fade.duration = 0.18
             fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            photo.add(fade, forKey: kCATransition)
+            photo.layer.add(fade, forKey: kCATransition)
         }
-        photo.backgroundColor = fill
-        if drawn !== next { photo.contents = next; drawn = next }
+        photo.layer.backgroundColor = fill
+        if drawn !== next { photo.layer.contents = next; drawn = next }
     }
     /// A photo only on this phone, or a status symbol in the given tint, in the image view.
     private func show(_ next: UIImage?, thumbnail: Bool, tint: UIColor? = nil) {
         showsThumbnail = thumbnail && next != nil
-        if drawn != nil || photo.backgroundColor != nil { photo.contents = nil; photo.backgroundColor = nil; drawn = nil }
+        if drawn != nil || photo.layer.backgroundColor != nil { photo.layer.contents = nil; photo.layer.backgroundColor = nil; drawn = nil }
         guard let next else { detach(image); return }
         let view = image ?? {
             let view = UIImageView(frame: contentView.bounds)
@@ -844,6 +846,15 @@ struct PhotoGrid: UIViewRepresentable {
         }
         show(nil, thumbnail: false, animated: false, color: ThumbHash.averageColor(hash))
         return hash
+    }
+    /// A sketch decoding off the main thread is drawn when it arrives, unless the cell has moved on
+    /// or a thumbnail came first: the stored thumbnail is read meanwhile, not after it.
+    private func showSketchOnceDecoded(_ hash: String, key: String) {
+        Task { [weak self] in
+            guard let sketch = await ThumbHashSketches.shared.sketch(hash),
+                  let self, self.identity == key, !self.showsThumbnail else { return }
+            self.show(sketch, thumbnail: false, animated: false)
+        }
     }
     /// Starts the download the cell has been waiting for, once the grid has slowed down.
     func loadFromNetworkIfWaiting() {
@@ -927,11 +938,8 @@ struct PhotoGrid: UIViewRepresentable {
         if showsThumbnail { displayProbe.displayed(.memoryOther) }
         else { displayProbe.placeholder(drawn != nil ? .sketch : sketch != nil ? .color : .empty) }
         mediaID = source
+        if let sketch { showSketchOnceDecoded(sketch, key: key) }
         task = Task { [weak self] in
-            if let sketch, let decoded = await ThumbHashSketches.shared.sketch(sketch) {
-                guard !Task.isCancelled, let self, self.identity == key else { return }
-                self.show(decoded, thumbnail: false, animated: false)
-            }
             if let stored = await pipeline.storedThumbnail(for: asset, pixelSize: pixels) {
                 guard !Task.isCancelled, let self, self.identity == key else { return }
                 self.show(stored.cgImage, thumbnail: true, animated: true)

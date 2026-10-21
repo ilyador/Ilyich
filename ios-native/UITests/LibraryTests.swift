@@ -160,13 +160,16 @@ final class LibraryTests: XCTestCase {
         let closeViewer = app.buttons["Close"]
         XCTAssertTrue(closeViewer.waitForExistence(timeout: 5), "The grid should receive taps after dismissing the shelves.")
         closeViewer.tap()
+        // The viewer zooms back into its cell; the library takes touches again once it has.
+        requireHittable(app.textFields["library.search"], in: app)
 
         let heading = app.staticTexts["library.heading"]
         XCTAssertTrue(heading.waitForExistence(timeout: 5))
         let initialMonth = heading.label
         let rightEdge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.91, dy: 0.72))
         let scrubTarget = app.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.22))
-        rightEdge.press(forDuration: 0.05, thenDragTo: scrubTarget)
+        // The photos follow the finger once the rail has opened, so the finger stays down until it has.
+        rightEdge.press(forDuration: 0.05, thenDragTo: scrubTarget, withVelocity: .default, thenHoldForDuration: 1)
         let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", initialMonth), object: heading)
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 10), .completed,
                        "A trailing inward and vertical drag should scrub to a different timeline month.")
@@ -738,26 +741,41 @@ final class LibraryTests: XCTestCase {
         XCTAssertNotNil(shown)
         capture(app, "Viewer — upright")
         XCUIDevice.shared.orientation = .landscapeLeft
-        sleep(2)
-        XCTAssertGreaterThan(window.frame.width, window.frame.height, "The viewer turns with the phone.")
-        XCTAssertEqual(onScreenPhoto(app), shown, "Turning keeps the same photo on screen.")
+        XCTAssertTrue(waitFor { window.frame.width > window.frame.height }, "The viewer turns with the phone.")
+        XCTAssertEqual(onScreenPhoto(app, where: { $0 == shown }), shown, "Turning keeps the same photo on screen.")
         capture(app, "Viewer — turned with the phone")
         app.swipeLeft()
-        sleep(1)
-        let next = onScreenPhoto(app)
+        let next = onScreenPhoto(app, where: { $0 != shown })
         XCTAssertNotNil(next); XCTAssertNotEqual(next, shown, "Swiping still pages.")
         app.swipeRight()
-        sleep(1)
-        XCTAssertEqual(onScreenPhoto(app), shown, "Swiping back returns to the same photo, not one far away.")
+        XCTAssertEqual(onScreenPhoto(app, where: { $0 == shown }), shown, "Swiping back returns to the same photo, not one far away.")
         app.buttons["Close"].tap()
         XCTAssertTrue(app.textFields["library.search"].waitForExistence(timeout: 5))
-        sleep(1)
-        XCTAssertLessThan(window.frame.width, window.frame.height, "Closing the viewer turns the app back upright.")
+        XCTAssertTrue(waitFor { window.frame.width < window.frame.height }, "Closing the viewer turns the app back upright.")
     }
     /// The photo filling the viewer, by its asset: file names repeat across the fixture's months.
-    @MainActor private func onScreenPhoto(_ app: XCUIApplication) -> String? {
-        let photos = app.scrollViews.matching(NSPredicate(format: "identifier BEGINSWITH 'viewer.photo.'"))
-        return (0..<photos.count).map { photos.element(boundBy: $0) }.first { $0.isHittable }?.identifier
+    /// It is found by its identifier whatever it shows, the grid's thumbnail enlarged until its
+    /// preview loads or the zoomable photo after, and once it takes touches: nothing in the viewer
+    /// does while it zooms out of its cell or turns. Waits for one that meets `condition`, and
+    /// returns the last photo seen if none does in time.
+    @MainActor private func onScreenPhoto(_ app: XCUIApplication, within timeout: TimeInterval = 5,
+                                          where condition: (String) -> Bool = { _ in true }) -> String? {
+        let photos = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'viewer.photo.'"))
+        var shown: String?
+        _ = waitFor(within: timeout) {
+            shown = (0..<photos.count).lazy.map { photos.element(boundBy: $0) }.first { $0.isHittable }?.identifier
+            return shown.map(condition) ?? false
+        }
+        return shown
+    }
+    /// Polls `condition` until it holds or `timeout` passes, and says whether it held.
+    @MainActor private func waitFor(within timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if condition() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        } while Date() < deadline
+        return condition()
     }
     @MainActor func testViewerCloseAllowsOpeningAnotherPhoto() {
         let app = launch()
