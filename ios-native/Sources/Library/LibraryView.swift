@@ -181,6 +181,13 @@ struct LibraryView: View {
                                 handleShelfEvent(.open(row), items: shelfItems,
                                                  at: edgeInteraction.shelfFinger ?? CGPoint(x: 0, y: librarySize.height * 0.45))
                             }
+                            .onChange(of: edgeInteraction.backReady) { _, ready in
+                                // The glow at the left edge peaked while the finger held there.
+                                guard ready else { return }
+                                edgeInteraction.backReady = false
+                                handleShelfEvent(.back, items: shelfItems,
+                                                 at: edgeInteraction.shelfFinger ?? CGPoint(x: 0, y: librarySize.height * 0.45))
+                            }
                     } else {
                         Image(systemName: "line.3.horizontal").font(.system(size: 12, weight: .medium))
                             .frame(width: 28, height: 42).glassEffect(.clear.tint(.black.opacity(0.18)))
@@ -765,7 +772,7 @@ struct LibraryView: View {
     }
 
     /// One finger drives the shelves: sliding highlights, a swipe toward a row's tip opens it,
-    /// and the left edge goes back a level. While reordering it carries rows by their handles.
+    /// and holding at the left edge goes back a level. While reordering it carries rows by their handles.
     private func driveShelf(from start: CGPoint, to point: CGPoint) {
         guard shelves else { return }
         if edgeInteraction.isRearranging {

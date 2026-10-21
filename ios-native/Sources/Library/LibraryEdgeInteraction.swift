@@ -17,7 +17,8 @@ enum LibraryShelfEvent: Equatable {
     case none
     /// The glow at this row's tip peaked.
     case open(Int)
-    /// The finger reached the left edge inside a group, or while reordering.
+    /// The glow at the left edge peaked inside a group, or the finger reached the edge while
+    /// reordering.
     case back
 }
 
@@ -29,7 +30,8 @@ struct LibraryShelfCarry: Equatable {
 }
 
 /// The shelves are one swiper under one finger: sliding along the edge highlights rows, staying by
-/// a row's tip builds a glow that opens it, and the left edge goes back or puts the shelves away.
+/// a row's tip builds a glow that opens it, and staying at the left edge builds one that goes back
+/// a level, or at the top level lifting there puts the shelves away.
 /// Lifting over the reorder button past a row's tip reorders people or albums; lifting anywhere
 /// else puts the shelves away.
 @MainActor @Observable final class LibraryEdgeInteraction {
@@ -49,6 +51,11 @@ struct LibraryShelfCarry: Equatable {
     var tipNearness: CGFloat = 0
     /// Set when a row's glow peaks; the library opens that row and clears this.
     var openReady: Int?
+    /// Inside a group, the orange glow at the left edge. It builds while the finger stays there,
+    /// quicker than a row's, falls away when the finger moves in, and goes back a level at its peak.
+    var backProgress: CGFloat = 0
+    /// Set when the glow at the left edge peaks; the library goes back a level and clears this.
+    var backReady = false
     /// The row a sideways push has taken hold of; the wave stays on it while the finger drifts.
     var selectionHold: Int?
     /// People or albums at one level with drag handles.
@@ -64,6 +71,7 @@ struct LibraryShelfCarry: Equatable {
     @ObservationIgnored private var stroke: LibraryShelfStroke?
     @ObservationIgnored private var glowTask: Task<Void, Never>?
     @ObservationIgnored private var glowEnabled = false
+    @ObservationIgnored private var backEnabled = false
     @ObservationIgnored private var lastLayout: LibraryShelfGeometry?
     /// Scrolls a long list while a carried row is held near the top or bottom of the band.
     @ObservationIgnored private var carryScroll: Task<Void, Never>?
@@ -97,6 +105,7 @@ struct LibraryShelfCarry: Equatable {
         isShelfDragging = true
         selectionHold = nil
         resetGlow()
+        resetBackGlow()
     }
 
     /// `reorder` offers the reorder button past the focused row's tip, in People and Albums.
@@ -123,17 +132,11 @@ struct LibraryShelfCarry: Equatable {
         stroke.bottomFloor = LibraryShelfGeometry.scrollFloor(stroke.bottomFloor, depth: depth.bottom)
         if point.x > LibraryShelfGeometry.cancelWidth + 24 { stroke.isArmed = true }
         let atEdge = stroke.isArmed && point.x < LibraryShelfGeometry.cancelWidth
-        if atEdge && nested {
-            // Inside a group the edge goes back a level; moving in again re-arms it.
-            stroke.isArmed = false
-            self.stroke = stroke
-            overReorder = false
-            return .back
-        }
-        if atEdge != isCancelling {
-            isCancelling = atEdge
-            // The fan folds back toward the edge while lifting would put it away.
-            withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .snappy(duration: 0.2)) { shelfReveal = atEdge ? 0.4 : 1 }
+        // At the top level the fan folds back toward the edge while lifting would put it away.
+        let cancelling = atEdge && !nested
+        if cancelling != isCancelling {
+            isCancelling = cancelling
+            withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .snappy(duration: 0.2)) { shelfReveal = cancelling ? 0.4 : 1 }
         }
         var row = atEdge ? nil : layout.pickedRow(atY: point.y)
         // A held row stays chosen while the finger drifts, until it is a row away or the finger
@@ -171,7 +174,9 @@ struct LibraryShelfCarry: Equatable {
         // Past the row's right edge the row stays focused but its glow ends.
         glowEnabled = row != nil && row != selected && stroke.pushed && !stroke.opened && point.x <= tip + LibraryShelfGeometry.tipSlack
         tipNearness = glowEnabled ? LibraryShelfGeometry.tipNearness(fingerX: point.x, tip: tip) : 0
-        if tipNearness > 0 || openProgress > 0 { startGlow() }
+        // Inside a group, staying at the edge builds a glow there that goes back a level.
+        backEnabled = atEdge && nested
+        if tipNearness > 0 || openProgress > 0 || backEnabled || backProgress > 0 { startGlow() }
         let over = reorder && row.map { LibraryShelfGeometry.isOverReorderButton(point, tip: tip, rowCenter: layout.center($0)) } == true
         if over != overReorder {
             overReorder = over
@@ -204,6 +209,9 @@ struct LibraryShelfCarry: Equatable {
         stroke = nil; isShelfDragging = false; isCancelling = false
         selectionHold = nil
         resetGlow()
+        // Lifting before the library went back leaves it where it is.
+        resetBackGlow()
+        backReady = false
         overReorder = false
         carryScroll?.cancel(); carryScroll = nil
         edgeScroll.stop()
@@ -278,6 +286,11 @@ struct LibraryShelfCarry: Equatable {
         Haptics.stopBuildUp()
     }
 
+    private func resetBackGlow() {
+        backEnabled = false
+        if backProgress != 0 { backProgress = 0 }
+    }
+
     /// The glow runs on its own clock, so it keeps building while the finger holds still.
     private func startGlow() {
         guard glowTask == nil else { return }
@@ -293,10 +306,12 @@ struct LibraryShelfCarry: Equatable {
         }
     }
 
-    /// Returns true when the glow has nothing more to do.
+    /// Returns true when the glows have nothing more to do.
     private func stepGlow(seconds: CGFloat) -> Bool {
         let building = glowEnabled && tipNearness > 0
         openProgress = LibraryShelfGeometry.nextGlow(openProgress, nearness: tipNearness, building: building, seconds: seconds)
+        let back = LibraryShelfGeometry.nextBackGlow(backProgress, building: backEnabled, seconds: seconds)
+        if back != backProgress { backProgress = back }
         if openProgress >= 1, let row = highlighted {
             stroke?.opened = true
             glowEnabled = false; tipNearness = 0; openProgress = 0
@@ -305,9 +320,18 @@ struct LibraryShelfCarry: Equatable {
             openReady = row
             return true
         }
+        if backProgress >= 1 {
+            // Going back happens once; the finger has to move in again.
+            stroke?.isArmed = false
+            backEnabled = false; backProgress = 0
+            glowTask = nil
+            Haptics.released()
+            backReady = true
+            return true
+        }
         // The rumble follows the glow up, and down as it falls away.
-        Haptics.buildUp(openProgress)
-        if openProgress == 0 && !building { glowTask = nil; return true }
+        Haptics.buildUp(max(openProgress, backProgress))
+        if openProgress == 0 && backProgress == 0 && !building && !backEnabled { glowTask = nil; return true }
         return false
     }
 
@@ -856,6 +880,12 @@ struct LibraryShelfGeometry {
         return min(1, max(0, glow + change * seconds))
     }
 
+    /// Inside a group, the glow at the left edge builds as a row's does by its tip, in 70% of the
+    /// time, and falls away as quickly when the finger moves in.
+    static func nextBackGlow(_ glow: CGFloat, building: Bool, seconds: CGFloat) -> CGFloat {
+        nextGlow(glow, nearness: 1, building: building, seconds: seconds / 0.7)
+    }
+
     /// A compact Gaussian gives the focused row the largest width, then returns
     /// exactly to the common resting width outside its local neighborhood.
     func focusStrength(_ index: Int, fingerY: CGFloat?) -> CGFloat {
@@ -957,7 +987,7 @@ struct LibraryShelfFan: View {
     let interaction: LibraryEdgeInteraction
     let size: CGSize
     let chromeY: CGFloat
-    /// Inside a group, VoiceOver can go back with a row action; the edge swipe does it by touch.
+    /// Inside a group, VoiceOver can go back with a row action; holding at the edge does it by touch.
     let nested: Bool
     let onBack: () -> Void
     let onClose: () -> Void
@@ -1050,6 +1080,17 @@ struct LibraryShelfFan: View {
                     LibraryShelfReorderButton(active: interaction.overReorder, size: LibraryShelfGeometry.focusedHeight,
                                               shown: reach * reach * (3 - 2 * reach), action: onReorder)
                         .position(LibraryShelfGeometry.reorderButtonCenter(tip: tip, rowCenter: layout.center(row) + layout.shift(row, fingerY: waveY)))
+                }
+                // Inside a group, orange light gathers at the left edge by the finger as it stays
+                // there, spreading inward as it builds; at its peak the shelves go back a level.
+                if nested, !rearranging, interaction.backProgress > 0, let finger = interaction.shelfFinger {
+                    let glow = interaction.backProgress
+                    RadialGradient(colors: [.orange.opacity(0.95 * glow), .orange.opacity(0.4 * glow), .orange.opacity(0)],
+                                   center: .leading, startRadius: 0, endRadius: 30 + 150 * glow)
+                        .frame(width: 180, height: 360)
+                        .position(x: 90, y: finger.y)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                 }
             }
         }

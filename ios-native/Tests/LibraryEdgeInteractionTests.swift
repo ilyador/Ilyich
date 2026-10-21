@@ -356,6 +356,9 @@ final class LibraryEdgeInteractionTests: XCTestCase {
         XCTAssertGreaterThan(timeToPeak(nearness: 1), 0.25, "The glow builds; it does not snap open.")
         XCTAssertLessThan(timeToPeak(nearness: 1), 0.45, "Holding by the tip opens the row in about a third of a second.")
         XCTAssertLessThan(timeToPeak(nearness: 0), 0.75, "Holding at the zone's start still opens, a little slower.")
+        var back: CGFloat = 0, backTime: CGFloat = 0
+        while back < 1 && backTime < 3 { back = LibraryShelfGeometry.nextBackGlow(back, building: true, seconds: 1 / 60); backTime += 1 / 60 }
+        XCTAssertEqual(backTime / timeToPeak(nearness: 1), 0.7, accuracy: 0.06, "Going back at the edge takes about 30% less than opening a row by its tip.")
         var early: CGFloat = 0
         for _ in 0..<6 { early = LibraryShelfGeometry.nextGlow(early, nearness: 1, building: true, seconds: 1 / 60) }
         var late: CGFloat = 0.7
@@ -396,10 +399,26 @@ final class LibraryEdgeInteractionTests: XCTestCase {
         XCTAssertEqual(interaction.highlighted, 3)
         try await Task.sleep(for: .seconds(0.8))
         XCTAssertNil(interaction.openReady, "Sliding along near the tips highlights without opening.")
-        XCTAssertEqual(interaction.moveStroke(to: CGPoint(x: 10, y: layout.center(3)), in: layout, nested: true), .back,
-                       "Inside a group the left edge goes back.")
-        XCTAssertEqual(interaction.moveStroke(to: CGPoint(x: 8, y: layout.center(3)), in: layout, nested: true), .none,
-                       "Going back happens once; the finger has to move in again.")
+        XCTAssertEqual(interaction.moveStroke(to: CGPoint(x: 10, y: layout.center(3)), in: layout, nested: true), .none,
+                       "Reaching the left edge alone goes nowhere; its glow has to build.")
+        XCTAssertFalse(interaction.backReady)
+        try await Task.sleep(for: .seconds(0.7))
+        XCTAssertTrue(interaction.backReady, "Inside a group, staying at the left edge goes back at the glow's peak.")
+        interaction.backReady = false
+        _ = interaction.moveStroke(to: CGPoint(x: 8, y: layout.center(3)), in: layout, nested: true)
+        try await Task.sleep(for: .seconds(0.7))
+        XCTAssertFalse(interaction.backReady, "Going back happens once; the finger has to move in again.")
+        XCTAssertEqual(interaction.backProgress, 0)
+
+        // Moving in before the peak lets the edge's glow fall away without going back.
+        _ = interaction.moveStroke(to: CGPoint(x: 60, y: layout.center(3)), in: layout, nested: true)
+        _ = interaction.moveStroke(to: CGPoint(x: 10, y: layout.center(3)), in: layout, nested: true)
+        try await Task.sleep(for: .seconds(0.1))
+        XCTAssertGreaterThan(interaction.backProgress, 0, "The glow builds while the finger stays at the edge.")
+        _ = interaction.moveStroke(to: CGPoint(x: 60, y: layout.center(3)), in: layout, nested: true)
+        try await Task.sleep(for: .seconds(0.7))
+        XCTAssertFalse(interaction.backReady, "Moving in lets it fall away without going back.")
+        XCTAssertEqual(interaction.backProgress, 0)
 
         // Back at the top level, the same stroke can open a group again straight away.
         interaction.openReady = nil
