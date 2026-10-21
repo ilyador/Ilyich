@@ -109,10 +109,10 @@ import XCTest
         }
     }
 
-    /// FEED-4. Months waiting for a request slot are queued by section index. When the phone adds
-    /// a month newer than every other, each index moves down by one, so the queue names the months
-    /// before the ones asked for: one already in flight is skipped, and the last month asked for
-    /// is never loaded.
+    /// FEED-4, fixed in scrubbing step 3. Months waiting for a request slot used to be queued by
+    /// section index. When the phone added a month newer than every other, each index moved down by
+    /// one, so the queue named the months before the ones asked for: one already in flight was
+    /// skipped, and the last month asked for never loaded. The queue now holds months by ID.
     func testQueuedMonthStillLoadsAfterThePhoneAddsANewerMonth() async throws {
         let months = Dictionary(uniqueKeysWithValues: (3...12).map { month in
             (String(format: "2025-%02d-01T00:00:00Z", month), [Asset(id: "photo-\(month)")])
@@ -129,10 +129,7 @@ import XCTest
         store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone-only", date: taken)]))
         XCTAssertEqual(store.sections.first?.id, "2026-01-01", "The phone's month is now the first section.")
         let loaded = await eventually(within: .seconds(3)) { store.loaded[asked] != nil }
-
-        XCTExpectFailure("FEED-4: queued months shift when a section is inserted. F2 removes this wrapper.", strict: true) {
-            XCTAssertTrue(loaded, "A month asked for loads once a slot frees.")
-        }
+        XCTAssertTrue(loaded, "A month asked for loads once a slot frees.")
     }
 
     /// FEED-5. A month's size comes only from the summary and is never reconciled with the photos

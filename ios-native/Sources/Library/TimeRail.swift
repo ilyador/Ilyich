@@ -24,10 +24,9 @@ struct TimeRail: View {
     @State private var scale = TimeRailScale(buckets: [])
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var buckets: [TimeBucket] { store.buckets }
-    private var total: Int { max(1, scale.totalCount) }
     private var activeIndex: Int { min(max(0, selected ?? store.navigation.section), max(0, buckets.count - 1)) }
 
-    private static let accent = Color(red: 0.44, green: 0.86, blue: 1)
+    fileprivate static let accent = Color(red: 0.44, green: 0.86, blue: 1)
     /// The tape's x inside the 44-point rail; ticks hang to its left.
     private static let tapeX: CGFloat = 37
     private static let lensWidth: CGFloat = 210
@@ -43,8 +42,9 @@ struct TimeRail: View {
         GeometryReader { geometry in
             let height = max(1, geometry.size.height - 48)
             // The line marks where you are: under the finger while scrubbing, the grid's own
-            // position otherwise.
-            let currentY = fingerY ?? puckFraction * height + 24
+            // position otherwise. Only the open rail draws it; the grid's position changes on
+            // every scrolled frame, and reading it here would redraw the whole rail each time.
+            let currentY = fingerY ?? (expanded ? puckFraction * height + 24 : 24)
             ZStack(alignment: .topLeading) {
                 if expanded {
                     // The grid darkens toward the rail, so the lens and the years read clearly.
@@ -96,7 +96,8 @@ struct TimeRail: View {
                 GlassEffectContainer {
                     ZStack(alignment: .topLeading) {
                         if !expanded && visible {
-                            puck.position(x: 24, y: fingerY ?? (puckFraction * height + 24))
+                            TimeRailPuck(store: store, scale: scale, height: height, fingerY: fingerY,
+                                         chosen: selected != nil && fingerY == nil ? fraction(activeIndex) : nil)
                                 .transition(Self.puckFromEdge)
                         }
                     }
@@ -165,18 +166,6 @@ struct TimeRail: View {
     }
 
     // MARK: Pieces
-
-    /// A glass puck with arrows above and below a glowing line that marks the position.
-    private var puck: some View {
-        VStack(spacing: 4) {
-            Image(systemName: "chevron.up").font(.system(size: 9, weight: .bold))
-            Capsule().fill(Self.accent).frame(width: 10, height: 2).shadow(color: Self.accent.opacity(0.9), radius: 4)
-            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
-        }
-        .foregroundStyle(.white)
-        .frame(width: 30, height: 58)
-        .glassEffect(.clear.tint(.black.opacity(0.18)).interactive(), in: .capsule)
-    }
 
     /// The tape and its ticks: short for months, longer for years, and the month under the finger
     /// longest and in the accent color while the rail is open.
@@ -278,9 +267,7 @@ struct TimeRail: View {
 
     private var puckFraction: CGFloat {
         if selected != nil && fingerY == nil { return fraction(activeIndex) }
-        // Read the position so the rail redraws as the grid moves; the grid's offset places the puck.
-        let before = scale.count(before: store.navigation.section) + store.navigation.item
-        return store.scroller.fraction ?? min(1, max(0, CGFloat(before) / CGFloat(total)))
+        return TimeRailPuck.gridFraction(store: store, scale: scale)
     }
     /// Months sit where the grid's layout puts them, so the rail and the photos agree.
     private func fraction(_ index: Int) -> CGFloat { store.scroller.fraction(ofSection: index) ?? CGFloat(scale.fraction(before: index)) }
@@ -397,6 +384,37 @@ struct TimeRail: View {
             railOpen = false
             selected = nil; yearSelection = nil; fingerY = nil
         }
+    }
+}
+
+/// A glass puck with arrows above and below a glowing line that marks the position. It follows the
+/// grid on every scrolled frame, so it watches the grid's position itself and the rest of the rail
+/// is left alone.
+private struct TimeRailPuck: View {
+    let store: LibraryStore
+    let scale: TimeRailScale
+    let height: CGFloat
+    let fingerY: CGFloat?
+    /// Where a chosen month or year sits, while no finger is on the rail.
+    let chosen: CGFloat?
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: "chevron.up").font(.system(size: 9, weight: .bold))
+            Capsule().fill(TimeRail.accent).frame(width: 10, height: 2).shadow(color: TimeRail.accent.opacity(0.9), radius: 4)
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+        }
+        .foregroundStyle(.white)
+        .frame(width: 30, height: 58)
+        .glassEffect(.clear.tint(.black.opacity(0.18)).interactive(), in: .capsule)
+        .position(x: 24, y: fingerY ?? ((chosen ?? Self.gridFraction(store: store, scale: scale)) * height + 24))
+    }
+
+    /// How far down the timeline the grid is. The position is read so that the view updates as
+    /// the grid moves; the grid's own offset places the puck.
+    @MainActor static func gridFraction(store: LibraryStore, scale: TimeRailScale) -> CGFloat {
+        let before = scale.count(before: store.navigation.section) + store.navigation.item
+        return store.scroller.fraction ?? min(1, max(0, CGFloat(before) / CGFloat(max(1, scale.totalCount))))
     }
 }
 

@@ -9,6 +9,9 @@ actor EntityStore {
     nonisolated let userID: String
     private let database: EntityDatabase
     private var generation = UUID()
+    /// Whether each month index exists, by the date it indexes; absent until looked up.
+    private var monthIndexes: [String: MonthIndex] = [:]
+    private enum MonthIndex { case ready, missing, unavailable }
     private static let cachedServerFeaturesKey = "cache.serverFeatures.v1"
 
     init(scope: String, userID: String, directory: URL? = nil) throws {
@@ -177,11 +180,54 @@ actor EntityStore {
         }
     }
     func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) throws -> [Asset] {
-        let (whereSQL, arguments) = timelinePredicate(filter)
-        let date = filter.orderBy == "createdAt" ? "createdAt" : "localDateTime"
-        let rows = try database.query("\(Self.timelineSelect) WHERE \(whereSQL) AND strftime('%Y-%m',json_extract(a.payload,'$.\(date)'))=? ORDER BY julianday(json_extract(a.payload,'$.\(date)')) \(filter.order == "asc" ? "ASC" : "DESC"),a.id", arguments + [String(bucket.prefix(7))])
-        return try decodeTimelineRows(rows)
+        let (sql, arguments) = timeBucketQuery(bucket, filter: filter)
+        return try decodeTimelineRows(try database.query(sql, arguments))
     }
+
+    /// What SQLite plans for a month's query, for tests and diagnostics.
+    func timeBucketPlan(_ bucket: String, filter: TimelineFilter = .init()) throws -> [String] {
+        let (sql, arguments) = timeBucketQuery(bucket, filter: filter)
+        return try database.query("EXPLAIN QUERY PLAN " + sql, arguments).compactMap { $0.last ?? nil }
+    }
+
+    private func timeBucketQuery(_ bucket: String, filter: TimelineFilter) -> (String, [String?]) {
+        let (whereSQL, arguments) = timelinePredicate(filter)
+        let date = Self.monthDate(filter)
+        let select = Self.timelineSelect(indexedBy: monthIndex(date))
+        return ("\(select) WHERE \(whereSQL) AND strftime('%Y-%m',json_extract(a.payload,'$.\(date)'))=? ORDER BY julianday(json_extract(a.payload,'$.\(date)')) \(filter.order == "asc" ? "ASC" : "DESC"),a.id",
+                arguments + [String(bucket.prefix(7))])
+    }
+
+    /// A month's photos are found through an index on their month, which the month query matches
+    /// exactly; without it every photo's record is read, a quarter of a second or more per month on
+    /// a large library. Until the index exists a month is found that way.
+    private func monthIndex(_ date: String) -> String? {
+        let name = Self.monthIndexName(date)
+        if monthIndexes[date] == nil {
+            let exists = (try? database.query("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", [name]).isEmpty) == false
+            monthIndexes[date] = exists ? .ready : .missing
+        }
+        return monthIndexes[date] == .ready ? name : nil
+    }
+
+    /// Builds the index for months of the feed's date, when taken or when added, if it is missing.
+    /// It reads every photo once, so it never runs at launch or on the main thread: the library asks
+    /// for it on the store's own executor once a feed's first month has been answered, and months
+    /// load the old way until then. Once the index exists this returns at once.
+    func buildMonthIndex(for filter: TimelineFilter) {
+        let date = Self.monthDate(filter)
+        guard monthIndex(date) == nil, monthIndexes[date] != .unavailable else { return }
+        do {
+            try database.execute("CREATE INDEX IF NOT EXISTS \(Self.monthIndexName(date)) ON entities(kind,strftime('%Y-%m',json_extract(payload,'$.\(date)'))) WHERE kind='asset'")
+            monthIndexes[date] = .ready
+        } catch {
+            // Months are still found by reading every photo; the next launch tries again.
+            monthIndexes[date] = .unavailable
+        }
+    }
+
+    private static func monthDate(_ filter: TimelineFilter) -> String { filter.orderBy == "createdAt" ? "createdAt" : "localDateTime" }
+    private static func monthIndexName(_ date: String) -> String { "asset_month_" + date }
 
     /// Located photos per month and place, for naming months and marking trips on the time rail.
     func monthPlaces(filter: TimelineFilter = .init()) throws -> [MonthPlaceCount] {
@@ -200,10 +246,11 @@ actor EntityStore {
 
     /// One query brings each photo with its EXIF and the fields the timeline reads from the raw
     /// record, instead of a query and two JSON passes per photo. A 4,000-photo month matters.
-    private static let timelineSelect = """
-    SELECT a.payload,e.payload,json_extract(a.payload,'$.deletedAt') IS NOT NULL,json_extract(a.payload,'$.stackId') \
-    FROM entities a LEFT JOIN entities e ON e.kind='exif' AND e.id=a.id
-    """
+    private static let timelineSelect = timelineSelect(indexedBy: nil)
+    private static func timelineSelect(indexedBy index: String?) -> String {
+        "SELECT a.payload,e.payload,json_extract(a.payload,'$.deletedAt') IS NOT NULL,json_extract(a.payload,'$.stackId') "
+            + "FROM entities a\(index.map { " INDEXED BY \($0)" } ?? "") LEFT JOIN entities e ON e.kind='exif' AND e.id=a.id"
+    }
 
     private func decodeTimelineRows(_ rows: [[String?]]) throws -> [Asset] {
         let decoder = APIJSON.decoder()

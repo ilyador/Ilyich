@@ -26,13 +26,15 @@ enum ThumbSource: Int, CaseIterable, Sendable {
 
 /// What a cell showed instead of a real thumbnail.
 enum ThumbPlaceholder: Int, CaseIterable, Sendable {
-    case sketch, empty, awaitingMonth
+    /// Names only grow: color came after the others.
+    case sketch, empty, awaitingMonth, color
 
     var name: String {
         switch self {
         case .sketch: "sketch"
         case .empty: "empty"
         case .awaitingMonth: "awaitingMonth"
+        case .color: "color"
         }
     }
 }
@@ -216,7 +218,8 @@ final class PerfRecorder: Sendable {
         let sameFrame = bySource[ThumbSource.memory.rawValue].count + bySource[ThumbSource.memoryOther.rawValue].count
         let placeholders = PerfSummary.Thumbnails.Placeholders(
             sketch: state.placeholders[ThumbPlaceholder.sketch.rawValue], empty: state.placeholders[ThumbPlaceholder.empty.rawValue],
-            awaitingMonth: state.placeholders[ThumbPlaceholder.awaitingMonth.rawValue], total: state.placeholders.reduce(0, +))
+            awaitingMonth: state.placeholders[ThumbPlaceholder.awaitingMonth.rawValue],
+            color: state.placeholders[ThumbPlaceholder.color.rawValue], total: state.placeholders.reduce(0, +))
         let thumbnails = PerfSummary.Thumbnails(
             binds: state.binds, sameFrameMemoryShare: state.binds == 0 ? 0 : PerfSummary.rounded(Double(sameFrame) / Double(state.binds)),
             display: display, placeholders: placeholders, abandoned: state.abandoned, failed: state.failed)

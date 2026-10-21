@@ -14,7 +14,7 @@ final class PerfScenarioDriverTests: XCTestCase {
         XCTAssertFalse(PerfSignpost.feed.isEnabled)
         PerfScenarioDriver.arm()
         var probe = ThumbDisplayProbe()
-        probe.bind(); probe.placeholder(sketch: true); probe.displayed(.disk)
+        probe.bind(); probe.placeholder(.sketch); probe.displayed(.disk)
         XCTAssertNil(PerfRecorder.shared, "Arming and probing stay inert.")
     }
 

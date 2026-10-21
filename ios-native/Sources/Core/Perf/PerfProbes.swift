@@ -33,10 +33,10 @@ struct ThumbDisplayProbe {
         }
     }
 
-    /// The bind drew the photo's sketch, or nothing, while the thumbnail is on its way.
-    func placeholder(sketch: Bool) {
+    /// The bind drew the photo's sketch, its average colour or nothing while the thumbnail is on its way.
+    func placeholder(_ kind: ThumbPlaceholder) {
         guard start != 0 else { return }
-        count(sketch ? .sketch : .empty)
+        count(kind)
     }
 
     /// The cell waits for its photo's month to load. Counted once until the cell is bound or reused.
@@ -140,8 +140,10 @@ enum FeedMonthProbe {
             return value
         } catch {
             let backend = name(note.backend ?? .serverTimeline)
-            // A cancelled load is work given up, not a slow or failed month.
-            if !(error is CancellationError) { recorder.recordMonth(backend: backend, nanoseconds: perfNow() &- start, succeeded: false) }
+            // A cancelled load is work given up, not a slow or failed month, however it ended.
+            if !(error is CancellationError) && !Task.isCancelled {
+                recorder.recordMonth(backend: backend, nanoseconds: perfNow() &- start, succeeded: false)
+            }
             if let interval { signposter.endInterval(PerfSignpost.feedMonth, interval, "backend=\(backend, privacy: .public) outcome=failed") }
             throw error
         }
