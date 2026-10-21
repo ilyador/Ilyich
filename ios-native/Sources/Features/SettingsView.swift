@@ -1,10 +1,11 @@
 import SwiftUI
 
 enum SettingsDestination: String, CaseIterable {
-    case account, backup, readOnly, appearance, grid, network, notifications, server, diagnostics, about
+    case account, backup, readOnly, appearance, grid, viewer, network, notifications, server, diagnostics, about
     var title: String {
         switch self {
         case .readOnly: "Read-only mode"
+        case .viewer: "Photo and video viewer"
         default: rawValue.capitalized
         }
     }
@@ -15,6 +16,7 @@ enum SettingsDestination: String, CaseIterable {
         case .readOnly: "pencil.slash"
         case .appearance: "circle.lefthalf.filled"
         case .grid: "square.grid.3x3"
+        case .viewer: "photo.on.rectangle"
         case .network: "network"
         case .notifications: "bell"
         case .server: "externaldrive.connected.to.line.below"
@@ -51,6 +53,8 @@ struct SettingsDestinationView: View {
         case .grid:
             Form { GridSettingsSection() }
                 .navigationTitle("Grid")
+        case .viewer:
+            ViewerSettingsView()
         case .server:
             ServerSettingsView(api: api)
         case .about:
@@ -79,6 +83,7 @@ struct SettingsView: View {
             Section("Library") {
                 NavigationLink { SettingsDestinationView(api: api, destination: .appearance) } label: { Label("Appearance", systemImage: "circle.lefthalf.filled") }
                 NavigationLink { SettingsDestinationView(api: api, destination: .grid) } label: { Label("Grid", systemImage: "square.grid.3x3") }
+                NavigationLink { SettingsDestinationView(api: api, destination: .viewer) } label: { Label("Photo and video viewer", systemImage: "photo.on.rectangle") }
             }
             Section {
                 NavigationLink { NetworkSettingsView(api: api, server: api.baseURL) } label: { Label("Network", systemImage: "network") }
@@ -128,7 +133,6 @@ private struct AppearanceSettingsSection: View {
             Picker("Accent color", selection: $accentName) {
                 ForEach(AppearanceAccent.allCases) { Text($0.title).tag($0.rawValue) }
             }
-            NavigationLink("Photo and video viewer") { ViewerSettingsView() }
             NavigationLink("Slideshow") { SlideshowSettingsView() }
         }
     }
