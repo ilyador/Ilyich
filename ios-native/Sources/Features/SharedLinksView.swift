@@ -18,7 +18,7 @@ struct SharedLinksView: View {
         .task { await load() }.refreshable { await load() }
         .sheet(item: $editing) { link in NavigationStack { SharedLinkEditor(api: api, album: link.album, link: link, onSaved: { Task { await load() } }) } }
         .confirmationDialog("Remove this shared link?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
-            Button("Remove link", role: .destructive) { if let link = deleting { Task { await remove(link) } } }.requiresWriteAccess(api)
+            Button("Remove link", role: .destructive) { if let link = deleting { Task { await remove(link) } } }.requiresWriteAccess()
         } message: { Text("Anyone with the link will lose access. Your photos stay in your library.") }
         .alert("Couldn’t update shared links", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
@@ -46,10 +46,10 @@ struct SharedLinkRow: View {
             HStack {
                 if let url = sharedURL(link: link, api: api) { ShareLink(item: url) { Label("Share link", systemImage: "square.and.arrow.up") } }
                 Spacer()
-                Button("Edit", action: onEdit).requiresWriteAccess(api)
+                Button("Edit", action: onEdit).requiresWriteAccess()
             }.buttonStyle(.borderless)
         }.padding(.vertical, 4)
-        .swipeActions { Button("Remove", role: .destructive, action: onRemove).requiresWriteAccess(api) }
+        .swipeActions { Button("Remove", role: .destructive, action: onRemove).requiresWriteAccess() }
     }
 }
 
@@ -93,7 +93,7 @@ struct SharedLinkEditor: View {
         }.navigationTitle(link == nil ? (album == nil ? "Share photos" : "Share album") : "Edit shared link")
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button(result == nil ? "Save" : "Done") {
             if result != nil { dismiss() } else { Task { await save() } }
-        }.disabled(saving).requiresWriteAccess(api, when: result == nil) } }
+        }.disabled(saving).requiresWriteAccess(when: result == nil) } }
         .task {
             if let link {
                 description = link.description ?? ""; slug = link.slug ?? ""; download = link.allowDownload; upload = link.allowUpload; metadata = link.showMetadata

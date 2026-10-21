@@ -1,32 +1,26 @@
-import IlyichPlatform
 import SwiftUI
 
-/// Disables a mutation affordance while leaving navigation and media browsing usable.
+extension EnvironmentValues {
+    /// What the signed-in account may do. The app sets it at its root from SessionStore, so the
+    /// views below follow a read-only change in the same frame. Nil while nobody is signed in.
+    @Entry var authorization: AuthorizationSnapshot? = nil
+}
+
+/// Disables a mutation affordance while leaving navigation and media browsing usable. It reads the
+/// account's authorization from the environment: no Keychain read and no polling.
 /// APIClient/backup enforce the same policy again immediately before sending writes.
 private struct WriteAccessModifier: ViewModifier {
-    let api: APIClient?
     let applies: Bool
-    @State private var readOnly: Bool
+    @Environment(\.authorization) private var authorization
 
-    init(api: APIClient?, applies: Bool) {
-        self.api = api; self.applies = applies
-        _readOnly = State(initialValue: Self.isReadOnly(api))
-    }
     func body(content: Content) -> some View {
-        content.disabled(applies && readOnly)
-            .onAppear { readOnly = Self.isReadOnly(api) }
-            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in readOnly = Self.isReadOnly(api) }
-            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in readOnly = Self.isReadOnly(api) }
-    }
-    private static func isReadOnly(_ api: APIClient?) -> Bool {
-        if let api { return api.isReadOnly }
-        guard let session = try? KeychainCredentialStore().load() else { return true }
-        return ReadOnlyPolicy.isEnabled(server: session.server, userID: session.userID)
+        // With nobody signed in there is nothing to change.
+        content.disabled(applies && authorization?.readOnly != false)
     }
 }
 
 extension View {
-    func requiresWriteAccess(_ api: APIClient? = nil, when applies: Bool = true) -> some View {
-        modifier(WriteAccessModifier(api: api, applies: applies))
+    func requiresWriteAccess(when applies: Bool = true) -> some View {
+        modifier(WriteAccessModifier(applies: applies))
     }
 }

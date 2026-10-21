@@ -33,9 +33,9 @@ struct DuplicatesView: View {
                             }
                         }
                         HStack {
-                            Button("Not duplicates") { Task { await dismissGroup(group) } }.requiresWriteAccess(api)
+                            Button("Not duplicates") { Task { await dismissGroup(group) } }.requiresWriteAccess()
                             Spacer()
-                            Button("Move others to trash") { confirming = group }.buttonStyle(.borderedProminent).requiresWriteAccess(api)
+                            Button("Move others to trash") { confirming = group }.buttonStyle(.borderedProminent).requiresWriteAccess()
                                 .disabled(!trashEnabled || selected(group).isEmpty || selected(group).count == group.assets.count)
                         }.font(.subheadline)
                     }.padding(.horizontal, 20)
@@ -44,7 +44,7 @@ struct DuplicatesView: View {
         }.navigationTitle("Duplicates").disabled(busy)
         .task { await load() }.refreshable { await load() }
         .confirmationDialog("Move \(confirming.map { $0.assets.count - selected($0).count } ?? 0) items to trash?", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }), titleVisibility: .visible) {
-            Button("Move to trash", role: .destructive) { if let group = confirming { Task { await resolve(group) } } }.requiresWriteAccess(api)
+            Button("Move to trash", role: .destructive) { if let group = confirming { Task { await resolve(group) } } }.requiresWriteAccess()
         } message: { Text("The items marked Keep will remain in your library.") }
         .alert("Couldn’t update duplicates", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
@@ -115,21 +115,21 @@ struct TrashView: View {
                     Button("Restore all items") { emptyAll = false; confirmAll = true }
                     Button("Empty trash", role: .destructive) { emptyAll = true; confirmAll = true }
                 } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Trash actions")
-                    .disabled(loading || trashEnabled != true || buckets.isEmpty).requiresWriteAccess(api)
+                    .disabled(loading || trashEnabled != true || buckets.isEmpty).requiresWriteAccess()
             }
             ToolbarItemGroup(placement: .bottomBar) {
-                Button("Restore", systemImage: "arrow.uturn.backward") { Task { await restore() } }.disabled(selection.isEmpty || loading).requiresWriteAccess(api)
+                Button("Restore", systemImage: "arrow.uturn.backward") { Task { await restore() } }.disabled(selection.isEmpty || loading).requiresWriteAccess()
                 Spacer()
-                Button("Delete forever", systemImage: "trash", role: .destructive) { confirmPermanent = true }.disabled(selection.isEmpty || loading).requiresWriteAccess(api)
+                Button("Delete forever", systemImage: "trash", role: .destructive) { confirmPermanent = true }.disabled(selection.isEmpty || loading).requiresWriteAccess()
             }
         }
         .task { await reload() }.refreshable { await reload() }
         .confirmationDialog("Permanently delete \(selection.count) items?", isPresented: $confirmPermanent, titleVisibility: .visible) {
-            Button("Delete forever", role: .destructive) { Task { await remove() } }.requiresWriteAccess(api)
+            Button("Delete forever", role: .destructive) { Task { await remove() } }.requiresWriteAccess()
         } message: { Text("These photos and videos will be permanently removed from your server. This cannot be undone.") }
         .confirmationDialog(emptyAll ? "Permanently delete everything in trash?" : "Restore every item in trash?", isPresented: $confirmAll, titleVisibility: .visible) {
-            if emptyAll { Button("Empty trash", role: .destructive) { Task { await changeAll(permanently: true) } }.requiresWriteAccess(api) }
-            else { Button("Restore all items") { Task { await changeAll(permanently: false) } }.requiresWriteAccess(api) }
+            if emptyAll { Button("Empty trash", role: .destructive) { Task { await changeAll(permanently: true) } }.requiresWriteAccess() }
+            else { Button("Restore all items") { Task { await changeAll(permanently: false) } }.requiresWriteAccess() }
         } message: { Text(emptyAll ? "This removes all of your trashed photos and videos from the server, including items you have not loaded here. This cannot be undone." : "All of your trashed photos and videos will return to their previous visibility, including items you have not loaded here.") }
         .alert("Couldn’t update trash", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }

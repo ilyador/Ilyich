@@ -49,7 +49,7 @@ struct PhotoEditor: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { if dirty { discard = true } else { dismiss() } }.disabled(saving) }
                 ToolbarItem(placement: .topBarTrailing) { Button("Reset") { crop = CGRect(x: 0, y: 0, width: 1, height: 1); transform = .init() }.disabled(loading || saving) }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.bold().disabled(loading || saving || !dirty).requiresWriteAccess(api) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.bold().disabled(loading || saving || !dirty).requiresWriteAccess() }
             }
             .interactiveDismissDisabled(dirty || saving)
             .task { await load() }

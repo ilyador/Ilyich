@@ -12,6 +12,14 @@ import IlyichPlatform
     var error: String?
     var requiresPasswordChange = false
     var pendingLink: AppLink?
+    /// What the signed-in account may do, for views: the app puts it in the environment, where
+    /// the controls that change things read it. Nil while nobody is signed in.
+    private(set) var authorization: AuthorizationSnapshot?
+    /// A read-only change is still pausing or resuming uploads.
+    private(set) var isApplyingReadOnly = false
+    /// The signed-in account's authorization, which the main client's requests ask.
+    @ObservationIgnored private(set) var authorizationState: AuthorizationState?
+    @ObservationIgnored private var readOnlyTransition: (id: UUID, task: Task<Void, Never>)?
     private(set) var libraryAPI: (any LibraryAPI)?
     private(set) var entities: EntityStore?
     /// Fills the thumbnail store with the whole library while the app is open.
@@ -52,7 +60,10 @@ import IlyichPlatform
             if ProcessInfo.processInfo.arguments.contains("--ui-testing-library") {
                 // The fixture serves a long People shelf to this session's own token.
                 let token = ProcessInfo.processInfo.arguments.contains("--ui-testing-many-people") ? "ui-test-many-people" : "ui-test-session"
-                do { try connect(StoredCredential(server: URL(string: "http://127.0.0.1:18091")!, token: token, userID: "00000000-0000-4000-8000-000000000001", name: "Test library")) }
+                let fixture = StoredCredential(server: URL(string: "http://127.0.0.1:18091")!, token: token, userID: "00000000-0000-4000-8000-000000000001", name: "Test library")
+                // Nor does a test's read-only mode, kept in the App Group for the fixture account.
+                ReadOnlyPolicy.setEnabled(false, server: fixture.server, userID: fixture.userID)
+                do { try connect(fixture) }
                 catch { self.error = error.localizedDescription }
             }
             #endif
@@ -99,10 +110,22 @@ import IlyichPlatform
     }
 
     private func connect(_ saved: StoredCredential) throws {
-        let client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID,
-                                   networkConfiguration: isUITesting ? NetworkConfiguration() : nil)
+        // A replaced session ends first, so the new one's generations follow its last.
+        authorizationState?.end()
+        // The App Group mirror is written here for the saved credential, which stays untouched.
+        let state = AuthorizationState(account: saved.account, token: saved.token,
+                                       readOnly: ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID),
+                                       requiresPasswordChange: saved.requiresPasswordChange == true,
+                                       mirror: isUITesting ? nil : AuthorizationMirror.current())
+        let client: APIClient
+        do {
+            client = try APIClient(baseURL: saved.server, accessToken: saved.token, userID: saved.userID,
+                                   networkConfiguration: isUITesting ? NetworkConfiguration() : nil, authorization: state)
+        } catch { state.end(); throw error }
         if let replaced = api, replaced !== client { Task { await replaced.shutdown() } }
         api = client
+        authorizationState = state
+        authorization = state.snapshot
         let pipeline = MediaPipeline(client: client)
         self.pipeline = pipeline
         thumbnailWarmer?.stop(); thumbnailWarmer = nil
@@ -115,13 +138,48 @@ import IlyichPlatform
                 let sync = NativeSync(api: client, store: entities)
                 self.sync = sync
                 libraryAPI = NativeLibraryAPI(client: client, entities: entities, sync: sync)
-                let warmer = ThumbnailWarmer()
+                let warmer = ThumbnailWarmer(session: state)
                 thumbnailWarmer = warmer
-                Task { if (try? await entities.isComplete()) == true { warmer.start(entities: entities, pipeline: pipeline) } }
+                warmer.start(when: { (try? await entities.isComplete()) == true }, entities: entities, pipeline: pipeline)
                 startSync()
             } catch { syncError = error.localizedDescription }
         }
         validateSession()
+    }
+
+    /// Turns read-only mode on or off for the signed-in account. The setting and the write
+    /// generation change at once, so the controls follow straight away and writes still waiting
+    /// to be sent are refused. Then turning it on pauses backup and shared uploads, and turning
+    /// it off carries on with what it paused. Changes are applied in the order they were made.
+    func setReadOnly(_ enabled: Bool) {
+        guard let api, let userID = api.userID, let state = authorizationState, !isSigningOut,
+              state.snapshot.readOnly != enabled else { return }
+        ReadOnlyPolicy.setEnabled(enabled, server: api.baseURL, userID: userID)
+        authorization = state.setReadOnly(enabled)
+        let previous = readOnlyTransition?.task, id = UUID()
+        isApplyingReadOnly = true
+        let task = Task { [weak self] in
+            await previous?.value
+            if enabled {
+                // Both stop at once. Stopping uploads is right whatever happened since.
+                async let backup: Void = BackupCoordinator.shared.pauseForReadOnly()
+                async let shares: Void = ShareInboxStore.shared.pauseForReadOnly()
+                _ = await (backup, shares)
+            } else if self?.authorizationState === state, state.snapshot.allows(.upload) {
+                await BackupCoordinator.shared.resumeAfterReadOnly()
+                await ShareInboxStore.shared.resumeAfterReadOnly(api: api)
+            }
+            guard let self, self.readOnlyTransition?.id == id else { return }
+            self.readOnlyTransition = nil
+            self.isApplyingReadOnly = false
+        }
+        readOnlyTransition = (id, task)
+    }
+
+    /// What was read or kept for the account may show photos it can no longer see.
+    private func accessChanged(client: APIClient) {
+        guard api === client, let authorizationState else { return }
+        authorization = authorizationState.accessChanged()
     }
 
     func sceneChanged(_ phase: ScenePhase) {
@@ -246,6 +304,7 @@ import IlyichPlatform
         do {
             try await entities.clear()
             resetRequested = true
+            accessChanged(client: client)
             await TimelineCache.shared.removeAll(scope: client.cacheScope)
             await TimelinePlacesCache.shared.removeAll(scope: client.cacheScope)
             guard api === client else { return }
@@ -276,6 +335,7 @@ import IlyichPlatform
         guard api === client else { return }
         if resetPending || summary.reset || revoked {
             // Places are kept through ordinary syncs, but not past a change in what may be seen.
+            accessChanged(client: client)
             await TimelinePlacesCache.shared.removeAll(scope: client.cacheScope)
         }
         guard api === client else { return }
@@ -300,6 +360,7 @@ import IlyichPlatform
         let revoked = await purgeRemovedMedia(entities: entities, pipeline: previousPipeline, client: client)
         guard api === client else { return }
         if resetPending || revoked {
+            accessChanged(client: client)
             await TimelineCache.shared.removeAll(scope: client.cacheScope)
             await TimelinePlacesCache.shared.removeAll(scope: client.cacheScope)
             guard api === client else { return }
@@ -362,6 +423,9 @@ import IlyichPlatform
     func signOut() async {
         guard !isSigningOut else { return }
         isSigningOut = true
+        // First, nothing made under the session is current any more, and the mirror says so.
+        authorizationState?.end(); authorizationState = nil; authorization = nil
+        readOnlyTransition?.task.cancel(); readOnlyTransition = nil; isApplyingReadOnly = false
         let previous = api, previousPipeline = pipeline, previousSync = sync, previousEntities = entities
         api = nil; pipeline = nil; name = ""; requiresPasswordChange = false; pendingLink = nil; error = nil
         sync = nil; entities = nil; libraryAPI = nil; syncError = nil; lastSyncDate = nil; isSyncing = false

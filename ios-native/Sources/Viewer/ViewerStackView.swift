@@ -30,7 +30,7 @@ struct ViewerStackView: View {
                         Menu {
                             Button("Set as stack cover") { run { let _: StackDetails = try await api.request(.put, path: "stacks/\(stackID)", body: ["primaryAssetId": asset.id]) } }
                             Button("Remove from stack") { run { try await api.requestVoid(.delete, path: "stacks/\(stackID)/assets/\(asset.id)") } }
-                        } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("Stack actions for \(asset.displayName)").requiresWriteAccess(api)
+                        } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("Stack actions for \(asset.displayName)").requiresWriteAccess()
                     }
                 }.disabled(busy)
             }
@@ -39,7 +39,7 @@ struct ViewerStackView: View {
             .overlay { if stack == nil && error == nil { ProgressView() } }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-                if stack?.assets.first?.ownerId == api.userID { ToolbarItem(placement: .topBarTrailing) { Button("Unstack") { confirmUnstack = true }.disabled(busy).requiresWriteAccess(api) } }
+                if stack?.assets.first?.ownerId == api.userID { ToolbarItem(placement: .topBarTrailing) { Button("Unstack") { confirmUnstack = true }.disabled(busy).requiresWriteAccess() } }
             }
             .confirmationDialog("Unstack these photos?", isPresented: $confirmUnstack, titleVisibility: .visible) {
                 Button("Unstack") {

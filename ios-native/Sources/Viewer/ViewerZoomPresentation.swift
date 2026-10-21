@@ -18,6 +18,8 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
     @Binding var item: Asset?
     /// The grid cell showing a photo, scrolled into view first, or nil when the grid has none.
     let sourceView: (String) -> UIView?
+    /// What the account may do. The viewer is outside the app's environment, so it is handed on.
+    let authorization: AuthorizationSnapshot?
     let onDismiss: () -> Void
     let content: (Asset, ViewerTransitionState, @escaping () -> Void) -> AnyView
 
@@ -91,7 +93,8 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
 
         private func root(_ asset: Asset) -> AnyView {
             guard let parent, let state else { return AnyView(EmptyView()) }
-            return AnyView(ViewerRoot(content: parent.content(asset, state, { [weak self] in self?.close() })).id(asset.id))
+            return AnyView(ViewerRoot(content: parent.content(asset, state, { [weak self] in self?.close() }), authorization: parent.authorization)
+                .id(asset.id))
         }
 
         /// A drag closes the viewer when it goes down on a photo at normal size: a sideways drag
@@ -132,11 +135,15 @@ final class ViewerHostingController: UIHostingController<AnyView> {
     }
 }
 
-/// A presented controller does not inherit the app's environment, so the accent is applied again.
+/// A presented controller does not inherit the app's environment, so the accent and what the
+/// account may do are applied again.
 private struct ViewerRoot: View {
     let content: AnyView
+    let authorization: AuthorizationSnapshot?
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
-    var body: some View { content.tint((AppearanceAccent(rawValue: accentName) ?? .design).tint) }
+    var body: some View {
+        content.tint((AppearanceAccent(rawValue: accentName) ?? .design).tint).environment(\.authorization, authorization)
+    }
 }
 
 extension LibraryStore {

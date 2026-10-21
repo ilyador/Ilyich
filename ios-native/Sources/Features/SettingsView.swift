@@ -37,7 +37,7 @@ struct SettingsDestinationView: View {
         case .backup:
             BackupSettingsView()
         case .readOnly:
-            Form { ReadOnlySettingsSection(api: api) }
+            Form { ReadOnlySettingsSection(session: session) }
                 .navigationTitle("Read-only mode")
         case .network:
             NetworkSettingsView(api: api, server: api.baseURL)
@@ -75,7 +75,7 @@ struct SettingsView: View {
                 }
                 NavigationLink { SettingsDestinationView(api: api, destination: .backup) } label: { Label("Backup", systemImage: "icloud.and.arrow.up") }
             }
-            ReadOnlySettingsSection(api: api)
+            ReadOnlySettingsSection(session: session)
             Section("Library") {
                 NavigationLink { SettingsDestinationView(api: api, destination: .appearance) } label: { Label("Appearance", systemImage: "circle.lefthalf.filled") }
                 NavigationLink { SettingsDestinationView(api: api, destination: .grid) } label: { Label("Grid", systemImage: "square.grid.3x3") }
@@ -99,28 +99,18 @@ struct SettingsView: View {
     }
 }
 
-/// Read-only mode, shown in Settings and as its own row on the Settings shelf.
+/// Read-only mode, shown in Settings and as its own row on the Settings shelf. The setting is the
+/// session's: the toggle shows the account's authorization and asks the session to change it.
 private struct ReadOnlySettingsSection: View {
-    let api: APIClient
-    @State private var readOnly = false
-    @State private var changingMode = false
+    let session: SessionStore?
+    @Environment(\.authorization) private var authorization
 
     var body: some View {
         Section {
-            Toggle("Read-only mode", isOn: Binding(get: { readOnly }, set: { enabled in
-                api.setReadOnly(enabled); readOnly = enabled
-                if enabled {
-                    changingMode = true
-                    ShareInboxStore.shared.cancel()
-                    Task {
-                        await BackupCoordinator.shared.pause()
-                        await BackgroundUploads.sharing.cancelAll()
-                        changingMode = false
-                    }
-                }
-            })).disabled(changingMode)
-        } footer: { Text("Browse and search without changing photos, albums or account details. Turning this on pauses uploads. Backup stays paused until you start it again.") }
-        .task { readOnly = api.isReadOnly }
+            Toggle("Read-only mode", isOn: Binding(get: { authorization?.readOnly == true }, set: { session?.setReadOnly($0) }))
+                // Until uploads have paused or carried on, as the last change asked.
+                .disabled(session == nil || authorization == nil || session?.isApplyingReadOnly == true)
+        } footer: { Text("Browse and search without changing photos, albums or account details. Uploads pause while it is on and carry on when you turn it off.") }
     }
 }
 
@@ -211,7 +201,7 @@ private struct AccountSettingsView: View {
             if let account, account.quotaSizeInBytes == nil { ServerStorageSection(api: api) }
             if saved { Label("Profile saved", systemImage: "checkmark.circle").foregroundStyle(.secondary) }
         }.navigationTitle("Account").disabled(loading || saving)
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(loading || saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).requiresWriteAccess(api) } }
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(loading || saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).requiresWriteAccess() } }
         .task {
             do { let user = try await api.currentUser(); account = user; name = user.name; email = user.email ?? "" } catch { failure = .init(error) }
             loading = false
@@ -245,7 +235,7 @@ struct ChangePasswordView: View {
             } footer: { Text("Use at least 8 characters.") }
             Toggle("Sign out other devices", isOn: $invalidate)
         }.navigationTitle("Change password")
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving || current.isEmpty || password.count < 8 || password != confirmation).requiresWriteAccess(api) } }
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving || current.isEmpty || password.count < 8 || password != confirmation).requiresWriteAccess() } }
         .alert("Couldn’t change password", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }

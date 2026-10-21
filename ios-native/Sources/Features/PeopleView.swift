@@ -28,7 +28,7 @@ struct PeopleView: View {
                             }
                         }
                     }.buttonStyle(.plain)
-                    .contextMenu { Button("Edit person", systemImage: "pencil") { editing = person }.requiresWriteAccess(api) }
+                    .contextMenu { Button("Edit person", systemImage: "pencil") { editing = person }.requiresWriteAccess() }
                 }
             }.padding(20)
             if hasMore {
@@ -91,7 +91,7 @@ private struct PersonEditor: View {
         }.navigationTitle("Edit person")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-            ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving).requiresWriteAccess(api) }
+            ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(saving).requiresWriteAccess() }
         }
         .task {
             name = person.name

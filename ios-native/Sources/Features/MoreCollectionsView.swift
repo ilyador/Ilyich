@@ -68,7 +68,7 @@ struct MemoriesView: View {
                             Text(memoryTitle(memory)).font(.title2.bold()); Spacer()
                             Button("Play memory", systemImage: "play.fill") { playingMemory = memory }.labelStyle(.iconOnly).disabled(memory.assets.isEmpty)
                             Button { Task { await toggleSaved(memory) } } label: { Image(systemName: memory.isSaved ? "bookmark.fill" : "bookmark") }
-                                .accessibilityLabel(memory.isSaved ? "Unsave memory" : "Save memory").requiresWriteAccess(api)
+                                .accessibilityLabel(memory.isSaved ? "Unsave memory" : "Save memory").requiresWriteAccess()
                         }.padding(.horizontal, 20)
                         FeatureAssetGrid(pipeline: pipeline, assets: memory.assets, onOpenAsset: onOpenAsset)
                     }
@@ -131,26 +131,26 @@ struct PartnersView: View {
                 ForEach(incoming) { partner in
                     VStack(alignment: .leading, spacing: 10) {
                         Button(partner.name) { var filter = TimelineFilter(); filter.userID = partner.id; filter.visibility = nil; onFilter(filter, partner.name) }
-                        Toggle("Show in your timeline", isOn: Binding(get: { partner.inTimeline == true }, set: { value in Task { await setTimeline(partner, value: value) } })).font(.subheadline).requiresWriteAccess(api)
+                        Toggle("Show in your timeline", isOn: Binding(get: { partner.inTimeline == true }, set: { value in Task { await setTimeline(partner, value: value) } })).font(.subheadline).requiresWriteAccess()
                     }.padding(.vertical, 4)
                 }
                 if incoming.isEmpty && !loading { Text("No partner libraries yet").foregroundStyle(.secondary) }
             }
             Section("You’re sharing with") {
-                ForEach(outgoing) { partner in Text(partner.name).swipeActions { Button("Stop sharing", role: .destructive) { pendingRemoval = partner }.requiresWriteAccess(api) } }
+                ForEach(outgoing) { partner in Text(partner.name).swipeActions { Button("Stop sharing", role: .destructive) { pendingRemoval = partner }.requiresWriteAccess() } }
                 if outgoing.isEmpty && !loading { Text("Your library is not shared with any partners.").foregroundStyle(.secondary) }
             }
             Section("Share your library") {
                 ForEach(candidates.filter { user in user.id != api.userID && !outgoing.contains { $0.id == user.id } }) { user in
-                    Button(user.name) { pendingShare = user }.requiresWriteAccess(api)
+                    Button(user.name) { pendingShare = user }.requiresWriteAccess()
                 }
             }
         }.navigationTitle("Partners").task { await load() }.refreshable { await load() }
         .confirmationDialog("Share your library with \(pendingShare?.name ?? "this person")?", isPresented: Binding(get: { pendingShare != nil }, set: { if !$0 { pendingShare = nil } }), titleVisibility: .visible) {
-            Button("Share library") { if let user = pendingShare { Task { await share(user) } } }.requiresWriteAccess(api)
+            Button("Share library") { if let user = pendingShare { Task { await share(user) } } }.requiresWriteAccess()
         } message: { Text("They will be able to browse your shared library. Locked photos stay private.") }
         .confirmationDialog("Stop sharing your library?", isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }), titleVisibility: .visible) {
-            Button("Stop sharing", role: .destructive) { if let partner = pendingRemoval { Task { await remove(partner) } } }.requiresWriteAccess(api)
+            Button("Stop sharing", role: .destructive) { if let partner = pendingRemoval { Task { await remove(partner) } } }.requiresWriteAccess()
         }
         .alert("Couldn’t update partners", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }

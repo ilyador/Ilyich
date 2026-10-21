@@ -371,7 +371,9 @@ extension APIClient: LibraryAPI {}
 
     /// Counts the feed's places once its first months are in, showing the copy kept on the phone
     /// meanwhile. A reload while they are being counted lets the count finish and then counts
-    /// again, so a library that keeps changing still gets its places.
+    /// again, so a library that keeps changing still gets its places. The count is kept on the
+    /// phone by the same task, under the epoch it began with, so a count that an access change
+    /// overtook is never kept.
     private func loadMonthPlaces(_ filter: TimelineFilter) {
         if let placesLoad {
             if placesLoad.filter == filter { placesStale = true; return }
@@ -386,11 +388,12 @@ extension APIClient: LibraryAPI {}
                 self?.keepPlaces(saved, for: filter)
             }
             try? await Task.sleep(for: delay)
+            let epoch = await TimelinePlacesCache.shared.epoch(scope: scope)
             guard !Task.isCancelled, let counts = try? await api.monthPlaces(filter: filter), !Task.isCancelled else { return }
             let places = await Task.detached(priority: .utility) { TimelinePlaces(counts: counts) }.value
             guard !Task.isCancelled, let self else { return }
             self.keepPlaces(places, for: filter)
-            Task { await TimelinePlacesCache.shared.save(places, scope: scope, filter: filter) }
+            await TimelinePlacesCache.shared.save(places, scope: scope, filter: filter, epoch: epoch)
         }
         placesLoad = (filter, id, task)
     }

@@ -68,7 +68,7 @@ struct LocationPickerView: View {
                 Button("Use location") {
                     guard let selected else { return }
                     onSelect(.init(latitude: selected.latitude, longitude: selected.longitude)); dismiss()
-                }.disabled(selected == nil || mapEnabled != true).requiresWriteAccess(api)
+                }.disabled(selected == nil || mapEnabled != true).requiresWriteAccess()
             }
         }
         .task { await loadFeatures() }

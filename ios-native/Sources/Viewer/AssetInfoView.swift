@@ -33,10 +33,10 @@ struct AssetInfoView: View {
                 if let date = asset.localDateTime ?? asset.fileCreatedAt {
                     LabeledContent("Taken", value: date.formatted(Date.FormatStyle(date: .long, time: .shortened, timeZone: TimeZone(secondsFromGMT: 0)!)))
                 }
-                if ownsAsset { Button("Adjust date and location") { editingMetadata = true }.requiresWriteAccess(api) }
-                TextField("Add a caption", text: $caption, axis: .vertical).disabled(!ownsAsset).lineLimit(2...6).requiresWriteAccess(api)
+                if ownsAsset { Button("Adjust date and location") { editingMetadata = true }.requiresWriteAccess() }
+                TextField("Add a caption", text: $caption, axis: .vertical).disabled(!ownsAsset).lineLimit(2...6).requiresWriteAccess()
                 if caption != (asset.exifInfo?.description ?? "") {
-                    Button("Save caption") { saveCaption() }.requiresWriteAccess(api).disabled(saving)
+                    Button("Save caption") { saveCaption() }.requiresWriteAccess().disabled(saving)
                 }
                 if ownsAsset {
                     Menu {
@@ -45,7 +45,7 @@ struct AssetInfoView: View {
                         Button("Clear rating") { setRating(nil) }
                     } label: {
                         LabeledContent("Rating", value: asset.exifInfo?.rating.map { $0 == -1 ? "Rejected" : "\($0) stars" } ?? "Unrated")
-                    }.disabled(saving).requiresWriteAccess(api)
+                    }.disabled(saving).requiresWriteAccess()
                 }
             }
             if let exif = asset.exifInfo {
@@ -115,7 +115,7 @@ struct AssetInfoView: View {
                             HStack { PersonThumbnail(pipeline: pipeline, person: person, pixelSize: PersonThumbnail.small).frame(width: 40, height: 40); Text(person.name.isEmpty ? "Unnamed person" : person.name) }
                         }
                     }
-                    if ownsAsset { Button("Fix faces", systemImage: "person.crop.rectangle.badge.plus") { editingFaces = true }.requiresWriteAccess(api) }
+                    if ownsAsset { Button("Fix faces", systemImage: "person.crop.rectangle.badge.plus") { editingFaces = true }.requiresWriteAccess() }
                 }
             }
             if !albums.isEmpty {
@@ -128,7 +128,7 @@ struct AssetInfoView: View {
             if !(asset.tags ?? []).isEmpty || ownsAsset {
                 Section("Tags") {
                     ForEach(asset.tags ?? []) { tag in Text(tag.value) }
-                    if ownsAsset { Button("Edit tags") { tagging = true }.requiresWriteAccess(api) }
+                    if ownsAsset { Button("Edit tags") { tagging = true }.requiresWriteAccess() }
                 }
             }
             if !text.isEmpty {
@@ -225,7 +225,7 @@ private struct MetadataEditor: View {
         }.navigationTitle("Adjust information")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(saving).requiresWriteAccess(api) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(saving).requiresWriteAccess() }
             }.interactiveDismissDisabled(saving)
             .sheet(isPresented: $pickingLocation) {
                 NavigationStack {

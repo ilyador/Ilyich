@@ -318,7 +318,7 @@ final class LegacyFormatsTests: XCTestCase {
         for (filter, places) in G.places {
             let path = Legacy.placesPath(scope: scope, feedKey: filter.cacheKey)
             let fixture = try FixtureLoader.data("caches/" + path)
-            await TimelinePlacesCache.shared.save(places, scope: scope, filter: filter)
+            await TimelinePlacesCache.shared.save(places, scope: scope, filter: filter, epoch: TimelinePlacesCache.shared.epoch(scope: scope))
             let written = try Data(contentsOf: caches.appendingPathComponent(path))
             XCTAssertEqual(try FixtureLoader.canonicalJSON(written), try FixtureLoader.canonicalJSON(fixture), path)
             let loaded = await TimelinePlacesCache.shared.load(scope: scope, filter: filter)

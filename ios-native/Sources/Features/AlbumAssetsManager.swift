@@ -37,7 +37,7 @@ struct AlbumAssetsManager: View {
                 Picker("Choose from", selection: $source) { Text("Library").tag("timeline"); Text("Archive").tag("archive") }.pickerStyle(.segmented).padding()
                 NavigationLink {
                     LocalLibraryView(destinationAlbumID: album.id, destinationAlbumName: album.albumName, onBackupFinished: { Task { await refreshAlbum() } })
-                } label: { Label("Upload from this phone", systemImage: "icloud.and.arrow.up") }.buttonStyle(.bordered).requiresWriteAccess(api).padding(.bottom, 12)
+                } label: { Label("Upload from this phone", systemImage: "icloud.and.arrow.up") }.buttonStyle(.bordered).requiresWriteAccess().padding(.bottom, 12)
             }
             if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary).padding() }
             if loaded && !loading && assets.isEmpty { FeatureEmpty(title: "No photos here", symbol: "photo.on.rectangle", description: mode == .add ? "Try another collection." : "This album has no photos or videos.") }
@@ -59,11 +59,11 @@ struct AlbumAssetsManager: View {
         .safeAreaInset(edge: .bottom) {
             if !selection.isEmpty { Text(mode == .cover ? "1 cover selected" : "\(selection.count.formatted()) selected").font(.subheadline).padding(.horizontal, 24).padding(.vertical, 12).glassEffect().padding(.bottom, 8) }
         }
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button(action) { if mode == .remove { confirmRemove = true } else { Task { await save() } } }.disabled(selection.isEmpty || busy || loading).requiresWriteAccess(api) } }
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button(action) { if mode == .remove { confirmRemove = true } else { Task { await save() } } }.disabled(selection.isEmpty || busy || loading).requiresWriteAccess() } }
         .disabled(busy)
         .task(id: source) { await reload() }
         .confirmationDialog("Remove \(selection.count) items from this album?", isPresented: $confirmRemove, titleVisibility: .visible) {
-            Button("Remove from album", role: .destructive) { Task { await save() } }.requiresWriteAccess(api)
+            Button("Remove from album", role: .destructive) { Task { await save() } }.requiresWriteAccess()
         } message: { Text("The photos and videos will stay in your library.") }
         .alert("Couldn’t update album", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
