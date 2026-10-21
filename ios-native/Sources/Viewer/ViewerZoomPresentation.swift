@@ -22,6 +22,9 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
     let authorization: AuthorizationSnapshot?
     let onDismiss: () -> Void
     let content: (Asset, ViewerTransitionState, @escaping () -> Void) -> AnyView
+    /// Outside the app's scene the viewer would always read as in the background, which keeps
+    /// videos and animations from playing, so it is handed the app's phase too.
+    @Environment(\.scenePhase) private var scenePhase
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
@@ -93,7 +96,8 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
 
         private func root(_ asset: Asset) -> AnyView {
             guard let parent, let state else { return AnyView(EmptyView()) }
-            return AnyView(ViewerRoot(content: parent.content(asset, state, { [weak self] in self?.close() }), authorization: parent.authorization)
+            return AnyView(ViewerRoot(content: parent.content(asset, state, { [weak self] in self?.close() }), authorization: parent.authorization,
+                                      scenePhase: parent.scenePhase)
                 .id(asset.id))
         }
 
@@ -135,14 +139,16 @@ final class ViewerHostingController: UIHostingController<AnyView> {
     }
 }
 
-/// A presented controller does not inherit the app's environment, so the accent and what the
-/// account may do are applied again.
+/// A presented controller does not inherit the app's environment, so the accent, what the
+/// account may do and the scene's phase are applied again.
 private struct ViewerRoot: View {
     let content: AnyView
     let authorization: AuthorizationSnapshot?
+    let scenePhase: ScenePhase
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     var body: some View {
         content.tint((AppearanceAccent(rawValue: accentName) ?? .design).tint).environment(\.authorization, authorization)
+            .environment(\.scenePhase, scenePhase)
     }
 }
 
