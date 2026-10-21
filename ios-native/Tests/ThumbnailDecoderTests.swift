@@ -33,7 +33,7 @@ final class ThumbnailDecoderTests: XCTestCase {
         let store = ThumbnailStore(scope: "scope", root: root)
         for id in ids { await store.store(png, assetID: id, revision: "1") }
         let recorder = Recorder()
-        let decoder = ThumbnailDecoder(store: store, lanes: 1, decoded: { _, key in recorder.decoded(key) },
+        let decoder = ThumbnailDecoder(store: store, lanes: 1, decoded: { _, request in recorder.decoded(request.identity) },
                                        willDecode: { recorder.willDecode($0) })
         return (decoder, recorder)
     }

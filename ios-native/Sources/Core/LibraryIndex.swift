@@ -133,6 +133,8 @@ final class LibraryIndex: Sendable {
     func persistCachedServerFeatures(_ features: ServerFeatures) async throws { try await mapped { try await writer.persistCachedServerFeatures(features) } }
     func cachedServerFeatures() async throws -> ServerFeatures? { try await mapped { try await writer.cachedServerFeatures() } }
     func takeAccessInvalidation() async throws -> Bool { try await mapped { try await writer.takeAccessInvalidation() } }
+    func accessInvalidationPending() async throws -> Bool { try await mapped { try await writer.accessInvalidationPending() } }
+    func thumbnailRevisions() async throws -> [String: String] { try await mapped { try await writer.thumbnailRevisions() } }
     func pendingMediaPurges(limit: Int = 5_000) async throws -> [MediaPurge] { try await mapped { try await writer.pendingMediaPurges(limit: limit) } }
     func finishMediaPurges(_ purges: [MediaPurge]) async throws { try await mapped { try await writer.finishMediaPurges(purges) } }
     func prepare(sessionFingerprint: String) async throws -> Bool { try await mapped { try await writer.prepare(sessionFingerprint: sessionFingerprint) } }

@@ -21,13 +21,14 @@ import XCTest
     /// Library notifications the engine posted for this account.
     let notifications: Recorded<[String: Bool]>
     let warmer: ThumbnailWarmer
+    let pipeline: MediaPipeline
 
     fileprivate init(server: StubServer, api: APIClient, entities: EntityStore, engine: SyncEngine, status: SyncStatusBoard,
                      presence: AppPresence, authorization: AuthorizationState, live: FakeLiveConnection, expiries: Recorded<String>,
-                     notifications: Recorded<[String: Bool]>, warmer: ThumbnailWarmer) {
+                     notifications: Recorded<[String: Bool]>, warmer: ThumbnailWarmer, pipeline: MediaPipeline) {
         self.server = server; self.api = api; self.entities = entities; self.engine = engine; self.status = status
         self.presence = presence; self.authorization = authorization; self.live = live; self.expiries = expiries
-        self.notifications = notifications; self.warmer = warmer
+        self.notifications = notifications; self.warmer = warmer; self.pipeline = pipeline
     }
 
     static let completeStream = SyncEvents.stream([SyncEvents.complete()])
@@ -71,8 +72,9 @@ extension XCTestCase {
         let presence = AppPresence(isForeground: foreground)
         let status = SyncStatusBoard()
         let warmer = ThumbnailWarmer(session: authorization)
+        let pipeline = MediaPipeline(client: api)
         let engine = SyncEngine(client: api, entities: entities, native: NativeSync(api: api, store: entities, acks: acks),
-                                pipeline: MediaPipeline(client: api), warmer: warmer, presence: presence, check: check,
+                                pipeline: pipeline, warmer: warmer, presence: presence, check: check,
                                 authorization: authorization, device: FakeAccountDevice(log: AccountEventLog()), status: status,
                                 connect: connect ?? { live.connect() }, debounce: debounce)
         let notifications = Recorded<[String: Bool]>()
@@ -87,13 +89,15 @@ extension XCTestCase {
             registration.remove()
             warmer.stop()
             await engine.shutdown()
+            await pipeline.removeAll()
             await api.shutdown()
             await TimelineCache.shared.removeAll(scope: scope)
             await TimelinePlacesCache.shared.removeAll(scope: scope)
             try? FileManager.default.removeItem(at: directory)
         }
         return SyncHarness(server: server, api: api, entities: entities, engine: engine, status: status, presence: presence,
-                           authorization: authorization, live: live, expiries: expiries, notifications: notifications, warmer: warmer)
+                           authorization: authorization, live: live, expiries: expiries, notifications: notifications, warmer: warmer,
+                           pipeline: pipeline)
     }
 }
 

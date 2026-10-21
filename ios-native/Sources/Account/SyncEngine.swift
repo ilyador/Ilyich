@@ -80,15 +80,18 @@ actor SyncEngine {
     /// Moves whenever the live connection stops, so one stopped never starts again.
     private var liveGeneration: UInt64 = 0
     private var resetting = false
+    /// A server reset's memory was cleared and its sweep still waits for a complete index.
+    private var resetSeen = false
     private var status = SyncStatus()
     private var statusSequence: UInt64 = 0
-    private var observers: [UUID: AsyncStream<LibraryChange>.Continuation] = [:]
+    /// Where the engine's changes go: media first, then the screens and every subscriber.
+    let hub: LibraryChangeHub
 
     /// `connect` opens the live connection, the client's own by default.
     init(client: APIClient, entities: EntityStore, native: NativeSync, pipeline: MediaPipeline, warmer: ThumbnailWarmer,
          presence: AppPresence, check: SessionCheck, authorization: AuthorizationState, device: any AccountDevice,
          status: SyncStatusBoard, connect: (@Sendable () async throws -> ServerEventConnection)? = nil,
-         debounce: Duration = .milliseconds(350), dependents: (any DependentFetching)? = nil) {
+         debounce: Duration = .milliseconds(350), dependents: (any DependentFetching)? = nil, hub: LibraryChangeHub? = nil) {
         self.client = client
         self.entities = entities
         self.native = native
@@ -103,6 +106,7 @@ actor SyncEngine {
         self.connect = connect ?? { try await client.serverEvents() }
         self.debounce = debounce
         scope = client.cacheScope
+        self.hub = hub ?? LibraryChangeHub(pipeline: pipeline, scope: client.cacheScope)
     }
 
     // MARK: Commands
@@ -211,8 +215,7 @@ actor SyncEngine {
         stopPass()
         for waiter in waiters.values { waiter.continuation.resume(throwing: CancellationError()) }
         waiters.removeAll()
-        for observer in observers.values { observer.finish() }
-        observers.removeAll()
+        await hub.close()
         await runner?.value
         await repairs?.value
         update { $0.isSyncing = false }
@@ -222,16 +225,8 @@ actor SyncEngine {
     var waiting: Int { waiters.count }
 
     /// Every change the engine publishes from now on, until the account closes.
-    func changes() -> AsyncStream<LibraryChange> {
-        let (stream, continuation) = AsyncStream.makeStream(of: LibraryChange.self)
-        guard isOpen else {
-            continuation.finish()
-            return stream
-        }
-        let id = UUID()
-        observers[id] = continuation
-        continuation.onTermination = { [weak self] _ in Task { await self?.stopObserving(id) } }
-        return stream
+    func changes() async -> AsyncStream<LibraryChange> {
+        await hub.subscribe()
     }
 
     // MARK: Passes
@@ -328,18 +323,23 @@ actor SyncEngine {
     }
 
     /// Makes a pass's effects safe and names them for this account: the media of removed photos
-    /// is forgotten, everything when the server reset the library, and the access epoch moves
-    /// when access was lost. Nil once the account has closed.
+    /// is forgotten, and the access epoch moves when access was lost. When the server reset the
+    /// library, memory and the URL cache are cleared, and once the index is complete again the
+    /// grid thumbnails it no longer vouches for are swept; the rest stay, so the offline library
+    /// needs no downloads. Nil once the account has closed.
     private func settle(_ index: IndexChange, hints: ServerInvalidation) async -> (change: LibraryChange, accessChanged: Bool)? {
         guard isOpen else { return nil }
-        // A server reset committed in an earlier pass that failed, or before a crash, is still due.
-        let resetPending = (try? await entities.takeAccessInvalidation()) == true
+        // A server reset committed in an earlier pass that failed, or before a crash, is still due;
+        // so is the flag an older build left, which wiped every image instead.
+        let resetPending = (try? await entities.accessInvalidationPending()) == true
         guard isOpen else { return nil }
-        if resetPending || index.serverReset { await pipeline.removeAll() }
+        // Due once per reset: memory goes, the access epoch moves and the feeds reload.
+        let resetDue = index.serverReset || (resetPending && !resetSeen)
+        if resetPending || index.serverReset { await reconcileAfterReset(memory: resetDue) }
         // Clearing every cache for one deletion would throw away the whole offline library.
         let purged = await purgeRemovedMedia()
         guard isOpen else { return nil }
-        let accessChanged = resetPending || index.serverReset || !index.accessLost.isEmpty || !purged.revoked.isEmpty
+        let accessChanged = resetDue || !index.accessLost.isEmpty || !purged.revoked.isEmpty
         if accessChanged {
             // Places are kept through ordinary syncs, but not past a change in what may be seen.
             moveAccessEpoch()
@@ -359,7 +359,7 @@ actor SyncEngine {
         change.stacks = index.stacks
         change.partnersChanged = index.partnersChanged
         change.memoriesChanged = index.memoriesChanged
-        change.reset = index.serverReset || index.localReset || resetPending
+        change.reset = index.serverReset || index.localReset || resetDue
         change.routingChanged = index.routingChanged
         change.configurationChanged = hints.configurationChanged
         change.overflow = index.overflow
@@ -373,13 +373,27 @@ actor SyncEngine {
         return (change, accessChanged)
     }
 
-    /// Tells the screens and every observer, unless nothing changed.
+    /// After a server reset: what memory and the URL cache hold goes, once per reset, since any of
+    /// it may belong to a photo the account can no longer see. The grid thumbnails on disk wait
+    /// until the index is complete again; then those of photos it doesn't hold, or holds at
+    /// another revision, are removed, and only then is the reset marked done, so a crash before
+    /// it sweeps on the next pass.
+    private func reconcileAfterReset(memory: Bool) async {
+        if memory { await pipeline.removeAllButStoredThumbnails() }
+        resetSeen = true
+        guard isOpen, (try? await entities.isComplete()) == true,
+              let valid = try? await entities.thumbnailRevisions(), isOpen else { return }
+        _ = await pipeline.sweepStoredThumbnails(keeping: valid)
+        guard isOpen, (try? await entities.takeAccessInvalidation()) != nil else { return }
+        resetSeen = false
+    }
+
+    /// Tells media, the screens and every observer, unless nothing changed.
     private func publish(_ change: LibraryChange, accessChanged: Bool) async {
         guard isOpen, !change.isEmpty else { return }
         await TimelineCache.shared.removeAll(scope: scope)
         guard isOpen else { return }
-        await LegacyNotificationBridge.libraryChanged(change, scope: scope, accessChanged: accessChanged)
-        for observer in observers.values { observer.yield(change) }
+        await hub.publish(change, accessChanged: accessChanged)
         if change.configurationChanged { check.validate() }
     }
 
@@ -552,10 +566,6 @@ actor SyncEngine {
     private func showSyncing() {
         let syncing = runner != nil || resetting
         update { $0.isSyncing = syncing }
-    }
-
-    private func stopObserving(_ id: UUID) {
-        observers[id] = nil
     }
 }
 

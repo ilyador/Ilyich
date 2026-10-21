@@ -11,6 +11,8 @@ final class ThumbnailDecoder: Sendable {
         let identity: MediaCacheIdentity
         let assetID: String
         let revision: String
+        /// The media fence's token when the request was made, for remembering what it decodes.
+        var token: UInt64 = 0
     }
 
     private enum Priority { case visible, ahead }
@@ -35,14 +37,14 @@ final class ThumbnailDecoder: Sendable {
     private let store: ThumbnailStore
     private let lanes: Int
     private let queue = DispatchQueue(label: "ilyich.thumbnail-decoder", qos: .userInitiated, attributes: .concurrent)
-    private let decoded: @Sendable (PreparedImage, MediaCacheIdentity) -> Void
+    private let decoded: @Sendable (PreparedImage, Request) -> Void
     private let willDecode: (@Sendable (MediaCacheIdentity) -> Void)?
     /// Photos about to scroll in; past this many the oldest have usually scrolled past already.
     private static let aheadLimit = 120
 
     /// `decoded` receives every image decoded for the current generation, so prefetched photos
     /// reach memory with nobody waiting. `willDecode` lets tests watch the order.
-    init(store: ThumbnailStore, lanes: Int = 3, decoded: @escaping @Sendable (PreparedImage, MediaCacheIdentity) -> Void,
+    init(store: ThumbnailStore, lanes: Int = 3, decoded: @escaping @Sendable (PreparedImage, Request) -> Void,
          willDecode: (@Sendable (MediaCacheIdentity) -> Void)? = nil) {
         self.store = store
         self.lanes = max(1, lanes)
@@ -183,7 +185,7 @@ final class ThumbnailDecoder: Sendable {
             return Array(current.waiters.values)
         }
         guard let waiters else { return }
-        if let image { decoded(image, key) }
+        if let image { decoded(image, job.request) }
         for waiter in waiters { waiter.resume(returning: image) }
     }
 }
