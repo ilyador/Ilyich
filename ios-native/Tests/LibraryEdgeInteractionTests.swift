@@ -437,6 +437,24 @@ final class LibraryEdgeInteractionTests: XCTestCase {
         interaction.endStroke()
     }
 
+    @MainActor func testInsideAGroupTheRowNearTheEdgeHintsBeforeGoingBack() {
+        var layout = LibraryShelfGeometry(count: 5, size: phone, topInset: 88, bottomInset: 100)
+        layout.top = layout.top(placing: 0, at: 300)
+        let interaction = LibraryEdgeInteraction()
+        interaction.shelfTop = layout.top
+        interaction.rebase(at: CGPoint(x: 120, y: layout.center(2)), armed: true, in: layout)
+        _ = interaction.moveStroke(to: CGPoint(x: 100, y: layout.center(2)), in: layout, nested: true)
+        XCTAssertEqual(interaction.edgeNearness, 0, "Away from the edge there is no hint.")
+        XCTAssertNil(interaction.backRow)
+        _ = interaction.moveStroke(to: CGPoint(x: 40, y: layout.center(2)), in: layout, nested: true)
+        XCTAssertGreaterThan(interaction.edgeNearness, 0, "Nearing the edge hints at going back.")
+        XCTAssertEqual(interaction.backRow, 2, "The hint sits in the row under the finger.")
+        _ = interaction.moveStroke(to: CGPoint(x: 40, y: layout.center(2)), in: layout, nested: false)
+        XCTAssertEqual(interaction.edgeNearness, 0, "At the top level the edge puts the shelves away instead.")
+        XCTAssertNil(interaction.backRow)
+        interaction.endStroke()
+    }
+
     @MainActor func testTheRowAlreadySelectedNeverActivates() async throws {
         var layout = LibraryShelfGeometry(count: 5, size: phone, topInset: 88, bottomInset: 100)
         layout.top = layout.top(placing: 0, at: 300)

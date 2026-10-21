@@ -51,9 +51,15 @@ struct LibraryShelfCarry: Equatable {
     var tipNearness: CGFloat = 0
     /// Set when a row's glow peaks; the library opens that row and clears this.
     var openReady: Int?
-    /// Inside a group, the orange glow at the left edge. It builds while the finger stays there,
-    /// quicker than a row's, falls away when the finger moves in, and goes back a level at its peak.
+    /// Inside a group, the orange glow at the edge end of the row under the finger. It builds while
+    /// the finger stays at the left edge, quicker than a row's, falls away when the finger moves in,
+    /// and goes back a level at its peak.
     var backProgress: CGFloat = 0
+    /// How near the left edge the finger is inside a group, for a faint orange hint before the glow
+    /// there builds.
+    var edgeNearness: CGFloat = 0
+    /// The row under the finger near the left edge, which carries the orange glow.
+    var backRow: Int?
     /// Set when the glow at the left edge peaks; the library goes back a level and clears this.
     var backReady = false
     /// The row a sideways push has taken hold of; the wave stays on it while the finger drifts.
@@ -174,8 +180,13 @@ struct LibraryShelfCarry: Equatable {
         // Past the row's right edge the row stays focused but its glow ends.
         glowEnabled = row != nil && row != selected && stroke.pushed && !stroke.opened && point.x <= tip + LibraryShelfGeometry.tipSlack
         tipNearness = glowEnabled ? LibraryShelfGeometry.tipNearness(fingerX: point.x, tip: tip) : 0
-        // Inside a group, staying at the edge builds a glow there that goes back a level.
+        // Inside a group, a faint orange hint grows in the row under the finger as it nears the left
+        // edge, and staying at the edge builds the glow that goes back a level.
         backEnabled = atEdge && nested
+        let nearness = nested && stroke.isArmed ? LibraryShelfGeometry.edgeNearness(fingerX: point.x) : 0
+        if nearness != edgeNearness { edgeNearness = nearness }
+        let glowRow = nearness > 0 || backProgress > 0 ? layout.pickedRow(atY: point.y) : nil
+        if glowRow != backRow { backRow = glowRow }
         if tipNearness > 0 || openProgress > 0 || backEnabled || backProgress > 0 { startGlow() }
         let over = reorder && row.map { LibraryShelfGeometry.isOverReorderButton(point, tip: tip, rowCenter: layout.center($0)) } == true
         if over != overReorder {
@@ -289,6 +300,8 @@ struct LibraryShelfCarry: Equatable {
     private func resetBackGlow() {
         backEnabled = false
         if backProgress != 0 { backProgress = 0 }
+        if edgeNearness != 0 { edgeNearness = 0 }
+        if backRow != nil { backRow = nil }
     }
 
     /// The glow runs on its own clock, so it keeps building while the finger holds still.
@@ -323,7 +336,7 @@ struct LibraryShelfCarry: Equatable {
         if backProgress >= 1 {
             // Going back happens once; the finger has to move in again.
             stroke?.isArmed = false
-            backEnabled = false; backProgress = 0
+            resetBackGlow()
             glowTask = nil
             Haptics.released()
             backReady = true
@@ -880,10 +893,16 @@ struct LibraryShelfGeometry {
         return min(1, max(0, glow + change * seconds))
     }
 
-    /// Inside a group, the glow at the left edge builds as a row's does by its tip, in 70% of the
+    /// Inside a group, the glow at a row's edge end builds as a row's does by its tip, in 70% of the
     /// time, and falls away as quickly when the finger moves in.
     static func nextBackGlow(_ glow: CGFloat, building: Bool, seconds: CGFloat) -> CGFloat {
         nextGlow(glow, nearness: 1, building: building, seconds: seconds / 0.7)
+    }
+
+    /// How near the left edge the finger is: nothing from 40 points in, full where holding goes back.
+    static func edgeNearness(fingerX x: CGFloat) -> CGFloat {
+        let t = min(1, max(0, (cancelWidth + 40 - x) / 40))
+        return t * t * (3 - 2 * t)
     }
 
     /// A compact Gaussian gives the focused row the largest width, then returns
@@ -1064,6 +1083,7 @@ struct LibraryShelfFan: View {
                     let highlighted = !rearranging && interaction.highlighted == index
                     shelfButton(item, index: index, width: width, height: height, highlighted: highlighted,
                                 glow: highlighted ? max(interaction.openProgress, 0.3 * interaction.tipNearness) : 0,
+                                backGlow: !rearranging && interaction.backRow == index ? max(interaction.backProgress, 0.3 * interaction.edgeNearness) : 0,
                                 rearranging: rearranging)
                         .scaleEffect(carried == nil ? 1 : 1.04, anchor: .leading)
                         .shadow(color: .black.opacity(carried == nil ? 0 : 0.4), radius: 14, y: 6)
@@ -1080,17 +1100,6 @@ struct LibraryShelfFan: View {
                     LibraryShelfReorderButton(active: interaction.overReorder, size: LibraryShelfGeometry.focusedHeight,
                                               shown: reach * reach * (3 - 2 * reach), action: onReorder)
                         .position(LibraryShelfGeometry.reorderButtonCenter(tip: tip, rowCenter: layout.center(row) + layout.shift(row, fingerY: waveY)))
-                }
-                // Inside a group, orange light gathers at the left edge by the finger as it stays
-                // there, spreading inward as it builds; at its peak the shelves go back a level.
-                if nested, !rearranging, interaction.backProgress > 0, let finger = interaction.shelfFinger {
-                    let glow = interaction.backProgress
-                    RadialGradient(colors: [.orange.opacity(0.95 * glow), .orange.opacity(0.4 * glow), .orange.opacity(0)],
-                                   center: .leading, startRadius: 0, endRadius: 30 + 150 * glow)
-                        .frame(width: 180, height: 360)
-                        .position(x: 90, y: finger.y)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
                 }
             }
         }
@@ -1112,9 +1121,9 @@ struct LibraryShelfFan: View {
     }
 
     private func shelfButton(_ item: LibraryShelfItem, index: Int, width: CGFloat, height: CGFloat, highlighted: Bool,
-                             glow: CGFloat, rearranging: Bool) -> some View {
+                             glow: CGFloat, backGlow: CGFloat, rearranging: Bool) -> some View {
         Button(action: rearranging ? {} : item.action) {
-            LibraryShelfRowLabel(item: item, width: width, height: height, highlighted: highlighted, glow: glow,
+            LibraryShelfRowLabel(item: item, width: width, height: height, highlighted: highlighted, glow: glow, backGlow: backGlow,
                                  handle: rearranging, becomingTag: item.id == interaction.morphingID, api: api, pipeline: pipeline)
                 .glassEffectID(item.id, in: glass)
         }
@@ -1168,6 +1177,8 @@ struct LibraryShelfRowLabel: View {
     var highlighted = false
     /// The blue glow gathering at the tip as the row nears opening.
     var glow: CGFloat = 0
+    /// The orange glow gathering at the edge end as holding at the left edge nears going back.
+    var backGlow: CGFloat = 0
     /// A drag handle on the edge side of the row while reordering.
     var handle = false
     /// Rising into the filter tag: on the way the row takes the tag's own layout, its face sliding
@@ -1199,11 +1210,20 @@ struct LibraryShelfRowLabel: View {
                     .allowsHitTesting(false)
             }
         }
+        // Going back, orange light gathers the same way at the edge end, spreading toward the tip.
+        .overlay(alignment: .leading) {
+            if backGlow > 0 {
+                RadialGradient(colors: [.orange.opacity(0.95 * backGlow), .orange.opacity(0.4 * backGlow), .orange.opacity(0)],
+                               center: .leading, startRadius: 0, endRadius: height * 0.8 + width * 0.9 * backGlow)
+                    .allowsHitTesting(false)
+            }
+        }
         .clipShape(shape)
         .contentShape(.rect)
         .glassEffect(.clear.tint(.black.opacity(becomingTag ? 0.22 : 0.18)).interactive(), in: shape)
-        .overlay(shape.strokeBorder(item.isSelected || highlighted ? .cyan.opacity(0.85) : .white.opacity(0.22), lineWidth: 0.75))
-        .shadow(color: .cyan.opacity(0.9 * glow), radius: 6 + 20 * glow)
+        .overlay(shape.strokeBorder(backGlow > 0 ? .orange.opacity(0.85) : item.isSelected || highlighted ? .cyan.opacity(0.85) : .white.opacity(0.22),
+                                    lineWidth: 0.75))
+        .shadow(color: (backGlow > glow ? Color.orange : .cyan).opacity(0.9 * max(glow, backGlow)), radius: 6 + 20 * max(glow, backGlow))
     }
 
     private var rowContent: some View {
