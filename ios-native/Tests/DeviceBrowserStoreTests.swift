@@ -69,6 +69,53 @@ import XCTest
         XCTAssertTrue(store.isNearEnd("photo-\(240 - DeviceBrowserStore.prefetchDistance)"))
     }
 
+    /// A next page read from the query an insertion then replaced never lands: its photos sit one
+    /// place further on in the new reading, so it would hide one photo and show another twice.
+    func testNextPageReadBeforeAnInsertionLandsDoesNotLand() async throws {
+        let browser = FakeBrowser(count: 600)
+        let store = DeviceBrowserStore(browser: browser)
+        await store.refresh()
+        await store.loadMore()
+
+        browser.insertNewest("new")
+        browser.holdNextQuery()
+        browser.holdRead(480..<600)
+        let applying = Task { await store.apply(change(inserted: ["new"])) }
+        await browser.waitUntilHeld(query: true)
+        let loading = Task { await store.loadMore() }
+        await browser.waitUntilHeld(query: false)
+        browser.release(query: true)
+        await applying.value
+        browser.release(query: false)
+        await loading.value
+
+        let ids = store.photos.map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count, "No photo is shown twice.")
+        XCTAssertEqual(ids, Array((["new"] + (0..<600).map { "photo-\($0)" }).prefix(ids.count)))
+    }
+
+    /// A change that lands while another album is being read doesn't publish the album shown
+    /// before under the one chosen.
+    func testChangeWhileAnotherAlbumIsReadShowsTheChosenAlbum() async throws {
+        let browser = FakeBrowser(count: 600)
+        let store = DeviceBrowserStore(browser: browser)
+        store.albumID = "odd"
+        await store.refresh()
+        XCTAssertEqual(store.photos.first?.id, "photo-1")
+
+        store.albumID = ""
+        browser.holdNextQuery()
+        let selecting = Task { await store.selectAlbum() }
+        await browser.waitUntilHeld(query: true)
+        browser.remove(550)
+        await store.apply(change(removed: ["photo-550"]))
+        browser.release(query: true)
+        await selecting.value
+
+        XCTAssertEqual(store.photos.map(\.id), (0..<240).map { "photo-\($0)" })
+        XCTAssertEqual(store.total, 599)
+    }
+
     private func change(inserted: Set<String> = [], removed: Set<String> = [], changed: Set<String> = []) -> DeviceLibraryChange {
         DeviceLibraryChange(access: DeviceAccess(status: .authorized, generation: 1),
                             inserted: Set(inserted.map(DeviceAssetID.init)), removed: Set(removed.map(DeviceAssetID.init)),
@@ -82,6 +129,10 @@ private final class FakeBrowser: DeviceBrowsing {
     private struct State {
         var photos: [LocalPhoto]
         var reads: [Range<Int>] = []
+        var holdQuery = false
+        var heldRange: Range<Int>?
+        var heldQuery: CheckedContinuation<Void, Never>?
+        var heldRead: CheckedContinuation<Void, Never>?
     }
     private let state: Mutex<State>
 
@@ -103,17 +154,47 @@ private final class FakeBrowser: DeviceBrowsing {
     func remove(_ index: Int) { state.withLock { _ = $0.photos.remove(at: index) } }
     func insertNewest(_ id: String) { state.withLock { $0.photos.insert(LocalPhoto(id: id, date: Date()), at: 0) } }
 
+    /// Makes the next query wait until `release(query: true)`.
+    func holdNextQuery() { state.withLock { $0.holdQuery = true } }
+    /// Makes the next read of `range` wait until `release(query: false)`.
+    func holdRead(_ range: Range<Int>) { state.withLock { $0.heldRange = range } }
+
+    func waitUntilHeld(query: Bool) async {
+        while !state.withLock({ query ? $0.heldQuery != nil : $0.heldRead != nil }) {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    func release(query: Bool) {
+        let held = state.withLock { state in
+            defer { if query { state.heldQuery = nil } else { state.heldRead = nil } }
+            return query ? state.heldQuery : state.heldRead
+        }
+        held?.resume()
+    }
+
     var authorization: PHAuthorizationStatus { .authorized }
     func requestAccess() async -> DeviceAccess { DeviceAccess(status: .authorized, generation: 1) }
     func albums() async -> [DeviceAlbum] { [] }
     func changes() -> AsyncStream<DeviceLibraryChange> { AsyncStream { _ in } }
 
+    /// The album "odd" holds the photos with an odd number; any other album the whole library.
     func query(album: String) async -> DevicePhotoQuery {
-        DevicePhotoQuery(album: album, paging: Snapshot(photos: state.withLock { $0.photos }))
+        let photos = state.withLock { $0.photos }
+        if state.withLock({ state in defer { state.holdQuery = false }; return state.holdQuery }) {
+            await withCheckedContinuation { continuation in state.withLock { $0.heldQuery = continuation } }
+        }
+        let shown = album == "odd" ? photos.filter { Int($0.id.dropFirst(6)).map { $0 % 2 == 1 } ?? false } : photos
+        return DevicePhotoQuery(album: album, paging: Snapshot(photos: shown))
     }
 
     func photos(_ query: DevicePhotoQuery, in range: Range<Int>) async -> [LocalPhoto] {
-        state.withLock { $0.reads.append(range) }
+        let hold = state.withLock { state in
+            state.reads.append(range)
+            defer { if state.heldRange == range { state.heldRange = nil } }
+            return state.heldRange == range
+        }
+        if hold { await withCheckedContinuation { continuation in state.withLock { $0.heldRead = continuation } } }
         return query.paging.photos(in: range)
     }
 

@@ -24,7 +24,8 @@ import Photos
     @ObservationIgnored private var nearEnd: Set<String> = []
     @ObservationIgnored private var changes: Task<Void, Never>?
     @ObservationIgnored private var albumRead: Task<Void, Never>?
-    /// Moves with every reading that replaces the pages, so an older one never lands after it.
+    /// Moves when a reading that replaces the pages starts and when one lands, so an older reading,
+    /// or a next page read from a query since replaced, never lands after it.
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadingMore = false
 
@@ -99,6 +100,9 @@ import Photos
         }
         if change.albumsChanged { readAlbums() }
         guard let old = query else { return }
+        // The pages shown belong to another album than the one chosen: a reading of the chosen one
+        // is under way, and this change may have just superseded it, so read the chosen one.
+        guard old.album == albumID else { await refresh(keeping: 1); return }
         let removedShown = change.removed.contains { pageOf[$0.rawValue] != nil }
         let changedPages = Set(change.changed.compactMap { pageOf[$0.rawValue] })
         guard !change.inserted.isEmpty || !change.removed.isEmpty || !changedPages.isEmpty else { return }
@@ -127,10 +131,13 @@ import Photos
             updated[page] = read
         }
         self.query = query; pages = updated
+        generation += 1
         publish()
     }
 
+    /// Replaces the pages, and moves `generation` so a page read from the query replaced never lands.
     private func commit(_ query: DevicePhotoQuery, photos read: [LocalPhoto]) {
+        generation += 1
         self.query = query
         pages = stride(from: 0, to: read.count, by: Self.pageSize).map { Array(read[$0..<min($0 + Self.pageSize, read.count)]) }
         publish()
