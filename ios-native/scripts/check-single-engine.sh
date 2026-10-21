@@ -9,7 +9,9 @@
 #   2. a session is built from that configuration anywhere but today's BackgroundUploads
 #      (allowed until B9) and the new transport's live session;
 #   3. app or extension code outside Sources/Transfers names the new transport's types, which would
-#      start it beside BackgroundUploads, or hand it today's completion handlers, before B9.
+#      start it beside BackgroundUploads, or hand it today's completion handlers, before B9;
+#   3b. code outside Sources/Transfers names the new lifecycle's types (B7): iOS allows one launch
+#      handler per background task identifier, and BackupLifecycle registers both until B9.
 # B9 deletes BackgroundUploads from rule 2's list and drops rule 3, and adds the old engine's
 # symbols, which must then be gone.
 #
@@ -29,6 +31,8 @@ session_builders=(Sources/Backup/BackgroundUploads.swift Sources/Transfers/Trans
 # The transport's types that open a session or take over iOS's completion handlers. Its value
 # types and the TransferTransport protocol may be named anywhere.
 transport_types='TransportRegistry|BackgroundTransport|BackgroundEventAcks|URLSessionTransportSession|BackgroundSessionDelegate|TransportEventProcessor'
+# The lifecycle's types that register background tasks or drive backup's background time.
+lifecycle_types='LifecycleEventSource|SystemBackgroundTaskScheduler|SystemLifecycleInputs|SystemBackgroundTime|TransferLifecycle'
 
 failures=0
 
@@ -63,6 +67,8 @@ reject "only BackgroundUploads (until B9) and the transport's live session may b
     "${session_builders[@]}" < <(code_lines 'TransferSessionConfiguration\.make\(')
 reject "the new upload transport stays dormant until B9; the app must not create it beside BackgroundUploads" \
     < <(code_lines -w "$transport_types" | grep -v '^Sources/Transfers/' || true)
+reject "the new lifecycle stays dormant until B9; BackupLifecycle registers the background tasks, and iOS allows one handler each" \
+    < <(code_lines -w "$lifecycle_types" | grep -v '^Sources/Transfers/' || true)
 reject "only the Photos adapter in Sources/Device observes the library; subscribe to PhotoKitAdapter.changes()" \
     < <(code_lines 'PHPhotoLibraryChangeObserver|unregisterChangeObserver|PHPhotoLibrary\.shared\(\)\.register\(' | grep -v '^Sources/Device/' || true)
 reject "only the Photos adapter in Sources/Device changes the library; use PhotoKitAdapter.perform, which journals the change" \
@@ -72,6 +78,6 @@ reject "only the Photos adapter in Sources/Device fetches assets or requests the
     < <(code_lines 'PHImageManager|PHCachingImageManager|PHAsset\.fetchAssets' | grep -v '^Sources/Device/' || true)
 
 if [ "$failures" -gt 0 ]; then
-    echo "check-single-engine: $failures problem(s); see REBUILD_ROADMAP.md, B5, B9, P1 and P3" >&2
+    echo "check-single-engine: $failures problem(s); see REBUILD_ROADMAP.md, B5, B7, B9, P1 and P3" >&2
     exit 1
 fi
