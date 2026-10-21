@@ -242,6 +242,14 @@ extension TransferStore {
         return job
     }
 
+    /// Whether a job's part is with the transport, waiting for its answer: the background session
+    /// carries it on whether or not the app runs.
+    func hasSubmittedJobs() throws -> Bool {
+        var found = false
+        try database().run("SELECT EXISTS(SELECT 1 FROM jobs WHERE state='submitted')") { found = ($0.integer(0) ?? 0) != 0 }
+        return found
+    }
+
     // MARK: Pages and counts
 
     /// The library lane's counts for the snapshot: jobs left, jobs failed and photos confirmed.

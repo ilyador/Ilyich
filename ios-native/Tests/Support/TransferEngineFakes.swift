@@ -104,6 +104,9 @@ final class FakeJobExecutor: JobExecuting {
         case holdThenReturn(TransferGate)
         /// Reports progress `count` times, waits at the gate, then succeeds.
         case report(count: Int, TransferGate)
+        /// Waits at `staging`, hands the part to the transport (submitted), then waits at `answer`
+        /// for the transport's answer and succeeds.
+        case handOff(staging: TransferGate, answer: TransferGate)
     }
 
     struct Call: Equatable, Sendable {
@@ -155,6 +158,12 @@ final class FakeJobExecutor: JobExecuting {
             for sent in 1...count { await context.progress(sent: Int64(sent) * 100, expected: Int64(count) * 100) }
             await gate.wait()
             try await context.ensureOwned()
+        case .handOff(let staging, let answer):
+            await staging.wait()
+            try await context.advance(to: .submitting, phase: "original")
+            try await context.advance(to: .submitted)
+            await answer.wait()
+            try await context.ensureOwned()
         }
         try await context.ensureOwned()
         state.withLock { $0.submitted.append(key) }
@@ -186,16 +195,16 @@ struct TransferEngineHarness {
     let engine: TransferEngine<TestClock>
     static let base = Date(timeIntervalSinceReferenceDate: 800_000_000)
 
-    init(claim: Bool = true) async throws {
+    init(claim: Bool = true, scheduler: (any WindowScheduling)? = nil) async throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("TransferEngine-" + UUID().uuidString, isDirectory: true)
         store = TransferStore(url: folder.appendingPathComponent("transfers.sqlite"))
         if claim { try await store.claimForEngine() }
-        engine = Self.engine(store: store, clock: clock, authorization: authorization, executor: executor)
+        engine = Self.engine(store: store, clock: clock, authorization: authorization, executor: executor, scheduler: scheduler)
     }
 
     static func engine(store: TransferStore, clock: TestClock, authorization: FakeTransferAuthorization,
-                       executor: FakeJobExecutor) -> TransferEngine<TestClock> {
-        TransferEngine(store: store, executor: executor, authorization: authorization, clock: clock,
+                       executor: FakeJobExecutor, scheduler: (any WindowScheduling)? = nil) -> TransferEngine<TestClock> {
+        TransferEngine(store: store, executor: executor, authorization: authorization, clock: clock, scheduler: scheduler,
                        now: { base.addingTimeInterval(TimeInterval(clock.now.offset.components.seconds) + TimeInterval(clock.now.offset.components.attoseconds) / 1e18) },
                        random: { 0.5 })
     }

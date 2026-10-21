@@ -57,6 +57,20 @@ extension AuthorizationState: TransferAuthorizing {
     }
 }
 
+/// Where the engine's background windows go: LifecycleEventSource (B7). The engine hands over a
+/// plan only when it changes, in order.
+protocol WindowScheduling: Sendable {
+    func schedule(_ plan: SchedulePlan) async
+}
+
+/// How far a background window got the engine (B7).
+enum WindowHandoff: Hashable, Sendable {
+    /// A job's part is with the background session, which carries on once the app is suspended.
+    case handedToDaemon
+    /// Nothing can run now: no job, all waiting, retrying later, paused or blocked.
+    case nothingRunnable
+}
+
 /// The lease is gone: released by a command, or fenced by a change of authorization.
 struct LeaseLost: Error, Equatable, Sendable {}
 
@@ -117,6 +131,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private let clock: C
     private let now: @Sendable () -> Date
     private let random: @Sendable () -> Double
+    private let scheduler: (any WindowScheduling)?
 
     // Persisted engine state, loaded at start.
     private var intent: RunIntent = .paused
@@ -168,9 +183,21 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var lastSentAt: C.Instant?
     private var flush: Task<Void, Never>?
 
+    // Background windows.
+    /// The last plan handed to the scheduler.
+    private var plan: SchedulePlan?
+    private var plans: AsyncStream<SchedulePlan>.Continuation?
+    private var planner: Task<Void, Never>?
+    /// Windows waiting for a job to reach the transport or for nothing to be runnable.
+    private var handoffs: [UUID: CheckedContinuation<WindowHandoff, Never>] = [:]
+    /// Waits cancelled before they were stored.
+    private var cancelledHandoffs: Set<UUID> = []
+
     init(store: TransferStore, executor: any JobExecuting, authorization: any TransferAuthorizing, clock: C, concurrency: Int = 1,
+         scheduler: (any WindowScheduling)? = nil,
          now: @escaping @Sendable () -> Date = { Date() }, random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }) {
         self.store = store
+        self.scheduler = scheduler
         self.concurrency = max(concurrency, 1)
         self.executor = executor
         self.authorization = authorization
@@ -210,6 +237,14 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         await refreshCounts()
         // A stop that came while this loaded wins: the engine stays stopped.
         guard !stopped else { return }
+        if let scheduler {
+            // One consumer, so plans reach iOS in the order the engine made them.
+            let (stream, continuation) = AsyncStream.makeStream(of: SchedulePlan.self)
+            plans = continuation
+            planner = Task {
+                for await plan in stream { await scheduler.schedule(plan) }
+            }
+        }
         let updates = authorization.updates()
         watcher = Task { [weak self] in
             for await snapshot in updates { await self?.authorizationChanged(snapshot) }
@@ -231,6 +266,10 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         for task in finishing.values { await task.value }
         loop = nil
         watcher = nil
+        resolveHandoffs(.nothingRunnable)
+        // The plan already handed over stays with iOS: the database outlives this engine.
+        plans?.finish()
+        plans = nil
         flush?.cancel()
         for subscriber in subscribers.values { subscriber.finish() }
         subscribers = [:]
@@ -342,6 +381,64 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         return merge
     }
 
+    // MARK: Background windows
+
+    /// Wakes the loop and returns once a job's part is with the transport, or once nothing can
+    /// run. It waits on the loop, never polling: a background window finishes the moment its
+    /// work is the daemon's. A part already with the transport returns at once.
+    func handoff() async -> WindowHandoff {
+        if (try? await store.hasSubmittedJobs()) == true { return .handedToDaemon }
+        guard loop != nil, !stopped, !Task.isCancelled else { return .nothingRunnable }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if cancelledHandoffs.remove(id) != nil {
+                    continuation.resume(returning: .nothingRunnable)
+                } else {
+                    handoffs[id] = continuation
+                    wake()
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelHandoff(id) }
+        }
+    }
+
+    /// Whether a job's part is with the transport now.
+    func daemonOwnsWork() async -> Bool {
+        (try? await store.hasSubmittedJobs()) ?? false
+    }
+
+    private func cancelHandoff(_ id: UUID) {
+        if let waiter = handoffs.removeValue(forKey: id) {
+            waiter.resume(returning: .nothingRunnable)
+        } else {
+            cancelledHandoffs.insert(id)
+        }
+    }
+
+    private func resolveHandoffs(_ handoff: WindowHandoff) {
+        guard !handoffs.isEmpty else { return }
+        let waiters = handoffs.values
+        handoffs = [:]
+        for waiter in waiters { waiter.resume(returning: handoff) }
+    }
+
+    /// The windows this state asks for: automatic backup's while it is on and nothing blocks the
+    /// engine. A manual run or a share uses no windows, as today.
+    private func currentPlan() -> SchedulePlan {
+        guard intent == .automatic, blocker == nil else { return .none }
+        return .automatic(requireCharging: preferences?.requireCharging ?? false, triggerDelay: preferences?.triggerDelay ?? 0)
+    }
+
+    private func updatePlan() {
+        guard let plans else { return }
+        let current = currentPlan()
+        guard current != plan else { return }
+        plan = current
+        plans.yield(current)
+    }
+
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem] {
         try await store.queuePage(lane: lane, after: seq, limit: limit)
     }
@@ -366,6 +463,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             if let until = waitUntil, now() >= until { wait = nil; waitUntil = nil }
             if blocker != nil || wait != nil {
                 await publish()
+                if active.isEmpty { resolveHandoffs(.nothingRunnable) }
                 await sleep(until: wait == nil ? nil : waitUntil)
                 continue
             }
@@ -375,6 +473,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                     if Task.isCancelled { return }
                     lastMessage = error.localizedDescription
                     await publish()
+                    if active.isEmpty { resolveHandoffs(.nothingRunnable) }
                     await sleep(until: now().addingTimeInterval(30))
                     continue
                 }
@@ -385,6 +484,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             }
             await publish()
             // Full, or nothing runnable: a finished job, a command or the next retry wakes it.
+            if active.isEmpty { resolveHandoffs(.nothingRunnable) }
             let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
             await sleep(until: active.count < concurrency ? try? await store.nextRetry(lanes: lanes) : nil)
         }
@@ -537,6 +637,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard try await store.advance(job: lease.job, token: lease.token, to: state, phase: phase) else { throw LeaseLost() }
         // ensureOwned after the await.
         guard owns(lease) else { throw LeaseLost() }
+        if state == .submitted { resolveHandoffs(.handedToDaemon) }
     }
 
     private func progress(_ lease: Lease, sent: Int64, expected: Int64) async {
@@ -660,6 +761,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private func publish(refreshingCounts: Bool = true) async {
         if refreshingCounts { await refreshCounts() }
         guard !stopped else { return }
+        updatePlan()
         let value = snapshot()
         latest = value
         guard value != lastSent else { return }
