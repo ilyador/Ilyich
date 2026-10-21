@@ -243,7 +243,8 @@ final class LibraryJobExecutor: JobExecuting {
         // The body: kept from an unanswered attempt whose body was written in full, which iOS may
         // still be sending, else new. One left .created never finished its body: the app ended
         // part way, or an earlier lease's write may still run or remove it, so it is abandoned
-        // and its file left to the stage's cleanup.
+        // and its file left to the stage's cleanup. A kept body must end with its closing
+        // boundary and have the size recorded when it was written (B6).
         var reusable = unanswered
         if var abandoned = unanswered, abandoned.state == .created {
             abandoned.state = .abandoned
@@ -254,7 +255,8 @@ final class LibraryJobExecutor: JobExecuting {
         let key = self.key(attempt.id, stage: stage)
         let body = layout.url(forRelativePath: key.bodyPath)
         let written: Set<AttemptState> = [.bodyWritten, .submitted, .interrupted]
-        if attempt.bodyPath == nil || !written.contains(attempt.state) || !FileManager.default.fileExists(atPath: body.path) {
+        if attempt.bodyPath == nil || !written.contains(attempt.state)
+            || UploadBody.isComplete(body, boundary: Self.boundary(attempt.id), bytes: attempt.bodyBytes) != true {
             attempt.state = .created
             attempt.bodyPath = key.bodyPath
             attempt.checksum = checksum
@@ -296,10 +298,14 @@ final class LibraryJobExecutor: JobExecuting {
         let key = self.key(attempt.id, stage: stage)
         var attempt = attempt
         guard let receipt = record.receipt else {
-            attempt.state = .failed
+            // Without a status the server never answered (a lost connection, a force quit): the
+            // attempt is interrupted, and a retry checks again by checksum and sends this body
+            // again. A status is the server's answer: a retry starts a new attempt after a new
+            // check. Either way the row records it.
+            let interrupted = record.httpStatus == nil
+            attempt.state = interrupted ? .interrupted : .failed
             guard try await store.saveAttempt(attempt, failure: record, job: job.lease.job, token: job.lease.token) else { throw LeaseLost() }
-            // Recorded in the attempt's row: a retry starts a new attempt, after a new check.
-            try? uploader.acknowledge(key, keepingBody: false)
+            try? uploader.acknowledge(key, keepingBody: interrupted)
             throw UploadOutcomeFailure.failed(record)
         }
         attempt.state = .completed

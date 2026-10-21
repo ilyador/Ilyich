@@ -89,16 +89,21 @@ extension TransferStore {
         let db = try database()
         return try db.transaction {
             guard try Self.holds(db, job: job, token: token) else { return false }
-            try db.run("""
-                INSERT OR REPLACE INTO attempts(id,job_id,part,session,state,body_path,body_bytes,checksum,os_task_id,remote_id,remote_status,\
-                http_status,error_domain,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, [.text(attempt.id.rawValue), .integer(job), .text(attempt.part.rawValue), .text(TransferSessionID.backup.rawValue),
-                      .text(attempt.state.rawValue), .optionalText(attempt.bodyPath), .optionalInteger(attempt.bodyBytes),
-                      .optionalText(attempt.checksum), .optionalInteger(attempt.taskID), .optionalText(attempt.remoteID),
-                      .optionalText(attempt.remoteStatus), .optionalInteger(failure?.httpStatus.map(Int64.init)),
-                      .optionalText(failure?.errorDomain), .optionalInteger(failure?.errorCode.map(Int64.init))])
+            try Self.writeAttempt(db, attempt, failure: failure, job: job)
             return true
         }
+    }
+
+    /// Inserts or replaces an attempt's row.
+    static func writeAttempt(_ db: TransferSQLite, _ attempt: LibraryAttempt, failure: OutcomeRecord?, job: Int64) throws {
+        try db.run("""
+            INSERT OR REPLACE INTO attempts(id,job_id,part,session,state,body_path,body_bytes,checksum,os_task_id,remote_id,remote_status,\
+            http_status,error_domain,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, [.text(attempt.id.rawValue), .integer(job), .text(attempt.part.rawValue), .text(TransferSessionID.backup.rawValue),
+                  .text(attempt.state.rawValue), .optionalText(attempt.bodyPath), .optionalInteger(attempt.bodyBytes),
+                  .optionalText(attempt.checksum), .optionalInteger(attempt.taskID), .optionalText(attempt.remoteID),
+                  .optionalText(attempt.remoteStatus), .optionalInteger(failure?.httpStatus.map(Int64.init)),
+                  .optionalText(failure?.errorDomain), .optionalInteger(failure?.errorCode.map(Int64.init))])
     }
 
     // MARK: Discovery

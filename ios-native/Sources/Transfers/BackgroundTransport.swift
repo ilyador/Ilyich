@@ -76,6 +76,10 @@ final class BackgroundTransport: TransferTransport {
         return matching.count
     }
 
+    func cancel(tasks ids: [Int]) async {
+        for id in ids { await tasks.cancelTask(id) }
+    }
+
     /// Monotonic time, for throttling progress.
     static func uptime() -> Duration { ContinuousClock.now - origin }
     private static let origin = ContinuousClock.now

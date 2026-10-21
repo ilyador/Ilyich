@@ -16,6 +16,9 @@ protocol TransferTransport: Sendable {
     func inventory() async -> TransportInventory
     /// Cancels every live task of an account and returns how many.
     func cancel(scope: String) async -> Int
+    /// Cancels tasks by ID, as recovery does for tasks no attempt waits for. A task that is gone
+    /// is ignored.
+    func cancel(tasks: [Int]) async
 }
 
 extension TransferSessionID {
