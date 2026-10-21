@@ -122,6 +122,9 @@ final class AccountRuntime: Sendable {
             let entities = library.entities
             library.warmer.start(when: { (try? await entities.isComplete()) == true }, entities: entities, pipeline: pipeline)
             await library.sync.start()
+            // Fills the index's derived tables for a library synced before they existed, off the
+            // main thread and a batch at a time; reads don't use them yet.
+            entities.startBackfill()
         }
         check.validate()
         // A background launch, for a backup window or a finished upload, leaves it for the next
@@ -136,6 +139,7 @@ final class AccountRuntime: Sendable {
         if let library {
             await library.warmer.stop()
             await library.sync.shutdown()
+            await library.entities.stopBackfill()
         }
         await work.cancelAndJoin()
         await transfers?.store.close()
