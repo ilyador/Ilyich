@@ -15,7 +15,7 @@ struct LiveAccountDevice: AccountDevice {
         await coordinator.disconnect(keepingAutomaticBackup: keepingAutomaticBackup)
     }
 
-    func endCasting() async { await CastController.shared.signOut() }
+    func endCasting() async { await CastSessionService.shared.signOut() }
 
     func reloadWidgets() async { await MainActor.run { WidgetCenter.shared.reloadAllTimelines() } }
 

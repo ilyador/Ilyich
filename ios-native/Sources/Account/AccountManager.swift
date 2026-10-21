@@ -58,7 +58,7 @@ protocol AccountDevice: Sendable {
     /// Stops backup and shared uploads, and switches automatic backup off unless
     /// `keepingAutomaticBackup`. The backup state stays on disk with its receipts.
     func stopUploads(keepingAutomaticBackup: Bool) async
-    /// Stops casting and revokes the receiver's server session.
+    /// Stops casting and revokes the grants the receiver was given.
     func endCasting() async
     func reloadWidgets() async
     func clearNotifications() async
@@ -324,12 +324,12 @@ actor AccountManager {
         // 2. The account's work ends, and uploads stop while the session can still answer them.
         await runtime.cancelAndJoin()
         await device.stopUploads(keepingAutomaticBackup: policy.keepsAutomaticBackup)
-        // 3. While the token and the network settings still work: the cast session first, which
-        //    needs the token, then the session itself. Past the budget, sign-out goes on without
-        //    them.
+        // 3. While the token and the network settings still work: casting stops and its grants
+        //    are revoked, which needs the token, then the session itself. Past the budget,
+        //    sign-out goes on without them.
         await Self.within(dependencies.serverSignOutBudget) {
             await device.endCasting()
-            await runtime.api.revokeCastAuthorization()
+            await runtime.castGrants.close()
             try? await runtime.api.logout()
         }
         // 4. The extensions and upload delegates stop seeing the session: the tombstone first, then

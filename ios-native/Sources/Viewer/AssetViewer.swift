@@ -16,7 +16,7 @@ struct AssetViewer: View {
     let transition: ViewerTransitionState?
     /// Closes the viewer when it was presented outside SwiftUI.
     let onClose: (() -> Void)?
-    @ObservedObject private var cast = CastController.shared
+    @ObservedObject private var cast = CastSessionService.shared
     @State private var selectedID: String
     @State private var replacements: [String: Asset] = [:]
     @State private var controls = true
@@ -133,7 +133,7 @@ struct AssetViewer: View {
         // A photo that can't be cast, such as a locked one, never reaches the TV.
         .task(id: settledID) {
             guard settledID != nil, capabilities.offers(.cast) else { return }
-            CastController.shared.select(api: api, asset: current)
+            CastSessionService.shared.select(api: api, asset: current)
         }
         .task(id: (settledID ?? "") + "|" + String(refreshRevision)) { if settledID != nil { await refreshCurrentAsset() } }
         .task(id: settledID) { if settledID != nil { await prefetchNeighbors() } }
