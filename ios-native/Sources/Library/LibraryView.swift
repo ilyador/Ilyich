@@ -1132,14 +1132,14 @@ private struct SelectionActionsView: View {
         if selection.local.isEmpty {
             BulkActionsView(api: api, pipeline: pipeline, assets: selection.assets, onChanged: onChanged)
         } else if selection.assets.isEmpty {
-            LocalPhotoActionsView(photos: selection.local, onChanged: onChanged)
+            LocalPhotoActionsView(photos: selection.local) { _ in onChanged() }
         } else {
             List {
                 NavigationLink("\(selection.assets.count) server photos") {
                     BulkActionsView(api: api, pipeline: pipeline, assets: selection.assets, onChanged: onChanged)
                 }
                 NavigationLink("\(selection.local.count) phone photos") {
-                    LocalPhotoActionsView(photos: selection.local, onChanged: onChanged)
+                    LocalPhotoActionsView(photos: selection.local) { _ in onChanged() }
                 }
             }.navigationTitle("Selection actions")
         }

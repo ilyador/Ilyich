@@ -269,6 +269,12 @@ The adapter implements PhotoLibraryStaging. PhotoResourceExport and PhotoCurrent
   - testFavoriteToggleDoesNotDisableOfflineFallback
 - **Acceptance:**
   - On the phone, On this phone scrolls smoothly over more than 20k photos; Live Photo share works; temp folders are gone after kill and relaunch
+- **As built:**
+  - `DeviceBrowserStore` (Sources/Features) reads 240-photo pages through `DeviceBrowsing` (the adapter, Sources/Device/DeviceBrowsing.swift). A change to photos already read re-reads only their pages; a removal of photos not yet read only moves the count; an insertion, a removal of a shown photo, an album change in an album view, or access reads the pages shown again. The next page loads as the last 60 photos come on screen; the Load more button stays.
+  - `PhotoKitAdapter.media(_:_:)` (DeviceMedia.swift) is the one media path, over one shared `PHCachingImageManager`: it looks the asset up off the main thread and cancels the request when the stream is dropped. `LocalPhotoMedia` serves viewer pages only; the library grid's phone cells and `LocalPhotoThumbnail` use the stream directly, and the backup queue's rows read `details(of:)`. `LocalPhoto` moved to DeviceMedia.swift. `scripts/check-single-engine.sh` rule 6 keeps asset fetches and image requests in Sources/Device, except Free up space until P4.
+  - `DevicePhotoActionsStore` runs favorite and remove through `perform`, backup through `BackupCoordinator.enqueue`'s new `BackupEnqueueOutcome`, and sharing through `DeviceShareExporter` (an actor on its own queue that encodes previews). The app delegate sweeps `tmp/IlyichLocalShare-*` at launch.
+  - "A favorite no longer disables the offline fallback": the adapter's observer records, from Photos' per-asset change details, the modification dates an asset moved through while its content stayed the same (`ContentRevisions`). The fallback and a later removal accept those revisions; an edit, a revert or a removal forgets them. The server viewer only drops the phone copy after a removal. What the adapter learnt is kept in memory, so a favorite made while the app wasn't running still ends the fallback, as before.
+  - The local viewer drops removed photos and shows the next one (else the one before); it closes when none is left.
 
 ### P4 — Cleanup service with explicit deletion-safety invariants
 

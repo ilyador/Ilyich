@@ -80,7 +80,19 @@ struct BackupClientCache {
     }
 }
 
-@MainActor @Observable final class BackupCoordinator {
+/// How adding photos to the backup queue ended.
+enum BackupEnqueueOutcome: Equatable, Sendable {
+    /// Queued; backup starts or was already set to.
+    case queued
+    case failed(String)
+}
+
+/// Adds photos to the backup queue (BackupCoordinator implements it).
+@MainActor protocol BackupEnqueuing: AnyObject {
+    func enqueue(localIDs: [String], albumID: String?) async -> BackupEnqueueOutcome
+}
+
+@MainActor @Observable final class BackupCoordinator: BackupEnqueuing {
     static let shared = BackupCoordinator()
     var preferences = BackupPreferences()
     private(set) var albums: [DeviceAlbum] = []
@@ -311,20 +323,35 @@ struct BackupClientCache {
         await start(retryFailures: false)
     }
 
-    func enqueue(localIDs: [String], albumID: String? = nil) async {
+    /// Adds photos to the queue and starts backup. The outcome is this call's own: an error shown
+    /// from an earlier run, still in `error`, is not taken for it.
+    @discardableResult
+    func enqueue(localIDs: [String], albumID: String? = nil) async -> BackupEnqueueOutcome {
+        let before = error
         await activate()
-        guard saved != nil, directory != nil else { return }
-        guard !isRunning, stopping == nil else { error = "Pause backup before adding selected photos."; return }
+        guard saved != nil, directory != nil else {
+            // Taking up the account failed just now, or nobody is signed in.
+            return .failed(error != before ? error ?? Self.unavailable : Self.unavailable)
+        }
+        guard !isRunning, stopping == nil else { return refuse("Pause backup before adding selected photos.") }
         if let albumID {
-            guard UUID(uuidString: albumID) != nil else { error = "The selected album is invalid."; return }
+            guard UUID(uuidString: albumID) != nil else { return refuse("The selected album is invalid.") }
             if state.pendingAlbumAdds == nil { state.pendingAlbumAdds = [:] }
             for localID in localIDs { state.pendingAlbumAdds?[localID, default: []].insert(albumID) }
         }
         let existing = Set(state.queue)
         state.queue.append(contentsOf: Set(localIDs).subtracting(existing).sorted())
-        do { try persist() } catch { self.error = error.localizedDescription; return }
+        do { try persist() } catch { return refuse(error.localizedDescription) }
         await start()
+        return .queued
     }
+
+    private func refuse(_ message: String) -> BackupEnqueueOutcome {
+        error = message
+        return .failed(message)
+    }
+
+    private static let unavailable = "Backup isn’t available. Sign in again, then retry."
 
     /// A past upload is not sufficient for deleting local data: recheck current
     /// server ownership, checksum, trash state, pair and local revision now.

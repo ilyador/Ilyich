@@ -73,6 +73,9 @@ actor PhotoKitAdapter {
     var albumCache: (generation: UInt64, albums: [DeviceAlbum])?
     /// Moves whenever Photos reports a change, as any change may add, remove, rename or resize an album.
     nonisolated let albumGeneration = Mutex<UInt64>(0)
+    /// Revisions that show the same content, as when a favorite moved an asset's modification date
+    /// (DeviceBrowsing.swift).
+    nonisolated let contentRevisions = Mutex(ContentRevisions())
 
     private struct Observation {
         /// Generation 0 until access is first read.
@@ -170,6 +173,7 @@ actor PhotoKitAdapter {
         // edit changes smart albums such as Favorites and Recently Edited, which Photos doesn't
         // reliably report as a change to the album itself.
         albumGeneration.withLock { $0 &+= 1 }
+        contentRevisions.withLock { $0.apply(details) }
         let starts = observation.withLock { state -> Bool in
             var change = state.pending ?? DeviceLibraryChange(access: state.access)
             change.merge(details)

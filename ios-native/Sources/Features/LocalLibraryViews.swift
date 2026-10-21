@@ -8,7 +8,7 @@ struct LocalLibraryView: View {
     var onBackupFinished: (() -> Void)? = nil
     @State private var initialized = false
     @State private var watchingUploads = false
-    @State private var library = LocalPhotoLibrary()
+    @State private var library = DeviceBrowserStore()
     @State private var backup = BackupCoordinator.shared
     @State private var selection = Set<String>()
     @State private var selecting = false
@@ -53,18 +53,18 @@ struct LocalLibraryView: View {
                 }.padding().glassEffect().padding(.horizontal, 12)
             }
         }
-        .task { library.begin(); if !initialized { initialized = true; selecting = destinationAlbumID != nil } }
+        .task { if !initialized { initialized = true; selecting = destinationAlbumID != nil }; await library.start() }
         .onChange(of: backup.isRunning) { _, running in
             if watchingUploads && !running { onBackupFinished?(); watchingUploads = false }
         }
         .onChange(of: showBackup) { _, shown in if !shown { onBackupFinished?() } }
         .onDisappear { library.stop() }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { library.begin() } }
-        .onChange(of: library.albumID) { _, _ in selection = []; library.selectAlbum() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await library.start() } } }
+        .onChange(of: library.albumID) { _, _ in selection = []; Task { await library.selectAlbum() } }
         .onChange(of: library.photos) { _, values in selection.formIntersection(Set(values.map(\.id))) }
-        .fullScreenCover(item: $viewing) { LocalPhotoViewer(photo: $0, onChanged: { library.refresh() }) }
-        .sheet(isPresented: $showActions) { NavigationStack { LocalPhotoActionsView(photos: actionPhotos) { selection = []; selecting = false; library.refresh() } } }
-        .sheet(isPresented: $accessPicker, onDismiss: { library.refresh() }) { LimitedPhotoAccessPicker { accessPicker = false; library.refresh() } }
+        .fullScreenCover(item: $viewing) { LocalPhotoViewer(photo: $0, onChanged: { Task { await library.refresh() } }) }
+        .sheet(isPresented: $showActions) { NavigationStack { LocalPhotoActionsView(photos: actionPhotos) { _ in selection = []; selecting = false; Task { await library.refresh() } } } }
+        .sheet(isPresented: $accessPicker, onDismiss: { Task { await library.refresh() } }) { LimitedPhotoAccessPicker { accessPicker = false; Task { await library.refresh() } } }
         .sheet(isPresented: $showBackup) { NavigationStack { BackupSettingsView().toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showBackup = false } } } } }
     }
     private var photoGrid: some View {
@@ -94,17 +94,17 @@ struct LocalLibraryView: View {
                             if selecting { Image(systemName: selection.contains(photo.id) ? "checkmark.circle.fill" : "circle").font(.title3).symbolRenderingMode(.palette).foregroundStyle(selection.contains(photo.id) ? Color.accentColor : Color.white, Color.black.opacity(0.4)).padding(7) }
                         }
                     }.buttonStyle(.plain).accessibilityLabel(photo.title).accessibilityAddTraits(selection.contains(photo.id) ? .isSelected : [])
+                    .onAppear { if library.isNearEnd(photo.id) { Task { await library.loadMore() } } }
                 }
             }
-            if library.photos.count < library.total { Button("Load more photos") { library.loadMore() }.padding(24) }
+            if library.photos.count < library.total { Button("Load more photos") { Task { await library.loadMore() } }.padding(24) }
             Text("\(library.total.formatted()) items").font(.caption).foregroundStyle(.secondary).padding()
-        }.refreshable { library.refresh() }
+        }.refreshable { await library.refresh() }
     }
     private func upload() async {
         uploading = true; defer { uploading = false }
         watchingUploads = true
-        await backup.enqueue(localIDs: Array(selection), albumID: destinationAlbumID)
-        if backup.error == nil { selection = []; selecting = false }
+        if await backup.enqueue(localIDs: Array(selection), albumID: destinationAlbumID) == .queued { selection = []; selecting = false }
         showBackup = true
     }
 }

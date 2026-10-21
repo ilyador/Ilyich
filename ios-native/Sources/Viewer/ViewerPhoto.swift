@@ -98,7 +98,9 @@ struct ViewerPhoto: View {
             .onChange(of: localMedia.image) { _, _ in
                 // A Photos edit during an asynchronous image request invalidates
                 // the proven match; it must not replace the server version.
-                if let photo = matchedLocalPhoto, !LocalMediaFallback.isUnchanged(photo) {
+                guard usingLocalCopy, let photo = matchedLocalPhoto else { return }
+                Task {
+                    guard !(await LocalMediaFallback.isUnchanged(photo)), usingLocalCopy, matchedLocalPhoto == photo else { return }
                     usingLocalCopy = false; localMedia.cancel()
                 }
             }
@@ -123,9 +125,10 @@ struct ViewerPhoto: View {
         catch {
             guard !Task.isCancelled, imageLoadID == loadID, animatedRevision != mediaKey else { return }
             failure = Self.message(for: error)
-            if let photo = LocalMediaFallback.photo(after: error, asset: asset, matched: matchedLocalPhoto, active: active) {
+            if let photo = await LocalMediaFallback.photo(after: error, asset: asset, matched: matchedLocalPhoto, active: active),
+               !Task.isCancelled, imageLoadID == loadID {
                 usingLocalCopy = true
-                localMedia.load(photo, full: true, network: false, maximumResolution: fullResolution || zoomed)
+                localMedia.load(photo, network: false, maximumResolution: fullResolution || zoomed)
             }
         }
     }

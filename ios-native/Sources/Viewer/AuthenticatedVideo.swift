@@ -125,21 +125,29 @@ struct AuthenticatedVideo: View {
     }
 
     private func startLocalFallback(after failure: Error) {
-        guard let sourceAsset, let photo = LocalMediaFallback.photo(after: failure, asset: sourceAsset, matched: matchedLocalPhoto, active: activeNow,
-                                                                    kind: isLivePhotoMotion ? .motion : .video) else { return }
-        localPhoto = photo; usingLocal = true
-        localMedia.load(photo, full: true, network: false, motion: isLivePhotoMotion)
+        guard let sourceAsset else { return }
+        let request = requestKey
+        Task {
+            guard let photo = await LocalMediaFallback.photo(after: failure, asset: sourceAsset, matched: matchedLocalPhoto, active: activeNow,
+                                                             kind: isLivePhotoMotion ? .motion : .video),
+                  request == requestKey, activeNow, transport == nil else { return }
+            localPhoto = photo; usingLocal = true
+            localMedia.load(photo, network: false, motion: isLivePhotoMotion)
+        }
     }
 
     /// A Photos edit during the asynchronous request invalidates the proven match.
     private func adoptLocal() {
         guard usingLocal, let photo = localPhoto else { return }
-        guard LocalMediaFallback.isUnchanged(photo) else {
-            stopLocal(); error = "The copy on this phone changed. Try again."; return
+        Task {
+            guard await LocalMediaFallback.isUnchanged(photo) else {
+                guard usingLocal, localPhoto == photo else { return }
+                stopLocal(); error = "The copy on this phone changed. Try again."; return
+            }
+            guard usingLocal, localPhoto == photo, let player = localMedia.player else { return }
+            player.isMuted = muted
+            if shouldPlayLocal { player.play() } else { player.pause() }
         }
-        guard let player = localMedia.player else { return }
-        player.isMuted = muted
-        if shouldPlayLocal { player.play() } else { player.pause() }
     }
 
     private func stopLocal() {

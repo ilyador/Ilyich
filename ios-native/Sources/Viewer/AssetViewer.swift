@@ -244,8 +244,10 @@ struct AssetViewer: View {
         .sheet(isPresented: $localPhotoActions) {
             if let photo = matchedLocalPhotos[current.id], !changedLocalCopies.contains(current.id) {
                 NavigationStack {
-                    LocalPhotoActionsView(photos: [photo]) {
-                        changedLocalCopies.insert(current.id); localPhotoActions = false
+                    LocalPhotoActionsView(photos: [photo]) { change in
+                        // Only a removal ends the phone copy; a favorite leaves the photo as it was.
+                        if case .removed = change { changedLocalCopies.insert(current.id) }
+                        localPhotoActions = false
                     }
                 }
             }
