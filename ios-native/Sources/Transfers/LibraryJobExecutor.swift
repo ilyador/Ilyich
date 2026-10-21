@@ -240,11 +240,21 @@ final class LibraryJobExecutor: JobExecuting {
         }
         guard result.action == "accept" else { throw APIError.invalidResponse("The server returned an unknown upload decision.") }
 
-        // The body: kept from an unanswered attempt, which iOS may still be sending, else new.
-        var attempt = unanswered ?? LibraryAttempt(id: AttemptID(), part: part, state: .created)
+        // The body: kept from an unanswered attempt whose body was written in full, which iOS may
+        // still be sending, else new. One left .created never finished its body: the app ended
+        // part way, or an earlier lease's write may still run or remove it, so it is abandoned
+        // and its file left to the stage's cleanup.
+        var reusable = unanswered
+        if var abandoned = unanswered, abandoned.state == .created {
+            abandoned.state = .abandoned
+            guard try await store.saveAttempt(abandoned, job: job.lease.job, token: job.lease.token) else { throw LeaseLost() }
+            reusable = nil
+        }
+        var attempt = reusable ?? LibraryAttempt(id: AttemptID(), part: part, state: .created)
         let key = self.key(attempt.id, stage: stage)
         let body = layout.url(forRelativePath: key.bodyPath)
-        if attempt.bodyPath == nil || !FileManager.default.fileExists(atPath: body.path) {
+        let written: Set<AttemptState> = [.bodyWritten, .submitted, .interrupted]
+        if attempt.bodyPath == nil || !written.contains(attempt.state) || !FileManager.default.fileExists(atPath: body.path) {
             attempt.state = .created
             attempt.bodyPath = key.bodyPath
             attempt.checksum = checksum

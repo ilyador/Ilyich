@@ -146,6 +146,97 @@ final class LibraryJobTests: XCTestCase {
         await h.tearDown()
     }
 
+    /// A user's retry of a failed photo stages it again: a stage kept from the failed try may be
+    /// of an older version of the photo, with its checksum, or its files may be what failed.
+    func testRetryOfFailedPhotoStagesItAgain() async throws {
+        let h = try await LibraryJobHarness()
+        let edited = FakeStaging.date.addingTimeInterval(3_600)
+        try await h.seed("trashed") { folder in
+            LibraryStage(stageID: UUID().uuidString, folder: folder, revision: AssetRevision(FakeStaging.date),
+                         original: try! h.stagedFile(folder, "original", filename: "trashed.HEIC", contents: "old"), motion: nil, sidecar: nil,
+                         fields: [:], isVideo: false, originalChecksum: "sum-old")
+        }
+        h.server.hold(checksum: "sum-old", as: .duplicate("server-old", trashed: true))
+        try await h.seed("missing") { folder in
+            LibraryStage(stageID: UUID().uuidString, folder: folder, revision: AssetRevision(FakeStaging.date),
+                         original: StagedFile(path: folder + "/gone", filename: "missing.HEIC", contentType: "image/heic"), motion: nil,
+                         sidecar: nil, fields: [:], isVideo: false)
+        }
+        // The user edits the trashed one in Photos; the other's files are simply gone.
+        h.staging.add("trashed", FakeStaging.Photo(modified: edited))
+        h.staging.add("missing")
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        try await untilTransfers("Both fail.") { try await h.states("trashed", "missing") == [.failed, .failed] }
+        XCTAssertEqual(h.staging.staged.count, 0)
+
+        try await h.engine.retry(nil)
+        try await untilTransfers("Both are backed up after the retry.") { try await h.backedUp("trashed", "missing") }
+        XCTAssertEqual(h.staging.stagings("trashed"), 1, "The retry stages the photo again.")
+        XCTAssertEqual(h.staging.stagings("missing"), 1)
+        let receipt = try await h.receipt("trashed")
+        XCTAssertEqual(receipt?.revision, AssetRevision(edited), "The edited version is what goes.")
+        XCTAssertNotEqual(receipt?.original.checksum, "sum-old")
+        XCTAssertEqual(Set(h.uploads.uploads.map(\.filename)), ["trashed.HEIC", "missing.HEIC"])
+        await h.tearDown()
+    }
+
+    /// Discovery queues a failed photo again once it is edited, from a new stage; unedited, it
+    /// stays failed until the user retries it.
+    func testDiscoveryRequeuesFailedPhotoOnceEdited() async throws {
+        let h = try await LibraryJobHarness()
+        try await h.seed("photo") { folder in
+            LibraryStage(stageID: UUID().uuidString, folder: folder, revision: AssetRevision(FakeStaging.date),
+                         original: try! h.stagedFile(folder, "original", filename: "photo.HEIC", contents: "old"), motion: nil, sidecar: nil,
+                         fields: [:], isVideo: false, originalChecksum: "sum-old")
+        }
+        h.server.hold(checksum: "sum-old", as: .duplicate("server-old", trashed: true))
+        h.staging.add("photo")
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        try await untilTransfers("The photo fails.") { try await h.job("photo")?.state == .failed }
+
+        let unchanged = try await h.discover()
+        XCTAssertEqual(unchanged?.queued, 0, "An unedited failed photo waits for the user.")
+        let stillFailed = try await h.job("photo")?.state
+        XCTAssertEqual(stillFailed, .failed)
+
+        let edited = FakeStaging.date.addingTimeInterval(60.5)
+        h.staging.edit("photo", modified: edited)
+        let changed = try await h.discover()
+        XCTAssertEqual(changed?.queued, 1)
+        try await untilTransfers("The edited photo is backed up.") { try await h.receipt("photo") != nil }
+        let receipt = try await h.receipt("photo")
+        XCTAssertEqual(receipt?.revision, AssetRevision(edited))
+        XCTAssertEqual(h.staging.stagings("photo"), 1)
+        XCTAssertEqual(h.uploads.uploads.map(\.filename), ["photo.HEIC"])
+        await h.tearDown()
+    }
+
+    /// An attempt the app ended during while writing its body is never sent: its body may be cut
+    /// short. The job writes a new body under a new attempt.
+    func testPartlyWrittenBodyIsNotSent() async throws {
+        let h = try await LibraryJobHarness()
+        let partial = AttemptID()
+        try await h.seed("partial", stage: { folder in
+            // What the write left: a body without its file part or closing boundary.
+            try! h.group.write("--Ilyich-\(partial.rawValue)\r\nContent-Disposition: form-data; name=\"isFavorite\"\r\n\r\nfal",
+                               to: folder + "/" + partial.rawValue + ".multipart")
+            return LibraryStage(stageID: UUID().uuidString, folder: folder, revision: AssetRevision(FakeStaging.date),
+                                original: try! h.stagedFile(folder, "original", filename: "partial.HEIC", contents: "p"), motion: nil,
+                                sidecar: nil, fields: ["isFavorite": "false"], isVideo: false, originalChecksum: "sum-partial")
+        }, attempts: [LibraryAttempt(id: partial, part: .original, state: .created, bodyPath: "unused", checksum: "sum-partial")])
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        try await untilTransfers("The photo is backed up.") { try await h.receipt("partial") != nil }
+        let uploads = h.uploads.uploads
+        XCTAssertEqual(uploads.count, 1)
+        XCTAssertNotEqual(uploads.first?.key.attempt, partial, "The cut-short body is not sent.")
+        XCTAssertEqual(uploads.first?.filename, "partial.HEIC")
+        XCTAssertEqual(uploads.first?.fields["isFavorite"], "false")
+        await h.tearDown()
+    }
+
     /// An edited photo's new date queues it again; its new upload stacks over the old one.
     func testChangedDateRequeuesAndStacks() async throws {
         let h = try await LibraryJobHarness()
