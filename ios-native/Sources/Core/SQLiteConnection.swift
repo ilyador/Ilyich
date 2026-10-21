@@ -139,26 +139,6 @@ final class SQLiteConnection {
         get throws { if case .integer(let version) = try scalar("PRAGMA user_version") { Int(version) } else { 0 } }
     }
 
-    /// Runs one long statement on a connection and a thread of its own, returning whether it
-    /// succeeded. The database is in WAL mode, so other connections keep reading meanwhile; their
-    /// writes wait for the statement as for any other writer.
-    static func executeOnItsOwnConnection(path: String, _ sql: String) async -> Bool {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                var connection: OpaquePointer?
-                guard sqlite3_open_v2(path, &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK, let connection else {
-                    if let connection { sqlite3_close(connection) }
-                    return continuation.resume(returning: false)
-                }
-                // A sync's write in progress is waited for, not given up on.
-                sqlite3_busy_timeout(connection, 60_000)
-                let status = sqlite3_exec(connection, "PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; " + sql, nil, nil, nil)
-                sqlite3_close(connection)
-                continuation.resume(returning: status == SQLITE_OK)
-            }
-        }
-    }
-
     private func statement(_ sql: String, handle: OpaquePointer) throws -> OpaquePointer {
         if let cached = prepared[sql] { return cached }
         if prepared.count >= cacheLimit {

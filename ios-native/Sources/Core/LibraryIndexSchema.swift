@@ -12,16 +12,22 @@ import Foundation
 /// - album_member: one row per album-asset record; person_member: one row per visible face of a
 ///   named person;
 /// - locked_asset: assets the server last sent as locked, which are never stored;
-/// - orphan_dependent, dependent_repair and month_places: empty until Q3 and F5 fill them;
+/// - orphan_dependent: EXIF, faces, OCR, edits and metadata that arrived before their asset, held
+///   until it arrives (Q3); dependent_repair: assets whose dependents must be fetched again, such
+///   as a photo taken out of the Locked Folder (Q3); month_places: empty until F5 fills it;
 /// - index_state (one row): the backfill's kind and cursor, whether the derived tables are
 ///   complete (queryable), a persisted revision, and the stale marker.
+///
+/// Version 2 (Q3) adds indexes for the feeds' reads: months in created-at order and stack
+/// members. It drops the month indexes over the entities that builds before Q3 made on a second
+/// read-write connection; the feeds read asset_index instead.
 ///
 /// The stale marker: triggers on metadata and acknowledgements set index_state.stale on any write
 /// made outside this build's writer, which marks its transactions with writer_active. A build
 /// from before Q2, reinstalled over this one, writes both on every sync batch, reset and sign-out
 /// without keeping the derived tables, so the next open of this build starts the backfill again.
 enum LibraryIndexSchema {
-    static let version = 1
+    static let version = 2
 
     /// The tables and indexes every version has, created as before Q2.
     static let base = [
@@ -72,8 +78,20 @@ enum LibraryIndexSchema {
         }
     }
 
-    /// The derived tables, each made from one kind of entity row.
-    static let derivedTables = ["asset_index", "album_member", "person_member", "locked_asset", "orphan_dependent", "dependent_repair", "month_places"]
+    /// What version 2 adds. Each statement can run again harmlessly.
+    static let v2: [String] = [
+        "CREATE INDEX IF NOT EXISTS asset_index_created ON asset_index(created_month,created_at,file_created_at,file_name,id)",
+        "CREATE INDEX IF NOT EXISTS asset_index_stack ON asset_index(stack_id) WHERE stack_id IS NOT NULL",
+        "DROP INDEX IF EXISTS asset_month_localDateTime",
+        "DROP INDEX IF EXISTS asset_month_createdAt",
+    ]
+
+    /// The tables derived from the entities, which a backfill can work out again.
+    static let derivedTables = ["asset_index", "album_member", "person_member", "locked_asset", "month_places"]
+    /// What the sync stream left for later: dependents waiting for their asset and assets waiting
+    /// for a repair. Nothing else holds them, so only a reset, a new session or a sign-out
+    /// empties them.
+    static let pendingTables = ["orphan_dependent", "dependent_repair"]
 
     /// The kinds the backfill walks, in order.
     static let backfillKinds = ["asset", "albumAsset", "face"]
@@ -88,18 +106,22 @@ enum LibraryIndexSchema {
         var revision: Int64
     }
 
-    /// Brings a file to version 1 in place. Only new tables, triggers and the state row are added,
-    /// in one transaction; nothing existing is read or rewritten. A file a build without the
-    /// derived tables wrote to since restarts its backfill.
+    /// Brings a file to version 2 in place. Only new tables, indexes, triggers and the state row
+    /// are added, and the old month indexes dropped, in one transaction; no entity is read or
+    /// rewritten. A file a build without the derived tables wrote to since restarts its backfill.
     static func migrate(_ database: SQLiteConnection) throws {
         if try database.userVersion < version {
             try database.transaction {
-                guard try database.userVersion < version else { return }
-                for statement in v1 { try database.execute(statement) }
-                // An empty library has nothing to fill.
-                if case .integer(0) = try database.scalar("SELECT EXISTS(SELECT 1 FROM entities)") {
-                    try database.execute("UPDATE index_state SET backfill_kind=NULL,backfill_cursor=NULL,queryable=1 WHERE id=1")
+                let from = try database.userVersion
+                guard from < version else { return }
+                if from < 1 {
+                    for statement in v1 { try database.execute(statement) }
+                    // An empty library has nothing to fill.
+                    if case .integer(0) = try database.scalar("SELECT EXISTS(SELECT 1 FROM entities)") {
+                        try database.execute("UPDATE index_state SET backfill_kind=NULL,backfill_cursor=NULL,queryable=1 WHERE id=1")
+                    }
                 }
+                for statement in v2 { try database.execute(statement) }
                 try database.execute("PRAGMA user_version=\(version)")
             }
         }
@@ -122,9 +144,10 @@ enum LibraryIndexSchema {
         try database.execute("UPDATE index_state SET backfill_kind=?,backfill_cursor=NULL,queryable=0,stale=0 WHERE id=1", [.text(backfillKinds[0])])
     }
 
-    /// The entities were emptied, so the derived tables empty too and match them.
-    static func clearDerived(_ database: SQLiteConnection) throws {
-        for table in derivedTables { try database.execute("DELETE FROM \(table)") }
+    /// The entities were emptied, so the derived tables empty too and match them. `pending` empties
+    /// the orphans and repairs as well, as a new session or a sign-out does.
+    static func clearDerived(_ database: SQLiteConnection, pending: Bool = true) throws {
+        for table in derivedTables + (pending ? pendingTables : []) { try database.execute("DELETE FROM \(table)") }
         try database.execute("UPDATE index_state SET backfill_kind=NULL,backfill_cursor=NULL,queryable=1,stale=0,revision=revision+1 WHERE id=1")
     }
 
@@ -197,7 +220,9 @@ enum LibraryIndexSchema {
     /// Works the derived rows out again for what one batch touched, from the entities as the batch
     /// left them.
     static func maintain(_ database: SQLiteConnection, _ touched: DerivedTouch) throws {
-        if touched.reset { try clearDerived(database) }
+        // The reset emptied the orphans and repairs itself, when it came: those that came after
+        // it in the batch stay.
+        if touched.reset { try clearDerived(database, pending: false) }
         let asset = derivations["asset"]!, album = derivations["albumAsset"]!, face = derivations["face"]!
         if !touched.assets.isEmpty {
             let list = try json(touched.assets)

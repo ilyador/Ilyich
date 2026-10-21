@@ -3,18 +3,14 @@ import Foundation
 /// A read-only connection to the offline library on a serial queue of its own: `viewport` at
 /// user-initiated priority for what the screen waits on, `aggregate` at utility for counts, lists
 /// and maps. Each reads the last committed state, so it never waits for the writer's batches and
-/// never sees half of one. Until Q3 these run the same SQL over the entities as before Q2.
+/// never sees half of one. Feeds, map markers and memberships read the derived tables (Q3), which
+/// a caller uses only once `isReadable`; single records still read the entities.
 actor IndexReader {
     private nonisolated let queue: DispatchSerialQueue
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     nonisolated let path: String
     nonisolated let userID: String
     private var connection: SQLiteConnection?
-    /// Whether each month index exists, by the date it indexes; absent until looked up.
-    private var monthIndexes: [String: MonthIndex] = [:]
-    private enum MonthIndex { case ready, missing, building, unavailable }
-    /// Each month index being built, by the date it indexes.
-    private var monthIndexBuilds: [String: Task<Void, Never>] = [:]
 
     init(path: String, userID: String, label: String, qos: DispatchQoS) {
         self.path = path
@@ -84,27 +80,37 @@ actor IndexReader {
             return memory.assets.isEmpty ? nil : memory
         }
     }
+    // MARK: Feeds
+
+    /// Whether the feeds can be read here: the first sync is complete and the derived tables hold
+    /// every entity. Read in one statement, so the two agree.
+    func isReadable() throws -> Bool {
+        try database.query("SELECT (SELECT value FROM metadata WHERE key='complete')='1' AND (SELECT queryable FROM index_state WHERE id=1)=1").first?[0] == "1"
+    }
+
+    /// A feed's photos across months, in the server's order.
     func timelineAssets(filter: TimelineFilter = .init(), offset: Int = 0, limit: Int = 200) throws -> [Asset] {
-        let (whereSQL, arguments) = timelinePredicate(filter)
-        let date = filter.orderBy == "createdAt" ? "createdAt" : "localDateTime"
-        let rows = try database.query("\(Self.timelineSelect) WHERE \(whereSQL) ORDER BY julianday(json_extract(a.payload,'$.\(date)')) \(filter.order == "asc" ? "ASC" : "DESC"), a.id LIMIT ? OFFSET ?", arguments + [String(min(max(limit, 1), 2_000)), String(max(offset, 0))])
+        let (whereSQL, arguments) = feedPredicate(filter)
+        let rows = try database.query("\(Self.feedSelect) WHERE \(whereSQL) ORDER BY \(Self.order(filter, month: false)) LIMIT ? OFFSET ?",
+                                      arguments + [String(min(max(limit, 1), 2_000)), String(max(offset, 0))])
         return try decodeTimelineRows(rows)
     }
+
+    /// A feed's months, newest first unless it asks otherwise, with how many photos each holds.
     func timeBuckets(filter: TimelineFilter = .init()) throws -> [TimeBucket] {
-        let (whereSQL, arguments) = timelinePredicate(filter)
-        let date = filter.orderBy == "createdAt" ? "createdAt" : "localDateTime"
-        return try database.query("SELECT strftime('%Y-%m-01',json_extract(a.payload,'$.\(date)')),count(*) FROM entities a WHERE \(whereSQL) GROUP BY 1 ORDER BY 1 \(filter.order == "asc" ? "ASC" : "DESC")", arguments).compactMap {
+        let (whereSQL, arguments) = feedPredicate(filter)
+        let month = Self.monthColumn(filter)
+        return try database.query("SELECT \(month)||'-01',count(*) FROM asset_index i WHERE \(whereSQL) AND \(month) IS NOT NULL GROUP BY \(month) ORDER BY \(month) \(Self.direction(filter))", arguments).compactMap {
             guard let bucket = $0[0], let count = $0[1].flatMap(Int.init) else { return nil }
             return TimeBucket(timeBucket: bucket, count: count)
         }
     }
-    /// One month of a feed. With `buildingIndex`, as the library's feed asks, a month read the slow
-    /// way then starts building the index months are found by.
-    func timeBucket(_ bucket: String, filter: TimelineFilter = .init(), buildingIndex: Bool = false) throws -> [Asset] {
+
+    /// One month of a feed, in the server's order: local day, file creation time, file name, then
+    /// ID, all one way; in created-at order, the time added first instead of the day.
+    func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) throws -> [Asset] {
         let (sql, arguments) = timeBucketQuery(bucket, filter: filter)
-        let assets = try decodeTimelineRows(try database.query(sql, arguments))
-        if buildingIndex { startMonthIndex(Self.monthDate(filter)) }
-        return assets
+        return try decodeTimelineRows(try database.query(sql, arguments))
     }
 
     /// What SQLite plans for a month's query, for tests and diagnostics.
@@ -113,73 +119,20 @@ actor IndexReader {
         return try database.query("EXPLAIN QUERY PLAN " + sql, arguments).compactMap { $0.last ?? nil }
     }
 
-    /// Whether a feed's months are found through their index, for tests and diagnostics.
-    func monthIndexIsReady(for filter: TimelineFilter = .init()) -> Bool { monthIndex(Self.monthDate(filter)) != nil }
-
     private func timeBucketQuery(_ bucket: String, filter: TimelineFilter) -> (String, [String?]) {
-        let (whereSQL, arguments) = timelinePredicate(filter)
-        let date = Self.monthDate(filter)
-        let select = Self.timelineSelect(indexedBy: monthIndex(date))
-        return ("\(select) WHERE \(whereSQL) AND strftime('%Y-%m',json_extract(a.payload,'$.\(date)'))=? ORDER BY julianday(json_extract(a.payload,'$.\(date)')) \(filter.order == "asc" ? "ASC" : "DESC"),a.id",
-                arguments + [String(bucket.prefix(7))])
+        let (whereSQL, arguments) = feedPredicate(filter)
+        return ("\(Self.feedSelect) WHERE \(Self.monthColumn(filter))=? AND \(whereSQL) ORDER BY \(Self.order(filter, month: true))",
+                [String(bucket.prefix(7))] + arguments)
     }
-
-    /// A month's photos are found through an index on their month, which the month query matches
-    /// exactly; without it every photo's record is read, a quarter of a second or more per month on
-    /// a large library. Until the index exists a month is found that way.
-    private func monthIndex(_ date: String) -> String? {
-        let name = Self.monthIndexName(date)
-        // The lookup is tiny, so it runs even for a month load that has been cancelled, and only an
-        // answer is kept: a failed lookup is tried again by the next month.
-        if monthIndexes[date] == nil,
-           let rows = try? database.query("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", [name], cancellable: false) {
-            monthIndexes[date] = rows.isEmpty ? .missing : .ready
-        }
-        return monthIndexes[date] == .ready ? name : nil
-    }
-
-    /// Builds the index for months of the feed's date, when taken or when added, if it is missing,
-    /// and returns once it is in. Once the index exists this returns at once.
-    func buildMonthIndex(for filter: TimelineFilter) async {
-        let date = Self.monthDate(filter)
-        startMonthIndex(date)
-        await monthIndexBuilds[date]?.value
-    }
-
-    /// Starts building a missing month index, once a session. Building reads every photo, so it
-    /// runs on a connection and a thread of its own: the store keeps answering on its own
-    /// connection meanwhile, months load the old way until the index is in, and writes wait for the
-    /// build as they would for any other writer.
-    private func startMonthIndex(_ date: String) {
-        guard monthIndex(date) == nil, monthIndexes[date] == .missing else { return }
-        monthIndexes[date] = .building
-        let path = self.path
-        let sql = "CREATE INDEX IF NOT EXISTS \(Self.monthIndexName(date)) ON entities(kind,strftime('%Y-%m',json_extract(payload,'$.\(date)'))) WHERE kind='asset'"
-        monthIndexBuilds[date] = Task.detached(priority: .utility) { [weak self] in
-            let built = await SQLiteConnection.executeOnItsOwnConnection(path: path, sql)
-            await self?.finishMonthIndex(date, built: built)
-        }
-    }
-
-    private func finishMonthIndex(_ date: String, built: Bool) {
-        monthIndexBuilds[date] = nil
-        // The next month looks the index up again, through this store's connection, which so learns
-        // of it. If it could not be built, months are still found by reading every photo, and the
-        // next launch tries again.
-        monthIndexes[date] = built ? nil : .unavailable
-    }
-
-    private static func monthDate(_ filter: TimelineFilter) -> String { filter.orderBy == "createdAt" ? "createdAt" : "localDateTime" }
-    private static func monthIndexName(_ date: String) -> String { "asset_month_" + date }
 
     /// Located photos per month and place, for naming months and marking trips on the time rail.
     func monthPlaces(filter: TimelineFilter = .init()) throws -> [MonthPlaceCount] {
-        let (whereSQL, arguments) = timelinePredicate(filter)
-        let date = filter.orderBy == "createdAt" ? "createdAt" : "localDateTime"
+        let (whereSQL, arguments) = feedPredicate(filter)
+        let month = Self.monthColumn(filter)
         return try database.query("""
-        SELECT strftime('%Y-%m-01',json_extract(a.payload,'$.\(date)')),json_extract(e.payload,'$.city'),json_extract(e.payload,'$.country'),count(*)
-        FROM entities a JOIN entities e ON e.kind='exif' AND e.id=a.id
-        WHERE \(whereSQL) AND (json_extract(e.payload,'$.city') IS NOT NULL OR json_extract(e.payload,'$.country') IS NOT NULL)
+        SELECT \(month)||'-01',json_extract(e.payload,'$.city'),json_extract(e.payload,'$.country'),count(*)
+        FROM asset_index i JOIN entities e ON e.kind='exif' AND e.id=i.id
+        WHERE \(whereSQL) AND \(month) IS NOT NULL AND (json_extract(e.payload,'$.city') IS NOT NULL OR json_extract(e.payload,'$.country') IS NOT NULL)
         GROUP BY 1,2,3
         """, arguments).compactMap { row in
             guard let bucket = row[0], let count = row[3].flatMap(Int.init) else { return nil }
@@ -187,38 +140,54 @@ actor IndexReader {
         }
     }
 
-    /// One query brings each photo with its EXIF and the fields the timeline reads from the raw
-    /// record, instead of a query and two JSON passes per photo. A 4,000-photo month matters.
-    private static let timelineSelect = timelineSelect(indexedBy: nil)
-    private static func timelineSelect(indexedBy index: String?) -> String {
-        "SELECT a.payload,e.payload,json_extract(a.payload,'$.deletedAt') IS NOT NULL,json_extract(a.payload,'$.stackId') "
-            + "FROM entities a\(index.map { " INDEXED BY \($0)" } ?? "") LEFT JOIN entities e ON e.kind='exif' AND e.id=a.id"
+    private static func monthColumn(_ filter: TimelineFilter) -> String { filter.orderBy == "createdAt" ? "i.created_month" : "i.local_month" }
+    private static func direction(_ filter: TimelineFilter) -> String { filter.order == "asc" ? "ASC" : "DESC" }
+    /// The server's order (AssetRepository.getTimeBucket): the local day, or the time added, then
+    /// the file's creation time and its name, all one way; the ID settles ties, which the server
+    /// leaves open. Within a month the columns follow asset_index's indexes, so SQLite reads a
+    /// month in order without sorting it.
+    private static func order(_ filter: TimelineFilter, month: Bool) -> String {
+        let way = direction(filter)
+        let first = filter.orderBy == "createdAt" ? ["i.created_at"] : (month ? ["i.local_day"] : ["i.local_month", "i.local_day"])
+        return (first + ["i.file_created_at", "i.file_name", "i.id"]).map { "\($0) \(way)" }.joined(separator: ",")
     }
+
+    /// One query brings each photo with its EXIF and the fields the timeline reads from the
+    /// derived row, instead of a query and two JSON passes per photo. A 4,000-photo month matters.
+    private static let feedSelect = "SELECT a.payload,e.payload,i.trashed,i.stack_id FROM asset_index i "
+        + "JOIN entities a ON a.kind='asset' AND a.id=i.id LEFT JOIN entities e ON e.kind='exif' AND e.id=i.id"
 
     private func decodeTimelineRows(_ rows: [[String?]]) throws -> [Asset] {
         let decoder = APIJSON.decoder()
-        var stacks: [String: AssetStack?] = [:]
+        let stacks = try self.stacks(ids: Set(rows.compactMap { $0[3] }))
         return try rows.compactMap { row in
             guard let payload = row[0] else { return nil }
             var asset = try decoder.decode(Asset.self, from: Data(payload.utf8))
             asset.isTrashed = row[2] == "1"
             if asset.ownerId != userID { asset.isFavorite = false }
             if let exif = row[1] { asset.exifInfo = try decoder.decode(ExifInfo.self, from: Data(exif.utf8)) }
-            if let stackID = row[3] {
-                if stacks[stackID] == nil { stacks[stackID] = try stack(id: stackID) }
-                asset.stack = stacks[stackID] ?? nil
-            }
+            if let stackID = row[3] { asset.stack = stacks[stackID] }
             return asset
         }
     }
 
-    private func stack(id stackID: String) throws -> AssetStack? {
-        guard let data = try entityData(kind: "stack", id: stackID) else { return nil }
-        let stack = try JSONDecoder().decode([String: EntityJSON].self, from: data)
-        guard let primary = stack["primaryAssetId"]?.string else { return nil }
-        let count = try database.query("SELECT count(*) FROM entities WHERE kind='asset' AND json_extract(payload,'$.stackId')=?", [stackID]).first?[0].flatMap(Int.init) ?? 0
-        return .init(id: stackID, primaryAssetId: primary, assetCount: count)
+    /// The stacks of a page of photos, in one query. A stack counts its photos the way the server
+    /// does: those in the timeline and not in the trash.
+    private func stacks(ids: Set<String>) throws -> [String: AssetStack] {
+        guard !ids.isEmpty else { return [:] }
+        let list = String(decoding: try JSONEncoder().encode(ids.sorted()), as: UTF8.self)
+        var stacks: [String: AssetStack] = [:]
+        for row in try database.query("""
+        SELECT s.id,json_extract(s.payload,'$.primaryAssetId'),
+               (SELECT count(*) FROM asset_index c WHERE c.stack_id=s.id AND c.trashed=0 AND c.visibility='timeline')
+        FROM entities s WHERE s.kind='stack' AND s.id IN (SELECT value FROM json_each(?))
+        """, [list]) {
+            guard let id = row[0], let primary = row[1] else { continue }
+            stacks[id] = .init(id: id, primaryAssetId: primary, assetCount: row[2].flatMap(Int.init) ?? 0)
+        }
+        return stacks
     }
+
     /// Small identity rows for old Flutter uploads and native uploads alike. The
     /// current server no longer syncs obsolete deviceId/deviceAssetId columns.
     func localAssetMatches(offset: Int = 0, limit: Int = 1_000) throws -> [LocalAssetMatch] {
@@ -243,24 +212,36 @@ actor IndexReader {
             return LocalAssetMatch(assetID: id, checksum: checksum, cloudID: string("iCloudId"), createdAt: date("createdAt"), adjustmentTime: date("adjustmentTime"), latitude: number("latitude"), longitude: number("longitude"))
         }
     }
+    /// Every album with its photo count and its users, in three queries however many albums.
     func albums() throws -> [Album] {
-        try database.query("SELECT payload FROM entities WHERE kind='album' ORDER BY json_extract(payload,'$.name') COLLATE NOCASE").compactMap { row in
-            try row[0].map { try albumFromPayload($0) }
+        var counts: [String: Int] = [:]
+        for row in try database.query("SELECT album_id,count(*) FROM album_member GROUP BY album_id") {
+            if let id = row[0] { counts[id] = row[1].flatMap(Int.init) ?? 0 }
+        }
+        let users = try albumUsers(of: nil)
+        return try database.query("SELECT id,payload FROM entities WHERE kind='album' ORDER BY json_extract(payload,'$.name') COLLATE NOCASE").compactMap { row in
+            guard let id = row[0], let payload = row[1] else { return nil }
+            return try albumFromPayload(payload, count: counts[id] ?? 0, users: users[id] ?? [])
         }
     }
     func album(id: String) throws -> Album? {
         guard let text = try database.query("SELECT payload FROM entities WHERE kind='album' AND id=?", [id]).first?[0] else { return nil }
-        return try albumFromPayload(text)
+        let count = try database.query("SELECT count(*) FROM album_member WHERE album_id=?", [id]).first?[0].flatMap(Int.init) ?? 0
+        return try albumFromPayload(text, count: count, users: albumUsers(of: id)[id] ?? [])
     }
-    private func albumFromPayload(_ text: String) throws -> Album {
-        var object = try JSONDecoder().decode([String: EntityJSON].self, from: Data(text.utf8))
-        guard let id = object["id"]?.string else { throw invalidSync() }
-        let count = try database.query("SELECT count(*) FROM entities WHERE kind='albumAsset' AND json_extract(payload,'$.albumId')=?", [id]).first?[0].flatMap(Int.init) ?? 0
-        let users = try database.query("SELECT u.payload,r.payload FROM entities r JOIN entities u ON u.kind='user' AND u.id=json_extract(r.payload,'$.userId') WHERE r.kind='albumUser' AND json_extract(r.payload,'$.albumId')=?", [id]).compactMap { row -> EntityJSON? in
-            guard let user = row[0], let relation = row[1] else { return nil }
-            let r = try JSONDecoder().decode([String: EntityJSON].self, from: Data(relation.utf8))
-            return .object(["user": try JSONDecoder().decode(EntityJSON.self, from: Data(user.utf8)), "role": r["role"] ?? .string("viewer")])
+    /// The users of one album, or of every album, by album.
+    private func albumUsers(of albumID: String?) throws -> [String: [EntityJSON]] {
+        let filter = albumID == nil ? "" : " AND json_extract(r.payload,'$.albumId')=?"
+        var users: [String: [EntityJSON]] = [:]
+        for row in try database.query("SELECT json_extract(r.payload,'$.albumId'),u.payload,json_extract(r.payload,'$.role') FROM entities r JOIN entities u ON u.kind='user' AND u.id=json_extract(r.payload,'$.userId') WHERE r.kind='albumUser'\(filter) ORDER BY r.id",
+                                      albumID.map { [$0] } ?? []) {
+            guard let album = row[0], let user = row[1] else { continue }
+            users[album, default: []].append(.object(["user": try JSONDecoder().decode(EntityJSON.self, from: Data(user.utf8)), "role": .string(row[2] ?? "viewer")]))
         }
+        return users
+    }
+    private func albumFromPayload(_ text: String, count: Int, users: [EntityJSON]) throws -> Album {
+        var object = try JSONDecoder().decode([String: EntityJSON].self, from: Data(text.utf8))
         object["albumName"] = object["name"]; object["albumThumbnailAssetId"] = object["thumbnailAssetId"]
         object["assetCount"] = .integer(Int64(count)); object["shared"] = .bool(users.count > 1); object["albumUsers"] = .array(users)
         return try APIJSON.decoder().decode(Album.self, from: JSONEncoder().encode(object))
@@ -274,50 +255,48 @@ actor IndexReader {
         }
     }
 
-    /// Mirrors GET /map/markers from the synchronized asset, EXIF, partner, and
-    /// album rows. Projection stays limited to the six marker fields.
+    /// Mirrors GET /map/markers from the derived rows, EXIF, partners and albums. Projection stays
+    /// limited to the six marker fields.
     func mapMarkers(_ query: MapMarkerQuery) throws -> [MapMarker] {
         var conditions = [
-            "a.kind='asset'", "e.kind='exif'", "json_extract(e.payload,'$.assetId')=a.id",
-            "json_extract(e.payload,'$.latitude') IS NOT NULL", "json_extract(e.payload,'$.longitude') IS NOT NULL",
-            "json_extract(a.payload,'$.deletedAt') IS NULL"
+            "json_extract(e.payload,'$.latitude') IS NOT NULL", "json_extract(e.payload,'$.longitude') IS NOT NULL", "i.trashed=0"
         ]
         var arguments: [String?] = []
         if query.isArchived == true {
-            conditions.append("(json_extract(a.payload,'$.visibility')='timeline' OR (json_extract(a.payload,'$.ownerId')=? AND json_extract(a.payload,'$.visibility')='archive'))")
+            conditions.append("(i.visibility='timeline' OR (i.owner_id=? AND i.visibility='archive'))")
             arguments.append(userID)
         } else {
-            conditions.append("json_extract(a.payload,'$.visibility')='timeline'")
+            conditions.append("i.visibility='timeline'")
         }
         if let favorite = query.isFavorite {
-            conditions.append("json_extract(a.payload,'$.isFavorite')=CAST(? AS INTEGER)")
+            conditions.append("i.favorite=CAST(? AS INTEGER)")
             arguments.append(favorite ? "1" : "0")
         }
         if let date = query.fileCreatedAfter {
-            conditions.append("julianday(json_extract(a.payload,'$.fileCreatedAt'))>=julianday(?)")
+            conditions.append("i.file_created_at>=julianday(?)")
             arguments.append(date.ISO8601Format())
         }
         if let date = query.fileCreatedBefore {
-            conditions.append("julianday(json_extract(a.payload,'$.fileCreatedAt'))<=julianday(?)")
+            conditions.append("i.file_created_at<=julianday(?)")
             arguments.append(date.ISO8601Format())
         }
-        var scopes = ["json_extract(a.payload,'$.ownerId')=?"]
+        var scopes = ["i.owner_id=?"]
         arguments.append(userID)
         if query.withPartners {
-            scopes.append("EXISTS(SELECT 1 FROM entities p JOIN entities u ON u.kind='user' AND u.id=json_extract(p.payload,'$.sharedById') WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedById')=json_extract(a.payload,'$.ownerId') AND json_extract(p.payload,'$.sharedWithId')=? AND json_extract(u.payload,'$.deletedAt') IS NULL)")
+            scopes.append("i.owner_id IN (SELECT json_extract(p.payload,'$.sharedById') FROM entities p JOIN entities u ON u.kind='user' AND u.id=json_extract(p.payload,'$.sharedById') WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedWithId')=? AND json_extract(u.payload,'$.deletedAt') IS NULL)")
             arguments.append(userID)
         }
         if query.withSharedAlbums {
-            scopes.append("EXISTS(SELECT 1 FROM entities r JOIN entities m ON m.kind='albumUser' AND json_extract(m.payload,'$.albumId')=json_extract(r.payload,'$.albumId') AND json_extract(m.payload,'$.userId')=? JOIN entities b ON b.kind='album' AND b.id=json_extract(r.payload,'$.albumId') WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.assetId')=a.id AND json_extract(b.payload,'$.deletedAt') IS NULL)")
+            scopes.append("i.id IN (SELECT m.asset_id FROM album_member m JOIN entities b ON b.kind='album' AND b.id=m.album_id WHERE json_extract(b.payload,'$.deletedAt') IS NULL AND m.album_id IN (SELECT json_extract(u.payload,'$.albumId') FROM entities u WHERE u.kind='albumUser' AND json_extract(u.payload,'$.userId')=?))")
             arguments.append(userID)
         }
         conditions.append("(" + scopes.joined(separator: " OR ") + ")")
         let rows = try database.query("""
-        SELECT a.id,json_extract(e.payload,'$.latitude'),json_extract(e.payload,'$.longitude'),
+        SELECT i.id,json_extract(e.payload,'$.latitude'),json_extract(e.payload,'$.longitude'),
                json_extract(e.payload,'$.city'),json_extract(e.payload,'$.state'),json_extract(e.payload,'$.country')
-        FROM entities a JOIN entities e ON e.kind='exif' AND json_extract(e.payload,'$.assetId')=a.id
+        FROM asset_index i JOIN entities e ON e.kind='exif' AND e.id=i.id
         WHERE \(conditions.joined(separator: " AND "))
-        ORDER BY julianday(json_extract(a.payload,'$.fileCreatedAt')) DESC,a.id
+        ORDER BY i.file_created_at DESC,i.id
         """, arguments)
         return rows.compactMap { row in
             guard let id = row[0], let latitude = row[1].flatMap(Double.init), let longitude = row[2].flatMap(Double.init) else { return nil }
@@ -356,54 +335,52 @@ actor IndexReader {
         if let stackID = object["stackId"]?.string, let data = try entityData(kind: "stack", id: stackID) {
             let stack = try JSONDecoder().decode([String: EntityJSON].self, from: data)
             if let primary = stack["primaryAssetId"]?.string {
-                let count = try database.query("SELECT count(*) FROM entities WHERE kind='asset' AND json_extract(payload,'$.stackId')=?", [stackID]).first?[0].flatMap(Int.init) ?? 0
+                // Counted as the server counts a stack: its photos in the timeline, not in the trash.
+                let count = try database.query("SELECT count(*) FROM entities WHERE kind='asset' AND json_extract(payload,'$.stackId')=? AND json_extract(payload,'$.deletedAt') IS NULL AND json_extract(payload,'$.visibility')='timeline'", [stackID]).first?[0].flatMap(Int.init) ?? 0
                 asset.stack = .init(id: stackID, primaryAssetId: primary, assetCount: count)
             }
         }
         return asset
     }
-    private func timelinePredicate(_ filter: TimelineFilter) -> (String, [String?]) {
-        var conditions = ["a.kind='asset'", "json_extract(a.payload,'$.visibility')!='locked'"]
+    /// A feed's conditions on asset_index `i`. Membership comes from album_member and
+    /// person_member, each read once rather than per photo.
+    private func feedPredicate(_ filter: TimelineFilter) -> (String, [String?]) {
+        var conditions = ["i.visibility!='locked'"]
         var values: [String?] = []
-        if let visibility = filter.visibility { conditions.append("json_extract(a.payload,'$.visibility')=?"); values.append(visibility.rawValue) }
-        else { conditions.append("json_extract(a.payload,'$.visibility') IN ('timeline','archive')") }
-        conditions.append("json_extract(a.payload,'$.deletedAt') IS \(filter.isTrashed == true ? "NOT " : "")NULL")
-        if let favorite = filter.isFavorite { conditions.append("json_extract(a.payload,'$.isFavorite')=CAST(? AS INTEGER)"); values.append(favorite ? "1" : "0") }
-        if let developed = filter.isDeveloped {
-            conditions.append("COALESCE(json_extract(a.payload,'$.isDeveloped'),0)=CAST(? AS INTEGER)"); values.append(developed ? "1" : "0")
-        }
+        if let visibility = filter.visibility { conditions.append("i.visibility=?"); values.append(visibility.rawValue) }
+        else { conditions.append("i.visibility IN ('timeline','archive')") }
+        conditions.append("i.trashed=\(filter.isTrashed == true ? 1 : 0)")
+        if let favorite = filter.isFavorite { conditions.append("i.favorite=CAST(? AS INTEGER)"); values.append(favorite ? "1" : "0") }
+        if let developed = filter.isDeveloped { conditions.append("i.developed=CAST(? AS INTEGER)"); values.append(developed ? "1" : "0") }
         if let album = filter.albumID {
-            conditions.append("a.id IN (SELECT json_extract(r.payload,'$.assetId') FROM entities r WHERE r.kind='albumAsset' AND json_extract(r.payload,'$.albumId')=?)"); values.append(album)
+            conditions.append("i.id IN (SELECT asset_id FROM album_member WHERE album_id=?)"); values.append(album)
         }
         if let person = filter.personID {
-            // Materialize membership once. Correlating a JSON expression with
-            // the TEXT asset ID defeats SQLite's expression index affinity.
-            conditions.append("a.id IN (SELECT json_extract(f.payload,'$.assetId') FROM entities f WHERE f.kind='face' AND json_extract(f.payload,'$.personId')=? AND json_extract(f.payload,'$.deletedAt') IS NULL AND json_extract(f.payload,'$.isVisible')=1)"); values.append(person)
+            conditions.append("i.id IN (SELECT asset_id FROM person_member WHERE person_id=?)"); values.append(person)
         }
         if let place = filter.place {
             // One parameter however many photos the place holds. They came from this account's
             // own map, so they need no owner check.
-            conditions.append("a.id IN (SELECT value FROM json_each(?))")
+            conditions.append("i.id IN (SELECT value FROM json_each(?))")
             values.append(String(decoding: (try? JSONEncoder().encode(place.assetIDs)) ?? Data("[]".utf8), as: UTF8.self))
         }
         if (filter.albumID == nil && filter.place == nil) || filter.userID != nil {
-            var owners = ["json_extract(a.payload,'$.ownerId')=?"]
+            var owners = ["i.owner_id=?"]
             values.append(filter.userID ?? userID)
             if filter.withPartners {
-                owners.append("EXISTS(SELECT 1 FROM entities p WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedById')=json_extract(a.payload,'$.ownerId') AND json_extract(p.payload,'$.sharedWithId')=?\(filter.personID == nil ? " AND json_extract(p.payload,'$.inTimeline')=1" : ""))")
+                owners.append("i.owner_id IN (SELECT json_extract(p.payload,'$.sharedById') FROM entities p WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedWithId')=?\(filter.personID == nil ? " AND json_extract(p.payload,'$.inTimeline')=1" : ""))")
                 values.append(userID)
             }
             if filter.personID != nil {
-                owners.append("a.id IN (SELECT json_extract(r.payload,'$.assetId') FROM entities r JOIN entities u ON u.kind='albumUser' AND json_extract(u.payload,'$.albumId')=json_extract(r.payload,'$.albumId') AND json_extract(u.payload,'$.userId')=? WHERE r.kind='albumAsset')")
+                owners.append("i.id IN (SELECT m.asset_id FROM album_member m WHERE m.album_id IN (SELECT json_extract(u.payload,'$.albumId') FROM entities u WHERE u.kind='albumUser' AND json_extract(u.payload,'$.userId')=?))")
                 values.append(userID)
             }
             conditions.append("(" + owners.joined(separator: " OR ") + ")")
         }
         if filter.withStacked {
-            conditions.append("NOT EXISTS(SELECT 1 FROM entities s WHERE s.kind='stack' AND s.id=json_extract(a.payload,'$.stackId') AND json_extract(s.payload,'$.primaryAssetId')!=a.id)")
+            conditions.append("(i.stack_id IS NULL OR NOT EXISTS(SELECT 1 FROM entities s WHERE s.kind='stack' AND s.id=i.stack_id AND json_extract(s.payload,'$.primaryAssetId')!=i.id))")
         }
         return (conditions.joined(separator: " AND "), values)
     }
     private func metadata(_ key: String) throws -> String? { try database.query("SELECT value FROM metadata WHERE key=?", [key]).first?[0] }
-    private func invalidSync() -> APIError { .invalidResponse("The server sent an invalid synchronization record. Your saved cursor was not advanced.") }
 }
