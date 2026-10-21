@@ -248,6 +248,21 @@ import XCTest
         await TimelineCache.shared.removeAll(scope: scope); await TimelinePlacesCache.shared.removeAll(scope: scope)
     }
 
+    func testADeletedPhotoLeavesTheFeedBeforeTheServerConfirms() async throws {
+        let bucket = "2026-01-01T00:00:00Z"
+        let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "a"), Asset(id: "b"), Asset(id: "c")])
+        let store = LibraryStore(api: api)
+        await store.reload()
+        try await until("The timeline did not load.") { store.loaded[bucket]?.count == 3 }
+
+        store.removeLocally(["b"])
+        XCTAssertEqual(store.sections.first?.count, 2)
+        XCTAssertEqual([0, 1].compactMap { store.asset(section: 0, item: $0)?.id }, ["a", "c"])
+        store.removeLocally(["a", "c"])
+        XCTAssertTrue(store.sections.isEmpty, "A month with nothing left goes.")
+        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
     func testFilterKeepsLoadedFeedUntilReplacementBucketCommits() async throws {
         let bucket = "2026-01-01T00:00:00Z"
         let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "old-a"), Asset(id: "old-b")],

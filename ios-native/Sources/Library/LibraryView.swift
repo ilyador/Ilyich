@@ -212,7 +212,7 @@ struct LibraryView: View {
             } message: { Text(errorMessage) }
             .confirmationDialog(features?.trash == false ? "Permanently delete \(store.selected.count) items?" : "Move \(store.selected.count) items to Trash?", isPresented: alertShown { $0 == .confirm(.deleteSelection) }, titleVisibility: .visible) {
                 Button(features?.trash == false ? "Delete permanently" : "Move to Trash", role: .destructive) {
-                    runSelection { ids in try await api.trashAssets(ids: ids, permanently: features?.trash == false) }
+                    runSelection { ids in try await api.trashAssets(ids: ids, permanently: features?.trash == false); store.removeLocally(Set(ids)) }
                 }
             } message: { Text(features?.trash == false ? "This cannot be undone. Photos on your phone are kept." : "This changes the server library. Photos on your phone are kept.") }
             .confirmationDialog("Sign out of Ilyich?", isPresented: alertShown { $0 == .confirm(.signOut) }, titleVisibility: .visible) {
@@ -286,7 +286,7 @@ struct LibraryView: View {
     private func assetViewer(_ asset: Asset, transition: ViewerTransitionState, close: @escaping () -> Void) -> some View {
         // Exploring the photo's place closes the viewer, then raises the Earth turned to it.
         AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
-                    onUpdated: store.update, onDeleted: { Task { await store.refreshAfterMutation() } },
+                    onUpdated: store.update, onDeleted: { store.removeLocally([transition.currentID]); Task { await store.refreshAfterMutation() } },
                     albumID: navigator.viewerRoute?.albumContext ?? store.timelineFilter.albumID,
                     matchedLocalPhotos: store.matchingDevicePhotos, onExploreLocation: { navigator.send(.exploreLocation($0)) },
                     transition: transition, onClose: close)

@@ -964,6 +964,28 @@ extension APIClient: LibraryAPI {}
         updateMergedEntries()
         revision += 1
     }
+    /// Takes photos out of the feed at once, before the server's refresh confirms it, so a deleted
+    /// photo can't be opened while that is on its way.
+    func removeLocally(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        originalTimeline = nil
+        results.removeAll { ids.contains($0.id) }
+        var removed: [String: Int] = [:]
+        for key in Array(loaded.keys) {
+            let before = loaded[key]?.count ?? 0
+            loaded[key]?.removeAll { ids.contains($0.id) }
+            let gone = before - (loaded[key]?.count ?? 0)
+            if gone > 0 { removed[key] = gone }
+        }
+        if !removed.isEmpty {
+            remoteBuckets = remoteBuckets.compactMap { bucket in
+                guard let gone = removed[bucket.id] else { return bucket }
+                return bucket.count > gone ? TimeBucket(timeBucket: bucket.timeBucket, count: bucket.count - gone) : nil
+            }
+            updateSections()
+        }
+        revision += 1
+    }
     func refreshAfterMutation() async {
         originalTimeline = nil
         do {
