@@ -158,7 +158,8 @@ enum Legacy {
     // MARK: Share inbox
 
     /// <AppGroup>/ShareInbox/<batch>/manifest.json, version 1, written by SharedInbox.save from
-    /// the Share extension and again after each upload. File URLs are absolute.
+    /// the Share extension and again after each upload, in builds before rebuild milestone W3.
+    /// File URLs are absolute. Version 2 (ShareManifest) keeps every key, so this reads it too.
     struct SharedBatch: Codable, Sendable {
         let id: UUID
         let createdAt: Date

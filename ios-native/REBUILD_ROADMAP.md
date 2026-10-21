@@ -929,7 +929,7 @@ App side: WidgetRefreshCoordinator (typed changes, 60 s debounce, skipped in the
 ### B10 — Retire legacy backup formats
 
 - **Workstreams:** 2, 3. **Depends on:** B9. **Risk:** medium.
-- **Scope:** Gates: at least 7 days on device, inventory shows zero legacy descriptors, and the owner confirms no older build will be reinstalled. Then delete LegacyBackupImporter, the backup mirrors in LegacyFormats, legacy descriptor and outcome decoding, the state.json.imported files and unreferenced legacy stage folders. An unexpected legacy descriptor is cancelled and logged.
+- **Scope:** Gates: at least 7 days on device, inventory shows zero legacy descriptors, and the owner confirms no older build will be reinstalled. Then delete LegacyBackupImporter, the backup mirrors in LegacyFormats, legacy descriptor and outcome decoding, the state.json.imported files and unreferenced legacy stage folders. Also retire W3's share-manifest v1 reader and stop writing the v1 url keys in v2 manifests, once no v1 manifest remains. An unexpected legacy descriptor is cancelled and logged.
 - **Migration:** Irreversible deletion of state.json.imported, behind the gates above.
 - **Tests:**
   - RecoveryTests on v2 only
@@ -953,7 +953,7 @@ App side: WidgetRefreshCoordinator (typed changes, 60 s debounce, skipped in the
 - Background URLSession identifiers Bundle.main.bundleIdentifier + .backup and .share-upload (on the phone app.alextran.immich.H4K2MSF2SG.*), and task descriptors. Identifiers UNCHANGED. Legacy {id, receipt} descriptors adopted by ID (B5, B6). v2 descriptors written from B9. Legacy decoding removed in B10 once none remain.
 - BGTask identifiers app.ilyich.native.backup.processing and app.ilyich.native.backup.refresh, and UIBackgroundModes. KEEP. A coverage identifier is added only if the owner approves.
 - Transfer notifications transfer.<UUID> and the terminal replay state. MIGRATE from state.json into notification_batches (B1, B9); IDs reused.
-- Share inbox. <AppGroup>/ShareInbox/<batch>/manifest.json plus files and <identity>.multipart and .receipt. v1 READ; new batches WRITTEN as v2 with relative names (W3). Upload identity derivation unchanged. Manifest-less folders collected after 24 h.
+- Share inbox. <AppGroup>/ShareInbox/<batch>/manifest.json plus files and <identity>.multipart and .receipt. v1 READ; new batches WRITTEN as v2 with relative names (W3). v2 keeps every v1 key, so a rolled-back build still reads it; readers since W3 use only the names. Upload identity derivation unchanged. Manifest-less folders collected after 24 h.
 - Transfers database. Application Support/IlyichTransfers/<digest>.sqlite. NEW in B1, in the private container (never the app group), excluded from iCloud backup. Holds jobs, attempts, receipts and the rest.
 - Device database. Application Support/IlyichDevice/device.sqlite. NEW in P1 (mutation journal); fingerprints added in P5.
 - Fingerprint cache. Caches/IlyichFingerprints/<digest>.json. IMPORTED into device_fingerprint, then deleted (P5).

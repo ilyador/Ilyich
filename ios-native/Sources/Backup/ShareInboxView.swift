@@ -1,3 +1,4 @@
+import IlyichShareInbox
 import SwiftUI
 
 struct ShareInboxView: View {
@@ -23,6 +24,7 @@ struct ShareInboxView: View {
                             .disabled(selection.isEmpty || api.isReadOnly)
                     }
                     if let error = inbox.error { Text(error).foregroundStyle(.red) }
+                    if inbox.unreadableBatches > 0 { Text("Some shared files couldn’t be read and aren’t listed.").foregroundStyle(.red) }
                     if api.isReadOnly { Text("Turn off Read-only mode in Settings to upload.").foregroundStyle(.secondary) }
                 }
                 if inbox.batches.isEmpty {
@@ -54,7 +56,7 @@ struct ShareInboxView: View {
                 Button("Discard copies", role: .destructive) { if let discard { inbox.discard(discard) }; discard = nil }
             } message: { Text("Originals in Photos and the source app stay unchanged.") }
             .task {
-                inbox.refresh()
+                await inbox.refresh()
                 selection = Set(inbox.batches.flatMap { $0.attachments.map(\.id) })
                 while !Task.isCancelled {
                     await inbox.refreshProgress()

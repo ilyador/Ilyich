@@ -1,6 +1,7 @@
 import SwiftUI
 import Photos
 import IlyichPlatform
+import IlyichShareInbox
 
 struct LocalPhotoActionsView: View {
     let photos: [LocalPhoto]

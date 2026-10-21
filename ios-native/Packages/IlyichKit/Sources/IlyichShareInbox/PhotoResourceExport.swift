@@ -1,11 +1,24 @@
-import Foundation
 import CryptoKit
+import Foundation
 import Network
 @preconcurrency import Photos
 
-/// PhotoKit streams on its own serial queue. A lock also covers cancellation,
-/// which can arrive before PhotoKit has returned the request identifier.
-final class PhotoResourceExport: @unchecked Sendable {
+/// Streams one PhotoKit resource to a file, or hashes it. PhotoKit streams on its own serial
+/// queue. A lock also covers cancellation, which can arrive before PhotoKit has returned the
+/// request identifier.
+public final class PhotoResourceExport: @unchecked Sendable {
+    /// Why an export waits rather than fails.
+    public enum Deferral: LocalizedError, Sendable {
+        /// The original is in iCloud and cellular downloads are off.
+        case waitingForWiFi
+
+        public var errorDescription: String? {
+            switch self {
+            case .waitingForWiFi: "Waiting for Wi-Fi to download the iCloud original"
+            }
+        }
+    }
+
     private let lock = NSLock()
     private let destination: URL?
     private var hash = Insecure.SHA1()
@@ -17,11 +30,12 @@ final class PhotoResourceExport: @unchecked Sendable {
     private var monitor: NWPathMonitor?
     private var started = false
 
-    init(destination: URL? = nil) { self.destination = destination }
+    /// Without a destination, the resource is only hashed.
+    public init(destination: URL? = nil) { self.destination = destination }
 
     /// The same streamed resource used by backup, with no temporary export or
     /// iCloud network request. A cloud-only resource fails for the caller to skip.
-    @MainActor static func checksum(_ resource: PHAssetResource) async throws -> String {
+    @MainActor public static func checksum(_ resource: PHAssetResource) async throws -> String {
         let reader = PhotoResourceExport()
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = false
@@ -29,9 +43,11 @@ final class PhotoResourceExport: @unchecked Sendable {
         return reader.lock.withLock { Data(reader.hash.finalize()).base64EncodedString() }
     }
 
-    // Resource discovery is main-actor isolated. Keep PhotoKit request setup on
-    // that actor; PhotoKit still streams bytes and hashes on its callback queue.
-    @MainActor func write(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions, allowCellular: Bool = true) async throws {
+    /// Resource discovery is main-actor isolated. Keep PhotoKit request setup on
+    /// that actor; PhotoKit still streams bytes and hashes on its callback queue.
+    /// With network access and `allowCellular` off, an iCloud download waits for Wi-Fi: the
+    /// export throws `Deferral.waitingForWiFi` while the phone is on cellular or offline.
+    @MainActor public func write(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions, allowCellular: Bool = true) async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 begin(resource, options: options, allowCellular: allowCellular, continuation: continuation)
@@ -56,7 +72,7 @@ final class PhotoResourceExport: @unchecked Sendable {
             self.monitor = monitor
             monitor.pathUpdateHandler = { path in
                 if path.status != .satisfied || path.isExpensive || path.usesInterfaceType(.cellular) {
-                    self.finish(BackupDeferral.waitingForWiFi, cancelRequest: true)
+                    self.finish(Deferral.waitingForWiFi, cancelRequest: true)
                 } else { self.startRequest(resource, options: options) }
             }
             lock.unlock()

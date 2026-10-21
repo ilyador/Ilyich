@@ -1,4 +1,5 @@
 import Foundation
+import IlyichShareInbox
 @preconcurrency import Photos
 import UniformTypeIdentifiers
 
@@ -189,7 +190,8 @@ enum BackupError: LocalizedError {
                   details.code == PHPhotosError.networkAccessRequired.rawValue else { throw error }
             try Task.checkCancellation()
             options.isNetworkAccessAllowed = true
-            try await PhotoResourceExport(destination: destination).write(resource, options: options, allowCellular: allowCellular)
+            do { try await PhotoResourceExport(destination: destination).write(resource, options: options, allowCellular: allowCellular) }
+            catch PhotoResourceExport.Deferral.waitingForWiFi { throw BackupDeferral.waitingForWiFi }
         }
         try Task.checkCancellation()
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: destination.path)
