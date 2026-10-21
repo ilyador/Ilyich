@@ -153,6 +153,60 @@ import XCTest
         XCTAssertNil(pipeline.cachedImage(for: locked, pixelSize: 8), "Nor remembered.")
     }
 
+    /// Work asked for before a photo was locked, still waiting for its request when the lock
+    /// lands, neither downloads nor keeps anything: not a grid thumbnail, not the warmer's, not a
+    /// preview. A request made after the lock is served as before.
+    func testMediaAskedForBeforeALockIsNotKept() async throws {
+        let server = makeStubServer()
+        server.route("GET", "assets/locked/thumbnail", StubServer.Response(status: 200, headers: ["Content-Type": "image/png", "Cache-Control": "max-age=86400"], body: png))
+        let (_, pipeline) = try makePipeline(server: server)
+        let locked = Asset(id: "locked", mediaRevision: "r1")
+        let token = pipeline.mediaToken()
+
+        await pipeline.forget(assetIDs: ["locked"], revoked: true)
+        _ = try? await pipeline.image(for: locked, pixelSize: 8, token: token)
+        try? await pipeline.storeThumbnail(locked, token: token)
+        _ = try? await pipeline.image(for: locked, size: .preview, pixelSize: 8, token: token)
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertTrue(server.requests("GET", "assets/locked/thumbnail").isEmpty, "Nothing is downloaded.")
+        XCTAssertFalse(pipeline.hasStoredThumbnail(locked), "No thumbnail is stored.")
+        XCTAssertNil(pipeline.cachedImage(for: locked, pixelSize: 8), "None is remembered.")
+        XCTAssertNil(pipeline.latestImage(assetID: locked.id, size: .preview), "No preview is remembered.")
+        let held = try await pipeline.urlCacheHolds(locked, size: .preview)
+        XCTAssertFalse(held, "No preview is in the URL cache.")
+
+        try await pipeline.storeThumbnail(locked, token: pipeline.mediaToken())
+        // The file is written just after the bytes are handed back.
+        let stored = Date().addingTimeInterval(5)
+        while !pipeline.hasStoredThumbnail(locked) && Date() < stored { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(pipeline.hasStoredThumbnail(locked), "A request made after the lock is stored, as for a photo unlocked again.")
+    }
+
+    /// A preview whose download was under way when its photo was deleted is not remembered and
+    /// does not stay in the URL cache.
+    func testPreviewFinishingAfterDeletionIsNotKept() async throws {
+        let server = makeStubServer()
+        let gate = StubServer.Gate()
+        server.route("GET", "assets/gone/thumbnail", StubServer.Response(status: 200, headers: ["Content-Type": "image/png", "Cache-Control": "max-age=86400"], body: png).waiting(for: gate))
+        let (_, pipeline) = try makePipeline(server: server)
+        let gone = Asset(id: "gone", mediaRevision: "r1")
+        let download = Task { try await pipeline.image(for: gone, size: .preview, pixelSize: 8) }
+        let deadline = Date().addingTimeInterval(5)
+        while server.requests("GET", "assets/gone/thumbnail").isEmpty && Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(server.requests("GET", "assets/gone/thumbnail").count, 1, "The download started.")
+
+        // A deletion leaves previews in flight running; only the fence keeps them out.
+        await pipeline.forget(assetIDs: ["gone"])
+        gate.open()
+        let result = try? await download.value
+
+        XCTAssertNil(result, "The finished preview is refused.")
+        XCTAssertNil(pipeline.latestImage(assetID: gone.id, size: .preview), "It is not remembered.")
+        let held = try await pipeline.urlCacheHolds(gone, size: .preview)
+        XCTAssertFalse(held, "Nor left in the URL cache.")
+    }
+
     /// More than 2,000 photos (2,100 here) deleted on the server in one pass all lose their thumbnails, and
     /// the photo left keeps its own.
     func testMoreThan2000DeletionsAreAllForgotten() async throws {
