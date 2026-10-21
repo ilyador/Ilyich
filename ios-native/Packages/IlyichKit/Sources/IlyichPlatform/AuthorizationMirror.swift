@@ -5,7 +5,8 @@ import Foundation
 /// generation: it moves when read-only mode is turned on or off and when the session ends, and
 /// never repeats on the phone. A reader must not write unless the mirror still shows the digest
 /// and epoch its work started under; no value, another digest or another epoch fails closed.
-/// Sign-out publishes an empty digest.
+/// Sign-out publishes an empty digest. Beside them the app keeps its access epoch, which no
+/// extension reads.
 public struct AuthorizationMirror: Sendable {
     public struct Value: Equatable, Sendable {
         public let digest: String
@@ -19,6 +20,7 @@ public struct AuthorizationMirror: Sendable {
 
     static let digestKey = "account.digest"
     static let epochKey = "account.authorizationEpoch"
+    static let accessEpochKey = "account.accessEpoch"
     private let suiteName: String
 
     /// The mirror in an App Group's preferences.
@@ -40,5 +42,17 @@ public struct AuthorizationMirror: Sendable {
         guard let defaults = UserDefaults(suiteName: suiteName) else { return }
         defaults.set(value.digest, forKey: Self.digestKey)
         defaults.set(NSNumber(value: value.epoch), forKey: Self.epochKey)
+    }
+
+    /// The app's access epoch for the account `read()` names, kept beside the write generation so
+    /// that a relaunch goes on from both and neither repeats. Only the app reads it.
+    public func accessEpoch() -> UInt64? {
+        guard let defaults = UserDefaults(suiteName: suiteName) else { return nil }
+        return (defaults.object(forKey: Self.accessEpochKey) as? NSNumber)?.uint64Value
+    }
+
+    public func keepAccessEpoch(_ epoch: UInt64) {
+        guard let defaults = UserDefaults(suiteName: suiteName) else { return }
+        defaults.set(NSNumber(value: epoch), forKey: Self.accessEpochKey)
     }
 }

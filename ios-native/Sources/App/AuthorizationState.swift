@@ -8,7 +8,7 @@ import Synchronization
 /// and upload delegates read. Its generations come from one counter, so two of them are never
 /// equal by accident:
 /// - the access epoch moves when access to some photos is lost or the library is reset. It fences
-///   reads and what is kept of them;
+///   reads and what is kept of them, on disk too, so the mirror keeps it for the next launch;
 /// - the write generation moves on every read-only toggle. It fences writes and uploads, and the
 ///   mirror carries it;
 /// - both move when the session ends.
@@ -33,20 +33,33 @@ final class AuthorizationState: Sendable {
         var observers: [UUID: AsyncStream<AuthorizationSnapshot>.Continuation] = [:]
     }
 
-    /// The state of a session opened with `token`, which `mirror` then names. The generations go
-    /// on from the one the mirror holds, so none is reused on this phone: the same account keeps
-    /// it, as a relaunch changes nothing, and any other account starts after it.
+    /// The state of a session opened with `token`, which `mirror` then names. The mirror keeps the
+    /// write generation and the access epoch whenever either moves, and the generations go on from
+    /// them, so neither repeats on this phone: the same account keeps both, as a relaunch changes
+    /// nothing, and any other account starts after every generation given out before. The
+    /// private epoch fences only what is held in memory, so it starts there too.
     init(account: AccountID, token: String, readOnly: Bool, requiresPasswordChange: Bool, mirror: AuthorizationMirror?) {
-        let published = mirror?.read()
-        let start: UInt64 = if let published { published.digest == account.digest ? max(published.epoch, 1) : published.epoch &+ 1 } else { 1 }
+        let published = mirror?.read(), kept = mirror?.accessEpoch()
+        let write: UInt64, access: UInt64
+        if let published, published.digest == account.digest {
+            write = max(published.epoch, 1)
+            // With no access epoch kept, nothing says which one was current: a new one is safe.
+            access = kept ?? (write &+ 1)
+        } else {
+            write = max(published?.epoch ?? 0, kept ?? 0) &+ 1
+            access = write
+        }
+        let counter = max(write, access)
         let tokenDigest = SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
-        let snapshot = AuthorizationSnapshot(epoch: AuthorizationEpoch(account: account, value: start), writeGeneration: start, privateEpoch: start,
+        let snapshot = AuthorizationSnapshot(epoch: AuthorizationEpoch(account: account, value: access), writeGeneration: write, privateEpoch: counter,
                                              tokenDigest: tokenDigest, readOnly: readOnly, requiresPasswordChange: requiresPasswordChange,
                                              lockedFolderUnlocked: false)
         self.account = account
         self.mirror = mirror
-        state = Mutex(State(snapshot: snapshot, counter: start))
-        mirror?.publish(.init(digest: account.digest, epoch: start))
+        state = Mutex(State(snapshot: snapshot, counter: counter))
+        // The access epoch first: until the digest names this account, a relaunch starts afresh.
+        mirror?.keepAccessEpoch(access)
+        mirror?.publish(.init(digest: account.digest, epoch: write))
     }
 
     var snapshot: AuthorizationSnapshot { state.withLock { $0.snapshot } }
@@ -63,7 +76,7 @@ final class AuthorizationState: Sendable {
     /// refused, and the mirror says so. Setting it to what it already is changes nothing.
     @discardableResult
     func setReadOnly(_ enabled: Bool) -> AuthorizationSnapshot {
-        change(mirrored: true) { snapshot, next in
+        change(moving: .writeGeneration) { snapshot, next in
             guard snapshot.readOnly != enabled else { return false }
             snapshot.readOnly = enabled
             snapshot.writeGeneration = next
@@ -72,10 +85,11 @@ final class AuthorizationState: Sendable {
     }
 
     /// Access to some photos was lost, or the library was reset: what was read or kept before
-    /// may show what the account can no longer see. Writes are unaffected.
+    /// may show what the account can no longer see. Writes are unaffected, and the mirror the
+    /// extensions read stays; the new access epoch is kept beside it for the next launch.
     @discardableResult
     func accessChanged() -> AuthorizationSnapshot {
-        change(mirrored: false) { snapshot, next in
+        change(moving: .accessEpoch) { snapshot, next in
             snapshot.epoch = AuthorizationEpoch(account: account, value: next)
             return true
         }
@@ -95,6 +109,7 @@ final class AuthorizationState: Sendable {
                 return (state.counter, Array(state.observers.values))
             }
             guard let ended else { return }
+            mirror?.keepAccessEpoch(ended.generation)
             mirror?.publish(.init(digest: "", epoch: ended.generation))
             // Finishing runs each stream's termination handler, which takes the snapshot's lock.
             for observer in ended.observers { observer.finish() }
@@ -115,9 +130,12 @@ final class AuthorizationState: Sendable {
         return stream
     }
 
-    /// Applies `update` with the next generation, if it changes anything, and tells the mirror
-    /// when the write generation moved.
-    private func change(mirrored: Bool, _ update: (inout AuthorizationSnapshot, UInt64) -> Bool) -> AuthorizationSnapshot {
+    /// The generation a change moves, which the mirror then keeps.
+    private enum Moved { case writeGeneration, accessEpoch }
+
+    /// Applies `update` with the next generation, if it changes anything, and has the mirror keep
+    /// the generation it moved.
+    private func change(moving moved: Moved, _ update: (inout AuthorizationSnapshot, UInt64) -> Bool) -> AuthorizationSnapshot {
         changes.withLock { _ in
             let (snapshot, observers, changed) = state.withLock { state -> (AuthorizationSnapshot, [AsyncStream<AuthorizationSnapshot>.Continuation], Bool) in
                 let next = state.counter &+ 1
@@ -126,7 +144,10 @@ final class AuthorizationState: Sendable {
                 return (state.snapshot, Array(state.observers.values), true)
             }
             guard changed else { return snapshot }
-            if mirrored { mirror?.publish(.init(digest: account.digest, epoch: snapshot.writeGeneration)) }
+            switch moved {
+            case .writeGeneration: mirror?.publish(.init(digest: account.digest, epoch: snapshot.writeGeneration))
+            case .accessEpoch: mirror?.keepAccessEpoch(snapshot.epoch.value)
+            }
             for observer in observers { observer.yield(snapshot) }
             return snapshot
         }

@@ -115,11 +115,6 @@ struct BackupClientCache {
     private var generation = UUID()
     private var lastProgress: (id: Int, time: Date, sent: Int64)?
     private var clients = BackupClientCache()
-    /// Read-only mode stopped a backup that goes on when it is turned off, and whether that run
-    /// retried earlier failures.
-    private var resumesAfterReadOnly: Bool?
-    /// Whether the run being started or under way retries earlier failures.
-    private var runRetriesFailures = false
 
     /// The signed-in account's read-only flag, which SessionStore sets before it pauses backup.
     private var isReadOnly: Bool { saved.map { ReadOnlyPolicy.isEnabled(server: $0.server, userID: $0.userID) } ?? false }
@@ -151,8 +146,9 @@ struct BackupClientCache {
             error = state.error; refreshCounts(); refreshLibrary()
             BackupLifecycle.shared.configure()
             if state.transferNotification?.terminalFailures != nil { await replayFinishedTransferNotification() }
-            // A backup that was running when read-only mode came on goes on once it is turned off.
-            if !state.paused, !state.queue.isEmpty, isReadOnly { resumesAfterReadOnly = resumesAfterReadOnly ?? false }
+            // A backup still marked running under read-only mode: the app ended before the pause
+            // that turning it on makes was saved. That pause is made now.
+            if !state.paused, !state.queue.isEmpty, isReadOnly { await pause() }
             else if !state.paused, !state.queue.isEmpty {
                 if state.transferNotification == nil {
                     state.transferNotification = BackupTransferNotification(id: UUID(), total: state.queue.count)
@@ -191,9 +187,8 @@ struct BackupClientCache {
     func start(retryFailures: Bool = true) async {
         await activate()
         guard saved != nil, directory != nil, !isRunning, stopping == nil else { return }
-        // Asked for while read-only mode is on: it starts when read-only mode is turned off.
-        guard !isReadOnly else { resumesAfterReadOnly = resumesAfterReadOnly ?? retryFailures; return }
-        runRetriesFailures = retryFailures
+        // Nothing is uploaded while read-only mode is on; every control that starts backup is off.
+        guard !isReadOnly else { return }
         guard BackupLifecycle.shared.conditionsPermitBackup(requireCharging: preferences.requireCharging) else {
             activity = preferences.requireCharging ? "Waiting for charging and a cool device" : "Waiting for the device to cool down"
             return
@@ -246,8 +241,7 @@ struct BackupClientCache {
     }
 
     func pause(disableAutomatic: Bool = true) async {
-        // Pausing by hand, or for sign-out, also forgets a resume that read-only mode set up.
-        if disableAutomatic { preferences.automatic = false; state.preferences = preferences; resumesAfterReadOnly = nil }
+        if disableAutomatic { preferences.automatic = false; state.preferences = preferences }
         if let stopping {
             await stopping.value
             if disableAutomatic, let id = state.transferNotification?.id {
@@ -279,26 +273,6 @@ struct BackupClientCache {
         await stopping.value
     }
 
-    /// Read-only mode came on. Uploading stops at once, as with Pause, but automatic backup stays
-    /// on, and a backup that was running goes on with the photo it was on once read-only mode is
-    /// turned off. The photo being sent is sent again from its staged copy: its checksum check
-    /// finds it on the server if it got there, so it is neither lost nor uploaded twice.
-    func pauseForReadOnly() async {
-        if stopping == nil, isRunning || !state.paused { resumesAfterReadOnly = resumesAfterReadOnly ?? runRetriesFailures }
-        await pause(disableAutomatic: false)
-    }
-
-    /// Read-only mode was turned off: the backup it stopped goes on, and automatic backup runs as
-    /// after any other change.
-    func resumeAfterReadOnly() async {
-        if let stopping { await stopping.value }
-        guard !isReadOnly else { return }
-        guard let retryFailures = resumesAfterReadOnly else { BackupLifecycle.shared.foregroundChanged(); return }
-        resumesAfterReadOnly = nil
-        // Finding new photos can take a while; the run is the coordinator's, which Pause stops.
-        Task { await start(retryFailures: retryFailures) }
-    }
-
     /// Stops outgoing requests before the caller deletes the shared credentials.
     func disconnect() async {
         ShareInboxStore.shared.cancel()
@@ -311,7 +285,7 @@ struct BackupClientCache {
 
     func startAutomatically() async {
         await activate()
-        // Read-only mode holds automatic backup quietly; turning it off starts it again.
+        // Nothing is uploaded while read-only mode is on.
         guard preferences.automatic, !isRunning, state.error == nil, !isReadOnly else { return }
         await start(retryFailures: false)
     }
@@ -516,7 +490,6 @@ struct BackupClientCache {
             // Read-only mode came on mid-run, before its pause stopped this one: the pause takes
             // over, with the photo it was on kept for later and no failure to show.
             guard generation == runID else { return }
-            resumesAfterReadOnly = resumesAfterReadOnly ?? retryFailures
             activity = "Backup paused"; state.paused = true
             try? persist()
         }
