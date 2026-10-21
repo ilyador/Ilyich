@@ -134,6 +134,23 @@ final class SharedInboxTests: XCTestCase {
         XCTAssertFalse(exists(repository.folder(for: healthyID)))
     }
 
+    /// Screens read `batches` straight after `await refresh()`: Shared files selects every file
+    /// in it, and the immich://share link marks its batches seen. So a refresh returns with the
+    /// read it made, even while another refresh, from coming forward or the upload worker, is
+    /// still reading.
+    @MainActor func testRefreshReturnsWithItsReadWhileAnotherOverlaps() async throws {
+        let repository = ShareInboxRepository(root: root)
+        let store = ShareInboxStore(repository: repository)
+        let id = UUID()
+        try await repository.save(SharedBatch(id: id, createdAt: Date(), attachments: [photo("photo", in: try makeFolder(id, names: ["photo"]))]))
+        // It starts reading once this test waits for its own read, which it then follows.
+        let overlapping = Task { await store.refresh() }
+        await store.refresh()
+        XCTAssertEqual(store.batches.map(\.id), [id], "The batch shared before this refresh is listed when it returns.")
+        await overlapping.value
+        XCTAssertEqual(store.batches.map(\.id), [id])
+    }
+
     func testV1ManifestLoadsAndRewritesAsV2() async throws {
         // The golden manifest, written by a build before W3 on a phone whose container had another path.
         let folder = try makeFolder()

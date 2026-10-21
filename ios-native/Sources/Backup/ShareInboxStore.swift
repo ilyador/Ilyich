@@ -20,21 +20,26 @@ import IlyichShareInbox
     private var stopping: Task<Void, Never>?
     private var generation = UUID()
     @ObservationIgnored private var loads = 0
+    @ObservationIgnored private var appliedLoad = 0
     @ObservationIgnored private var inbox: ShareInboxRepository?
 
     init(repository: ShareInboxRepository? = nil) { inbox = repository }
 
-    /// Reads the inbox off the main actor. Only the latest of overlapping reads is kept.
+    /// Reads the inbox off the main actor. Overlapping reads may finish in any order: each is
+    /// applied unless a newer one already was, so `batches` never goes back in time, and when a
+    /// refresh returns it holds a read made after the call (or `error` says why reading failed).
+    /// Callers read `batches` straight after awaiting a refresh.
     func refresh() async {
         loads += 1
         let load = loads
         do {
             let states = try await repository().load()
-            guard load == loads else { return }
+            guard load > appliedLoad else { return }
+            appliedLoad = load
             batches = states.compactMap(\.batch)
             unreadableBatches = states.count - batches.count
         } catch {
-            guard load == loads else { return }
+            guard load > appliedLoad else { return }
             self.error = "Shared files couldn’t be read: \(error.localizedDescription)"
         }
     }
