@@ -155,7 +155,6 @@ import XCTest
         let server = makeStubServer()
         server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
         server.route("POST", "sessions", .json(#"{"id":"cast-1","token":"cast-token","expiresAt":"2099-01-01T00:00:00.000Z"}"#))
-        server.route("HEAD", "assets/photo-1/thumbnail", StubServer.Response(status: 200, headers: ["Content-Type": "image/jpeg"]))
         server.route("DELETE", "sessions/cast-1", .empty())
         server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
         let harness = makeHarness(credential("alice", on: server), server: server)
@@ -163,7 +162,7 @@ import XCTest
         harness.credentials.onRemove { seenAtRemoval.withLock { $0 = server.requests.map { $0.method + " " + $0.path } } }
         await harness.manager.restore()
         let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
-        _ = try await runtime.api.prepareCast(asset: Asset(id: "photo-1"))
+        _ = try await runtime.castGrants.grant(covering: 0)
 
         await harness.manager.signOut(.user)
 

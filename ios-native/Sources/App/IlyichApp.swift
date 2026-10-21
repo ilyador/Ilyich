@@ -11,7 +11,7 @@ import SwiftUI
         let session = AccountSession(environment: .current)
         _session = State(initialValue: session)
         BackupLifecycle.shared.setBackgroundPreparation { await session.prepareForBackgroundBackup() }
-        _ = CastController.shared
+        _ = CastSessionService.shared
     }
     var body: some Scene {
         WindowGroup {
@@ -41,6 +41,8 @@ import SwiftUI
             .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }
+            // Cast works for the signed-in account; another account, or none, stops it.
+            .onChange(of: session.runtime?.id, initial: true) { CastSessionService.shared.attach(session.runtime?.cast) }
             .onChange(of: scenePhase, initial: true) { _, phase in session.sceneChanged(phase) }
         }
     }

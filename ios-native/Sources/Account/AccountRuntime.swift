@@ -26,6 +26,8 @@ final class AccountRuntime: Sendable {
     let check: SessionCheck
     /// The account's tasks, cancelled and waited for at shutdown.
     let work: OwnedWork
+    /// The child sessions Cast receivers are given; sign-out revokes them before it logs out.
+    let castGrants: CastGrantStore
     private let device: any AccountDevice
     private let presence: AppPresence
     private let backupStateCopyDelay: Duration
@@ -51,6 +53,9 @@ final class AccountRuntime: Sendable {
     /// Dormant: nothing calls it before the cutover (B9).
     var transferServer: APITransferServer { APITransferServer(client: api) }
 
+    /// What Cast works with for this account.
+    var cast: CastAccount { CastAccount(scope: api.cacheScope, grants: castGrants, resolver: CastMediaResolver(api: api)) }
+
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
                  device: any AccountDevice, presence: AppPresence, backupStateCopyDelay: Duration) {
@@ -64,6 +69,7 @@ final class AccountRuntime: Sendable {
         self.transfers = transfers
         self.check = check
         self.work = work
+        self.castGrants = CastGrantStore(server: api)
         self.device = device
         self.presence = presence
         self.backupStateCopyDelay = backupStateCopyDelay

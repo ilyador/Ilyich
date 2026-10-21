@@ -37,7 +37,6 @@ actor APIClient {
     /// The sessions and the address choice every request of this client goes through.
     nonisolated let transport: ServerTransport
     private nonisolated var connection: ServerConnection { transport.connection }
-    private var castAuthorization: CastAuthorization?
     private var entityStore: EntityStore?
     private var cachedServerFeatures: ServerFeatures?
 
@@ -267,34 +266,6 @@ actor APIClient {
         _ = try await transport.send(.void(.post, "users/profile-image", body: body, contentType: "multipart/form-data; boundary=\(boundary)"))
     }
 
-    func prepareCast(asset: Asset) async throws -> CastMedia {
-        let authorization: CastAuthorization
-        if let saved = castAuthorization, let expiry = saved.expiresAt, expiry > Date().addingTimeInterval(10) { authorization = saved }
-        else {
-            authorization = try await request(.post, path: "sessions", body: CastSessionCreation())
-            castAuthorization = authorization
-        }
-        let path = "assets/\(asset.id)/" + (asset.isVideo ? "video/playback" : "thumbnail")
-        let query: [URLQueryItem] = asset.isVideo ? [] : [.init(name: "size", value: "fullsize"), .init(name: "edited", value: "true"), .init(name: "c", value: asset.cacheRevision)]
-        var mediaRequest = try await authorizedRequest(path: path, query: query)
-        mediaRequest.httpMethod = "HEAD"
-        let (head, response) = try await transport.data(for: mediaRequest)
-        try ServerFailure.check(response, body: head, path: path)
-        let castRequest = try await connection.request(path: path, query: query)
-        guard let mime = response.mimeType, let castURL = castRequest.url, var parts = URLComponents(url: castURL, resolvingAgainstBaseURL: false) else {
-            throw APIError.invalidResponse("The server did not identify this media type for casting.")
-        }
-        parts.queryItems = (parts.queryItems ?? []) + [.init(name: "sessionKey", value: authorization.token)]
-        parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-        guard let url = parts.url else { throw APIError.invalidServerURL }
-        return CastMedia(url: url, contentType: mime)
-    }
-    func revokeCastAuthorization() async {
-        guard let authorization = castAuthorization else { return }
-        castAuthorization = nil
-        try? await requestVoid(.delete, path: "sessions/\(authorization.id)")
-    }
-
     /// Download only on explicit export/share. Keep large originals out of memory.
     func download(asset: Asset, original: Bool = false, progress: (@Sendable (Double?) -> Void)? = nil) async throws -> URL {
         let useOriginal = original || asset.isVideo
@@ -368,13 +339,6 @@ struct SharedLinkCreation: Encodable, Sendable {
     var showMetadata = false
 }
 
-struct CastMedia: Sendable { let url: URL; let contentType: String }
-private struct CastSessionCreation: Encodable, Sendable {
-    let deviceType = "Cast"
-    let deviceOS = "Google Cast"
-    let duration = 900
-}
-private struct CastAuthorization: Decodable, Sendable { let id: String; let token: String; let expiresAt: Date? }
 
 
 extension APIClient {
