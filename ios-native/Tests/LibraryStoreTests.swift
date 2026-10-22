@@ -11,6 +11,8 @@ import XCTest
             .page(["second"], next: "third"),
         ])
         let store = LibraryStore(source: api)
+        // A checked search: the AI check starts off.
+        store.setChecksContent(true)
         store.search("me wearing a red hat in Amsterdam")
         try await settle(store, calls: 1, api: api)
         store.loadMore()
@@ -34,6 +36,7 @@ import XCTest
             .page(["found"]),
         ])
         let store = LibraryStore(source: api)
+        store.setChecksContent(true)
         store.search("Maya in Amsterdam")
         try await settle(store, calls: 2, api: api)
         XCTAssertTrue(store.verification?.canRetry == true)
@@ -332,6 +335,49 @@ import XCTest
         XCTAssertFalse(store.isReplacingFeed)
         XCTAssertEqual(store.asset(section: 0, item: 0)?.id, "old-photo")
         store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    /// F7 review: More's filtered view, opened with no text, keeps the feed shown on screen until it
+    /// is ready, and on an error for Retry and Clear, even after a search whose results are gone.
+    /// Over a feed with nothing on screen, no older search's results show while it loads.
+    func testFilteredViewKeepsTheFeedShownUntilReadyAndOnAnError() async throws {
+        let bucket = "2026-01-01T00:00:00Z"
+        // No metadata pages: the filtered view's search fails.
+        let api = LibraryAPIFixture([.page(["beach-1", "beach-2"])], timelineAssets: [Asset(id: "timeline-photo")],
+                                    scopedTimelineAssets: ["favorites": []])
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        try await until("The timeline did not load.") { store.loaded[bucket]?.first?.id == "timeline-photo" }
+        store.search("beach")
+        try await settle(store, calls: 1, api: api)
+        XCTAssertEqual(store.results.map(\.id), ["beach-1", "beach-2"])
+        // The bar's clear button.
+        store.search("")
+        XCTAssertEqual(store.asset(section: 0, item: 0)?.id, "timeline-photo")
+
+        store.applySearchOptions(mode: .context, filter: SearchFilter(type: StringFilter(eq: "VIDEO")))
+        XCTAssertTrue(store.isBrowsingChoices)
+        XCTAssertEqual(store.sections.map(\.id), [bucket], "The library stays while the filtered view loads.")
+        XCTAssertEqual(store.asset(section: 0, item: 0)?.id, "timeline-photo")
+        try await until("The filtered view did not fail.") { await api.metadataCalls == 1 && store.error != nil }
+        XCTAssertTrue(store.isReplacingFeed)
+        XCTAssertEqual(store.sections.map(\.id), [bucket], "An error keeps the library for Retry and Clear.")
+        XCTAssertEqual(store.asset(section: 0, item: 0)?.id, "timeline-photo")
+        store.clearFilters()
+        XCTAssertFalse(store.isReplacingFeed)
+        XCTAssertEqual(store.asset(section: 0, item: 0)?.id, "timeline-photo")
+
+        // Favorites has nothing to freeze: the filtered view starts empty, not with the beach search.
+        store.setFeed(.favorites, title: "Favorites")
+        try await until("Favorites did not replace the library.") { !store.isReplacingFeed && !store.isLoading && store.totalCount == 0 }
+        store.applySearchOptions(mode: .context, filter: SearchFilter(type: StringFilter(eq: "VIDEO")))
+        XCTAssertTrue(store.isBrowsingChoices)
+        XCTAssertNil(store.asset(section: 0, item: 0), "No older search's results show under the filtered view.")
+        XCTAssertEqual(store.totalCount, 0)
+        try await until("The filtered view did not fail.") { await api.metadataCalls == 2 && store.error != nil }
+        XCTAssertNil(store.asset(section: 0, item: 0))
+        await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testRapidScopeReplacementAndClearCannotCommitStaleFeed() async throws {

@@ -258,6 +258,11 @@ struct ServerSearchRequest: Sendable {
     /// request leaves verify unsaid, so the server checks whenever it is configured to; when false
     /// it sends verify: false, Immich's plain smart search.
     let checksContent: Bool
+    /// A Photo content search the server is asked to check, the only one whose verification means anything.
+    var asksForCheck: Bool {
+        guard checksContent, case .relevance(.text) = query.ranking else { return false }
+        return true
+    }
 
     init(_ query: LibraryQuery, userID: String?, checksContent: Bool = true) throws(Unsupported) {
         guard !query.visibility.isEmpty else { throw .predicate("visibility") }

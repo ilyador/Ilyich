@@ -525,6 +525,8 @@ final class LibraryTests: XCTestCase {
         capture(app, "Search — typing, AI check off and More")
         search.typeText("red hat\n")
         XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20))
+        // The fixture reports every search as verified, but the card shows only for one sent with
+        // the check; SearchChoicesTests pins the verify field itself, which the fixture ignores.
         XCTAssertFalse(app.staticTexts["Visually checked"].exists, "With the AI check off, nothing is checked.")
         requireHittable(check, in: app); check.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
         XCTAssertTrue(app.staticTexts["Visually checked"].waitForExistence(timeout: 20), "Turning it on runs the checked search.")

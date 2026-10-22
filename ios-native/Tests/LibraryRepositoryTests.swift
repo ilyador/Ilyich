@@ -199,14 +199,18 @@ actor SearchRecorder: FakeFeedSource {
     nonisolated let cacheScope = "test-search-" + UUID().uuidString
     nonisolated let userID: String?
     private let items: [Asset]
+    /// What every page says of its check, as the UI fixture answers every search verified.
+    private let verification: Verification?
     private(set) var smart: [SearchQuery] = []
     private(set) var metadata: [MetadataQuery] = []
-    init(userID: String?, items: [Asset]) { self.userID = userID; self.items = items }
+    init(userID: String?, items: [Asset], verification: Verification? = nil) {
+        self.userID = userID; self.items = items; self.verification = verification
+    }
     func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] { [] }
     func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] { [] }
     func search(_ query: SearchQuery) async throws -> SearchResponse { smart.append(query); return page() }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { metadata.append(query); return page() }
     private func page() -> SearchResponse {
-        SearchResponse(assets: SearchAssets(items: items, count: items.count, nextCursor: nil, nextPage: nil), verification: nil)
+        SearchResponse(assets: SearchAssets(items: items, count: items.count, nextCursor: nil, nextPage: nil), verification: verification)
     }
 }

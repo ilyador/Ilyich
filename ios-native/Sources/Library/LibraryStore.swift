@@ -114,6 +114,7 @@ private struct FrozenFeed {
     private let placesDelay: Duration
     var filterTitle: String?
     var query = ""
+    /// The server's check of the results shown; nil unless a checked Photo content search returned them.
     var verification: Verification?
     var hasMore = false
     var revision = 0
@@ -894,7 +895,7 @@ private struct FrozenFeed {
         changeChoices(to: searchChoices.removing(kind))
     }
 
-    /// `reopen` opens the filtered view even when nothing changed, as More's Apply does.
+    /// `reopen` is More's Apply: with no text it opens the filtered view, even when nothing changed.
     private func changeChoices(to choices: SearchChoices, reopen: Bool = false) {
         let before = searchChoices
         searchChoices = choices
@@ -910,18 +911,21 @@ private struct FrozenFeed {
             }
         }
         if query.isEmpty {
-            // A mode alone changes only what the next search looks in.
-            guard choices.isFiltering, choices.filter != before.filter || choiceBrowse == nil else { return }
-            rememberOriginal()
+            // Only More's Apply opens the filtered view; once open, a change of filter narrows it
+            // again. A chip removed while browsing plainly, or a mode alone, opens nothing: the
+            // mode changes only what the next search looks in.
+            guard choices.isFiltering, choiceBrowse == nil ? reopen : choices.filter != before.filter else { return }
+            // The feed shown is frozen before it becomes the filtered view, so it stays on screen
+            // until the view is ready, and on an error.
+            rememberOriginal(); beginScopeChange()
             if choiceBrowse == nil {
                 choiceBrowse = (filterTitle, usesMetadata)
                 if filterTitle == nil { filterTitle = "Filtered library" }
             }
             usesMetadata = true; showingResults = true
         } else {
-            rememberOriginal()
+            rememberOriginal(); beginScopeChange()
         }
-        beginScopeChange()
         queryTask = Task { await loadResults(.first) }
     }
 
@@ -946,8 +950,10 @@ private struct FrozenFeed {
         else { scheduleReload() }
     }
 
-    /// The search the feed's scope, the text and its mode, or the similar photo, make.
-    private func searchRequest(text: String) throws(Unsupported) -> ServerSearchRequest {
+    /// The search the feed's scope, the text and its mode, More's filters, or the similar photo,
+    /// make. Nil when More's filters leave the feed no photo to find: a visibility chosen outside
+    /// the feed's own, such as Only archived inside Favorites, which keeps to the timeline.
+    private func searchRequest(text: String) throws(Unsupported) -> ServerSearchRequest? {
         var scope = searchScope
         if let similarAssetID {
             scope = scope.similar(to: similarAssetID)
@@ -956,10 +962,25 @@ private struct FrozenFeed {
             // the time taken, as the server's search always ordered it.
             if case .chronological(.createdAt, let ascending) = scope.ranking { scope.ranking = .chronological(.takenAt, ascending: ascending) }
             // More's filters narrow every search typed, and the filtered view they open.
-            if !text.isEmpty || choiceBrowse != nil { scope = scope.narrowed(by: searchChoices.filter) }
+            if !text.isEmpty || choiceBrowse != nil {
+                scope = scope.narrowed(by: searchChoices.filter)
+                guard !scope.visibility.isEmpty else { return nil }
+            }
             scope = scope.refined(text: text, mode: searchChoices.mode)
         }
         return try ServerSearchRequest(scope, userID: source.userID, checksContent: similarAssetID == nil && searchChoices.verifiesText)
+    }
+
+    /// The choices leave nothing to find: the results are empty at once, as a search that found
+    /// nothing, and the server is not asked.
+    private func showNothingFound() {
+        guard !Task.isCancelled else { return }
+        searchFeed = nil; searchCanResume = false; removedResultIDs = []
+        results = []; showingResults = true
+        hasMore = false; verification = nil; error = nil; isSearching = false
+        revision += 1; resetID = UUID()
+        commitFrozenFeed()
+        updateVisibleResultsTitle()
     }
 
     private enum SearchStep { case first, more, retry, refresh }
@@ -975,12 +996,17 @@ private struct FrozenFeed {
         if !fromStart, let searchFeed { feed = searchFeed }
         else if step == .more { isSearching = false; return }
         else {
-            do { feed = SearchFeed(SearchFeed.Request(try searchRequest(text: text)), source: source) } catch {
+            let request: ServerSearchRequest?
+            do { request = try searchRequest(text: text) } catch {
                 self.error = error.localizedDescription; return
             }
+            guard let request else { showNothingFound(); return }
+            feed = SearchFeed(SearchFeed.Request(request), source: source)
             searchFeed = feed; searchCanResume = false; removedResultIDs = []
         }
         let previousResultIDs = results.map(\.id)
+        // Only a search the server was asked to check has a verification to show.
+        let checked = feed.request.search.asksForCheck
         isSearching = true; error = nil
         defer { if searchGeneration == searchID { isSearching = false } }
         do {
@@ -996,7 +1022,7 @@ private struct FrozenFeed {
             searchCanResume = state.retryPoint != nil
             if step == .refresh, state.retryPoint != nil {
                 // An unchecked page met while refreshing keeps the rows shown until it is retried.
-                hasMore = false; verification = state.verification
+                hasMore = false; verification = checked ? state.verification : nil
                 revision += 1
                 return
             }
@@ -1004,7 +1030,7 @@ private struct FrozenFeed {
             let resultRowsChanged = previousResultIDs != updatedResults.map(\.id)
             results = updatedResults
             showingResults = true
-            hasMore = state.hasMore; verification = state.verification
+            hasMore = state.hasMore; verification = checked ? state.verification : nil
             revision += 1
             if fromStart || (step == .refresh && resultRowsChanged) { resetID = UUID() }
             commitFrozenFeed()
@@ -1095,6 +1121,10 @@ private struct FrozenFeed {
     }
     private func beginScopeChange() {
         freezeCurrentFeedIfNeeded()
+        // The results belong to the search left behind; the frozen feed keeps its own copy. An old
+        // search's results kept here would show under the next results view while it loads, when
+        // the feed it replaces had nothing on screen to freeze.
+        results = []
         stop(); selected = []; isSelecting = false; isSearching = false; isLoading = false
         verification = nil; hasMore = false
         searchFeed = nil; searchCanResume = false; removedResultIDs = []
