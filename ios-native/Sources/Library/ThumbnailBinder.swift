@@ -26,6 +26,8 @@ import UIKit
         let shortSide: Int
         let thumbhash: String?
         let name: String
+        /// A Locked Folder photo: never asked of the shared scheduler, whose caches outlive the unlock.
+        var isLocked = false
         var stage: Stage
 
         var key: String { assetID + "|" + revision }
@@ -71,7 +73,7 @@ import UIKit
         let samePhoto = previous.map { $0.assetID == asset.id && $0.revision == asset.cacheRevision } ?? false
         if samePhoto, let previous, previous.shortSide == shortSide { return previous.stage != .exact }
         var binding = Binding(assetID: asset.id, revision: asset.cacheRevision, shortSide: shortSide, thumbhash: asset.thumbhash,
-                              name: asset.displayName, stage: .empty)
+                              name: asset.displayName, isLocked: asset.visibility == .locked, stage: .empty)
         if !samePhoto { cell.displayProbe.bind() }
         // A thumbnail in memory draws in this frame instead of after an empty one.
         if let exact = pipeline.cachedThumbnail(assetID: asset.id, revision: asset.cacheRevision, shortSide: shortSide) {
@@ -142,7 +144,7 @@ import UIKit
             let frame = cell.frame
             guard frame.intersects(viewport) else { continue }
             shown.insert(binding.assetID)
-            guard binding.stage != .exact else { continue }
+            guard binding.stage != .exact, !binding.isLocked else { continue }
             onScreen.append((binding, hypot(frame.midX - middle.x, frame.midY - middle.y)))
         }
         onScreen.sort { $0.distance < $1.distance }
