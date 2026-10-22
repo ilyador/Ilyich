@@ -182,6 +182,9 @@ import UIKit
 
     private func sleep() {
         running = false
+        // The speed is measured over frames the link ran. The next frame has no time to measure
+        // over, so a jump after a rest (the rail, a date, Show in timeline) is not a fast scroll.
+        lastTime = nil
         frames.stop()
     }
 
@@ -211,9 +214,8 @@ import UIKit
         guard let collection, let layout = collection.collectionViewLayout as? VirtualPhotoLayout else { sleep(); return }
         let offset = collection.contentOffset.y
         let screen = Double(max(1, collection.bounds.height))
-        if let lastOffset, let lastTime, time > lastTime {
+        if let lastOffset {
             let delta = Double(offset - lastOffset)
-            let dt = time - lastTime
             if delta != 0 {
                 direction = delta > 0 ? 1 : -1
                 stillSince = nil
@@ -221,8 +223,12 @@ import UIKit
             } else if stillSince == nil {
                 stillSince = time
             }
-            let alpha = 1 - exp(-dt / Self.speedWindow)
-            speed += (abs(delta) / dt / screen - speed) * alpha
+            // Only across a frame the link ran: a jump across a sleep moved the grid, not fast.
+            if let lastTime, time > lastTime {
+                let dt = time - lastTime
+                let alpha = 1 - exp(-dt / Self.speedWindow)
+                speed += (abs(delta) / dt / screen - speed) * alpha
+            }
         }
         lastOffset = offset
         lastTime = time
@@ -232,6 +238,11 @@ import UIKit
         let still = stopped || stillFor >= ViewportPolicy.restAfter
         let next: Motion
         if scrubbing {
+            // The rail has the grid. A fling it interrupted ended without the delegate saying so
+            // (setContentOffset stops a deceleration silently), and its landing screen is not where
+            // the grid goes any more.
+            flingTarget = nil
+            decelerating = false
             next = .scrubbing
         } else if still && (!decelerating || stillFor >= Self.unreportedRestAfter) {
             speed = 0

@@ -176,6 +176,10 @@ import XCTest
         XCTAssertEqual(ViewportPolicy.aheadScreens(at: 0), 1)
         XCTAssertEqual(ViewportPolicy.aheadScreens(at: 2), 2)
         XCTAssertEqual(ViewportPolicy.aheadScreens(at: 9), 3)
+        XCTAssertTrue(ViewportPolicy.prefetchesSketchesAhead(.idle(since: 0)))
+        XCTAssertTrue(ViewportPolicy.prefetchesSketchesAhead(.tracking(speed: 2)), "Up to the fast mark the photos ahead will be shown.")
+        XCTAssertFalse(ViewportPolicy.prefetchesSketchesAhead(.flinging(speed: 3)), "Past it they pass before they could be.")
+        XCTAssertFalse(ViewportPolicy.prefetchesSketchesAhead(.scrubbing))
         XCTAssertEqual(ViewportPolicy.coverageHold, CoveragePolicy.today.motionHold, "Coverage waits the same hold the worker was built with.")
     }
 
@@ -294,6 +298,63 @@ import XCTest
         XCTAssertEqual(Self.kind(rested.motion), "idle")
         XCTAssertTrue(rested.target.isEmpty, "At rest there is no target: the screen itself is wanted.")
         scheduler.withdraw(source)
+    }
+
+    /// The rail grabbed while a fling still coasts: setContentOffset stops the deceleration, UIKit
+    /// reports no end, and the fling's landing screen is forgotten, since the grid goes where the
+    /// finger says. When the finger lifts the grid is at rest after the policy's tenth of a second,
+    /// not the half second a fling whose end was never reported waits.
+    func testARailScrubInterruptingAFlingDropsTheFlingsTarget() throws {
+        let h = Harness()
+        h.viewport.willBeginDragging()
+        h.scroll(by: h.screen * 0.8, over: 0.2, frames: 12)
+        let landing = h.collection.contentOffset.y + h.screen * 3
+        h.viewport.willEndDragging(velocity: CGPoint(x: 0, y: 4 * h.screen / 1_000), target: CGPoint(x: 0, y: landing))
+        h.viewport.didEndDragging(decelerate: true)
+        h.scroll(by: h.screen * 0.5, over: 0.1, frames: 6)
+        XCTAssertFalse(try XCTUnwrap(h.windows.last).target.isEmpty, "The fling's landing screen is wanted while it coasts.")
+
+        h.scrubbing = true
+        h.scroll(by: h.screen * 5, over: 0.1, frames: 6)
+        let scrubbed = try XCTUnwrap(h.windows.last)
+        XCTAssertEqual(scrubbed.motion, .scrubbing)
+        XCTAssertTrue(scrubbed.target.isEmpty, "The fling's landing screen is not where the grid goes any more.")
+
+        h.scrubbing = false
+        h.hold(for: 0.15, frames: 9)
+        XCTAssertEqual(Self.kind(try XCTUnwrap(h.windows.last).motion), "idle")
+        XCTAssertFalse(h.frames.isRunning)
+    }
+
+    /// A jump after a rest (the rail tapped, a date, Show in timeline, a perf scenario's jump) is
+    /// not a fast scroll: no frame ran across the rest to measure it over, so the screen it lands
+    /// on may download at once, and the grid is at rest again a tenth of a second later.
+    func testAJumpAfterARestIsNotMeasuredAsAFastScroll() throws {
+        let h = Harness()
+        h.viewport.setNeedsDemand()
+        h.hold(for: 0.02, frames: 1)
+        XCTAssertEqual(Self.kind(try XCTUnwrap(h.windows.last).motion), "idle")
+        XCTAssertFalse(h.frames.isRunning)
+
+        // A second and a half of rest, then twenty screens in one frame.
+        h.time += 1.5
+        h.collection.contentOffset.y += h.screen * 20
+        h.viewport.didScroll()
+        h.tick(1 / 60)
+        let landed = try XCTUnwrap(h.windows.last)
+        guard case .tracking(let speed) = landed.motion else { return XCTFail("A jump tracks until it has rested: \(landed.motion).") }
+        XCTAssertEqual(speed, 0, "Twenty screens over the rest is no speed.")
+        XCTAssertFalse(ViewportPolicy.isFast(landed.motion, wasFast: false), "The screen the jump lands on may download at once.")
+        XCTAssertEqual(h.viewport.direction, 1, "The jump went down the library.")
+        XCTAssertFalse(landed.ahead.isEmpty)
+        for photo in landed.ahead {
+            let frame = try XCTUnwrap(h.layout.layoutAttributesForItem(at: Harness.path(photo.key.assetID))?.frame)
+            XCTAssertLessThan(frame.minY, landed.visible.maxY + h.screen, "One screen ahead at a jump, not three: \(photo.key.assetID)")
+        }
+
+        h.hold(for: 0.15, frames: 9)
+        XCTAssertEqual(Self.kind(try XCTUnwrap(h.windows.last).motion), "idle")
+        XCTAssertFalse(h.frames.isRunning)
     }
 
     /// The rail's finger holds coverage while it is down and for the policy's hold after; the

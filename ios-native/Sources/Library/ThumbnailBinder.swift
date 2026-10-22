@@ -207,8 +207,13 @@ import UIKit
             items.append(.init(request: ThumbnailRequest(key: binding.key, thumbhash: binding.thumbhash, shortSide: binding.shortSide),
                                band: windows.visibleBand, rank: rank))
         }
-        // Each window comes nearest the screen first, and no photo is asked for twice.
+        // Each window comes nearest the screen first, and no photo is asked for twice. The sketches
+        // of where a fling lands decode now, off the main thread, so its cells have them at once;
+        // so do those of the photos ahead, unless the grid is fast: then they pass before they
+        // could be shown, and a rail sweep would queue a whole new window of them every frame.
+        // The photos just passed still have theirs.
         var hashes: [String] = []
+        let sketchesAhead = ViewportPolicy.prefetchesSketchesAhead(windows.motion)
         let bands: [(DemandBand, [Ahead])] = [(.target, windows.target), (.ahead, windows.ahead), (.behind, windows.behind)]
         for (band, photos) in bands {
             var rank = 0
@@ -217,11 +222,9 @@ import UIKit
                 items.append(.init(request: ThumbnailRequest(key: photo.key, thumbhash: photo.thumbhash, shortSide: windows.shortSide),
                                    band: band, rank: rank))
                 rank += 1
-                if band != .behind, let hash = photo.thumbhash { hashes.append(hash) }
+                if band == .target || (band == .ahead && sketchesAhead), let hash = photo.thumbhash { hashes.append(hash) }
             }
         }
-        // The sketches of photos about to scroll in decode now, off the main thread, so their
-        // cells have them at once; those just passed still have theirs.
         ThumbHashSketches.shared.prefetch(hashes)
         scheduler.submit(ViewportDemand(generation: pipeline.mediaToken(), items: items, motion: windows.motion), from: source)
     }
