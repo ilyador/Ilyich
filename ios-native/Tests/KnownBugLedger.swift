@@ -359,8 +359,10 @@ import XCTest
         store.setFeed(.trash, title: "Trash")
         store.search("beach")
         let trash = try await searchFilter(server, "search/smart", request: 2, store: store)
-        // Search options after Reset, which clears every filter.
+        // Search options after Reset, which clears every filter, then a search in the mode chosen.
+        store.clearFilters()
         store.applySearchOptions(mode: .filename, filter: SearchFilter())
+        store.search("beach")
         let options = try await searchFilter(server, "search/metadata", request: 1, store: store)
 
         XCTAssertEqual(library["trashedAt"], .object(["eq": .null]), "A library search leaves trashed photos out.")

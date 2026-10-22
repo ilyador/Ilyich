@@ -147,7 +147,23 @@ private struct FrozenFeed {
     }
     /// The search scope as Search options edit it.
     private(set) var searchFilter = ServerSearchRequest.filter(for: LibraryStore.librarySearch)
-    private(set) var searchMode = SearchMode.context
+    /// The AI check, mode and filters chosen under the search bar. They persist until changed.
+    private(set) var searchChoices: SearchChoices {
+        didSet { if searchChoices != oldValue { choicesStorage?.save(searchChoices) } }
+    }
+    var searchMode: SearchMode { searchChoices.mode }
+    @ObservationIgnored private let choicesStorage: SearchChoicesStorage?
+    /// While More's filters show without text: the title and the kind of feed they were opened
+    /// over, which come back once the last filter goes.
+    private var choiceBrowse: (title: String?, usesMetadata: Bool)?
+    /// The filtered view More opens, with no text typed, is showing.
+    var isBrowsingChoices: Bool { choiceBrowse != nil }
+    /// Whether the choices apply to what is shown: a text search, or More's filtered view.
+    var choicesApply: Bool { similarAssetID == nil && (!query.isEmpty || choiceBrowse != nil) }
+    /// The search shown asks the server to check photo content.
+    var checksPhotoContent: Bool { similarAssetID == nil && !query.isEmpty && searchChoices.verifiesText }
+    /// What the search bar searches in, by name: the feed's title, not the filtered view's.
+    var searchPlaceTitle: String? { choiceBrowse.map { $0.title } ?? filterTitle }
     private var similarAssetID: String?
     /// The search shown, which reads its pages; nil until one starts, and after a change of scope.
     @ObservationIgnored private var searchFeed: SearchFeed?
@@ -186,8 +202,11 @@ private struct FrozenFeed {
     }
     @ObservationIgnored var started = false
 
-    init(source: any LibraryFeedSource, includesDevicePhotos: Bool = false, placesDelay: Duration = .seconds(3)) {
+    init(source: any LibraryFeedSource, includesDevicePhotos: Bool = false, placesDelay: Duration = .seconds(3),
+         choices: SearchChoicesStorage? = nil) {
         self.source = source; self.includesDevicePhotos = includesDevicePhotos; self.placesDelay = placesDelay
+        choicesStorage = choices
+        searchChoices = choices?.load() ?? SearchChoices()
     }
     private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && feedQuery == .library }
     var selectedLocalPhotos: [LocalPhoto] { Array(selectedLocalRecords.values) }
@@ -695,7 +714,7 @@ private struct FrozenFeed {
         // The library shown stays, with the plan its months come from.
         if reuseTimeline { feedPlan = shownPlan }
         feedQuery = .library; searchScope = Self.librarySearch
-        filterTitle = nil; query = ""; results = []; showingResults = false; usesMetadata = false; searchMode = .context
+        filterTitle = nil; query = ""; results = []; showingResults = false; usesMetadata = false; choiceBrowse = nil
         originalTimeline = nil; scrollRequest = nil
         let restoreSaved = !reuseTimeline && saved?.0.buckets.isEmpty == false && saved?.3 != nil
         if restoreSaved, let saved {
@@ -748,7 +767,7 @@ private struct FrozenFeed {
 
     func setPerson(_ person: Person) {
         rememberOriginal()
-        beginScopeChange()
+        beginScopeChange(); choiceBrowse = nil
         feedQuery = .person(person.id)
         searchScope = Self.widened(.person(person.id))
         filterTitle = person.name.isEmpty ? "Person" : person.name
@@ -758,7 +777,7 @@ private struct FrozenFeed {
 
     func setAlbum(_ album: Album) {
         rememberOriginal()
-        beginScopeChange()
+        beginScopeChange(); choiceBrowse = nil
         let ascending = album.order == "asc"
         feedQuery = .album(album.id, ascending: ascending)
         searchScope = Self.widened(.album(album.id, ascending: ascending))
@@ -778,7 +797,7 @@ private struct FrozenFeed {
     func setPlace(_ place: PlaceMembership, title: String) {
         guard !place.assetIDs.isEmpty else { return }
         rememberOriginal()
-        beginScopeChange()
+        beginScopeChange(); choiceBrowse = nil
         feedQuery = .place(place)
         searchScope = Self.widened(.place(place))
         filterTitle = title; query = ""; showingResults = false; usesMetadata = false
@@ -797,12 +816,12 @@ private struct FrozenFeed {
 
     func setMetadataFilter(_ filter: SearchFilter, title: String, developedOnly: Bool = false) {
         rememberOriginal()
-        beginScopeChange()
+        beginScopeChange(); choiceBrowse = nil
         feedQuery = .library
         var scope = LibraryQuery(filter)
         if developedOnly { scope.predicates.developed = true }
         searchScope = scope
-        filterTitle = title; query = ""; searchMode = .context
+        filterTitle = title; query = ""
         usesMetadata = true; showingResults = true
         queryTask = Task { await loadResults(.first) }
     }
@@ -816,7 +835,7 @@ private struct FrozenFeed {
     /// A shelf's feed: Favorites, Archive, Trash, Recently taken or added, a partner, Lightroom.
     func setFeed(_ query: LibraryQuery, title: String) {
         rememberOriginal()
-        beginScopeChange()
+        beginScopeChange(); choiceBrowse = nil
         feedQuery = query; filterTitle = title; self.query = ""; showingResults = false; usesMetadata = false
         // A search inside the feed keeps its scope, trash, visibility and filters.
         searchScope = query
@@ -824,8 +843,8 @@ private struct FrozenFeed {
     }
 
     func clearFilters() {
-        beginScopeChange(); feedQuery = .library; searchScope = Self.librarySearch
-        filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false; searchMode = .context
+        beginScopeChange(); feedQuery = .library; searchScope = Self.librarySearch; choiceBrowse = nil
+        filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false
         selected = []; isSelecting = false
         if let saved = originalTimeline, let plan = saved.3 {
             cancelRequests(); generation = UUID(); searchGeneration = UUID()
@@ -853,16 +872,62 @@ private struct FrozenFeed {
         queryTask = Task { await loadResults(.first) }
     }
 
+    /// More's mode and filters. With text typed the search runs again with them; without, the
+    /// filters show the feed narrowed by them, as one list, until the last one is removed.
     func applySearchOptions(mode: SearchMode, filter: SearchFilter) {
+        var choices = searchChoices
+        choices.mode = mode; choices.filter = SearchChoices.sanitized(filter)
+        changeChoices(to: choices, reopen: true)
+    }
+
+    /// The AI check under the search bar. A Photo content search showing runs again.
+    func setChecksContent(_ on: Bool) {
+        guard on != searchChoices.checksContent else { return }
+        searchChoices.checksContent = on
+        guard searchChoices.mode == .context, similarAssetID == nil, !query.isEmpty else { return }
         rememberOriginal(); beginScopeChange()
-        searchMode = mode; searchScope = LibraryQuery(filter, base: searchScope); usesMetadata = true; showingResults = true
-        filterTitle = mode == .context ? "Filtered library" : mode.rawValue
+        queryTask = Task { await loadResults(.first) }
+    }
+
+    /// Removes one chip's choice, and shows what is left.
+    func removeChoice(_ kind: SearchChip.Kind) {
+        changeChoices(to: searchChoices.removing(kind))
+    }
+
+    /// `reopen` opens the filtered view even when nothing changed, as More's Apply does.
+    private func changeChoices(to choices: SearchChoices, reopen: Bool = false) {
+        let before = searchChoices
+        searchChoices = choices
+        guard choices != before || (reopen && query.isEmpty && choiceBrowse == nil), similarAssetID == nil else { return }
+        if !choices.isFiltering, let base = choiceBrowse {
+            // The last filter went: the feed More was opened over comes back.
+            choiceBrowse = nil
+            filterTitle = base.title; usesMetadata = base.usesMetadata
+            if query.isEmpty {
+                if base.title == nil { clearFilters() }
+                else { beginScopeChange(); showingResults = base.usesMetadata; scheduleReload() }
+                return
+            }
+        }
+        if query.isEmpty {
+            // A mode alone changes only what the next search looks in.
+            guard choices.isFiltering, choices.filter != before.filter || choiceBrowse == nil else { return }
+            rememberOriginal()
+            if choiceBrowse == nil {
+                choiceBrowse = (filterTitle, usesMetadata)
+                if filterTitle == nil { filterTitle = "Filtered library" }
+            }
+            usesMetadata = true; showingResults = true
+        } else {
+            rememberOriginal()
+        }
+        beginScopeChange()
         queryTask = Task { await loadResults(.first) }
     }
 
     func findSimilar(to asset: Asset) {
-        rememberOriginal(); beginScopeChange()
-        query = ""; searchMode = .context; searchScope = Self.librarySearch; similarAssetID = asset.id
+        rememberOriginal(); beginScopeChange(); choiceBrowse = nil
+        query = ""; searchScope = Self.librarySearch; similarAssetID = asset.id
         filterTitle = "Similar photos"; showingResults = true; usesMetadata = true
         queryTask = Task { await loadResults(.first) }
     }
@@ -890,9 +955,11 @@ private struct FrozenFeed {
             // Search can't order by date added, so a field search inside Recently added is ordered by
             // the time taken, as the server's search always ordered it.
             if case .chronological(.createdAt, let ascending) = scope.ranking { scope.ranking = .chronological(.takenAt, ascending: ascending) }
-            scope = scope.refined(text: text, mode: searchMode)
+            // More's filters narrow every search typed, and the filtered view they open.
+            if !text.isEmpty || choiceBrowse != nil { scope = scope.narrowed(by: searchChoices.filter) }
+            scope = scope.refined(text: text, mode: searchChoices.mode)
         }
-        return try ServerSearchRequest(scope, userID: source.userID)
+        return try ServerSearchRequest(scope, userID: source.userID, checksContent: similarAssetID == nil && searchChoices.verifiesText)
     }
 
     private enum SearchStep { case first, more, retry, refresh }

@@ -34,7 +34,7 @@ struct SearchOptionsView: View {
                 if let count = filter.personIds?.all?.count { Text("\(count) people required").font(.footnote).foregroundStyle(.secondary) }
                 if let count = filter.tagIds?.all?.count { Text("\(count) tags required").font(.footnote).foregroundStyle(.secondary) }
             }
-            Section("Location") {
+            Section("Place") {
                 SearchMetadataField(title: "Country", api: api, request: .init(kind: .country), value: text(\.country))
                 SearchMetadataField(title: "State or region", api: api, request: .init(kind: .state, country: filter.country?.eq), value: text(\.state))
                 SearchMetadataField(title: "City", api: api, request: .init(kind: .city, country: filter.country?.eq, state: filter.state?.eq), value: text(\.city))
@@ -58,20 +58,22 @@ struct SearchOptionsView: View {
                     }
                 }
             }
-            Section("Media") {
+            Section("Media type") {
                 Picker("Type", selection: Binding(get: { filter.type?.eq ?? "" }, set: { filter.type = $0.isEmpty ? nil : .init(eq: $0) })) {
                     Text("Photos and videos").tag(""); Text("Photos").tag("IMAGE"); Text("Videos").tag("VIDEO")
                 }
-                Toggle("Favorites only", isOn: flag(\.isFavorite))
                 Toggle("Motion photos only", isOn: flag(\.isMotion))
+            }
+            Section("Display options") {
+                Toggle("Favorites only", isOn: flag(\.isFavorite))
                 Toggle("Not in an album", isOn: Binding(get: { filter.hasAlbums?.eq == false }, set: { filter.hasAlbums = $0 ? .init(eq: false) : nil }))
+                Picker("Archived", selection: Binding(get: { filter.visibility.flatMap { $0.eq ?? ($0.in?.count == 1 ? $0.in?.first : nil) } ?? "" },
+                                                      set: { filter.visibility = $0.isEmpty ? nil : .init(eq: $0) })) {
+                    Text("Included").tag(""); Text("Left out").tag("timeline"); Text("Only archived").tag("archive")
+                }
                 Picker("Rating", selection: Binding(get: { filter.rating.map { $0.eq ?? 0 } ?? -1 }, set: { filter.rating = $0 == -1 ? nil : .init(eq: $0 == 0 ? nil : $0) })) {
                     Text("Any rating").tag(-1); Text("Unrated").tag(0)
                     ForEach(1...5, id: \.self) { Text("\($0) stars").tag($0) }
-                }
-                Picker("Visibility", selection: Binding(get: { filter.visibility.flatMap { $0.eq ?? ($0.in?.count == 1 ? $0.in?.first : nil) } ?? "" },
-                                                        set: { filter.visibility = $0.isEmpty ? nil : .init(eq: $0) })) {
-                    Text("Library and archive").tag(""); Text("Library").tag("timeline"); Text("Archive").tag("archive")
                 }
             }
             if let failure { Section { Text(failure).foregroundStyle(.red); Button("Retry") { Task { await load() } } } }

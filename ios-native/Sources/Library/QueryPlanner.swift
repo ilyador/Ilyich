@@ -254,10 +254,15 @@ struct ServerSearchRequest: Sendable {
     /// The owner the phone keeps, for the account's own photos or a partner's.
     let owner: String?
     let limitations: Set<Limitation>
+    /// Whether a Photo content search's results are checked by the server's AI. When true the
+    /// request leaves verify unsaid, so the server checks whenever it is configured to; when false
+    /// it sends verify: false, Immich's plain smart search.
+    let checksContent: Bool
 
-    init(_ query: LibraryQuery, userID: String?) throws(Unsupported) {
+    init(_ query: LibraryQuery, userID: String?, checksContent: Bool = true) throws(Unsupported) {
         guard !query.visibility.isEmpty else { throw .predicate("visibility") }
         self.query = query
+        self.checksContent = checksContent
         filter = Self.filter(for: query)
         switch query.ranking {
         case .relevance: endpoint = .smart; order = nil
@@ -325,6 +330,7 @@ struct ServerSearchRequest: Sendable {
         case .relevance(.text(let text, let language)):
             body.query = text
             if let language { body.language = language }
+            if !checksContent { body.verify = false }
         case .relevance(.similar(let id)): body.queryAssetId = id
         case .chronological: break
         }

@@ -60,11 +60,11 @@ import XCTest
         XCTAssertEqual(store.results.map(\.id), ["own"], "Recently taken keeps to the account's own photos.")
 
         // A filename search inside Recently added is ordered by the time taken, which search can do.
+        // A mode chosen alone sends nothing; it changes what the next search looks in.
         store.applySearchOptions(mode: .filename, filter: SearchFilter())
-        try await until("The options search was not sent.") { await api.metadata.count == 1 && !store.isSearching }
         store.setFeed(.recentlyAdded, title: "Recently added")
         store.search("beach")
-        try await until("The filename search was not sent.") { await api.metadata.count == 2 && !store.isSearching }
+        try await until("The filename search was not sent.") { await api.metadata.count == 1 && !store.isSearching }
         XCTAssertNil(store.error)
         let lastField = await api.metadata.last
         let field = try XCTUnwrap(lastField)
@@ -91,7 +91,11 @@ import XCTest
         try await until("The similar search was not sent.") { await api.smart.count == 2 && !store.isSearching }
         XCTAssertEqual(store.results.map(\.id), ["shown"])
         store.applySearchOptions(mode: .filename, filter: SearchFilter())
-        try await until("The options search was not sent.") { await api.metadata.count == 1 && !store.isSearching }
+        store.search("beach")
+        try await until("The filename search was not sent.") { await api.metadata.count == 1 && !store.isSearching }
+        XCTAssertEqual(store.results.map(\.id), ["shown"])
+        store.applySearchOptions(mode: .filename, filter: SearchFilter(isFavorite: BoolFilter(eq: true)))
+        try await until("The filtered search was not sent.") { await api.metadata.count == 2 && !store.isSearching }
         XCTAssertEqual(store.results.map(\.id), ["shown"])
         for body in await api.smart.map(\.filter) + api.metadata.map(\.filter) {
             XCTAssertEqual(body.visibility, StringFilter(in: ["timeline", "archive"]))
@@ -191,7 +195,7 @@ import XCTest
 }
 
 /// A library whose searches all answer with the same photos, recording each request.
-private actor SearchRecorder: FakeFeedSource {
+actor SearchRecorder: FakeFeedSource {
     nonisolated let cacheScope = "test-search-" + UUID().uuidString
     nonisolated let userID: String?
     private let items: [Asset]
