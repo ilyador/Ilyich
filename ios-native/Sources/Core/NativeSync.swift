@@ -144,11 +144,11 @@ struct AckPolicy: Sendable {
 /// committed together with its acknowledgements. In the app only SyncEngine runs passes, one at a
 /// time, and it decides when; tests also run them directly.
 struct NativeSync: Sendable {
-    let store: EntityStore
+    let store: LibraryIndex
     private let api: APIClient
     private let acks: AckPolicy
 
-    init(api: APIClient, store: EntityStore, acks: AckPolicy = AckPolicy()) {
+    init(api: APIClient, store: LibraryIndex, acks: AckPolicy = AckPolicy()) {
         self.api = api
         self.store = store
         self.acks = acks

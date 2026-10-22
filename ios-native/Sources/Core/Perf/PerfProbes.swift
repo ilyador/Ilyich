@@ -107,8 +107,8 @@ struct ThumbDisplayProbe {
     }
 }
 
-/// Times a month of photos loading, tagged with the backend that answered it. The LibraryAPI
-/// serving the month notes its backend on the load's task.
+/// Times a month of photos loading, tagged with the backend that answered it. The library
+/// repository serving the month notes its backend on the load's task.
 enum FeedMonthProbe {
     final class Note: Sendable {
         private let value = Mutex<QueryPlan.Backend?>(nil)
@@ -119,7 +119,7 @@ enum FeedMonthProbe {
     /// The measured load running on this task, if any.
     @TaskLocal static var current: Note?
 
-    /// Called by the LibraryAPI as it picks where a month comes from.
+    /// Called by the library repository as it reads where a month comes from.
     static func note(_ backend: QueryPlan.Backend) {
         guard PerfRecorder.shared != nil else { return }
         current?.set(backend)

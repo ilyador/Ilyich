@@ -13,7 +13,7 @@ import XCTest
         let api = SearchRecorder(userID: "alice", items: [
             photo("own", owner: "alice", developed: true), photo("partner's", owner: "bob"), photo("trashed", owner: "alice", trashed: true),
         ])
-        let store = LibraryStore(api: api, placesDelay: .zero)
+        let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
         removeCachesAfterwards(api.cacheScope)
 
@@ -25,7 +25,7 @@ import XCTest
             return try XCTUnwrap(last)
         }
 
-        store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash")
+        store.setFeed(.trash, title: "Trash")
         var body = try await search()
         XCTAssertEqual(body.filter.trashedAt, .set, "A search inside Trash keeps to the trash.")
         XCTAssertEqual(store.results.map(\.id), ["trashed"])
@@ -42,12 +42,12 @@ import XCTest
         body = try await search()
         XCTAssertEqual(body.filter.albumIds, IDsFilter(all: ["coast"]))
 
-        store.setTimeline(TimelineFilter(isFavorite: true), title: "Favorites")
+        store.setFeed(.favorites, title: "Favorites")
         body = try await search()
         XCTAssertEqual(body.filter.isFavorite, BoolFilter(eq: true))
         XCTAssertEqual(body.filter.visibility, StringFilter(in: ["timeline"]))
 
-        store.setTimeline(TimelineFilter(visibility: .archive), title: "Archive")
+        store.setFeed(.archive, title: "Archive")
         body = try await search()
         XCTAssertEqual(body.filter.visibility, StringFilter(in: ["archive"]))
 
@@ -55,16 +55,14 @@ import XCTest
         _ = try await search()
         XCTAssertEqual(store.results.map(\.id), ["own"], "Lightroom keeps to developed photos.")
 
-        var recentlyTaken = TimelineFilter(); recentlyTaken.userID = "alice"; recentlyTaken.isTrashed = false
-        store.setTimeline(recentlyTaken, title: "Recently taken")
+        store.setFeed(.recentlyTaken, title: "Recently taken")
         _ = try await search()
         XCTAssertEqual(store.results.map(\.id), ["own"], "Recently taken keeps to the account's own photos.")
 
         // A filename search inside Recently added is ordered by the time taken, which search can do.
         store.applySearchOptions(mode: .filename, filter: SearchFilter())
         try await until("The options search was not sent.") { await api.metadata.count == 1 && !store.isSearching }
-        var recentlyAdded = recentlyTaken; recentlyAdded.visibility = nil; recentlyAdded.orderBy = "createdAt"
-        store.setTimeline(recentlyAdded, title: "Recently added")
+        store.setFeed(.recentlyAdded, title: "Recently added")
         store.search("beach")
         try await until("The filename search was not sent.") { await api.metadata.count == 2 && !store.isSearching }
         XCTAssertNil(store.error)
@@ -82,7 +80,7 @@ import XCTest
         var locked = photo("locked", owner: "alice"); locked.visibility = .locked
         var hidden = photo("hidden", owner: "alice"); hidden.visibility = .hidden
         let api = SearchRecorder(userID: "alice", items: [locked, hidden, photo("shown", owner: "alice")])
-        let store = LibraryStore(api: api, placesDelay: .zero)
+        let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
         removeCachesAfterwards(api.cacheScope)
 
@@ -102,16 +100,13 @@ import XCTest
     }
 
     func testPlaceIdentityTracksMembershipNotCount() throws {
-        let lisbon = TimelineFilter(place: TimelinePlace(id: "Lisbon", assetIDs: ["a", "b"]))
-        let swapped = TimelineFilter(place: TimelinePlace(id: "Lisbon", assetIDs: ["a", "c"]))
-        let reordered = TimelineFilter(place: TimelinePlace(id: "Lisbon", assetIDs: ["b", "a"]))
+        func place(_ ids: [String]) -> LibraryQuery { .place(PlaceMembership(placeID: "Lisbon", assetIDs: ids, markerQuery: "")) }
+        let lisbon = place(["a", "b"]), swapped = place(["a", "c"]), reordered = place(["b", "a"])
         XCTAssertNotEqual(lisbon, swapped, "Same count, other photos: another feed.")
-        XCTAssertNotEqual(lisbon.cacheKey, swapped.cacheKey)
+        XCTAssertNotEqual(lisbon.stableKey, swapped.stableKey)
         XCTAssertEqual(lisbon, reordered)
-        XCTAssertEqual(lisbon.cacheKey, reordered.cacheKey)
-        let membership = PlaceMembership(placeID: "Lisbon", assetIDs: ["a", "b"], markerQuery: "")
-        XCTAssertEqual(lisbon.cacheKey, LibraryQuery.place(membership).stableKey, "The feed and the query name a place alike.")
-        XCTAssertFalse(lisbon.cacheKey.hasSuffix("#2"), "A place is no longer named by its count.")
+        XCTAssertEqual(lisbon.stableKey, reordered.stableKey)
+        XCTAssertFalse(lisbon.stableKey.hasSuffix("#2"), "A place is no longer named by its count.")
 
         // The places on the map carry their membership, with the marker query that found them.
         let markers = [MapMarker(id: "a", lat: 38.7, lon: -9.1, city: "Lisbon", state: nil, country: "Portugal"),
@@ -130,7 +125,7 @@ import XCTest
         addTeardownBlock { await api.shutdown() }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LibraryRepository-" + UUID().uuidString, isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let index = try EntityStore(scope: api.cacheScope, userID: "alice", directory: directory)
+        let index = try LibraryIndex(scope: api.cacheScope, userID: "alice", directory: directory)
         await api.attachEntityStore(index)
         let partner = try event("PartnerV1", #"{"sharedById":"bob","sharedWithId":"alice","inTimeline":true}"#, ack: "PartnerV1|bob")
 
@@ -196,15 +191,15 @@ import XCTest
 }
 
 /// A library whose searches all answer with the same photos, recording each request.
-private actor SearchRecorder: LibraryAPI {
+private actor SearchRecorder: FakeFeedSource {
     nonisolated let cacheScope = "test-search-" + UUID().uuidString
     nonisolated let userID: String?
     private let items: [Asset]
     private(set) var smart: [SearchQuery] = []
     private(set) var metadata: [MetadataQuery] = []
     init(userID: String?, items: [Asset]) { self.userID = userID; self.items = items }
-    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] { [] }
-    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] { [] }
+    func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] { [] }
+    func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] { [] }
     func search(_ query: SearchQuery) async throws -> SearchResponse { smart.append(query); return page() }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { metadata.append(query); return page() }
     private func page() -> SearchResponse {

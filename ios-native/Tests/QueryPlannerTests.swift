@@ -98,12 +98,12 @@ final class QueryPlannerTests: XCTestCase {
             XCTAssertEqual(try QueryPlanner.plan(stacked, context: indexed).backend, withIndex, name)
             XCTAssertEqual(try QueryPlanner.plan(stacked, context: online).backend, withoutIndex, name)
             if withIndex == .index {
-                let filter = try TimelineFilter(stacked, userID: me)
-                XCTAssertEqual(filter.albumID, stacked.predicates.albums.first, name)
-                XCTAssertEqual(filter.personID, stacked.predicates.people.first, name)
-                XCTAssertEqual(filter.place, stacked.predicates.place.map(TimelinePlace.init), name)
+                let feed = try IndexFeedRequest(stacked, userID: me)
+                XCTAssertEqual(feed.albumID, stacked.predicates.albums.first, name)
+                XCTAssertEqual(feed.personID, stacked.predicates.people.first, name)
+                XCTAssertEqual(feed.placeAssetIDs, stacked.predicates.place?.assetIDs, name)
             } else {
-                XCTAssertThrowsError(try TimelineFilter(stacked, userID: me), name)
+                XCTAssertThrowsError(try IndexFeedRequest(stacked, userID: me), name)
             }
             XCTAssertThrowsError(try ServerTimelineRequest(stacked, userID: me), name)
             // Search keeps every facet.
@@ -154,35 +154,43 @@ final class QueryPlannerTests: XCTestCase {
         XCTAssertFalse(ServerTimelineRequest.allowsPartners(albumInLibrary))
         XCTAssertFalse(ServerTimelineRequest.allowsPartners(.person(person)))
         XCTAssertFalse(ServerTimelineRequest.allowsPartners(.place(lisbon)))
-        // Until Q5 decides it, the library leaves partners out.
+        // Until the owner decides it (QUERY-1), the library leaves partners out.
         XCTAssertFalse(try ServerTimelineRequest(.library, userID: me).queryItems.contains { $0.name == "withPartners" })
     }
 
-    /// The server timeline is asked exactly as today's feeds ask it, so their caches keep their names.
+    /// The server timeline is asked exactly as the feeds asked it before Q5, so their caches keep
+    /// their names: these strings are what TimelineFilter wrote, pinned.
     func testTimelineRequestsKeepTodaysQueryItems() throws {
-        var recentlyTaken = TimelineFilter(); recentlyTaken.userID = me; recentlyTaken.isTrashed = false
-        var recentlyAdded = TimelineFilter(); recentlyAdded.userID = me; recentlyAdded.visibility = nil; recentlyAdded.isTrashed = false
-        recentlyAdded.orderBy = "createdAt"
-        var partnerFeed = TimelineFilter(); partnerFeed.userID = partner; partnerFeed.visibility = nil
-        var oldestFirst = TimelineFilter(albumID: album); oldestFirst.order = "asc"
-        let table: [(LibraryQuery, TimelineFilter)] = [
-            (.library, TimelineFilter()), (.favorites, TimelineFilter(isFavorite: true)), (.archive, TimelineFilter(visibility: .archive)),
-            (.trash, TimelineFilter(visibility: nil, isTrashed: true)), (.lightroom, TimelineFilter(isDeveloped: true)),
-            (.recentlyTaken, recentlyTaken), (.recentlyAdded, recentlyAdded), (.partner(partner), partnerFeed),
-            (.album(album), TimelineFilter(albumID: album)), (.album(album, ascending: true), oldestFirst),
-            (.person(person), TimelineFilter(personID: person)),
+        let table: [(LibraryQuery, String)] = [
+            (.library, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline"),
+            (.favorites, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isFavorite=true"),
+            (.archive, "order=desc&orderBy=takenAt&withStacked=true&visibility=archive"),
+            (.trash, "order=desc&orderBy=takenAt&withStacked=true&isTrashed=true"),
+            (.lightroom, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isDeveloped=true"),
+            (.recentlyTaken, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&userId=\(me)&isTrashed=false"),
+            (.recentlyAdded, "order=desc&orderBy=createdAt&withStacked=true&userId=\(me)&isTrashed=false"),
+            (.partner(partner), "order=desc&orderBy=takenAt&withStacked=true&userId=\(partner)"),
+            (.album(album), "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&albumId=\(album)"),
+            (.album(album, ascending: true), "order=asc&orderBy=takenAt&withStacked=true&visibility=timeline&albumId=\(album)"),
+            (.person(person), "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&personId=\(person)"),
         ]
-        for (query, filter) in table {
-            let request = try ServerTimelineRequest(query, userID: me)
-            XCTAssertEqual(request.queryItems, filter.queryItems, query.stableKey)
-            XCTAssertEqual(request.filter.cacheKey, filter.cacheKey)
-            XCTAssertEqual(LibraryQuery(filter, userID: me), query, "Today's feed reads back as its preset: \(query.stableKey)")
+        func written(_ request: ServerTimelineRequest) -> String {
+            request.queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
         }
-        XCTAssertEqual(try TimelineFilter(.place(lisbon), userID: me), TimelineFilter(place: TimelinePlace(lisbon)))
+        for (query, expected) in table {
+            XCTAssertEqual(written(try ServerTimelineRequest(query, userID: me)), expected, query.stableKey)
+        }
+        // The library's cache key is the request it sends; the own-photo feeds say userId=me.
+        XCTAssertEqual(LibraryQuery.library.stableKey, written(try ServerTimelineRequest(.library, userID: me)))
         XCTAssertThrowsError(try ServerTimelineRequest(.place(lisbon), userID: me)) { XCTAssertEqual($0 as? Unsupported, .placeNeedsIndex) }
         XCTAssertThrowsError(try ServerTimelineRequest(.videos, userID: me))
-        var locked = TimelineFilter(); locked.visibility = .locked
-        XCTAssertNil(LibraryQuery(locked, userID: me), "The Locked Folder has no library query.")
+        // The Locked Folder has its own query, every photo on its own.
+        XCTAssertEqual(written(ServerTimelineRequest(LockedFolderQuery())), "order=desc&orderBy=takenAt&withStacked=false&visibility=locked")
+        // Trash and album editing open stacks, as their screens always asked.
+        var trash = LibraryQuery.trash; trash.stacks = .all
+        XCTAssertEqual(written(try ServerTimelineRequest(trash, userID: me)), "order=desc&orderBy=takenAt&withStacked=false&isTrashed=true")
+        var albumPhotos = LibraryQuery.album(album); albumPhotos.visibility = [.timeline, .archive]; albumPhotos.stacks = .all
+        XCTAssertEqual(written(try ServerTimelineRequest(albumPhotos, userID: me)), "order=desc&orderBy=takenAt&withStacked=false&albumId=\(album)")
     }
 
     // MARK: Server search

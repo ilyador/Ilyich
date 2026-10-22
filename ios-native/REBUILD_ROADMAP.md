@@ -443,6 +443,13 @@ Discovery merges at commit time: temp table, NOT EXISTS an equal-date confirmati
   - UI testPeoplePlacesAndLightroomKeepTheCanonicalLibraryFeed on index routing
 - **Acceptance:**
   - On the phone, counts for People, Places, Lightroom, Favorites, Archive, Trash and partner feeds are unchanged (except partners, if adopted)
+- **As built:**
+  - TimelineFilter, TimelinePlace, the LibraryAPI protocol, LibraryAPIError.placeNeedsOfflineLibrary, NativeLibraryAPI, setTimeline and the EntityStore alias are gone. LibraryStore reads through a LibraryFeedSource (TimelineSource + SearchSource + cacheScope, userID, refresh), which LibraryRepository implements; shelves call setFeed with presets (.favorites, .archive, .trash, .recentlyTaken, .recentlyAdded, .lightroom, .partner) and the store keeps feedQuery and feedPlan.
+  - A feed plans on every load and passes that plan to summary, month and monthPlaces, so one load never mixes backends; the library reload that a sync change triggers (routingChanged included) plans again and keeps the grid on the photo it showed. A query the planner serves by search (a place before the index is readable) is shown as results with the noMonths limitation; nothing silently falls back on an error any more.
+  - Translators: ServerTimelineRequest writes its own query items, byte for byte what TimelineFilter wrote (pinned as strings), and orders months in the library's order; init(LockedFolderQuery) serves the Locked Folder. IndexFeedRequest is the index's translation; LibraryIndex's feed reads take a LibraryQuery. AlbumAssetsManager, Duplicates/Trash and the Locked Folder build a LibraryQuery (or LockedFolderQuery) and still read the server timeline, as before.
+  - Timeline and places caches are keyed by LibraryQuery.stableKey: byte-equal for the library and every shelf except Recently taken and Recently added (userId=me), whose old files age out of the twelve kept and which reload once.
+  - Partners (QUERY-1) stay out: LibraryRepository.includesPartners is plumbed through the index and the server timeline but off, so the library shows exactly what it did; the ledger entry keeps its wrapper until the owner answers (and T5's coverage covers partners).
+  - Not done here: the UI fixture's sync/stream and ack (the shared fixture server can't be changed by a milestone run), so UI tests still route through the server timeline; the LibraryIndex facade keeps its forwarding methods (they map SQLite errors and resume the backfill), only the alias and the TimelineFilter surface went.
 
 ### Q6 — Typed changes reach media precisely
 

@@ -133,14 +133,17 @@ struct TrashView: View {
         } message: { Text(emptyAll ? "This removes all of your trashed photos and videos from the server, including items you have not loaded here. This cannot be undone." : "All of your trashed photos and videos will return to their previous visibility, including items you have not loaded here.") }
         .alert("Couldn’t update trash", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
-    private var filter: TimelineFilter { var filter = TimelineFilter(); filter.visibility = nil; filter.isTrashed = true; filter.withStacked = false; return filter }
+    /// The trash with every stacked photo on its own, from the server timeline.
+    private var timeline: ServerTimelineRequest {
+        get throws { var query = LibraryQuery.trash; query.stacks = .all; return try ServerTimelineRequest(query, userID: api.userID) }
+    }
     private func reload() async {
         guard !loading else { return }
         loading = true
         do {
             trashEnabled = try await api.serverFeatures().trash
             guard trashEnabled == true else { assets = []; buckets = []; selection = []; loading = false; initialized = true; return }
-            buckets = try await api.timeBuckets(filter: filter); assets = []; nextBucket = 0; selection = []; initialized = true
+            buckets = try await api.timeBuckets(try timeline); assets = []; nextBucket = 0; selection = []; initialized = true
         } catch is CancellationError { } catch { failure = .init(error) }
         loading = false
         if !buckets.isEmpty { await loadNext() }
@@ -148,7 +151,7 @@ struct TrashView: View {
     private func loadNext() async {
         guard !loading, nextBucket < buckets.count else { return }
         loading = true; defer { loading = false }
-        do { assets += try await api.timeBucket(buckets[nextBucket].timeBucket, filter: filter); nextBucket += 1 } catch { failure = .init(error) }
+        do { assets += try await api.timeBucket(buckets[nextBucket].timeBucket, of: try timeline); nextBucket += 1 } catch { failure = .init(error) }
     }
     private func restore() async {
         loading = true; defer { loading = false }

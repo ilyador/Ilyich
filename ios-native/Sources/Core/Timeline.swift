@@ -7,69 +7,6 @@ struct TimeBucket: Codable, Hashable, Identifiable, Sendable {
     var date: Date? { APIDate.parse(timeBucket) }
 }
 
-/// The photos of one place. Only the local library index can lay them out by month, so the server
-/// never sees this filter. A place is known by its membership revision, which follows its photos,
-/// not their count, and keeps its feed and caches apart from the library's.
-struct TimelinePlace: Hashable, Sendable {
-    let membership: PlaceMembership
-
-    init(_ membership: PlaceMembership) { self.membership = membership }
-    init(id: String, assetIDs: [String], markerQuery: String = "") {
-        membership = PlaceMembership(placeID: id, assetIDs: assetIDs, markerQuery: markerQuery)
-    }
-    var key: String { membership.placeID + "#" + membership.revision }
-    var assetIDs: [String] { membership.assetIDs }
-    // A place can hold thousands of photos; the membership compares and hashes its revision only.
-}
-
-struct TimelineFilter: Hashable, Sendable {
-    var visibility: AssetVisibility? = .timeline
-    var albumID: String?
-    var personID: String?
-    var userID: String?
-    var isFavorite: Bool?
-    var isTrashed: Bool?
-    /// Photos with a developed Lightroom preview, or, with false, the rest.
-    var isDeveloped: Bool?
-    var withStacked = true
-    var withPartners = false
-    var order = "desc"
-    var orderBy = "takenAt"
-    var place: TimelinePlace?
-
-    /// Names this feed for the caches on the phone. A place is part of it, though the server never
-    /// sees one.
-    var cacheKey: String {
-        let items = queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
-        return place.map { items + "&place=" + $0.key } ?? items
-    }
-
-    var queryItems: [URLQueryItem] {
-        var items = [URLQueryItem(name: "order", value: order), URLQueryItem(name: "orderBy", value: orderBy),
-                     URLQueryItem(name: "withStacked", value: String(withStacked))]
-        for (name, value) in [("visibility", visibility?.rawValue), ("albumId", albumID), ("personId", personID), ("userId", userID),
-                              ("isFavorite", isFavorite.map(String.init)), ("isTrashed", isTrashed.map(String.init)),
-                              ("isDeveloped", isDeveloped.map(String.init))] {
-            if let value { items.append(.init(name: name, value: value)) }
-        }
-        if withPartners { items.append(.init(name: "withPartners", value: "true")) }
-        return items
-    }
-
-    /// A month in the library's order, which the index reads in too: by the time taken (or added,
-    /// in created-at order), newest first unless the feed asks otherwise, then by ID. The server
-    /// orders a month by day, file creation time and file name instead.
-    func libraryOrder(_ assets: [Asset]) -> [Asset] {
-        let added = orderBy == "createdAt", ascending = order == "asc"
-        return assets.sorted { a, b in
-            let left = (added ? a.createdAt : a.localDateTime) ?? .distantPast
-            let right = (added ? b.createdAt : b.localDateTime) ?? .distantPast
-            if left == right { return a.id < b.id }
-            return ascending ? left < right : left > right
-        }
-    }
-}
-
 /// The server returns columns with matching row counts, rather than one object per asset.
 struct TimeBucketPayload: Decodable, Sendable {
     let id: [String]

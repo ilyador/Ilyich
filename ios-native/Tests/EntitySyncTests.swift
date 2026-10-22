@@ -5,8 +5,8 @@ import XCTest
 
 @MainActor
 final class EntitySyncTests: XCTestCase {
-    private func makeStore(_ root: URL, scope: String = "server|alice") throws -> EntityStore {
-        try EntityStore(scope: scope, userID: "alice", directory: root)
+    private func makeStore(_ root: URL, scope: String = "server|alice") throws -> LibraryIndex {
+        try LibraryIndex(scope: scope, userID: "alice", directory: root)
     }
     private func event(_ type: String, _ json: String, ack: String? = nil) throws -> EntitySyncEvent {
         .init(type: type, data: try JSONDecoder().decode([String: EntityJSON].self, from: Data(json.utf8)), ack: ack ?? type + "|1")
@@ -186,19 +186,17 @@ final class EntitySyncTests: XCTestCase {
             face("locked-face", assetID: "locked"), face("trash-face", assetID: "trashed")
         ], epoch: epoch)
 
-        var personFilter = TimelineFilter()
-        personFilter.personID = "person"
-        let peoplePhotos = try await store.timelineAssets(filter: personFilter)
+        let personFilter = LibraryQuery.person("person")
+        let peoplePhotos = try await store.timelineAssets(personFilter)
         XCTAssertEqual(Set(peoplePhotos.map(\.id)), ["own-visible", "shared-visible"])
         XCTAssertEqual(peoplePhotos.count, 2, "Multiple visible faces must not duplicate an asset")
-        let peopleBuckets = try await store.timeBuckets(filter: personFilter)
+        let peopleBuckets = try await store.timeBuckets(personFilter)
         XCTAssertEqual(peopleBuckets.map(\.count).reduce(0, +), 2)
 
-        var albumFilter = TimelineFilter()
-        albumFilter.albumID = "shared-album"
-        let albumPhotos = try await store.timelineAssets(filter: albumFilter)
+        let albumFilter = LibraryQuery.album("shared-album")
+        let albumPhotos = try await store.timelineAssets(albumFilter)
         XCTAssertEqual(albumPhotos.map(\.id), ["shared-visible"])
-        let albumBuckets = try await store.timeBuckets(filter: albumFilter)
+        let albumBuckets = try await store.timeBuckets(albumFilter)
         XCTAssertEqual(albumBuckets.map(\.count).reduce(0, +), 1)
     }
     func testLockedTransitionPurgesMetadataAndCannotBeRepopulatedByLaterExif() async throws {
@@ -253,14 +251,13 @@ final class EntitySyncTests: XCTestCase {
         let buckets = try await store.timeBuckets()
         XCTAssertEqual(buckets.map(\.timeBucket), ["2026-02-01"])
         XCTAssertEqual(buckets.first?.count, 1)
-        var filter = TimelineFilter(); filter.isFavorite = true
-        let favorites = try await store.timeBucket("2026-02-01", filter: filter)
+        let favorites = try await store.timeBucket("2026-02-01", of: .favorites)
         XCTAssertEqual(favorites.map(\.id), ["primary"])
-        filter.withStacked = false; filter.isFavorite = nil
-        let all = try await store.timelineAssets(filter: filter)
+        var filter = LibraryQuery.library; filter.stacks = .all
+        let all = try await store.timelineAssets(filter)
         XCTAssertEqual(Set(all.map(\.id)), ["primary", "secondary"])
-        filter.visibility = nil
-        let defaultVisibility = try await store.timelineAssets(filter: filter)
+        filter.visibility = [.timeline, .archive]
+        let defaultVisibility = try await store.timelineAssets(filter)
         XCTAssertFalse(defaultVisibility.contains { $0.id == "hidden" })
         let matches = try await store.localAssetMatches()
         XCTAssertEqual(Set(matches.map(\.assetID)), ["primary", "secondary", "trash", "hidden"])
@@ -275,10 +272,10 @@ final class EntitySyncTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try makeStore(root), epoch = await store.epoch()
         _ = try await store.apply([asset("developed-1"), asset("developed-2"), asset("phone", developed: false)], epoch: epoch)
-        let lightroom = TimelineFilter(isDeveloped: true)
-        let buckets = try await store.timeBuckets(filter: lightroom)
+        let lightroom = LibraryQuery.lightroom
+        let buckets = try await store.timeBuckets(lightroom)
         XCTAssertEqual(buckets.first?.count, 2, "Only the developed photos.")
-        let month = try await store.timeBucket("2026-02-01", filter: lightroom)
+        let month = try await store.timeBucket("2026-02-01", of: lightroom)
         XCTAssertEqual(Set(month.map(\.id)), ["developed-1", "developed-2"])
     }
     func testAPlaceIsLaidOutByMonthFromItsOwnPhotos() async throws {
@@ -287,11 +284,11 @@ final class EntitySyncTests: XCTestCase {
         let store = try makeStore(root), epoch = await store.epoch()
         _ = try await store.apply([asset("lisbon-1"), asset("lisbon-2"), asset("porto"), asset("partner", owner: "bob"),
                                    asset("gone", deleted: true)], epoch: epoch)
-        let place = TimelineFilter(place: TimelinePlace(id: "Lisbon", assetIDs: ["lisbon-1", "lisbon-2", "partner", "gone", "unknown"]))
-        let buckets = try await store.timeBuckets(filter: place)
+        let place = LibraryQuery.place(PlaceMembership(placeID: "Lisbon", assetIDs: ["lisbon-1", "lisbon-2", "partner", "gone", "unknown"], markerQuery: ""))
+        let buckets = try await store.timeBuckets(place)
         XCTAssertEqual(buckets.map(\.timeBucket), ["2026-02-01"])
         XCTAssertEqual(buckets.first?.count, 3, "The place's photos from its map, a partner's included, without deleted or unknown ones.")
-        let month = try await store.timeBucket("2026-02-01", filter: place)
+        let month = try await store.timeBucket("2026-02-01", of: place)
         XCTAssertEqual(Set(month.map(\.id)), ["lisbon-1", "lisbon-2", "partner"])
         let library = try await store.timeBuckets()
         XCTAssertEqual(library.first?.count, 3, "The library itself is unchanged: its own three photos.")
@@ -389,7 +386,7 @@ extension EntitySyncTests {
         let api = try APIClient(baseURL: URL(string: "https://sync-test.invalid")!, accessToken: "test-session", userID: "alice",
                                 sessionConfiguration: configuration, networkConfiguration: .init())
         defer { Task { await api.shutdown() } }
-        let store = try EntityStore(scope: api.cacheScope, userID: "alice", directory: root)
+        let store = try LibraryIndex(scope: api.cacheScope, userID: "alice", directory: root)
         let fingerprint = try await api.syncSessionFingerprint()
         let needsReset = try await store.prepare(sessionFingerprint: fingerprint)
         XCTAssertTrue(needsReset)
@@ -423,7 +420,7 @@ extension EntitySyncTests {
         let api = try APIClient(baseURL: URL(string: "https://sync-test.invalid")!, accessToken: "test-session", userID: "alice",
                                 sessionConfiguration: configuration, networkConfiguration: .init())
         defer { Task { await api.shutdown() } }
-        let store = try EntityStore(scope: api.cacheScope, userID: "alice", directory: root)
+        let store = try LibraryIndex(scope: api.cacheScope, userID: "alice", directory: root)
         let sync = NativeSync(api: api, store: store)
         let partial = try JSONEncoder().encode(asset("photo")) + Data("\n".utf8)
         let complete = try JSONEncoder().encode(event("SyncCompleteV1", "{}", ack: "SyncCompleteV1|finished")) + Data("\n".utf8)

@@ -23,12 +23,17 @@ struct AlbumAssetsManager: View {
 
     private var title: String { switch mode { case .add: "Add photos"; case .remove: "Remove photos"; case .cover: "Choose cover" } }
     private var action: String { switch mode { case .add: "Add"; case .remove: "Remove"; case .cover: "Set cover" } }
-    private var filter: TimelineFilter {
-        var filter = TimelineFilter()
-        filter.withStacked = false
-        if mode == .add { filter.userID = api.userID; filter.visibility = source == "archive" ? .archive : .timeline }
-        else { filter.albumID = album.id; filter.visibility = nil; filter.order = album.order ?? "desc" }
-        return filter
+    /// Every photo on its own, stacks opened: the account's timeline or archive to add from, or the
+    /// album's photos in its order. Read from the server timeline, as this screen always has.
+    private var query: LibraryQuery {
+        var query: LibraryQuery
+        if mode == .add { query = source == "archive" ? .archive : .library; query.scope = .mine }
+        else { query = .album(album.id, ascending: album.order == "asc"); query.visibility = [.timeline, .archive] }
+        query.stacks = .all
+        return query
+    }
+    private var timeline: ServerTimelineRequest {
+        get throws { try ServerTimelineRequest(query, userID: api.userID) }
     }
     var body: some View {
         ScrollView {
@@ -80,7 +85,7 @@ struct AlbumAssetsManager: View {
         let token = UUID(); generation = token
         selection = []; assets = []; buckets = []; nextBucket = 0; loading = true; loaded = false; notice = nil
         do {
-            let result = try await api.timeBuckets(filter: filter)
+            let result = try await api.timeBuckets(try timeline)
             try Task.checkCancellation(); guard generation == token else { return }
             buckets = result; loading = false; loaded = true
             await loadNext(generation: token)
@@ -92,7 +97,7 @@ struct AlbumAssetsManager: View {
         loading = true
         defer { if generation == token { loading = false } }
         do {
-            let page = try await api.timeBucket(buckets[nextBucket].timeBucket, filter: filter)
+            let page = try await api.timeBucket(buckets[nextBucket].timeBucket, of: try timeline)
             try Task.checkCancellation(); guard generation == token else { return }
             let existing = Set(assets.map(\.id))
             assets.append(contentsOf: page.filter { !existing.contains($0.id) }); nextBucket += 1

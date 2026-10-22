@@ -2,20 +2,24 @@ import Foundation
 import IlyichPlatform
 
 /// One account's library reads: the planner picks the index, the server timeline or server search
-/// for a query, and the translators speak to each. Search pages keep only the photos that belong
-/// to the request. NativeLibraryAPI's TimelineFilter entry points route through here until Q5
-/// moves the feeds onto LibraryQuery.
-final class LibraryRepository: TimelineSource, SearchSource, Sendable {
+/// for a query, and the translators speak to each. A feed passes the plan it pinned to every read,
+/// so its months all come from one backend. Search pages keep only the photos that belong to the
+/// request.
+final class LibraryRepository: LibraryFeedSource {
     let client: APIClient
     let index: LibraryIndex?
     /// The account's sync, which runs refreshes as its own passes. Nil where nothing syncs.
     let sync: SyncEngine?
-    /// Whether the library includes the partners shown in the timeline. Off until Q5 decides it.
+    /// Whether the library includes the partners shown in the timeline (QUERY-1). Off: adopting it
+    /// changes what the library shows and its cache key, which waits for the owner's answer.
     let includesPartners: Bool
 
     init(client: APIClient, index: LibraryIndex?, sync: SyncEngine?, includesPartners: Bool = false) {
         self.client = client; self.index = index; self.sync = sync; self.includesPartners = includesPartners
     }
+
+    var cacheScope: String { client.cacheScope }
+    var userID: String? { client.userID }
 
     private func indexReadable() async throws -> Bool {
         guard let index else { return false }
@@ -28,37 +32,34 @@ final class LibraryRepository: TimelineSource, SearchSource, Sendable {
         try QueryPlanner.plan(query, context: PlannerContext(indexReadable: try await indexReadable()))
     }
 
-    func summary(_ query: LibraryQuery) async throws -> [TimeBucket] {
-        switch try await plan(query).backend {
-        case .index: return try await requireIndex().timeBuckets(filter: try indexFilter(query))
-        case .serverTimeline: return try await client.timeBuckets(filter: try timelineRequest(query).filter)
+    func summary(_ query: LibraryQuery, plan: QueryPlan) async throws -> [TimeBucket] {
+        switch plan.backend {
+        case .index: return try await requireIndex(query).timeBuckets(query, includesPartners: includesPartners)
+        case .serverTimeline: return try await client.timeBuckets(try timelineRequest(query))
         case .serverSearch: throw Self.noMonths(query)
         }
     }
 
-    func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] {
-        switch try await plan(query).backend {
+    func month(_ bucket: String, of query: LibraryQuery, plan: QueryPlan) async throws -> [Asset] {
+        switch plan.backend {
         case .index:
             FeedMonthProbe.note(.index)
-            return try await requireIndex().timeBucket(bucket, filter: try indexFilter(query))
+            return try await requireIndex(query).timeBucket(bucket, of: query, includesPartners: includesPartners)
         case .serverTimeline:
             FeedMonthProbe.note(.serverTimeline)
-            return try await client.timeBucket(bucket, filter: try timelineRequest(query).filter)
+            return try await client.timeBucket(bucket, of: try timelineRequest(query))
         case .serverSearch: throw Self.noMonths(query)
         }
     }
 
-    func monthPlaces(_ query: LibraryQuery) async throws -> [MonthPlaceCount] {
-        guard case .index = try await plan(query).backend else { return [] }
-        return try await requireIndex().monthPlaces(filter: try indexFilter(query))
+    func monthPlaces(_ query: LibraryQuery, plan: QueryPlan) async throws -> [MonthPlaceCount] {
+        guard case .index = plan.backend else { return [] }
+        return try await requireIndex(query).monthPlaces(query, includesPartners: includesPartners)
     }
 
-    private func requireIndex() throws -> LibraryIndex {
-        guard let index else { throw Unsupported.placeNeedsIndex }
+    private func requireIndex(_ query: LibraryQuery) throws -> LibraryIndex {
+        guard let index else { throw Self.noMonths(query) }
         return index
-    }
-    private func indexFilter(_ query: LibraryQuery) throws(Unsupported) -> TimelineFilter {
-        try TimelineFilter(query, userID: client.userID, includesPartners: includesPartners)
     }
     private func timelineRequest(_ query: LibraryQuery) throws(Unsupported) -> ServerTimelineRequest {
         try ServerTimelineRequest(query, userID: client.userID, includesPartners: includesPartners)
@@ -78,33 +79,8 @@ final class LibraryRepository: TimelineSource, SearchSource, Sendable {
         request.page(try await client.metadataSearch(request.metadataBody(cursor: cursor, size: size)))
     }
 
-    // MARK: Today's feeds (TimelineFilter), until Q5
-
-    /// The complete, queryable index serves the timeline; first sync never delays the server
-    /// timeline. The Locked Folder always comes from the server, and a place only from the index.
-    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
-        if filter.visibility != .locked, let index, try await index.isReadable() {
-            return try await index.timeBuckets(filter: filter)
-        }
-        guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
-        return try await client.timeBuckets(filter: filter)
-    }
-    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
-        if filter.visibility != .locked, let index, try await index.isReadable() {
-            FeedMonthProbe.note(.index)
-            return try await index.timeBucket(bucket, filter: filter)
-        }
-        guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
-        FeedMonthProbe.note(.serverTimeline)
-        return try await client.timeBucket(bucket, filter: filter)
-    }
-    /// A place's photos are laid out by month only from the complete local index.
-    func supportsPlaceTimelines() async -> Bool { (try? await indexReadable()) == true }
-    func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] {
-        guard filter.visibility != .locked, let index, try await index.isReadable() else { return [] }
-        return try await index.monthPlaces(filter: filter)
-    }
-    /// A sync pass, published like every other, and what it changed.
+    /// A sync pass, published like every other, and what it changed. Without a sync the server is
+    /// always up to date.
     func refresh() async throws -> LibraryChange? { try await sync?.refresh() }
 }
 

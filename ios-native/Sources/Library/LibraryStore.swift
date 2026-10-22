@@ -82,39 +82,9 @@ private struct FrozenFeed {
     var isScrubbing = false
 }
 
-protocol LibraryAPI: Sendable {
-    var cacheScope: String { get }
-    /// The signed-in user, which names the account's own photos in a search. Nil when unknown.
-    var userID: String? { get }
-    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket]
-    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset]
-    func search(_ query: SearchQuery) async throws -> SearchResponse
-    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse
-    /// Brings the library up to date with the server, and says what that changed, when it knows.
-    func refresh() async throws -> LibraryChange?
-    func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount]
-    /// Whether a place's photos can be laid out by month, as a person's are.
-    func supportsPlaceTimelines() async -> Bool
-}
-extension LibraryAPI {
-    var userID: String? { nil }
-    /// Without an offline library the server is always up to date.
-    func refresh() async throws -> LibraryChange? { nil }
-    /// Only the local index can count places for every month at once.
-    func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] { [] }
-    /// Only the local index can lay out a place by month.
-    func supportsPlaceTimelines() async -> Bool { false }
-}
-
-enum LibraryAPIError: LocalizedError {
-    /// A place's months come from the offline library, which is not ready.
-    case placeNeedsOfflineLibrary
-    var errorDescription: String? { "This place's photos can be shown by month once the offline library has synced." }
-}
-extension APIClient: LibraryAPI {}
-
 @MainActor @Observable final class LibraryStore {
-    let api: any LibraryAPI
+    /// Where the feed reads: the account's library repository.
+    let source: any LibraryFeedSource
     var buckets: [TimeBucket] = []
     var loaded: [String: [Asset]] = [:]
     private var remoteBuckets: [TimeBucket] = []
@@ -131,19 +101,17 @@ extension APIClient: LibraryAPI {}
     /// Each feed's places, so a month has a name before its photos load. They are kept per filter,
     /// so the places shown are always those of the feed shown, and clearing a filter brings the
     /// library's places straight back.
-    private var placesByFilter: [TimelineFilter: TimelinePlaces] = [:]
+    private var placesByFilter: [LibraryQuery: TimelinePlaces] = [:]
     /// Each month's places in the feed shown, ranked.
-    var monthPlaces: [String: [PlaceTally]] { placesByFilter[timelineFilter]?.months ?? [:] }
+    var monthPlaces: [String: [PlaceTally]] { placesByFilter[feedQuery]?.months ?? [:] }
     /// Months spent abroad, named for the time rail.
-    var trips: [String: String] { placesByFilter[timelineFilter]?.trips ?? [:] }
+    var trips: [String: String] { placesByFilter[feedQuery]?.trips ?? [:] }
     /// The places being counted, and for which feed.
-    @ObservationIgnored private var placesLoad: (filter: TimelineFilter, id: UUID, task: Task<Void, Never>)?
+    @ObservationIgnored private var placesLoad: (query: LibraryQuery, plan: QueryPlan, id: UUID, task: Task<Void, Never>)?
     /// The library changed while its places were being counted, so they are counted again after.
     @ObservationIgnored private var placesStale = false
     /// Counting every photo's place is one long read, so it waits for the first months of the grid.
     private let placesDelay: Duration
-    /// Whether a chosen place can be laid out by month like a person, as of the last reload.
-    @ObservationIgnored private(set) var canShowPlacesByMonth = false
     var filterTitle: String?
     var query = ""
     var verification: Verification?
@@ -169,7 +137,10 @@ extension APIClient: LibraryAPI {}
     let navigation = TimelinePosition()
     /// The rail moves the grid through this directly, at the finger's pace.
     @ObservationIgnored let scroller = GridScroller()
-    private(set) var timelineFilter = TimelineFilter()
+    /// What the feed shows. Its plan, made when the feed loads, serves every month it reads.
+    private(set) var feedQuery = LibraryQuery.library
+    /// How the feed shown is served, as of its last load; nil before then.
+    private(set) var feedPlan: QueryPlan?
     /// What a search inside the feed shown searches: its scope, trash, visibility and filters.
     private(set) var searchScope = LibraryStore.librarySearch {
         didSet { searchFilter = ServerSearchRequest.filter(for: searchScope) }
@@ -205,16 +176,17 @@ extension APIClient: LibraryAPI {}
     private var cacheEpoch: UUID?
     @ObservationIgnored private var cachedBuckets: Set<String> = []
     private var searchGeneration = UUID()
-    private var originalTimeline: (TimelineSnapshot, GridPosition?, String)?
+    /// The unfiltered library as it was left, with the plan its months came from.
+    private var originalTimeline: (TimelineSnapshot, GridPosition?, String, QueryPlan?)?
     @ObservationIgnored var position: GridPosition? {
         didSet { updateVisibleResultsTitle() }
     }
     @ObservationIgnored var started = false
 
-    init(api: any LibraryAPI, includesDevicePhotos: Bool = false, placesDelay: Duration = .seconds(3)) {
-        self.api = api; self.includesDevicePhotos = includesDevicePhotos; self.placesDelay = placesDelay
+    init(source: any LibraryFeedSource, includesDevicePhotos: Bool = false, placesDelay: Duration = .seconds(3)) {
+        self.source = source; self.includesDevicePhotos = includesDevicePhotos; self.placesDelay = placesDelay
     }
-    private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && timelineFilter == TimelineFilter() }
+    private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && feedQuery == .library }
     var selectedLocalPhotos: [LocalPhoto] { Array(selectedLocalRecords.values) }
     var selectedDevicePhotos: [LocalPhoto] {
         var seen = Set<String>()
@@ -323,7 +295,7 @@ extension APIClient: LibraryAPI {}
         guard !isReplacingFeed, isSelecting, !showingResults, !isSelectingGroup,
               buckets.indices.contains(navigation.section) else { return }
         let bucket = buckets[navigation.section].id
-        let current = generation, filter = timelineFilter
+        let current = generation, query = feedQuery, plan = feedPlan
         let operation = UUID(); groupSelectionID = operation
         isSelectingGroup = true
         groupSelectionTask = Task {
@@ -331,8 +303,8 @@ extension APIClient: LibraryAPI {}
             do {
                 let assets: [Asset]
                 if let cached = loaded[bucket], !cachedBuckets.contains(bucket) { assets = cached }
-                else if remoteBuckets.contains(where: { $0.id == bucket }) {
-                    assets = try await api.timeBucket(bucket, filter: filter)
+                else if let plan, remoteBuckets.contains(where: { $0.id == bucket }) {
+                    assets = try await source.month(bucket, of: query, plan: plan)
                 } else { assets = [] }
                 try Task.checkCancellation()
                 guard generation == current, isSelecting else { return }
@@ -398,28 +370,28 @@ extension APIClient: LibraryAPI {}
     /// again, so a library that keeps changing still gets its places. The count is kept on the
     /// phone by the same task, under the epoch it began with, so a count that an access change
     /// overtook is never kept.
-    private func loadMonthPlaces(_ filter: TimelineFilter) {
+    private func loadMonthPlaces(_ query: LibraryQuery, plan: QueryPlan) {
         if let placesLoad {
-            if placesLoad.filter == filter { placesStale = true; return }
+            if placesLoad.query == query, placesLoad.plan == plan { placesStale = true; return }
             placesLoad.task.cancel()
         }
         placesStale = false
-        let api = self.api, scope = api.cacheScope, delay = placesDelay, id = UUID()
+        let source = self.source, scope = source.cacheScope, delay = placesDelay, id = UUID()
         let task = Task { [weak self] in
             defer { self?.finishPlacesLoad(id) }
-            if self?.placesByFilter[filter] == nil, let saved = await TimelinePlacesCache.shared.load(scope: scope, filter: filter),
-               !Task.isCancelled, self?.placesByFilter[filter] == nil {
-                self?.keepPlaces(saved, for: filter)
+            if self?.placesByFilter[query] == nil, let saved = await TimelinePlacesCache.shared.load(scope: scope, query: query),
+               !Task.isCancelled, self?.placesByFilter[query] == nil {
+                self?.keepPlaces(saved, for: query)
             }
             try? await Task.sleep(for: delay)
             let epoch = await TimelinePlacesCache.shared.epoch(scope: scope)
-            guard !Task.isCancelled, let counts = try? await api.monthPlaces(filter: filter), !Task.isCancelled else { return }
+            guard !Task.isCancelled, let counts = try? await source.monthPlaces(query, plan: plan), !Task.isCancelled else { return }
             let places = await Task.detached(priority: .utility) { TimelinePlaces(counts: counts) }.value
             guard !Task.isCancelled, let self else { return }
-            self.keepPlaces(places, for: filter)
-            await TimelinePlacesCache.shared.save(places, scope: scope, filter: filter, epoch: epoch)
+            self.keepPlaces(places, for: query)
+            await TimelinePlacesCache.shared.save(places, scope: scope, query: query, epoch: epoch)
         }
-        placesLoad = (filter, id, task)
+        placesLoad = (query, plan, id, task)
     }
 
     private func finishPlacesLoad(_ id: UUID) {
@@ -427,16 +399,16 @@ extension APIClient: LibraryAPI {}
         placesLoad = nil
         if placesStale {
             placesStale = false
-            if load.filter == timelineFilter { loadMonthPlaces(load.filter) }
+            if load.query == feedQuery, let plan = feedPlan { loadMonthPlaces(load.query, plan: plan) }
         }
     }
 
-    private func keepPlaces(_ places: TimelinePlaces, for filter: TimelineFilter) {
+    private func keepPlaces(_ places: TimelinePlaces, for query: LibraryQuery) {
         // The library and a handful of people or albums are plenty to keep.
-        if placesByFilter[filter] == nil, placesByFilter.count >= 8 {
-            placesByFilter = placesByFilter.filter { $0.key == TimelineFilter() || $0.key == timelineFilter }
+        if placesByFilter[query] == nil, placesByFilter.count >= 8 {
+            placesByFilter = placesByFilter.filter { $0.key == .library || $0.key == feedQuery }
         }
-        placesByFilter[filter] = places
+        placesByFilter[query] = places
     }
     /// Search/filter results when showing them, otherwise the month under the viewport.
     var currentPlaceSummary: String? {
@@ -517,22 +489,34 @@ extension APIClient: LibraryAPI {}
         defer { if generation == current { isLoading = false } }
         do {
             if showingResults { await loadResults(reset: true, preservingPosition: preservingPosition); return }
-            cacheEpoch = await TimelineCache.shared.epoch(scope: api.cacheScope)
+            // The feed is planned on every load, so a change of routing (the offline library
+            // becoming readable, or going away) reopens it on the new backend, anchored by the
+            // photo it showed; every month of one load comes from that load's backend.
+            let query = feedQuery
+            let plan = try await source.plan(query)
+            guard generation == current else { return }
+            feedPlan = plan
+            if plan.backend == .serverSearch {
+                // A feed only search can serve, such as a place before the offline library is
+                // readable, is one list of results: the plan's noMonths limitation.
+                usesMetadata = true; showingResults = true
+                await loadResults(reset: true, preservingPosition: preservingPosition); return
+            }
+            cacheEpoch = await TimelineCache.shared.epoch(scope: source.cacheScope)
             // A background sync refresh already has current in-memory rows. Disk
             // hydration is only for an empty timeline; replaying it here can flash
             // older media revisions before the fresh bucket response arrives.
             if !preservingPosition,
-               let snapshot = await TimelineCache.shared.load(scope: api.cacheScope, filter: timelineFilter), generation == current {
+               let snapshot = await TimelineCache.shared.load(scope: source.cacheScope, query: query), generation == current {
                 remoteBuckets = snapshot.buckets; loaded = snapshot.assets; cachedBuckets = Set(loaded.keys)
                 recentBuckets = buckets.map(\.id).filter { loaded[$0] != nil }; updateSections(); revision += 1
                 if frozenFeed == nil { title = Self.monthTitle(buckets.first?.date) }
             }
-            let response = try await api.timeBuckets(filter: timelineFilter)
-            canShowPlacesByMonth = await api.supportsPlaceTimelines()
+            let response = try await source.summary(query, plan: plan)
             guard generation == current else { return }
             let previousSections = timelineSections
             remoteBuckets = response
-            loadMonthPlaces(timelineFilter)
+            loadMonthPlaces(query, plan: plan)
             updateSections()
             if preservingPosition && previousSections != timelineSections { resetID = UUID() }
             // Background sync keeps the viewport heading; scrolling/restoration
@@ -561,12 +545,7 @@ extension APIClient: LibraryAPI {}
                     error = failure
                 }
             }
-        } catch is CancellationError {} catch LibraryAPIError.placeNeedsOfflineLibrary {
-            // The offline library went away under a place, so its photos are found by search instead.
-            guard generation == current, let place = timelineFilter.place else { return }
-            canShowPlacesByMonth = false
-            searchPlace(place.membership, title: filterTitle ?? "Place")
-        } catch { if generation == current { self.error = error.localizedDescription } }
+        } catch is CancellationError {} catch { if generation == current { self.error = error.localizedDescription } }
     }
 
     func requestBucket(_ section: Int) {
@@ -589,13 +568,14 @@ extension APIClient: LibraryAPI {}
     }
 
     private func startPendingBuckets() {
+        guard let plan = feedPlan else { return }
         while requests.count < maximumBucketRequests, !pendingBuckets.isEmpty {
             let id = pendingBuckets.removeFirst()
             guard requests[id] == nil, bucketErrors[id] == nil,
                   loaded[id] == nil || cachedBuckets.contains(id),
                   remoteBuckets.contains(where: { $0.id == id }) else { continue }
-            let current = generation, filter = timelineFilter
-            requests[id] = Task { [weak self, api] in
+            let current = generation, query = feedQuery
+            requests[id] = Task { [weak self, source] in
                 defer {
                     if let self, self.generation == current {
                         self.requests[id] = nil
@@ -608,7 +588,7 @@ extension APIClient: LibraryAPI {}
                     }
                 }
                 do {
-                    let assets = try await FeedMonthProbe.measure { try await api.timeBucket(id, filter: filter) }
+                    let assets = try await FeedMonthProbe.measure { try await source.month(id, of: query, plan: plan) }
                     guard let self, self.generation == current, !Task.isCancelled else { return }
                     self.loaded[id] = assets
                     self.cachedBuckets.remove(id)
@@ -618,7 +598,7 @@ extension APIClient: LibraryAPI {}
                     FeedMonthProbe.committed()
                     if let epoch = self.cacheEpoch {
                         let snapshot = TimelineSnapshot(buckets: self.remoteBuckets, assets: self.loaded)
-                        await TimelineCache.shared.save(snapshot, scope: api.cacheScope, filter: filter, epoch: epoch)
+                        await TimelineCache.shared.save(snapshot, scope: source.cacheScope, query: query, epoch: epoch)
                     }
                 } catch is CancellationError {} catch {
                     // A load dropped for a month the grid left behind fails as URLError.cancelled
@@ -707,14 +687,16 @@ extension APIClient: LibraryAPI {}
     /// month. Bucket IDs hold local wall dates as UTC components, so the month is matched in UTC.
     func showInTimeline(_ asset: Asset) {
         let reuseTimeline = !isFiltered && !showingResults && !buckets.isEmpty
-        let saved = originalTimeline
+        let saved = originalTimeline, shownPlan = feedPlan
         beginScopeChange()
-        timelineFilter = TimelineFilter(); searchScope = Self.librarySearch
+        // The library shown stays, with the plan its months come from.
+        if reuseTimeline { feedPlan = shownPlan }
+        feedQuery = .library; searchScope = Self.librarySearch
         filterTitle = nil; query = ""; results = []; showingResults = false; usesMetadata = false; searchMode = .context
         originalTimeline = nil; scrollRequest = nil
-        let restoreSaved = !reuseTimeline && saved?.0.buckets.isEmpty == false
+        let restoreSaved = !reuseTimeline && saved?.0.buckets.isEmpty == false && saved?.3 != nil
         if restoreSaved, let saved {
-            remoteBuckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2
+            remoteBuckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2; feedPlan = saved.3
             recentBuckets = remoteBuckets.map(\.id).filter { loaded[$0] != nil }
             cachedBuckets = Set(loaded.keys)
             updateSections(); revision += 1
@@ -763,7 +745,7 @@ extension APIClient: LibraryAPI {}
     func setPerson(_ person: Person) {
         rememberOriginal()
         beginScopeChange()
-        timelineFilter = TimelineFilter(personID: person.id)
+        feedQuery = .person(person.id)
         searchScope = Self.widened(.person(person.id))
         filterTitle = person.name.isEmpty ? "Person" : person.name
         query = ""; showingResults = false; usesMetadata = false
@@ -773,15 +755,16 @@ extension APIClient: LibraryAPI {}
     func setAlbum(_ album: Album) {
         rememberOriginal()
         beginScopeChange()
-        timelineFilter = TimelineFilter(albumID: album.id)
-        timelineFilter.order = album.order ?? "desc"
-        searchScope = Self.widened(.album(album.id, ascending: timelineFilter.order == "asc"))
+        let ascending = album.order == "asc"
+        feedQuery = .album(album.id, ascending: ascending)
+        searchScope = Self.widened(.album(album.id, ascending: ascending))
         filterTitle = album.albumName; query = ""; showingResults = false; usesMetadata = false
         scheduleReload()
     }
 
     /// A place's photos are laid out by month, as a person's are, so the rail, the months' places
-    /// and the trips work there too. Without the offline library they are found by search instead.
+    /// and the trips work there too. Until the offline library is readable the planner serves a
+    /// place by search, as one list.
     func setPlace(id: String, assetIDs: [String], title: String) {
         guard !assetIDs.isEmpty else { return }
         setPlace(PlaceMembership(placeID: id, assetIDs: assetIDs, markerQuery: ""), title: title)
@@ -790,21 +773,11 @@ extension APIClient: LibraryAPI {}
     /// A place, known by its membership revision.
     func setPlace(_ place: PlaceMembership, title: String) {
         guard !place.assetIDs.isEmpty else { return }
-        guard canShowPlacesByMonth else { searchPlace(place, title: title); return }
         rememberOriginal()
         beginScopeChange()
-        timelineFilter = TimelineFilter(place: TimelinePlace(place))
+        feedQuery = .place(place)
         searchScope = Self.widened(.place(place))
         filterTitle = title; query = ""; showingResults = false; usesMetadata = false
-        scheduleReload()
-    }
-
-    private func searchPlace(_ place: PlaceMembership, title: String) {
-        rememberOriginal()
-        beginScopeChange()
-        timelineFilter = TimelineFilter()
-        searchScope = Self.widened(.place(place))
-        filterTitle = title; query = ""; usesMetadata = true; showingResults = true
         scheduleReload()
     }
 
@@ -821,7 +794,7 @@ extension APIClient: LibraryAPI {}
     func setMetadataFilter(_ filter: SearchFilter, title: String, developedOnly: Bool = false) {
         rememberOriginal()
         beginScopeChange()
-        timelineFilter = TimelineFilter()
+        feedQuery = .library
         var scope = LibraryQuery(filter)
         if developedOnly { scope.predicates.developed = true }
         searchScope = scope
@@ -833,30 +806,31 @@ extension APIClient: LibraryAPI {}
     /// Every photo developed in Lightroom, laid out by month as a person's photos are. A search
     /// within them keeps to developed photos.
     func setDeveloped(title: String) {
-        setTimeline(TimelineFilter(isDeveloped: true), title: title)
+        setFeed(.lightroom, title: title)
     }
 
-    func setTimeline(_ filter: TimelineFilter, title: String) {
+    /// A shelf's feed: Favorites, Archive, Trash, Recently taken or added, a partner, Lightroom.
+    func setFeed(_ query: LibraryQuery, title: String) {
         rememberOriginal()
         beginScopeChange()
-        timelineFilter = filter; filterTitle = title; query = ""; showingResults = false; usesMetadata = false
+        feedQuery = query; filterTitle = title; self.query = ""; showingResults = false; usesMetadata = false
         // A search inside the feed keeps its scope, trash, visibility and filters.
-        searchScope = LibraryQuery(filter, userID: api.userID) ?? Self.librarySearch
+        searchScope = query
         scheduleReload()
     }
 
     func clearFilters() {
-        beginScopeChange(); timelineFilter = TimelineFilter(); searchScope = Self.librarySearch
+        beginScopeChange(); feedQuery = .library; searchScope = Self.librarySearch
         filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false; searchMode = .context
         selected = []; isSelecting = false
-        if let saved = originalTimeline {
+        if let saved = originalTimeline, let plan = saved.3 {
             cancelRequests(); generation = UUID(); searchGeneration = UUID()
-            remoteBuckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2
+            remoteBuckets = saved.0.buckets; loaded = saved.0.assets; title = saved.2; feedPlan = plan
             recentBuckets = buckets.map(\.id).filter { loaded[$0] != nil }; cachedBuckets = Set(loaded.keys)
             updateSections(); restorePosition = saved.1; frozenFeed = nil; resetID = UUID(); revision += 1
             error = nil; isLoading = false; isSearching = false; originalTimeline = nil
             // The library's places come back with it, unless they were never counted.
-            if placesByFilter[timelineFilter] == nil { loadMonthPlaces(timelineFilter) }
+            if placesByFilter[feedQuery] == nil { loadMonthPlaces(feedQuery, plan: plan) }
         } else { scheduleReload() }
     }
 
@@ -913,7 +887,7 @@ extension APIClient: LibraryAPI {}
             if case .chronological(.createdAt, let ascending) = scope.ranking { scope.ranking = .chronological(.takenAt, ascending: ascending) }
             scope = scope.refined(text: text, mode: searchMode)
         }
-        return try ServerSearchRequest(scope, userID: api.userID)
+        return try ServerSearchRequest(scope, userID: source.userID)
     }
 
     private func loadResults(reset: Bool, retry: (cursor: String?, prefix: [Asset])? = nil,
@@ -950,8 +924,8 @@ extension APIClient: LibraryAPI {}
                 try Task.checkCancellation()
                 failedBatch = (nextCursor, prefix + accumulated)
                 let response = switch request.endpoint {
-                case .smart: request.page(try await api.search(request.smartBody(cursor: nextCursor)))
-                case .metadata: request.page(try await api.metadataSearch(request.metadataBody(cursor: nextCursor, size: pageSize)))
+                case .smart: try await source.smart(request, cursor: nextCursor)
+                case .metadata: try await source.metadata(request, cursor: nextCursor, size: pageSize)
                 }
                 try Task.checkCancellation()
                 fetchedPageCount += 1
@@ -1035,7 +1009,7 @@ extension APIClient: LibraryAPI {}
     func refreshAfterMutation() async {
         originalTimeline = nil
         do {
-            let change = try await api.refresh()
+            let change = try await source.refresh()
             // A change the pass found was published, and LibraryView reloads the feed on it unless a
             // search is showing. Reloading here as well would load every month twice.
             if let change, !change.isEmpty, query.isEmpty { return }
@@ -1060,6 +1034,8 @@ extension APIClient: LibraryAPI {}
         verification = nil; retryBatch = nil; cursor = nil; hasMore = false
         loadedResultPageCount = 0
         similarAssetID = nil
+        // The next feed plans its own months; none is read with this one's plan.
+        feedPlan = nil
         restorePosition = nil; error = nil
     }
     private func freezeCurrentFeedIfNeeded() {
@@ -1092,7 +1068,7 @@ extension APIClient: LibraryAPI {}
     }
     private func rememberOriginal() {
         if originalTimeline == nil && !isFiltered && !showingResults {
-            originalTimeline = (TimelineSnapshot(buckets: remoteBuckets, assets: loaded), position, title)
+            originalTimeline = (TimelineSnapshot(buckets: remoteBuckets, assets: loaded), position, title, feedPlan)
         }
     }
     private func updateSections() {

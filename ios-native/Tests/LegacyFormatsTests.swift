@@ -309,19 +309,20 @@ final class LegacyFormatsTests: XCTestCase {
     func testPlacesFilesAreFoundByHashingTheFeedKey() async throws {
         let scope = G.account.cacheScope
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        XCTAssertEqual(Legacy.placesPath(scope: scope, feedKey: TimelineFilter().cacheKey),
+        XCTAssertEqual(Legacy.placesPath(scope: scope, feedKey: LibraryQuery.library.stableKey),
                        "IlyichTimelinePlaces/\(G.digest)/ff9bafac0eb80c2674bfcaaa3acc714c710245186a78a84fce9c2cc4fe4df897.json")
-        XCTAssertEqual(LibraryQuery.library.stableKey, TimelineFilter().cacheKey, "The library's places are found under today's key.")
+        XCTAssertEqual(LibraryQuery.library.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline",
+                       "The library's places are found under the key they had before Q5.")
         XCTAssertEqual(try FixtureLoader.files(in: "caches/IlyichTimelinePlaces"),
-                       G.places.map { String(Legacy.placesPath(scope: scope, feedKey: $0.filter.cacheKey).dropFirst("IlyichTimelinePlaces/".count)) }.sorted())
+                       G.places.map { String(Legacy.placesPath(scope: scope, feedKey: $0.query.stableKey).dropFirst("IlyichTimelinePlaces/".count)) }.sorted())
         await TimelinePlacesCache.shared.removeAll(scope: scope)
-        for (filter, places) in G.places {
-            let path = Legacy.placesPath(scope: scope, feedKey: filter.cacheKey)
+        for (query, places) in G.places {
+            let path = Legacy.placesPath(scope: scope, feedKey: query.stableKey)
             let fixture = try FixtureLoader.data("caches/" + path)
-            await TimelinePlacesCache.shared.save(places, scope: scope, filter: filter, epoch: TimelinePlacesCache.shared.epoch(scope: scope))
+            await TimelinePlacesCache.shared.save(places, scope: scope, query: query, epoch: TimelinePlacesCache.shared.epoch(scope: scope))
             let written = try Data(contentsOf: caches.appendingPathComponent(path))
             XCTAssertEqual(try FixtureLoader.canonicalJSON(written), try FixtureLoader.canonicalJSON(fixture), path)
-            let loaded = await TimelinePlacesCache.shared.load(scope: scope, filter: filter)
+            let loaded = await TimelinePlacesCache.shared.load(scope: scope, query: query)
             XCTAssertEqual(loaded, places)
             let mirror = try Legacy.decoder().decode(Legacy.TimelinePlaces.self, from: fixture)
             XCTAssertEqual(mirror.months.mapValues { $0.map(\.name) }, places.months.mapValues { $0.map(\.name) })

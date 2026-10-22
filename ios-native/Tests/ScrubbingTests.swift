@@ -186,7 +186,7 @@ import XCTest
                               Asset(id: "c\(index)", localDateTime: second)]
         }
         let api = MonthLibrary(months: library)
-        let store = LibraryStore(api: api)
+        let store = LibraryStore(source: api)
         defer { store.stop() }
         addTeardownBlock { await TimelineCache.shared.removeAll(scope: api.cacheScope) }
         await store.reload()
@@ -278,7 +278,7 @@ import XCTest
         let api = MonthLibrary(months: Dictionary(uniqueKeysWithValues: months.map { ($0, [Asset(id: "photo-\($0)")]) }),
                                delay: .seconds(1), cancelled: URLError(.cancelled))
         addTeardownBlock { await TimelineCache.shared.removeAll(scope: api.cacheScope) }
-        let store = LibraryStore(api: api)
+        let store = LibraryStore(source: api)
         await store.reload()
         return (store, api)
     }
@@ -299,22 +299,23 @@ import XCTest
 final class MonthIndexTests: XCTestCase {
     func testMonthsAreReadInOrderFromTheirIndex() async throws {
         let root = temporaryDirectory()
-        let store = try EntityStore(scope: "server|month-index", userID: "alice", directory: root)
+        let store = try LibraryIndex(scope: "server|month-index", userID: "alice", directory: root)
         // 24,000 photos over 240 months, as in the UI test library.
         try await Self.addPhotos(24_000, to: store)
         let clock = ContinuousClock()
         let month = "2015-06-01T00:00:00Z"
-        let filters = [TimelineFilter(), TimelineFilter(isFavorite: true), TimelineFilter(visibility: .archive),
-                       TimelineFilter(withPartners: true), TimelineFilter(orderBy: "createdAt")]
+        var added = LibraryQuery.library; added.ranking = .chronological(.createdAt, ascending: false)
+        let filters: [(query: LibraryQuery, partners: Bool)] = [(.library, false), (.favorites, false), (.archive, false),
+                                                               (.library, true), (added, false)]
 
         var loaded: [[String]] = []
         var elapsed = Duration.zero
         for filter in filters {
-            let plan = try await store.timeBucketPlan(month, filter: filter)
-            let index = filter.orderBy == "createdAt" ? "asset_index_added" : "asset_index_taken"
+            let plan = try await store.timeBucketPlan(month, of: filter.query, includesPartners: filter.partners)
+            let index = filter.query == added ? "asset_index_added" : "asset_index_taken"
             XCTAssertTrue(plan.contains { $0.contains("USING INDEX \(index)") || $0.contains("USING COVERING INDEX \(index)") }, "\(filter): \(plan)")
             XCTAssertFalse(plan.contains { $0.contains("TEMP B-TREE") }, "A month is read in order, not sorted: \(filter): \(plan)")
-            elapsed += try await clock.measure { loaded.append(try await store.timeBucket(month, filter: filter).map(\.id)) }
+            elapsed += try await clock.measure { loaded.append(try await store.timeBucket(month, of: filter.query, includesPartners: filter.partners).map(\.id)) }
         }
         XCTAssertEqual(loaded[0].count, (11_300..<11_400).count { $0 % 50 != 0 && $0 % 40 != 0 }, "Archived and Bob's photos stay out.")
         let expected = (11_300..<11_400).filter { $0 % 50 != 0 && $0 % 40 != 0 }
@@ -332,7 +333,7 @@ final class MonthIndexTests: XCTestCase {
     func testOpeningDropsTheOldMonthIndexes() async throws {
         let root = temporaryDirectory()
         let scope = "server|month-index-old"
-        var store: EntityStore? = try EntityStore(scope: scope, userID: "alice", directory: root)
+        var store: LibraryIndex? = try LibraryIndex(scope: scope, userID: "alice", directory: root)
         try await Self.addPhotos(200, to: store!)
         store = nil
         let file = try XCTUnwrap(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
@@ -345,7 +346,7 @@ final class MonthIndexTests: XCTestCase {
         XCTAssertEqual(sqlite3_exec(database, "PRAGMA user_version=1", nil, nil, nil), SQLITE_OK)
         sqlite3_close(database)
 
-        store = try EntityStore(scope: scope, userID: "alice", directory: root)
+        store = try LibraryIndex(scope: scope, userID: "alice", directory: root)
         let month = try await store!.timeBucket("2006-01-01T00:00:00Z").map(\.id)
         XCTAssertEqual(month.count, 96)
         XCTAssertEqual(sqlite3_open(file.path, &database), SQLITE_OK)
@@ -365,7 +366,7 @@ final class MonthIndexTests: XCTestCase {
 
     /// Photos a hundred a month from January 2006, each with its EXIF, a few of them favorites,
     /// archived, a partner's or added in another month than taken.
-    private static func addPhotos(_ count: Int, to store: EntityStore) async throws {
+    private static func addPhotos(_ count: Int, to store: LibraryIndex) async throws {
         let epoch = await store.epoch()
         _ = try await store.prepare(sessionFingerprint: "session")
         let decoder = JSONDecoder()
@@ -391,7 +392,7 @@ final class MonthIndexTests: XCTestCase {
 }
 
 /// A library of months whose loads take `delay`, counting how many run at once.
-private actor MonthLibrary: LibraryAPI {
+private actor MonthLibrary: FakeFeedSource {
     nonisolated let cacheScope = "test-scrubbing-" + UUID().uuidString
     private let months: [String: [Asset]]
     private let delay: Duration
@@ -406,10 +407,10 @@ private actor MonthLibrary: LibraryAPI {
         self.months = months; self.delay = delay; self.cancelled = cancelled
     }
 
-    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
+    func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] {
         months.keys.sorted(by: >).map { TimeBucket(timeBucket: $0, count: months[$0]?.count ?? 0) }
     }
-    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
+    func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] {
         running += 1; maximumConcurrent = max(maximumConcurrent, running)
         defer { running -= 1 }
         if delay > .zero {

@@ -39,7 +39,7 @@ import Network
 
     /// Starts once `isReady` finds the offline library complete. The check is the warmer's own
     /// work, so stopping the warmer ends it.
-    func start(when isReady: @escaping @Sendable () async -> Bool, entities: EntityStore, pipeline: MediaPipeline) {
+    func start(when isReady: @escaping @Sendable () async -> Bool, entities: LibraryIndex, pipeline: MediaPipeline) {
         guard mayRun, task == nil, pendingStart == nil else { return }
         pendingStart = Task { [weak self] in
             let ready = await isReady()
@@ -49,7 +49,7 @@ import Network
         }
     }
 
-    func start(entities: EntityStore, pipeline: MediaPipeline) {
+    func start(entities: LibraryIndex, pipeline: MediaPipeline) {
         guard mayRun, task == nil else { return }
         pendingStart?.cancel(); pendingStart = nil
         isRunning = true
@@ -67,7 +67,7 @@ import Network
         monitor.cancel()
     }
 
-    private func run(entities: EntityStore, pipeline: MediaPipeline) async {
+    private func run(entities: LibraryIndex, pipeline: MediaPipeline) async {
         // Launch and the first screen of photos come first.
         try? await Task.sleep(for: .seconds(8))
         // Until the index's backfill is done its photos are not all listed; the next sync starts

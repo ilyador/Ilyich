@@ -121,7 +121,8 @@ struct LockedFolderView: View {
         .onDisappear { generation = UUID(); Task { await relock() } }
         .alert("Couldn’t unlock folder", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
-    private var filter: TimelineFilter { var filter = TimelineFilter(); filter.visibility = .locked; filter.withStacked = false; return filter }
+    /// The Locked Folder has its own query; no library query reaches it.
+    private var timeline: ServerTimelineRequest { ServerTimelineRequest(LockedFolderQuery()) }
     private func unlock() async {
         let requestGeneration = generation
         busy = true; defer { if requestGeneration == generation { busy = false } }
@@ -150,11 +151,11 @@ struct LockedFolderView: View {
         let requestGeneration = generation
         let status = try await api.authStatus()
         guard status.isElevated else { throw ServerFailure.forbidden(nil) }
-        let result = try await api.timeBuckets(filter: filter)
+        let result = try await api.timeBuckets(timeline)
         guard requestGeneration == generation else { return }
         self.status = status; buckets = result; nextBucket = 0; assets = []; unlocked = true
         if !buckets.isEmpty {
-            let page = try await api.timeBucket(buckets[0].timeBucket, filter: filter)
+            let page = try await api.timeBucket(buckets[0].timeBucket, of: timeline)
             guard requestGeneration == generation else { return }
             assets = page; nextBucket = 1
         }
@@ -172,7 +173,7 @@ struct LockedFolderView: View {
         let requestGeneration = generation
         busy = true; defer { if requestGeneration == generation { busy = false } }
         do {
-            let page = try await api.timeBucket(buckets[nextBucket].timeBucket, filter: filter)
+            let page = try await api.timeBucket(buckets[nextBucket].timeBucket, of: timeline)
             guard requestGeneration == generation else { return }
             assets += page; nextBucket += 1
         } catch { failure = .init(error) }

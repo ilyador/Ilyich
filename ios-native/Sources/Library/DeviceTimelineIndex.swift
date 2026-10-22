@@ -17,12 +17,12 @@ import Observation
 
     private struct Source: Sendable {
         let scope: String
-        let entities: EntityStore?
+        let entities: LibraryIndex?
         let preferences: BackupPreferences
         let receipts: [String: BackupReceipt]
     }
 
-    func configure(scope: String, entities: EntityStore?, preferences: BackupPreferences, receipts: [String: BackupReceipt]) {
+    func configure(scope: String, entities: LibraryIndex?, preferences: BackupPreferences, receipts: [String: BackupReceipt]) {
         source = Source(scope: scope, entities: entities, preferences: preferences, receipts: receipts)
         if changes == nil {
             let stream = PhotoKitAdapter.shared.changes()

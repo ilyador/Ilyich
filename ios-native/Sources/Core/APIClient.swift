@@ -37,7 +37,7 @@ actor APIClient {
     /// The sessions and the address choice every request of this client goes through.
     nonisolated let transport: ServerTransport
     private nonisolated var connection: ServerConnection { transport.connection }
-    private var entityStore: EntityStore?
+    private var entityStore: LibraryIndex?
     private var cachedServerFeatures: ServerFeatures?
 
     /// `sessionConfiguration` replaces the transport's default configuration, for tests. With
@@ -133,17 +133,16 @@ actor APIClient {
     func lock() async throws { try await requestVoid(.post, path: "auth/session/lock") }
     func currentUser() async throws -> User { try await request(.get, path: "users/me") }
 
-    // The server cannot narrow its timeline to a place, and would answer with the whole library.
-    func timeBuckets(filter: TimelineFilter = .init()) async throws -> [TimeBucket] {
-        guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
-        return try await request(.get, path: "timeline/buckets", query: filter.queryItems)
+    /// The server timeline's months. A place never reaches it: ServerTimelineRequest can't name one.
+    func timeBuckets(_ timeline: ServerTimelineRequest) async throws -> [TimeBucket] {
+        try await request(.get, path: "timeline/buckets", query: timeline.queryItems)
     }
-    func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) async throws -> [Asset] {
-        guard filter.place == nil else { throw LibraryAPIError.placeNeedsOfflineLibrary }
-        let payload: TimeBucketPayload = try await request(.get, path: "timeline/bucket", query: filter.queryItems + [.init(name: "timeBucket", value: bucket)])
-        return filter.libraryOrder(try payload.assets())
+    /// One month of the server timeline, in the library's order.
+    func timeBucket(_ bucket: String, of timeline: ServerTimelineRequest) async throws -> [Asset] {
+        let payload: TimeBucketPayload = try await request(.get, path: "timeline/bucket", query: timeline.queryItems + [.init(name: "timeBucket", value: bucket)])
+        return timeline.libraryOrder(try payload.assets())
     }
-    func attachEntityStore(_ store: EntityStore?) async {
+    func attachEntityStore(_ store: LibraryIndex?) async {
         entityStore = store.flatMap { $0.scope == cacheScope && $0.userID == userID ? $0 : nil }
         if let cachedServerFeatures, let entityStore {
             try? await entityStore.persistCachedServerFeatures(cachedServerFeatures)

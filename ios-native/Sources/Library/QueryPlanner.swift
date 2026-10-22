@@ -56,7 +56,7 @@ enum QueryPlanner {
         return limitations
     }
 
-    /// Whether the index can lay the query's filters out by month, as one TimelineFilter: any
+    /// Whether the index can lay the query's filters out by month, as one IndexFeedRequest: any
     /// owner, one album, one person (with the library only), a place, favorite and developed.
     static func indexServes(_ query: LibraryQuery) -> Bool {
         var rest = query.predicates
@@ -74,62 +74,9 @@ enum QueryPlanner {
     }
 }
 
-// MARK: Timeline translation
-
-extension TimelineFilter {
-    /// The timeline filter that serves a query on the index or the server timeline, as today's
-    /// feeds write it: the account's own photos name its user, and only they ask for active
-    /// photos explicitly. Partners are sent only where ServerTimelineRequest allows them.
-    init(_ query: LibraryQuery, userID: String?, includesPartners: Bool = false) throws(Unsupported) {
-        guard case .chronological(let field, let ascending) = query.ranking else { throw .predicate("relevance") }
-        self.init()
-        if query.visibility == .timeline { visibility = .timeline }
-        else if query.visibility == .archive { visibility = .archive }
-        else if query.visibility == [.timeline, .archive] { visibility = nil }
-        else { throw .predicate("visibility") }
-        guard QueryPlanner.indexServes(query) else { throw .predicate("search") }
-        switch query.scope {
-        case .library: break
-        case .mine:
-            guard let userID else { throw .predicate("owner") }
-            self.userID = userID
-        case .partner(let id): self.userID = id
-        }
-        albumID = query.predicates.albums.first
-        personID = query.predicates.people.first
-        place = query.predicates.place.map(TimelinePlace.init)
-        if query.trash == .trashed { isTrashed = true } else if query.scope == .mine { isTrashed = false }
-        isFavorite = query.predicates.favorite
-        isDeveloped = query.predicates.developed
-        withStacked = query.stacks == .primaryOnly
-        order = ascending ? "asc" : "desc"
-        orderBy = field.rawValue
-        withPartners = includesPartners && ServerTimelineRequest.allowsPartners(query)
-    }
-}
+// MARK: Search options
 
 extension LibraryQuery {
-    /// Today's feed filter as a query. The account's own user is the mine scope; any other user
-    /// is a partner. The Locked Folder and hidden photos have no query.
-    init?(_ filter: TimelineFilter, userID: String?) {
-        self.init()
-        switch filter.visibility {
-        case .timeline: visibility = .timeline
-        case .archive: visibility = .archive
-        case nil: visibility = [.timeline, .archive]
-        case .hidden, .locked: return nil
-        }
-        if let album = filter.albumID { predicates.albums = [album] }
-        if let person = filter.personID { predicates.people = [person] }
-        predicates.place = filter.place?.membership
-        if let user = filter.userID { scope = user == userID ? .mine : .partner(user) }
-        trash = filter.isTrashed == true ? .trashed : .active
-        ranking = .chronological(filter.orderBy == "createdAt" ? .createdAt : .takenAt, ascending: filter.order == "asc")
-        stacks = filter.withStacked ? .primaryOnly : .all
-        predicates.favorite = filter.isFavorite
-        predicates.developed = filter.isDeveloped
-    }
-
     /// A search filter from Search options or a media shelf, as a query. The ID list of a place
     /// can't name its place, so a place is kept from `base` when the filter still lists photos.
     init(_ filter: SearchFilter, base: LibraryQuery? = nil) {
@@ -168,17 +115,59 @@ extension LibraryQuery {
     }
 }
 
-/// A query on the server timeline: GET timeline/buckets and timeline/bucket.
+// MARK: Timeline translation
+
+/// A query on the server timeline: GET timeline/buckets and timeline/bucket, written as the
+/// feeds have always written it: order, orderBy and withStacked, then visibility, albumId,
+/// personId, userId, isFavorite, isTrashed, isDeveloped and withPartners where they apply. The
+/// account's own photos name its user, and only they ask for active photos explicitly.
 struct ServerTimelineRequest: Hashable, Sendable {
-    let filter: TimelineFilter
-    var queryItems: [URLQueryItem] { filter.queryItems }
+    let queryItems: [URLQueryItem]
+    private let byCreated: Bool
+    private let ascending: Bool
 
     /// `includesPartners` asks for the partners shown in the timeline; it is sent only where
     /// the server accepts it.
     init(_ query: LibraryQuery, userID: String?, includesPartners: Bool = false) throws(Unsupported) {
         if query.predicates.place != nil { throw .placeNeedsIndex }
         guard QueryPlanner.serverTimelineServes(query) else { throw .predicate("search") }
-        filter = try TimelineFilter(query, userID: userID, includesPartners: includesPartners)
+        guard case .chronological(let field, let ascending) = query.ranking else { throw .predicate("relevance") }
+        let visibility: String?
+        if query.visibility == .timeline { visibility = "timeline" }
+        else if query.visibility == .archive { visibility = "archive" }
+        else if query.visibility == [.timeline, .archive] { visibility = nil }
+        else { throw .predicate("visibility") }
+        let owner: String?
+        switch query.scope {
+        case .library: owner = nil
+        case .mine:
+            guard let userID else { throw .predicate("owner") }
+            owner = userID
+        case .partner(let id): owner = id
+        }
+        let trashed: Bool? = query.trash == .trashed ? true : query.scope == .mine ? false : nil
+        var items = Self.items(ascending: ascending, field: field, primaryOnly: query.stacks == .primaryOnly)
+        for (name, value) in [("visibility", visibility), ("albumId", query.predicates.albums.first),
+                              ("personId", query.predicates.people.first), ("userId", owner),
+                              ("isFavorite", query.predicates.favorite.map(String.init)), ("isTrashed", trashed.map(String.init)),
+                              ("isDeveloped", query.predicates.developed.map(String.init))] {
+            if let value { items.append(.init(name: name, value: value)) }
+        }
+        if includesPartners && Self.allowsPartners(query) { items.append(.init(name: "withPartners", value: "true")) }
+        queryItems = items; byCreated = field == .createdAt; self.ascending = ascending
+    }
+
+    /// The Locked Folder, every photo on its own: only the server serves it, and only while the
+    /// session is elevated.
+    init(_ locked: LockedFolderQuery) {
+        queryItems = Self.items(ascending: locked.ascending, field: .takenAt, primaryOnly: false)
+            + [.init(name: "visibility", value: AssetVisibility.locked.rawValue)]
+        byCreated = false; ascending = locked.ascending
+    }
+
+    private static func items(ascending: Bool, field: LibraryQuery.DateField, primaryOnly: Bool) -> [URLQueryItem] {
+        [.init(name: "order", value: ascending ? "asc" : "desc"), .init(name: "orderBy", value: field.rawValue),
+         .init(name: "withStacked", value: String(primaryOnly))]
     }
 
     /// The server answers 400 when withPartners comes with the archive, favorites or the trash, and
@@ -186,6 +175,63 @@ struct ServerTimelineRequest: Hashable, Sendable {
     static func allowsPartners(_ query: LibraryQuery) -> Bool {
         query.scope == .library && query.predicates.albums.isEmpty && query.predicates.people.isEmpty && query.predicates.place == nil
             && query.visibility == .timeline && query.predicates.favorite == nil && query.trash == .active
+    }
+
+    /// A month in the library's order, which the index reads in too: by the time taken (or added,
+    /// in created-at order), newest first unless the feed asks otherwise, then by ID. The server
+    /// orders a month by day, file creation time and file name instead.
+    func libraryOrder(_ assets: [Asset]) -> [Asset] {
+        let added = byCreated, ascending = ascending
+        return assets.sorted { a, b in
+            let left = (added ? a.createdAt : a.localDateTime) ?? .distantPast
+            let right = (added ? b.createdAt : b.localDateTime) ?? .distantPast
+            if left == right { return a.id < b.id }
+            return ascending ? left < right : left > right
+        }
+    }
+}
+
+/// A query on the offline index: the same feeds the server timeline serves, and places, which
+/// only the index can lay out by month. IndexReader turns it into SQL.
+struct IndexFeedRequest: Sendable {
+    /// Timeline or archive; nil for both. Locked and hidden photos are never read.
+    let visibility: String?
+    let albumID: String?
+    let personID: String?
+    /// One owner's photos; nil for the library, or for an album or place, which aren't narrowed.
+    let ownerID: String?
+    let favorite: Bool?
+    let trashed: Bool
+    let developed: Bool?
+    let primaryOnly: Bool
+    let withPartners: Bool
+    let byCreated: Bool
+    let ascending: Bool
+    let placeAssetIDs: [String]?
+
+    /// `userID` is the account's, which the mine scope names.
+    init(_ query: LibraryQuery, userID: String, includesPartners: Bool = false) throws(Unsupported) {
+        guard case .chronological(let field, let ascending) = query.ranking else { throw .predicate("relevance") }
+        if query.visibility == .timeline { visibility = "timeline" }
+        else if query.visibility == .archive { visibility = "archive" }
+        else if query.visibility == [.timeline, .archive] { visibility = nil }
+        else { throw .predicate("visibility") }
+        guard QueryPlanner.indexServes(query) else { throw .predicate("search") }
+        switch query.scope {
+        case .library: ownerID = nil
+        case .mine: ownerID = userID
+        case .partner(let id): ownerID = id
+        }
+        albumID = query.predicates.albums.first
+        personID = query.predicates.people.first
+        favorite = query.predicates.favorite
+        trashed = query.trash == .trashed
+        developed = query.predicates.developed
+        primaryOnly = query.stacks == .primaryOnly
+        withPartners = includesPartners && ServerTimelineRequest.allowsPartners(query)
+        byCreated = field == .createdAt
+        self.ascending = ascending
+        placeAssetIDs = query.predicates.place?.assetIDs
     }
 }
 
