@@ -26,9 +26,8 @@ struct LibraryView: View {
     @State private var edgeInteraction = LibraryEdgeInteraction()
     @State private var librarySize: CGSize = .zero
     @State private var shelf: Shelf = .root
-    @State private var people: [Person] = []
-    @State private var albums: [Album] = []
-    @State private var features: ServerFeatures?
+    /// The people, albums, features and shelf order the shelves show.
+    @State private var collections: CollectionsStore
     @State private var backupStore = BackupStore.shared
     @State private var placesDrag: CGFloat = 0
     /// The name typed for an album made from the selection.
@@ -42,8 +41,6 @@ struct LibraryView: View {
     @State private var tagHandoff = false
     /// A newer open or close makes a pending close stale.
     @State private var closeGeneration = 0
-    @State private var peopleOrder: [String] = []
-    @State private var albumOrder: [String] = []
     @State private var selectionBusy = false
     /// Height of the chips floating at the top: filter, uploads, search checking, selection.
     @State private var chromeHeight: CGFloat = 0
@@ -63,8 +60,15 @@ struct LibraryView: View {
 
     init(api: APIClient, pipeline: MediaPipeline, session: AccountSession) {
         self.api = api; self.pipeline = pipeline; self.session = session
-        _store = State(initialValue: LibraryStore(source: session.libraryRepository ?? LibraryRepository(client: api, index: nil, sync: nil), includesDevicePhotos: session.environment.usesDevicePhotos,
-                                                     choices: SearchChoicesStorage(scope: api.cacheScope)))
+        let repository = session.libraryRepository ?? LibraryRepository(client: api, index: nil, sync: nil)
+        // The feeds' month places are kept in the index and fenced by the account's access epoch;
+        // the files an earlier build kept are imported once (F5).
+        let places = MonthPlacesService(source: repository, store: session.entities, authorization: session.runtime?.authorization,
+                                        legacy: session.entities.map { LegacyPlacesImport.live(scope: api.cacheScope, index: $0) })
+        _store = State(initialValue: LibraryStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos,
+                                                     choices: SearchChoicesStorage(scope: api.cacheScope), places: places))
+        _collections = State(initialValue: CollectionsStore(api: api, people: PeopleDirectory(source: api),
+                                                               order: ShelfOrder(scope: api.cacheScope), pipeline: pipeline))
         _model = State(initialValue: LibraryScreenModel(lookup: api, inbox: ShareInboxStore.shared))
     }
 
@@ -213,7 +217,8 @@ struct LibraryView: View {
             } message: { Text(errorMessage) }
             .confirmationDialog(features?.trash == false ? "Permanently delete \(store.selected.count) items?" : "Move \(store.selected.count) items to Trash?", isPresented: alertShown { $0 == .confirm(.deleteSelection) }, titleVisibility: .visible) {
                 Button(features?.trash == false ? "Delete permanently" : "Move to Trash", role: .destructive) {
-                    runSelection { ids in try await api.trashAssets(ids: ids, permanently: features?.trash == false); store.removeLocally(Set(ids)) }
+                    let permanently = features?.trash == false
+                    runSelection { ids in try await api.trashAssets(ids: ids, permanently: permanently); store.removeLocally(Set(ids)) }
                 }
             } message: { Text(features?.trash == false ? "This cannot be undone. Photos on your phone are kept." : "This changes the server library. Photos on your phone are kept.") }
             .confirmationDialog("Sign out of Ilyich?", isPresented: alertShown { $0 == .confirm(.signOut) }, titleVisibility: .visible) {
@@ -232,13 +237,13 @@ struct LibraryView: View {
         .task {
             model.refreshSharedFiles()
             guard !store.started else { return }; store.started = true
-            await store.reload(); await loadShelfData()
+            await store.reload(); await collections.load()
         }
         .onAppear {
             connectNavigator()
             model.start()
             // A link closes whatever is open, then opens its photo, filter or screen.
-            model.takeLinks(from: session) { [albums = $albums, people = $people] in (albums.wrappedValue, people.wrappedValue) }
+            model.takeLinks(from: session) { [collections] in (collections.albums, collections.people) }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in Task { await pipeline.trimMemory() } }
         .onReceive(NotificationCenter.default.publisher(for: .ilyichCachesReset)) { notification in
@@ -250,15 +255,13 @@ struct LibraryView: View {
             if let change = notification.userInfo?["change"] as? LibraryChange { store.prune(change) }
             Task {
                 if store.query.isEmpty { await store.reload(preservingPosition: true) }
-                if notification.userInfo?["collections"] as? Bool == true {
-                    await loadShelfData()
-                }
+                if notification.userInfo?["collections"] as? Bool == true { await collections.load() }
             }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 model.refreshSharedFiles()
-                if store.started, people.isEmpty || albums.isEmpty { Task { await loadShelfData() } }
+                if store.started { collections.reloadIfFailed() }
             }
         }
         // The account's device index places the phone's photos; it follows Photos, backup and
@@ -753,7 +756,7 @@ struct LibraryView: View {
 
     private func presentShelves(_ value: Shelf, at point: CGPoint) {
         // People and albums that failed to load, say while the phone reconnected, load again.
-        if store.started, people.isEmpty || albums.isEmpty { Task { await loadShelfData() } }
+        if store.started { collections.reloadIfFailed() }
         // Opening again stops a close still on its way.
         closeGeneration += 1
         edgeInteraction.morphingID = nil; edgeInteraction.morphSize = nil
@@ -918,11 +921,7 @@ struct LibraryView: View {
             AnyView(NavigationStack { albumSharing(album, sharing, level: level) })
         case .newAlbum:
             AnyView(NavigationStack {
-                AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in
-                    albums.insert(album, at: 0)
-                    // An album made here leads the owner's order, as it leads the server's.
-                    if !albumOrder.isEmpty { saveOrder([album.id] + albumOrder, for: .albums) }
-                }
+                AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in collections.albumCreated(album) }
             })
         case .phoneViewer(let photo):
             AnyView(LocalPhotoViewer(photo: photo, photos: store.availableLocalPhotos(around: photo)))
@@ -974,7 +973,7 @@ struct LibraryView: View {
         case .link: SharedLinkEditor(api: api, album: album)
         case .people:
             AlbumMembersView(api: api, album: album, onLeft: {
-                albums.removeAll { $0.id == album.id }; store.clearFilters()
+                collections.albumRemoved(album.id); store.clearFilters()
             })
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { navigator.dismiss(level: level) } } }
         }
@@ -1062,8 +1061,11 @@ struct LibraryView: View {
     }
 
     private var canReorder: Bool { shelf == .people || shelf == .albums }
-    private var orderedPeople: [Person] { ShelfOrder.apply(peopleOrder, to: people, id: \.id) }
-    private var orderedAlbums: [Album] { ShelfOrder.apply(albumOrder, to: albums, id: \.id) }
+    private var people: [Person] { collections.people }
+    private var albums: [Album] { collections.albums }
+    private var features: ServerFeatures? { collections.features }
+    private var orderedPeople: [Person] { collections.orderedPeople }
+    private var orderedAlbums: [Album] { collections.orderedAlbums }
     /// Only the people or albums themselves move; New album and Manage stay at the end.
     private var reorderItems: [LibraryShelfItem] {
         shelfItems.filter { $0.id.hasPrefix(shelf == .people ? "person-" : "album-") }
@@ -1092,19 +1094,7 @@ struct LibraryView: View {
     }
 
     private func moveShelfRow(from: Int, to: Int) {
-        var ids = shelf == .people ? orderedPeople.map(\.id) : orderedAlbums.map(\.id)
-        guard from != to, ids.indices.contains(from), ids.indices.contains(to) else { return }
-        ids.insert(ids.remove(at: from), at: to)
-        saveOrder(ids, for: shelf == .people ? .people : .albums)
-        Haptics.rowDropped()
-    }
-
-    private func saveOrder(_ ids: [String], for kind: ShelfOrder.Kind) {
-        switch kind {
-        case .people: peopleOrder = ids
-        case .albums: albumOrder = ids
-        }
-        ShelfOrder(scope: api.cacheScope).save(ids, for: kind)
+        if collections.moveRow(from: from, to: to, of: shelf == .people ? .people : .albums) { Haptics.rowDropped() }
     }
     /// A group opens with its choice or first row where the group's own row was; going back puts
     /// the group's row there. Mid-swipe both happen under the finger, which keeps scrubbing the new
@@ -1143,37 +1133,6 @@ struct LibraryView: View {
         }
     }
     private func animate(_ changes: () -> Void) { withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.88), changes) }
-    private func loadShelfData() async {
-        let order = ShelfOrder(scope: api.cacheScope)
-        peopleOrder = order.ids(.people); albumOrder = order.ids(.albums)
-        async let featuresResult = try? api.serverFeatures()
-        async let albumResult = try? api.albums()
-        async let peopleResult = try? loadAllPeople()
-        // A failed load keeps what the shelves already show; it is tried again when they open.
-        if let loaded = await peopleResult { people = loaded }
-        if let loaded = await albumResult { albums = loaded }
-        if let loaded = await featuresResult { features = loaded }
-        // A scrub flies past every face in a second, so they all load before the shelf is opened.
-        let faces = orderedPeople
-        Task { await pipeline.warmFaces(faces, pixelSize: PersonThumbnail.small) }
-    }
-    private func loadAllPeople() async throws -> [Person] {
-        var all: [Person] = [], page = 1
-        var known = Set<String>()
-        while true {
-            try Task.checkCancellation()
-            let response = try await api.people(page: page, size: 100)
-            try Task.checkCancellation()
-            let fresh = response.people.filter { known.insert($0.id).inserted }
-            guard !fresh.isEmpty else { break }
-            all.append(contentsOf: fresh)
-            let visibleTotal = max(0, response.total - response.hidden)
-            if response.hasNextPage == false || all.count >= visibleTotal { break }
-            if response.hasNextPage == nil && response.people.count < 100 { break }
-            page += 1
-        }
-        return all
-    }
     private var ownsSelection: Bool {
         !store.selectedAssets.isEmpty && store.selectedAssets.allSatisfy { $0.ownerId == api.userID }
     }

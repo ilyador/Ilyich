@@ -38,10 +38,6 @@ struct LiveAccountDevice: AccountDevice {
 
     func removeNetworkSettings(server: URL) async throws { try NetworkConfigurationStore.remove(server: server) }
 
-    func clearTimelineCaches(scope: String) async {
-        await TimelinePlacesCache.shared.removeAll(scope: scope)
-    }
-
     func clearDiagnostics() async { await DiagnosticsStore.shared.clear() }
 
     func readOnlyChanged(_ enabled: Bool) async {

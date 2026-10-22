@@ -306,29 +306,52 @@ final class LegacyFormatsTests: XCTestCase {
         XCTAssertNil(Legacy.FlutterWidgetCredentials(defaults: defaults))
     }
 
-    func testPlacesFilesAreFoundByHashingTheFeedKey() async throws {
+    /// The places an earlier build kept are found by hashing each feed's key, moved into the
+    /// index's month_places rows and shown at the next launch before anything is counted, and the
+    /// account's folder is deleted. The library's file is found under its pre-Q5 key, byte for
+    /// byte; a person's under the key the index's people give.
+    @MainActor func testPlacesFilesAreImportedByHashingTheFeedKey() async throws {
         let scope = G.account.cacheScope
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         XCTAssertEqual(Legacy.placesPath(scope: scope, feedKey: LibraryQuery.library.stableKey),
                        "IlyichTimelinePlaces/\(G.digest)/ff9bafac0eb80c2674bfcaaa3acc714c710245186a78a84fce9c2cc4fe4df897.json")
         XCTAssertEqual(LibraryQuery.library.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline",
                        "The library's places are found under the key they had before Q5.")
         XCTAssertEqual(try FixtureLoader.files(in: "caches/IlyichTimelinePlaces"),
                        G.places.map { String(Legacy.placesPath(scope: scope, feedKey: $0.query.stableKey).dropFirst("IlyichTimelinePlaces/".count)) }.sorted())
-        await TimelinePlacesCache.shared.removeAll(scope: scope)
+
+        // The files as the earlier build left them, below a Caches of this test's own.
+        let caches = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyFormatsTests-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: caches) }
+        let root = caches.appendingPathComponent("IlyichTimelinePlaces", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: FixtureLoader.url("caches/IlyichTimelinePlaces/\(G.digest)"), to: root.appendingPathComponent(G.digest, isDirectory: true))
+        try Data("{}".utf8).write(to: root.appendingPathComponent(G.digest, isDirectory: true).appendingPathComponent("not-a-feed.json"))
+        let index = try LibraryIndex(scope: scope, userID: G.account.userID, directory: caches.appendingPathComponent("index", isDirectory: true))
+        _ = try await index.apply([SyncEvents.event("PersonV1", #"{"id":"\#(G.person)","name":"Pat","isHidden":false}"#, ack: "PersonV1|pat")],
+                                  epoch: await index.epoch())
+
+        let importer = LegacyPlacesImport(scope: scope, root: root, index: index)
+        let candidates = await importer.candidates()
+        XCTAssertEqual(candidates[Legacy.sha256(LibraryQuery.person(G.person).stableKey)], LibraryQuery.person(G.person), "A person's file is found through the index's people.")
+        await importer.run()
         for (query, places) in G.places {
-            let path = Legacy.placesPath(scope: scope, feedKey: query.stableKey)
-            let fixture = try FixtureLoader.data("caches/" + path)
-            await TimelinePlacesCache.shared.save(places, scope: scope, query: query, epoch: TimelinePlacesCache.shared.epoch(scope: scope))
-            let written = try Data(contentsOf: caches.appendingPathComponent(path))
-            XCTAssertEqual(try FixtureLoader.canonicalJSON(written), try FixtureLoader.canonicalJSON(fixture), path)
-            let loaded = await TimelinePlacesCache.shared.load(scope: scope, query: query)
-            XCTAssertEqual(loaded, places)
-            let mirror = try Legacy.decoder().decode(Legacy.TimelinePlaces.self, from: fixture)
-            XCTAssertEqual(mirror.months.mapValues { $0.map(\.name) }, places.months.mapValues { $0.map(\.name) })
-            XCTAssertEqual(mirror.trips, places.trips)
+            let rows = try await index.monthPlaces(forKey: query.stableKey)
+            XCTAssertEqual(rows, LegacyPlacesImport.rows(places), "\(query.stableKey)")
+            let shown = FeedPlaces(counts: rows ?? [])
+            XCTAssertEqual(shown.months.mapValues { $0.map(\.name) }, places.months.mapValues { $0.map(\.name) }, "The months keep their places and ranks.")
+            XCTAssertEqual(shown.months.mapValues { $0.map(\.count) }, places.months.mapValues { $0.map(\.count) })
+            XCTAssertTrue(shown.trips.isEmpty, "A file's trips are left out; the first count brings them back.")
         }
-        await TimelinePlacesCache.shared.removeAll(scope: scope)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path), "The folder is deleted once imported.")
+
+        // At the next launch the imported places show before the feed is counted.
+        let counter = PlacesCounter(holding: true)
+        let service = MonthPlacesService(source: counter, store: index, delay: .zero, legacy: LegacyPlacesImport(scope: scope, root: root, index: index))
+        service.show(.library, plan: try QueryPlanner.plan(.library, context: PlannerContext(indexReadable: true)))
+        let shown = await becomesTrue { service.places(of: .library)?.months["2025-10-01"]?.map(\.name) == ["Lisbon", "Sintra"] }
+        XCTAssertTrue(shown, "The kept places show straight after launch.")
+        XCTAssertEqual(service.places(of: .library)?.years[2025], "Lisbon · London")
+        await counter.release()
     }
 
     /// The fingerprint file LocalFingerprintCache wrote under its hashed name moves into

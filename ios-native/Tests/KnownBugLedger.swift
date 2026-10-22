@@ -26,7 +26,6 @@ import XCTest
             "2026-02-01T00:00:00Z": [Asset(id: "february")],
             june: [Asset(id: "early", localDateTime: early), Asset(id: "late", localDateTime: late)],
         ])
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: api)
         defer { store.stop() }
         await store.reload()
@@ -55,7 +54,6 @@ import XCTest
         let january = "2026-01-01T00:00:00Z"
         let day = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
         let api = LedgerLibrary(months: [january: [Asset(id: "server-photo", localDateTime: day)]])
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: api, includesDevicePhotos: true)
         defer { store.stop() }
         await store.reload()
@@ -90,7 +88,6 @@ import XCTest
         })
         // The second month is slow, so it is still loading when the reload checks for it.
         let api = LedgerLibrary(months: months, delay: .milliseconds(50), slow: ["2026-05-01T00:00:00Z": .seconds(1)])
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: api)
         defer { store.stop() }
         await store.reload()
@@ -117,7 +114,6 @@ import XCTest
             (String(format: "2025-%02d-01T00:00:00Z", month), [Asset(id: "photo-\(month)")])
         })
         let api = LedgerLibrary(months: months, delay: .milliseconds(200))
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: api, includesDevicePhotos: true)
         defer { store.stop() }
         await store.reload()
@@ -139,7 +135,6 @@ import XCTest
     func testMonthSmallerThanItsSummaryLeavesNoPermanentPlaceholder() async throws {
         let month = "2026-01-01T00:00:00Z"
         let api = LedgerLibrary(months: [month: [Asset(id: "first"), Asset(id: "second")]], counts: [month: 3])
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: api)
         defer { store.stop() }
         await store.reload()
@@ -155,31 +150,39 @@ import XCTest
         XCTAssertEqual(store.sections.first?.count, 2, "The month's own count stands.")
     }
 
-    /// FEED-6, fixed in rebuild milestone C6. A feed's month places were saved on the phone from
-    /// an unowned task, with no fence. When access changed while they were being counted (a
-    /// revoked album or partner, a library reset, sign-out), SessionStore deleted the saved places,
-    /// and the late count wrote them back, so places the account might no longer see showed at
-    /// the next launch. The count's own task now saves them, under the epoch it began with, and
-    /// every clear moves that epoch.
+    /// FEED-6, fixed in rebuild milestone C6 and carried into F5's MonthPlacesService. A feed's
+    /// month places were saved on the phone from an unowned task, with no fence. When access
+    /// changed while they were being counted (a revoked album or partner, a library reset,
+    /// sign-out), SessionStore deleted the saved places, and the late count wrote them back, so
+    /// places the account might no longer see showed at the next launch. A count now begins under
+    /// the account's access epoch and is neither shown nor kept once the epoch has moved; the feed
+    /// is counted again instead, and the index refuses a write whose epoch moved meanwhile.
     func testPlacesCountedBeforeAnAccessChangeAreNotKept() async throws {
         let month = "2026-02-01T00:00:00Z"
         let api = LedgerLibrary(months: [month: [Asset(id: "photo")]], holdPlaces: true,
                                 places: [MonthPlaceCount(bucket: "2026-02-01", city: "Kyoto", country: "Japan", count: 4)])
-        removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let authorization = AuthorizationState(account: AccountID(server: URL(string: "https://ledger.example.test/api")!, userID: "alice"),
+                                               token: "session", readOnly: false, requiresPasswordChange: false, mirror: nil)
+        let kept = MemoryPlacesStore()
+        let store = LibraryStore(source: api, placesDelay: .zero,
+                                 places: MonthPlacesService(source: api, store: kept, authorization: authorization, delay: .zero))
         defer { store.stop() }
         await store.reload()
         try await until("The places were never counted.") { await api.placesCalls == 1 }
 
-        // Access changes, and SessionStore drops what the phone kept for this account.
-        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+        // Access changes: the epoch moves, and the index drops what it kept for this account.
+        authorization.accessChanged()
+        await kept.removeAll()
         await api.releasePlaces()
         try await until("The count never finished.") { await api.placesAnswered == 1 }
-        let saved = await eventually(within: .seconds(1)) {
-            await TimelinePlacesCache.shared.load(scope: api.cacheScope, query: .library) != nil
-        }
+        try await until("The feed was not counted again under the new epoch.") { await api.placesCalls == 2 }
+        let saved = await kept.rows[LibraryQuery.library.stableKey]
+        XCTAssertNil(saved, "A count from before the access change is not kept on the phone.")
+        XCTAssertNil(store.monthPlaces["2026-02-01"], "Nor is it shown.")
 
-        XCTAssertFalse(saved, "A count from before the access change is not kept on the phone.")
+        await api.releasePlaces()
+        try await until("The recount was not kept.") { await kept.rows[LibraryQuery.library.stableKey] != nil }
+        XCTAssertEqual(store.monthPlaces["2026-02-01"]?.first?.name, "Kyoto", "The count under the current epoch shows.")
     }
 
     // MARK: - Account
@@ -349,7 +352,6 @@ import XCTest
         server.route("POST", "search/metadata", .json(Self.emptySearchPage))
         server.route("GET", "timeline/buckets", .json("[]"))
         let api = try stubClient(server, token: "ledger-session", userID: "alice")
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: LibraryRepository(client: api, index: nil, sync: nil))
         defer { store.stop() }
 
@@ -379,7 +381,6 @@ import XCTest
         server.route("POST", "search/metadata", .json(Self.emptySearchPage))
         server.route("GET", "timeline/buckets", .json("[]"))
         let api = try stubClient(server, token: "ledger-session", userID: "alice")
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: LibraryRepository(client: api, index: nil, sync: nil))
         defer { store.stop() }
 
@@ -414,7 +415,6 @@ import XCTest
     func testLibraryIncludesPartnersShownInTimeline() async throws {
         let server = makeStubServer()
         let api = try stubClient(server, token: "ledger-session", userID: "alice")
-        removeCachesAfterwards(api.cacheScope)
         let entities = try LibraryIndex(scope: api.cacheScope, userID: "alice", directory: temporaryDirectory())
         let epoch = await entities.epoch()
         _ = try await entities.apply([
@@ -434,7 +434,6 @@ import XCTest
         let remote = makeStubServer()
         remote.route("GET", "timeline/buckets", .json("[]"))
         let remoteAPI = try stubClient(remote, token: "ledger-session", userID: "alice")
-        removeCachesAfterwards(remoteAPI.cacheScope)
         let online = LibraryStore(source: LibraryRepository(client: remoteAPI, index: nil, sync: nil))
         defer { online.stop() }
         await online.reload()
@@ -520,11 +519,6 @@ import XCTest
         XCTFail(message)
     }
 
-    private func removeCachesAfterwards(_ scope: String) {
-        addTeardownBlock {
-            await TimelinePlacesCache.shared.removeAll(scope: scope)
-        }
-    }
 
     private func temporaryDirectory() -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("KnownBugLedger-" + UUID().uuidString, isDirectory: true)
@@ -590,7 +584,8 @@ private actor LedgerLibrary: FakeFeedSource {
     private let slow: [String: Duration]
     private let places: [MonthPlaceCount]
     private var summaryGate: StubServer.Gate?
-    private let placesGate: StubServer.Gate?
+    private var placesGate: StubServer.Gate?
+    private let holdsPlaces: Bool
     private(set) var summaryCalls = 0
     private(set) var placesCalls = 0
     private(set) var placesAnswered = 0
@@ -599,13 +594,18 @@ private actor LedgerLibrary: FakeFeedSource {
     init(months: [String: [Asset]], counts: [String: Int] = [:], delay: Duration = .zero, slow: [String: Duration] = [:],
          holdPlaces: Bool = false, places: [MonthPlaceCount] = []) {
         self.months = months; self.counts = counts; self.delay = delay; self.slow = slow; self.places = places
+        holdsPlaces = holdPlaces
         placesGate = holdPlaces ? StubServer.Gate() : nil
     }
 
     /// Summaries asked for from now on wait until releaseSummaries.
     func holdSummaries() { summaryGate = StubServer.Gate() }
     func releaseSummaries() { summaryGate?.open() }
-    func releasePlaces() { placesGate?.open() }
+    /// Lets the counts waiting finish; the next count waits again.
+    func releasePlaces() {
+        placesGate?.open()
+        if holdsPlaces { placesGate = StubServer.Gate() }
+    }
 
     func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] {
         summaryCalls += 1

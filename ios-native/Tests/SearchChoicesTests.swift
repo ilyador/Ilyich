@@ -75,7 +75,6 @@ import XCTest
         let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")])
         let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
-        removeCachesAfterwards(api.cacheScope)
 
         store.applySearchOptions(mode: .description, filter: SearchFilter())
         XCTAssertFalse(store.isBrowsingChoices, "A mode alone opens nothing.")
@@ -104,7 +103,6 @@ import XCTest
                                  verification: Verification(status: .complete, checked: 10, rejected: 9))
         let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
-        removeCachesAfterwards(api.cacheScope)
 
         XCTAssertFalse(store.searchChoices.checksContent)
         store.search("red hat")
@@ -144,7 +142,6 @@ import XCTest
         let storage = SearchChoicesStorage(scope: "server|alice", defaults: defaults)
         storage.save(SearchChoices(mode: .filename, filter: SearchFilter(type: StringFilter(eq: "VIDEO"), isFavorite: BoolFilter(eq: true))))
         let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")])
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: api, placesDelay: .zero, choices: storage)
         defer { store.stop() }
 
@@ -172,7 +169,6 @@ import XCTest
         let api = SearchRecorder(userID: "alice", items: [archivedPhoto])
         let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
-        removeCachesAfterwards(api.cacheScope)
 
         // In the library, which is searched with the archive, Only archived keeps to the archive.
         store.applySearchOptions(mode: .context, filter: SearchFilter(visibility: StringFilter(eq: "archive")))
@@ -214,7 +210,6 @@ import XCTest
         let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")])
         let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
-        removeCachesAfterwards(api.cacheScope)
 
         store.applySearchOptions(mode: .filename, filter: SearchFilter(type: StringFilter(eq: "VIDEO"), isFavorite: BoolFilter(eq: true)))
         XCTAssertEqual(store.searchChoices.chips().map(\.kind), [.mode, .type, .favorites])
@@ -265,7 +260,6 @@ import XCTest
         XCTAssertEqual(storage.load(), SearchChoices(), "Nothing chosen yet: Photo content, no AI check, no filters.")
 
         let api = SearchRecorder(userID: "alice", items: [])
-        removeCachesAfterwards(api.cacheScope)
         let store = LibraryStore(source: api, placesDelay: .zero, choices: storage)
         store.setChecksContent(true)
         store.applySearchOptions(mode: .ocr, filter: SearchFilter(personIds: IDsFilter(all: ["maya"]), isFavorite: BoolFilter(eq: true),
@@ -293,9 +287,4 @@ import XCTest
         XCTFail(message)
     }
 
-    private func removeCachesAfterwards(_ scope: String) {
-        addTeardownBlock {
-            await TimelinePlacesCache.shared.removeAll(scope: scope)
-        }
-    }
 }

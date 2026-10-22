@@ -205,6 +205,14 @@ final class LibraryIndex: Sendable {
         let feed = try feed(query, includesPartners)
         return try await mapped { try await aggregate.monthPlaces(feed) }
     }
+    /// The month places kept for one feed, or nil when none are (F5).
+    func monthPlaces(forKey key: String) async throws -> [MonthPlaceCount]? { try await mapped { try await aggregate.monthPlaces(forKey: key) } }
+    /// Keeps one feed's month places, unless `ifCurrent` says no when they are written (F5).
+    func keepMonthPlaces(_ counts: [MonthPlaceCount], forKey key: String, ifCurrent: @escaping @Sendable () -> Bool) async throws {
+        try await mapped { try await writer.keepMonthPlaces(counts, forKey: key, ifCurrent: ifCurrent) }
+    }
+    /// Every feed's kept month places go, as when access to some photos was lost (F5).
+    func clearMonthPlaces() async throws { try await mapped { try await writer.clearMonthPlaces() } }
     /// The owner's identity rows, each saying whether a phone photo may be matched to it, a page
     /// at a time in ID order.
     func identities(after cursor: String?, limit: Int = 2_000) async throws -> [LocalAssetMatch] {
@@ -235,3 +243,5 @@ final class LibraryIndex: Sendable {
         do { return try await body() } catch { throw IndexWriter.failure(error) }
     }
 }
+
+extension LibraryIndex: MonthPlacesStore {}

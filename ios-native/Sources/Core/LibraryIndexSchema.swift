@@ -14,7 +14,8 @@ import Foundation
 /// - locked_asset: assets the server last sent as locked, which are never stored;
 /// - orphan_dependent: EXIF, faces, OCR, edits and metadata that arrived before their asset, held
 ///   until it arrives (Q3); dependent_repair: assets whose dependents must be fetched again, such
-///   as a photo taken out of the Locked Folder (Q3); month_places: empty until F5 fills it;
+///   as a photo taken out of the Locked Folder (Q3); month_places: each feed's located photos per
+///   month and place, kept by MonthPlacesService under the feed's stableKey (F5);
 /// - index_state (one row): the backfill's kind and cursor, whether the derived tables are
 ///   complete (queryable), a persisted revision, and the stale marker.
 ///

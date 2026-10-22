@@ -15,7 +15,6 @@ import XCTest
         ])
         let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
-        removeCachesAfterwards(api.cacheScope)
 
         func search(_ text: String = "beach") async throws -> SearchQuery {
             let before = await api.smart.count
@@ -82,7 +81,6 @@ import XCTest
         let api = SearchRecorder(userID: "alice", items: [locked, hidden, photo("shown", owner: "alice")])
         let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
-        removeCachesAfterwards(api.cacheScope)
 
         store.search("beach")
         try await until("The search was not sent.") { await api.smart.count == 1 && !store.isSearching }
@@ -186,11 +184,6 @@ import XCTest
         XCTFail(message)
     }
 
-    private func removeCachesAfterwards(_ scope: String) {
-        addTeardownBlock {
-            await TimelinePlacesCache.shared.removeAll(scope: scope)
-        }
-    }
 }
 
 /// A library whose searches all answer with the same photos, recording each request.

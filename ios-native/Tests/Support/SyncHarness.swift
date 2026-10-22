@@ -88,7 +88,6 @@ extension XCTestCase {
             await engine.shutdown()
             await pipeline.removeAll()
             await api.shutdown()
-            await TimelinePlacesCache.shared.removeAll(scope: scope)
             try? FileManager.default.removeItem(at: directory)
         }
         return SyncHarness(server: server, api: api, entities: entities, engine: engine, status: status, presence: presence,

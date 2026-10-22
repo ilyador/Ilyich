@@ -246,8 +246,9 @@ enum Legacy {
     // MARK: Caches
 
     /// Caches/IlyichTimelinePlaces/<sha256(cache scope)>/<sha256(feed key)>.json, written by
-    /// TimelinePlacesCache.save. The file doesn't name its feed: an importer finds a feed's file by
-    /// hashing the feed's key, LibraryQuery.stableKey (byte-equal to the key before Q5 for the library, the shelves and places).
+    /// TimelinePlacesCache.save until F5. The file doesn't name its feed: LegacyPlacesImport finds a
+    /// feed's file by hashing the feed's key, LibraryQuery.stableKey (byte-equal to the key before
+    /// Q5 for the library, the shelves and places), and moves it into the index's month_places.
     struct TimelinePlaces: Codable, Sendable {
         /// Bucket ID (YYYY-MM-01) to the month's places, most photos first.
         var months: [String: [PlaceTally]]

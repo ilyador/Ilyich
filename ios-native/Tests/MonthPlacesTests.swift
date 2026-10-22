@@ -15,6 +15,18 @@ final class MonthPlacesTests: XCTestCase {
         XCTAssertNil(MonthPlaces.summary(places["2025-06-01"]))
     }
 
+    /// A feed's places carry each year's two busiest places, summed over its months once, so the
+    /// rail's year lens looks them up instead of adding every month on every frame.
+    func testYearSummariesAreWorkedOutOnce() {
+        let places = FeedPlaces(counts: [
+            place("2024-10-01", "Kyoto", "Japan", 30), place("2024-08-01", "Oslo", "Norway", 20), place("2024-05-01", "Kyoto", "Japan", 5),
+            place("2024-03-01", "Bergen", "Norway", 21), place("2023-01-01", nil, "France", 6),
+        ])
+        XCTAssertEqual(places.years, [2024: "Kyoto · Bergen", 2023: "France"])
+        XCTAssertEqual(places.months["2024-10-01"]?.map(\.name), ["Kyoto"])
+        XCTAssertNil(places.years[2022])
+    }
+
     func testTripsAreMonthsMostlyAbroadNamedByTheirCityOrCountry() {
         var counts: [MonthPlaceCount] = []
         for month in 1...12 { counts.append(place(String(format: "2024-%02d-01", month), "Amsterdam", "Netherlands", 120)) }

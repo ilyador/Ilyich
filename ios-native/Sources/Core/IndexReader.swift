@@ -140,6 +140,16 @@ actor IndexReader {
         }
     }
 
+    /// The month places kept for one feed by MonthPlacesService, or nil when none are (F5).
+    func monthPlaces(forKey key: String) throws -> [MonthPlaceCount]? {
+        let rows = try database.query("SELECT bucket,city,country,count FROM month_places WHERE query_key=? ORDER BY rowid", [key])
+        guard !rows.isEmpty else { return nil }
+        return rows.compactMap { row in
+            guard let bucket = row[0], let count = row[3].flatMap(Int.init) else { return nil }
+            return MonthPlaceCount(bucket: bucket, city: row[1], country: row[2], count: count)
+        }
+    }
+
     private static func monthColumn(_ filter: IndexFeedRequest) -> String { filter.byCreated ? "i.created_month" : "i.local_month" }
     private static func direction(_ filter: IndexFeedRequest) -> String { filter.ascending ? "ASC" : "DESC" }
     /// The library's order: the time taken, or the time added, newest first unless the feed asks

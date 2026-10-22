@@ -16,18 +16,22 @@ struct MonthPlaceCount: Sendable, Equatable {
     }
 }
 
-struct PlaceTally: Codable, Sendable, Equatable {
+struct PlaceTally: Sendable, Equatable {
     let name: String
     let count: Int
 }
 
-/// The places of one feed: each month's, ranked, and the months spent abroad, named for the rail.
-struct TimelinePlaces: Codable, Sendable, Equatable {
-    var months: [String: [PlaceTally]]
-    var trips: [String: String]
+/// The places of one feed, ready for the rail: each month's, ranked, the months spent abroad,
+/// named, and each year's busiest places, worked out once here rather than on every scrubbed frame.
+struct FeedPlaces: Sendable, Equatable {
+    let months: [String: [PlaceTally]]
+    let trips: [String: String]
+    /// Year to its two busiest places, for the rail's year lens.
+    let years: [Int: String]
 
-    init(months: [String: [PlaceTally]] = [:], trips: [String: String] = [:]) {
+    init(months: [String: [PlaceTally]], trips: [String: String]) {
         self.months = months; self.trips = trips
+        years = MonthPlaces.years(months)
     }
 
     init(counts: [MonthPlaceCount]) {
@@ -49,6 +53,16 @@ enum MonthPlaces {
     static func summary(_ places: [PlaceTally]?) -> String? {
         guard let places, !places.isEmpty else { return nil }
         return places.prefix(2).map(\.name).joined(separator: " · ")
+    }
+
+    /// Each year's places, summed over its months and summarized once.
+    static func years(_ months: [String: [PlaceTally]]) -> [Int: String] {
+        var totals: [Int: [String: Int]] = [:]
+        for (bucket, places) in months {
+            guard let year = Int(bucket.prefix(4)) else { continue }
+            for place in places { totals[year, default: [:]][place.name, default: 0] += place.count }
+        }
+        return totals.compactMapValues { summary(ranked($0)) }
     }
 
     static func ranked(_ totals: [String: Int]) -> [PlaceTally] {
