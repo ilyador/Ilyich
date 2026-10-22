@@ -1,5 +1,6 @@
 import Foundation
 import IlyichPlatform
+import Synchronization
 
 /// Takes the feed's months as they arrive, on the main actor. A delivery names the ticket of the
 /// feed it belongs to, so a month of a feed the user has left is dropped.
@@ -20,12 +21,22 @@ protocol TimelineFeedConsumer: AnyObject, Sendable {
 /// a passing reason (no network, a timeout, a busy server) is asked again while it stays on
 /// screen, after 1 s, then 2, 4, 8, 16 and every 30 s; a refusal waits for Retry. `invalidate`
 /// marks months stale: they stay shown and are read again when the grid wants them, and a load on
-/// its way is kept, not restarted.
+/// its way is kept, not restarted; a month that failed is forgotten, so the grid can ask again.
 actor TimelineFeed {
     /// Names one opening of a feed: its query and the plan its months come from.
     struct Ticket: Hashable, Sendable {
         private let id = UUID()
         init() {}
+    }
+
+    /// The months on screen as the grid last reported them, read at once rather than through the
+    /// command queue. The viewport command behind it in the queue decides what loads; this only
+    /// decides what stays: a load that lands while that command is on its way must not evict the
+    /// month that has just scrolled on, as the store's synchronous trim never did before F2.
+    final class Viewport: Sendable {
+        private let state = Mutex<Set<MonthKey>>([])
+        var months: Set<MonthKey> { state.withLock { $0 } }
+        func show(_ months: Set<MonthKey>) { state.withLock { $0 = months } }
     }
 
     enum Command: Sendable {
@@ -62,6 +73,8 @@ actor TimelineFeed {
     private struct Failure { var message: String; var attempts = 0; var transient = false; var due = false }
 
     private let source: any TimelineSource
+    /// What the grid shows right now, ahead of the viewport command that follows it.
+    private let onScreen: Viewport
     private weak var consumer: (any TimelineFeedConsumer)?
     private var session: Session?
     private var order: [MonthKey] = []
@@ -81,7 +94,7 @@ actor TimelineFeed {
     private var failures: [MonthKey: Failure] = [:]
     private var retries: [MonthKey: Task<Void, Never>] = [:]
 
-    init(source: any TimelineSource) { self.source = source }
+    init(source: any TimelineSource, viewport: Viewport = Viewport()) { self.source = source; onScreen = viewport }
 
     /// Commands in the order they were given.
     func handle(_ commands: [Command]) {
@@ -203,7 +216,9 @@ actor TimelineFeed {
     }
 
     private func invalidate(_ months: Set<MonthKey>?) {
-        for month in months ?? Set(resident.keys).union(loads.keys) {
+        // The failed months too: a sync's reload takes the banner and its Retry down, so a month
+        // that was refused must be askable again when the grid wants it, not placeholders for good.
+        for month in months ?? Set(resident.keys).union(loads.keys).union(failures.keys) {
             if resident[month] != nil { stale.insert(month) }
             loads[month]?.stale = true
             failures[month] = nil; cancelRetry(month)
@@ -283,7 +298,11 @@ actor TimelineFeed {
         startQueued()
     }
 
-    private func isProtected(_ month: MonthKey) -> Bool { visible.contains(month) || target == month }
+    /// On screen, as of the last viewport handled or the one the grid has reported since, or the
+    /// month a jump lands on.
+    private func isProtected(_ month: MonthKey) -> Bool {
+        visible.contains(month) || target == month || onScreen.months.contains(month)
+    }
 
     /// A month on screen or beside one, or the one a jump lands on.
     private func isWanted(_ month: MonthKey) -> Bool {
