@@ -373,6 +373,12 @@ Source status: **53 done, 0 partial, 0 missing**. These are source-audit labels,
   - **W2, Cast.** Each Cast session gets its own scoped, revocable grant sized to the media. Stop and disconnect revoke it, and the app's own session is never touched. This needs a check on the owner's Chromecast.
   - **Merged.** W2 and B3 each added an accessor to `AccountRuntime`; both are kept.
   - **Regression.** 587/587 unit tests and 47 UI tests with one skip and one failure, a viewer-controls test that passed on its own rerun. After the order change, 589/589 unit tests and LibraryTests passed on the branch. The video swipe test now finds its clip by label, since equal-time fixture photos reorder by ID.
+- Build `3040076` (rebuild milestones F1, T2 and P5 on top of 3040075):
+  - **F1, search pagination.** A SearchFeed actor owns cursors, page sizes, empty-page following and verification; results look the same and load further on scroll. A sync deletion prunes open results in place; a restored photo comes back on refresh.
+  - **T2, one thumbnail scheduler.** Cells only bind; one scheduler ranks visible, ahead and behind bands, caps downloads per band, batches deliveries to the main thread, and keeps T1's aspect-fill decode. Locked Folder photos are never asked of it.
+  - **P5, device index service.** Replaces DeviceTimelineIndex: rereads only the photos Photos names, imports the existing fingerprints (no re-hash), device.sqlite user_version 2 (additive). A phone photo whose server copy is trashed, archived or locked now shows as a phone-only photo.
+  - **Regression.** 753/753 unit tests and 47 UI tests with one skip and no failures.
+
 - Build `3040075` (rebuild milestone P4 on top of 3040074):
   - **P4, Free up space on a cleanup service.** A per-account CleanupService enforces the deletion-safety invariants: phone-side filters first, a strict server check per candidate (at most 6 at a time, no offline fallback; a 401 aborts), re-verification of only the selection at remove, and invalidation on token, read-only, settings, access or library changes. Free up space gains a "Kept on this phone" section listing each reason a backed-up photo stays.
   - **Removal is still off.** `CleanupRemovalGate.isOpen = false` (Sources/Cleanup/CleanupPolicy.swift) keeps Remove unavailable until the owner runs the 30-photo device gate; tests exercise removal only through fake PhotoKit.
