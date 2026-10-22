@@ -55,6 +55,8 @@ actor PhotoKitAdapter {
     /// What backup staging and discovery read (PhotoLibraryStaging.swift).
     nonisolated let stagingReader: any PhotoStagingReading
     private nonisolated let journal: DeviceDatabase
+    /// The phone's database, which also keeps the device index's fingerprints.
+    nonisolated var database: DeviceDatabase { journal }
     private nonisolated let window: Duration
     private nonisolated let sleep: @Sendable (Duration) async throws -> Void
     /// Access and what subscribers hear, behind a lock, so that Photos' own queue adds to it in

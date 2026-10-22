@@ -19,7 +19,7 @@ struct DeviceJournalRecord: Hashable, Sendable {
 /// The phone's own database (architecture section 3): Application Support/IlyichDevice/device.sqlite,
 /// in the app's private container, so no lock of it is ever held in the App Group when iOS suspends
 /// the app. It is device-wide, not per account, runs on a queue of its own and opens on first use.
-/// It holds the mutation journal; P5 adds fingerprints.
+/// It holds the mutation journal and the fingerprints of phone photos (P5).
 ///
 /// device_mutation has one row per change the app asked of Photos:
 /// - id: the change's UUID;
@@ -37,6 +37,13 @@ struct DeviceJournalRecord: Hashable, Sendable {
 /// - outcome: committed, declined, revisionChanged, notPermitted, failed or interrupted, and detail:
 ///   a failure's message.
 /// Rows are kept as history.
+///
+/// device_fingerprint has one row per phone photo hashed for the merged library (P5):
+/// - local_id: the asset's local identifier;
+/// - revision: REAL seconds since 2001, the modification date the asset had when hashed, bound
+///   as a double; NULL when Photos reported none;
+/// - checksum: the base64 SHA-1 of the asset's current full-size file, as the server stores it.
+/// Checksums don't depend on the account, so the table is device-wide. user_version is 2 from P5.
 actor DeviceDatabase {
     /// Application Support/IlyichDevice/device.sqlite.
     static var standardURL: URL {
@@ -84,6 +91,69 @@ actor DeviceDatabase {
         try database().query(Self.selection + " ORDER BY created_at,rowid").compactMap { Self.record($0) }
     }
 
+    // MARK: - Fingerprints
+
+    /// Every fingerprint kept, by local identifier.
+    func fingerprints() throws -> [String: DeviceFingerprint] {
+        var result: [String: DeviceFingerprint] = [:]
+        for row in try database().query("SELECT local_id,revision,checksum FROM device_fingerprint") {
+            guard row.count == 3, let id = row[0].text, let checksum = row[2].text else { continue }
+            result[id] = DeviceFingerprint(revision: row[1].real, checksum: checksum)
+        }
+        return result
+    }
+
+    /// Keeps `values`, all in one transaction, each replacing the photo's row, or with
+    /// `keepingExisting` only where the photo has none.
+    func saveFingerprints(_ values: [String: DeviceFingerprint], keepingExisting: Bool = false) throws {
+        guard !values.isEmpty else { return }
+        let connection = try database()
+        let statement = "INSERT OR \(keepingExisting ? "IGNORE" : "REPLACE") INTO device_fingerprint(local_id,revision,checksum) VALUES(?,?,?)"
+        try connection.transaction {
+            for (id, value) in values.sorted(by: { $0.key < $1.key }) {
+                try connection.execute(statement, [.text(id), value.revision.map { .real($0) } ?? .null, .text(value.checksum)])
+            }
+        }
+    }
+
+    /// Forgets the fingerprints of photos that are gone.
+    func removeFingerprints(_ ids: [String]) throws {
+        guard !ids.isEmpty else { return }
+        let connection = try database()
+        try connection.transaction {
+            for id in ids { try connection.execute("DELETE FROM device_fingerprint WHERE local_id=?", [.text(id)]) }
+        }
+    }
+
+    /// Moves every fingerprint file earlier builds kept below Caches/IlyichFingerprints, one per
+    /// account, into the table, then deletes each file once its rows are committed, and the
+    /// folder once it is empty. Every account's file is taken, as checksums don't depend on the
+    /// account. A row already in the table, hashed by this build, is kept. A file that can't be
+    /// read is deleted too: it was a disposable cache, and the photos it named are hashed again.
+    /// Running it again finds nothing to do. Returns the rows read.
+    @discardableResult
+    func importLegacyFingerprints(from folder: URL) throws -> Int {
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        var imported = 0
+        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) where file.pathExtension == "json" {
+            if let data = try? Data(contentsOf: file),
+               let values = try? Legacy.decoder().decode([String: Legacy.Fingerprint].self, from: data) {
+                try saveFingerprints(values.mapValues { DeviceFingerprint(modified: $0.modified, checksum: $0.checksum) }, keepingExisting: true)
+                imported += values.count
+            }
+            try? FileManager.default.removeItem(at: file)
+        }
+        if let left = try? FileManager.default.contentsOfDirectory(atPath: folder.path), left.isEmpty {
+            try? FileManager.default.removeItem(at: folder)
+        }
+        return imported
+    }
+
+    /// Caches/IlyichFingerprints, where builds before P5 kept fingerprints.
+    static var legacyFingerprintsFolder: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("IlyichFingerprints", isDirectory: true)
+    }
+
     private func database() throws -> DeviceSQLite {
         if let connection { return connection }
         let folder = url.deletingLastPathComponent()
@@ -98,7 +168,8 @@ actor DeviceDatabase {
             CREATE TABLE IF NOT EXISTS device_mutation(id TEXT PRIMARY KEY,account_digest TEXT,kind TEXT NOT NULL,origin TEXT NOT NULL,\
             asset_ids TEXT NOT NULL,expected_revisions TEXT NOT NULL,created_at REAL NOT NULL,finished_at REAL,outcome TEXT,detail TEXT)
             """)
-        if try opened.query("PRAGMA user_version").first?.first?.real == 0 { try opened.execute("PRAGMA user_version=1") }
+        try opened.execute("CREATE TABLE IF NOT EXISTS device_fingerprint(local_id TEXT PRIMARY KEY,revision REAL,checksum TEXT NOT NULL)")
+        if (try opened.query("PRAGMA user_version").first?.first?.real ?? 0) < 2 { try opened.execute("PRAGMA user_version=2") }
         connection = opened
         return opened
     }
@@ -226,6 +297,24 @@ actor DeviceDatabase {
     }
 }
 
+/// A phone photo's checksum and the revision it was hashed at, as seconds since 2001.
+struct DeviceFingerprint: Hashable, Sendable {
+    let revision: Double?
+    let checksum: String
+
+    init(revision: Double?, checksum: String) {
+        self.revision = revision
+        self.checksum = checksum
+    }
+
+    init(modified: Date?, checksum: String) {
+        self.init(revision: modified?.timeIntervalSinceReferenceDate, checksum: checksum)
+    }
+
+    /// Whether it was hashed at `modified`, compared as dates compare.
+    func isCurrent(for modified: Date?) -> Bool { revision.map(Date.init(timeIntervalSinceReferenceDate:)) == modified }
+}
+
 /// Device records couldn't be read or written, as on a full disk.
 struct DeviceDatabaseError: LocalizedError, Equatable {
     var errorDescription: String? { "Ilyich couldn’t update its records on this phone. Free some storage, then try again." }
@@ -271,6 +360,13 @@ final class DeviceSQLite {
     deinit { sqlite3_close(handle) }
 
     func execute(_ sql: String, _ values: [Value] = []) throws { _ = try query(sql, values) }
+
+    /// Runs `body` in one transaction, rolled back if it throws.
+    func transaction(_ body: () throws -> Void) throws {
+        try execute("BEGIN IMMEDIATE")
+        do { try body(); try execute("COMMIT") }
+        catch { try? execute("ROLLBACK"); throw error }
+    }
 
     func query(_ sql: String, _ values: [Value] = []) throws -> [[Value]] {
         var prepared: OpaquePointer?

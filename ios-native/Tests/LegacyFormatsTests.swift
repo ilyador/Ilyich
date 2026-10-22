@@ -331,20 +331,29 @@ final class LegacyFormatsTests: XCTestCase {
         await TimelinePlacesCache.shared.removeAll(scope: scope)
     }
 
-    func testFingerprintCacheIsWrittenUnderItsHashedName() async throws {
+    /// The fingerprint file LocalFingerprintCache wrote under its hashed name moves into
+    /// device.sqlite bit for bit, revisions as doubles and a missing one as NULL, and is deleted.
+    func testFingerprintFileIsImportedIntoTheDeviceDatabase() async throws {
         let scope = G.account.cacheScope
         let path = Legacy.fingerprintsPath(scope: scope)
         XCTAssertEqual(path, "IlyichFingerprints/\(G.digest).json")
-        let file = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent(path)
-        defer { try? FileManager.default.removeItem(at: file) }
-        let cache = LocalFingerprintCache(scope: scope)
-        await cache.save(G.fingerprints)
-        XCTAssertEqual(try FixtureLoader.canonicalJSON(Data(contentsOf: file)), try FixtureLoader.canonicalJSON(FixtureLoader.data("caches/" + path)))
-        let mirror = try FixtureLoader.decode([String: Legacy.Fingerprint].self, from: "caches/" + path)
-        XCTAssertEqual(mirror.mapValues(\.checksum), G.fingerprints.mapValues(\.checksum))
-        XCTAssertNil(mirror["7B6A5948-3726-4150-8F6E-5D4C3B2A1908/L0/001"]?.modified, "A photo without a modification date keeps none.")
-        let loaded = await cache.load()
-        XCTAssertEqual(loaded.mapValues(\.checksum), G.fingerprints.mapValues(\.checksum))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyFormatsTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent(path)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FixtureLoader.data("caches/" + path).write(to: file)
+
+        let database = DeviceDatabase(url: root.appendingPathComponent("device.sqlite"))
+        let imported = try await database.importLegacyFingerprints(from: file.deletingLastPathComponent())
+        XCTAssertEqual(imported, G.fingerprints.count)
+        let rows = try await database.fingerprints()
+        XCTAssertEqual(rows, G.fingerprints.mapValues { DeviceFingerprint(modified: $0.modified, checksum: $0.checksum) })
+        XCTAssertEqual(rows[G.l4]?.revision?.bitPattern, G.Bits.l4)
+        XCTAssertEqual(rows[G.l5]?.revision?.bitPattern, G.Bits.l5)
+        XCTAssertNil(rows["7B6A5948-3726-4150-8F6E-5D4C3B2A1908/L0/001"]?.revision, "A photo without a modification date keeps none.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.deletingLastPathComponent().path), "The file and its folder are gone.")
+        let again = try await database.importLegacyFingerprints(from: file.deletingLastPathComponent())
+        XCTAssertEqual(again, 0)
     }
 
     func testThumbnailTreeV1IsTheStoreLayout() async throws {
