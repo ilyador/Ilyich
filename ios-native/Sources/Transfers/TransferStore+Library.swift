@@ -151,6 +151,7 @@ extension TransferStore {
                 let match = "SELECT value FROM json_each(?)"
                 let ids = TransferSQLite.Value.text(TransferJSON.encode(edited))
                 try Self.dropStages(db, ofJobsIn: match, [ids])
+                try Self.reopenNotificationBatches(db, ofJobsIn: match, [ids])
                 try db.run("""
                     UPDATE jobs SET state='queued',retry_count=0,not_before=NULL,error_class=NULL,error_message=NULL,error_at=NULL \
                     WHERE id IN (\(match))

@@ -55,7 +55,8 @@ extension TransferStore {
     /// confirmation has the same revision is already backed up and gets none; a shared file
     /// already consumed (its upload committed, its manifest not yet rewritten) gets none either.
     /// A request with an album adds the album to the photo's destinations (B4): one already
-    /// backed up joins it with its receipt's server ID, the rest once their upload commits. A job
+    /// backed up joins it with the server ID of its receipt for that revision, the rest once their
+    /// upload commits. A job
     /// with a notification batch counts in the batch's total.
     func enqueue(_ requests: [TransferRequest]) throws -> (queued: Int, alreadyBackedUp: Int) {
         let db = try database()
@@ -69,10 +70,15 @@ extension TransferStore {
                     try db.run("SELECT 1 FROM confirmations WHERE local_id=? AND modification_date=?",
                                [.text(id.rawValue), .real(revision.referenceSeconds)]) { _ in confirmed = true }
                     if confirmed {
+                        // Only a receipt of the confirmed revision names its server copy: an older
+                        // one, left when the latest upload committed without a receipt, names the
+                        // copy from before an edit.
                         var remoteID: String?
-                        try db.run("SELECT original_id FROM receipts WHERE local_id=?", [.text(id.rawValue)]) { remoteID = $0.text(0) }
-                        // Confirmed without a receipt (a legacy Live Photo): the server ID comes
-                        // from uploading again, which the duplicate check answers.
+                        try db.run("SELECT original_id FROM receipts WHERE local_id=? AND modification_date=?",
+                                   [.text(id.rawValue), .real(revision.referenceSeconds)]) { remoteID = $0.text(0) }
+                        // Confirmed without a receipt of this revision (a legacy Live Photo, a
+                        // commit without its checksum): the server ID comes from uploading again,
+                        // which the duplicate check answers.
                         if album == nil || remoteID != nil {
                             if let album { try Self.addDestination(db, localID: id.rawValue, album: album, remoteID: remoteID) }
                             backedUp += 1
@@ -101,8 +107,11 @@ extension TransferStore {
                     queued += 1
                     seqs[lane] = seq
                     if let batch = request.batch {
+                        // A batch whose last notification went out starts over (reopenNotificationBatch).
                         try db.run("""
-                            INSERT INTO notification_batches(id,kind,total) VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET total=total+1
+                            INSERT INTO notification_batches(id,kind,total) VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET total=total+1,\
+                            started_posted=CASE WHEN terminal_posted=1 THEN 0 ELSE started_posted END,\
+                            failed=CASE WHEN terminal_posted=1 THEN NULL ELSE failed END,terminal_posted=0
                             """, [.text(batch.uuidString), .text(NotificationBatchKind(lane).rawValue)])
                     }
                 }
@@ -232,6 +241,7 @@ extension TransferStore {
                 arguments.append(.text(TransferJSON.encode(sourceKeys)))
             }
             if lane == .library { try Self.dropStages(db, ofJobsIn: match, arguments) }
+            try Self.reopenNotificationBatches(db, ofJobsIn: match, arguments)
             try db.run("""
                 UPDATE jobs SET state='queued',retry_count=0,not_before=NULL,error_class=NULL,error_message=NULL,error_at=NULL \
                 WHERE id IN (\(match))
