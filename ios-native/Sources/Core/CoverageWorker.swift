@@ -81,7 +81,7 @@ enum CoverageHold: Hashable, Sendable {
     case moving
     /// The grid just stopped; coverage waits until `until` on the uptime clock.
     case settling(until: TimeInterval)
-    /// Three downloads in a row failed: the server is left alone for a while.
+    /// Downloads failed: the server is left alone for a while.
     case serverFailing
     /// The thumbnail store is at its cap: downloading more would only evict what the grid showed.
     case diskBudget
@@ -213,6 +213,9 @@ struct CoverageState: Hashable, Sendable {
     /// Nil, as on every phone before T5, forces a verification pass; present files are never
     /// fetched again.
     var mark: Int64?
+    /// The mark the pass under way places when it reaches the end: the index's revision when it
+    /// began, or nil once one of its downloads failed. Nil between passes.
+    var passMark: Int64?
     /// The policy fingerprint the cursor and mark were made under.
     var policyHash: String?
     var total = 0
@@ -226,7 +229,8 @@ protocol CoverageStoring: Sendable {
     func contains(assetID: String, revision: String) -> Bool
     func currentUsage() async -> Int
     func coverageState() async -> CoverageState
-    func saveCoverageState(_ state: CoverageState) async
+    /// Saves the state, unless the store was cleared since `token` was taken from its fence. Whether it did.
+    func saveCoverageState(_ state: CoverageState, token: UInt64) async -> Bool
 }
 
 extension ThumbnailDiskStore: CoverageStoring {}
@@ -279,12 +283,13 @@ struct CoverageCursor: Codable, Hashable, Sendable {
 /// photo against the thumbnail store's presence map; only the missing ones are downloaded, on the
 /// scheduler's coverage band, which never takes more than two of the six download slots and
 /// yields every other to the screen. The position is saved after every page, so a kill resumes
-/// where it stopped, and once a pass has walked the whole library the index's revision is kept
-/// as the mark: a relaunch with nothing changed since makes no request at all, and one after
-/// changes that synced while no worker ran verifies the library once more without fetching a
-/// present file. While the account is open each library change names the photos it touched, and
-/// only those are checked again; a reset or an overflow asks for a whole pass. It downloads only
-/// while the conditions allow
+/// where it stopped, and once a pass has walked the whole library the index's revision it began
+/// at is kept as the mark: a relaunch with nothing changed since makes no request at all, and one
+/// after changes that synced while no worker ran, or during a pass an earlier launch began,
+/// verifies the library once more without fetching a present file. While the account is open each
+/// library change names the photos it touched, and only those are checked again; a reset or an
+/// overflow asks for a whole pass. A download that failed leaves the library unverified, so the
+/// photo is asked for again after a pause. It downloads only while the conditions allow
 /// (CoveragePolicy): the app in front, an unmetered network, no Low Power Mode, the phone not
 /// hot, no photo open, and the grid still for a moment. It belongs to one account; once that
 /// session ends it never starts again.
@@ -409,15 +414,23 @@ final class CoverageWorker: Sendable {
     private func run() async {
         if startDelay > .zero { try? await Task.sleep(for: startDelay) }
         guard mayRun else { return }
-        let changes = changes
+        // Subscribed before anything is read, so every change from here on is named in memory.
+        let stream = await changes()
         let subscription = Task { [weak self] in
-            for await change in await changes() {
+            for await change in stream {
                 guard let self else { return }
                 received(change)
             }
         }
         defer { subscription.cancel() }
-        var checkedAtStart = false
+        // While the worker runs, changes name the photos to check again. Changes that landed
+        // while no worker ran, or during a pass an earlier launch began, are named in no memory
+        // of this one: until a pass begins here, or the mark is found level with the index, a
+        // mark behind the index's revision means one more verification pass, which fetches no
+        // present file.
+        var trusted = false
+        // Rounds in a row in which a download failed; each gives the server a longer pause.
+        var failingRounds = 0
         while mayRun {
             guard (try? await index.isReadable()) == true else {
                 publish { $0.hold = .libraryNotReady }
@@ -426,27 +439,39 @@ final class CoverageWorker: Sendable {
                 continue
             }
             publish { $0.hold = nil }
+            let token = store.fence.token()
             var saved = await store.coverageState()
             if saved.policyHash != policy.fingerprint {
                 saved = CoverageState(policyHash: policy.fingerprint)
-                await store.saveCoverageState(saved)
+                guard await store.saveCoverageState(saved, token: token) else { continue }
             }
             guard mayRun else { return }
             let revision = (try? await index.derivedRevision()) ?? 0
             let (full, pending, changed) = state.withLock { state in (state.fullPassWanted, state.recheck, state.changed) }
-            // While the worker runs, changes name the photos to check again. At the start, a mark
-            // behind the index's revision means changes landed while no worker ran, or before a
-            // recheck could finish: the library is verified once more, fetching no present file.
-            let behind = !checkedAtStart && saved.mark != revision
-            checkedAtStart = true
+            let behind = !trusted && saved.mark != revision
+            // A reset or an overflow walks from the newest photo again, whatever position a pass had.
+            if full { saved.cursor = nil }
+            // A pass that begins here sees every change from now on; one resumed from an earlier
+            // launch did not, so its mark is checked against the index's revision once it ends.
+            if saved.cursor == nil { trusted = true }
+            let failed: Bool
             if full || saved.cursor != nil || saved.mark == nil || behind {
                 state.withLock { $0.fullPassWanted = false }
-                await verify(resuming: saved)
+                failed = await verify(resuming: saved)
             } else if !pending.isEmpty || changed {
-                await recheck(pending)
+                failed = await recheck(pending)
             } else {
                 publish { $0.isRunning = false; $0.hold = nil; $0.total = saved.total; $0.stored = saved.stored }
                 await wake.wait(upTo: nil)
+                continue
+            }
+            // The photos whose download failed are asked for again, after a pause that doubles
+            // with every round that failed, up to sixteen times the first.
+            if failed {
+                failingRounds += 1
+                guard await pauseAfterFailures(failurePause * (1 << (min(failingRounds, 5) - 1))) else { return }
+            } else {
+                failingRounds = 0
             }
         }
     }
@@ -480,63 +505,83 @@ final class CoverageWorker: Sendable {
 
     /// Walks the library from the saved position, or from the newest photo, checking every photo
     /// against the store and downloading the missing ones. The position and the counts are saved
-    /// after each page; at the end the index's revision becomes the mark.
-    private func verify(resuming saved: CoverageState) async {
+    /// after each page; at the end the index's revision the pass began at becomes the mark,
+    /// unless a download failed on the way. Whether one did.
+    private func verify(resuming saved: CoverageState) async -> Bool {
         var kept = saved
         var cursor = CoverageCursor(encoded: saved.cursor)
-        if cursor == nil { kept.stored = 0 }
+        if cursor == nil {
+            // From the newest photo. A change after this is named in memory, or found at the
+            // next launch as a mark behind the index's revision.
+            guard let revision = try? await index.derivedRevision() else {
+                await wake.wait(upTo: .seconds(30))
+                return false
+            }
+            kept.stored = 0
+            kept.passMark = revision
+        }
         guard let total = try? await index.coverageCount() else {
             await wake.wait(upTo: .seconds(30))
-            return
+            return false
         }
         kept.total = total
         state.withLock { $0.statistics.passes += 1 }
         publish { $0.isRunning = true; $0.total = total; $0.stored = kept.stored }
         var failures = 0
+        var failed = false
         while mayRun {
+            // Taken before the page is read: a store cleared after this refuses the page's
+            // writes and the save of its position alike.
+            let token = store.fence.token()
             guard let page = try? await index.coveragePage(after: cursor, limit: pageSize) else {
                 await wake.wait(upTo: .seconds(30))
-                return
+                return failed
             }
             state.withLock { $0.statistics.pagesRead += 1 }
             if page.isEmpty {
-                // Walked to the end: verified through the index's revision now. What changed
-                // during the walk was named by changes that wait to be checked; a reset meanwhile
-                // means another pass, not a verified library.
+                // Walked to the end: verified through the revision the pass began at. What
+                // changed since was named by changes that wait to be checked; a reset meanwhile
+                // means another pass, and a failed download a library not verified, so the
+                // next pass asks for the photo again.
                 let verified = !state.withLock({ $0.fullPassWanted })
-                let revision = try? await index.derivedRevision()
                 kept.cursor = nil
-                kept.mark = verified ? revision : nil
+                kept.mark = verified ? kept.passMark : nil
+                kept.passMark = nil
                 kept.stored = min(kept.stored, kept.total)
-                await store.saveCoverageState(kept)
+                // A store cleared meanwhile (Clear browsing cache) refuses the save: this pass
+                // ends and the next starts from the newest photo with fresh counts.
+                guard await store.saveCoverageState(kept, token: token) else { return failed }
                 state.withLock { $0.statistics.completedPasses += 1 }
                 publish { $0.total = kept.total; $0.stored = kept.stored }
-                return
+                return failed
             }
-            let token = store.fence.token()
             var present = 0
             var missing: [(id: String, revision: String)] = []
             for row in page {
                 if store.contains(assetID: row.id, revision: row.revision) { present += 1 } else { missing.append((row.id, row.revision)) }
             }
             let outcome = await download(missing, token: token, failures: &failures)
-            guard !outcome.interrupted else { return }
-            // A store cleared meanwhile (Clear browsing cache) has no position any more: this
-            // pass ends and the next starts from the newest photo with fresh counts.
-            let current = await store.coverageState()
-            guard current.policyHash == kept.policyHash, current.cursor == kept.cursor else { return }
+            if !outcome.failed.isEmpty {
+                // Saved with the position, so the pass ends unverified in this launch or a later one.
+                failed = true
+                kept.passMark = nil
+            }
+            guard !outcome.interrupted else { return failed }
             // Committed only once the page is done, so a page worked twice is never counted twice.
             kept.stored += present + outcome.fetched
             cursor = page.last?.cursor
             kept.cursor = cursor?.encoded
-            await store.saveCoverageState(kept)
+            guard await store.saveCoverageState(kept, token: token) else { return failed }
             publish { $0.stored = kept.stored }
         }
+        return failed
     }
 
     /// Checks the photos changes named: those still in the covered set and not on disk are
-    /// downloaded. The count follows the index when photos came or went, and the mark the changes.
-    private func recheck(_ ids: Set<String>) async {
+    /// downloaded. The count follows the index when photos came or went, and the mark the changes
+    /// once every download succeeded; the photos that failed wait to be checked again. Whether
+    /// one failed.
+    private func recheck(_ ids: Set<String>) async -> Bool {
         let countStale = state.withLock { state -> Bool in
             state.recheck.subtract(ids)
             state.changed = false
@@ -555,7 +600,7 @@ final class CoverageWorker: Sendable {
         guard let revisions = try? await index.coverageRevisions(of: Array(ids)) else {
             putBack()
             await wake.wait(upTo: .seconds(30))
-            return
+            return false
         }
         state.withLock { $0.statistics.rechecked += ids.count }
         let token = store.fence.token()
@@ -563,25 +608,38 @@ final class CoverageWorker: Sendable {
         if !missing.isEmpty { publish { $0.isRunning = true } }
         var failures = 0
         let outcome = await download(missing, token: token, failures: &failures)
+        let failed = !outcome.failed.isEmpty
         guard !outcome.interrupted else {
             putBack()
-            return
+            return failed
+        }
+        if failed {
+            // Checked again after a pause; the mark waits for them, so a kill meanwhile finds
+            // the index past it at the next launch.
+            state.withLock { state in
+                state.recheck.formUnion(outcome.failed)
+                state.changed = true
+            }
         }
         var kept = await store.coverageState()
-        guard mayRun, kept.cursor == nil, kept.mark != nil else { return }
+        guard mayRun, kept.cursor == nil, kept.mark != nil else { return failed }
         if countStale, let total = try? await index.coverageCount() { kept.total = total }
         kept.stored = min(kept.stored + outcome.fetched, kept.total)
         // Verified through this revision, unless more changes already wait.
         let quiet = state.withLock { state in state.recheck.isEmpty && !state.fullPassWanted && !state.changed }
         if quiet { kept.mark = revision }
-        await store.saveCoverageState(kept)
+        // A store cleared meanwhile refuses the save; the next pass starts from the newest photo.
+        guard await store.saveCoverageState(kept, token: token) else { return failed }
         publish { $0.total = kept.total; $0.stored = kept.stored }
+        return failed
     }
 
     // MARK: Downloads
 
     private struct Outcome {
         var fetched = 0
+        /// The photos whose download failed.
+        var failed: [String] = []
         var interrupted = false
     }
 
@@ -593,12 +651,12 @@ final class CoverageWorker: Sendable {
         guard !photos.isEmpty else { return outcome }
         guard await waitForRoom() else { outcome.interrupted = true; return outcome }
         var consecutive = failures
-        await withTaskGroup(of: Bool?.self) { group in
+        await withTaskGroup(of: (id: String, stored: Bool?).self) { group in
             var inFlight = 0
-            func settle(_ result: Bool?) {
-                switch result {
+            func settle(_ result: (id: String, stored: Bool?)) {
+                switch result.stored {
                 case .some(true): outcome.fetched += 1; consecutive = 0
-                case .some(false): consecutive += 1
+                case .some(false): outcome.failed.append(result.id); consecutive += 1
                 case .none: break
                 }
             }
@@ -610,7 +668,7 @@ final class CoverageWorker: Sendable {
                 if consecutive >= 3 {
                     for await result in group { inFlight -= 1; settle(result) }
                     consecutive = 0
-                    guard await pauseAfterFailures() else { outcome.interrupted = true; break }
+                    guard await pauseAfterFailures(failurePause) else { outcome.interrupted = true; break }
                 }
                 // Checked just before each download starts, so none starts during a hold.
                 guard await waitUntilClear() else { outcome.interrupted = true; break }
@@ -618,12 +676,12 @@ final class CoverageWorker: Sendable {
                 group.addTask {
                     do {
                         try await scheduler.store(assetID: photo.id, revision: photo.revision, band: .coverage, token: token)
-                        return true
+                        return (photo.id, true)
                     } catch is CancellationError {
                         // The photo was forgotten or the store cleared meanwhile: not a failure.
-                        return nil
+                        return (photo.id, nil)
                     } catch {
-                        return false
+                        return (photo.id, false)
                     }
                 }
                 inFlight += 1
@@ -636,11 +694,11 @@ final class CoverageWorker: Sendable {
         return outcome
     }
 
-    /// The pause after three failures in a row, which a change of conditions or a library change
-    /// meanwhile does not cut short. False once the worker may not run.
-    private func pauseAfterFailures() async -> Bool {
+    /// A pause that leaves a failing server alone, which a change of conditions or a library
+    /// change meanwhile does not cut short. False once the worker may not run.
+    private func pauseAfterFailures(_ pause: Duration) async -> Bool {
         publish { $0.hold = .serverFailing }
-        let deadline = ContinuousClock.now + failurePause
+        let deadline = ContinuousClock.now + pause
         while mayRun {
             let remaining = deadline - ContinuousClock.now
             guard remaining > .zero else { return true }

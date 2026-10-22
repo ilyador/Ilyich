@@ -85,8 +85,10 @@ import XCTest
         await first.stop()
         XCTAssertEqual(first.statistics.pagesRead, 2)
         var saved = await h.store.coverageState()
+        let began = try await h.index.derivedRevision()
         XCTAssertNotNil(saved.cursor, "The position after page one is saved.")
         XCTAssertNil(saved.mark, "The library isn't verified yet.")
+        XCTAssertEqual(saved.passMark, began, "The pass carries the revision it began at.")
         XCTAssertEqual(saved.total, 6)
         XCTAssertEqual(saved.stored, 2, "Page one: p1 fetched, p2 present.")
         // A download that has started finishes into the store, as every download does.
@@ -106,6 +108,7 @@ import XCTest
         let revision = try await h.index.derivedRevision()
         XCTAssertNil(saved.cursor)
         XCTAssertEqual(saved.mark, revision, "Verified through the index's revision.")
+        XCTAssertNil(saved.passMark, "Nothing is under way.")
         XCTAssertEqual(saved.total, 6)
         XCTAssertEqual(saved.stored, 6)
         let relaunched = ThumbnailDiskStore(directory: h.store.directory, indexDelay: nil)
@@ -165,6 +168,45 @@ import XCTest
         await fourth.stop()
     }
 
+    /// A photo that synced in while an earlier launch's pass had already walked its month is not
+    /// lost with the change that named it when that process was killed: the resumed pass ends
+    /// with the revision it began at, which the next launch finds behind the index, and verifies
+    /// the library once more without fetching a present file.
+    func testAChangeLostWithAnEarlierLaunchIsFoundByTheMark() async throws {
+        let h = try await makeHarness(photos: Self.six)
+        h.server.block(["p3"])
+        let first = makeWorker(h)
+        first.start()
+        try await until("Page two did not start.") { h.server.requested.contains("p4") }
+        await first.stop()
+        h.server.block([])
+        try await until("The held downloads did not finish.") {
+            h.store.contains(assetID: "p3", revision: "r1") && h.store.contains(assetID: "p4", revision: "r1")
+        }
+        let began = try await h.index.derivedRevision()
+        var saved = await h.store.coverageState()
+        XCTAssertNotNil(saved.cursor)
+        XCTAssertEqual(saved.passMark, began)
+        // While no worker runs, a photo newer than any walked lands in the newest month; the
+        // change naming it died with the earlier process.
+        _ = try await h.index.apply([Self.photo("p0", taken: "2026-06-20T12:00:00Z")], epoch: h.index.epoch())
+        let moved = try await h.index.derivedRevision()
+        XCTAssertNotEqual(moved, began)
+
+        let second = makeWorker(h)
+        second.start()
+        try await until("The new photo was not fetched.") { h.server.requested.contains("p0") }
+        try await until("The verification pass did not finish.") { second.statistics.completedPasses == 2 && !second.isRunning }
+        XCTAssertEqual(second.statistics.passes, 2, "The resumed pass, then one from the newest photo.")
+        XCTAssertEqual(h.server.requested.count, 7, "p1 to p6 once, then p0: no present file was fetched again.")
+        saved = await h.store.coverageState()
+        XCTAssertEqual(saved.mark, moved, "Verified through the index as it is now.")
+        XCTAssertNil(saved.passMark)
+        XCTAssertEqual(saved.total, 7)
+        XCTAssertEqual(saved.stored, 7)
+        await second.stop()
+    }
+
     /// A reset, or a change that overflowed, walks the library again instead of checking photos one by one.
     func testAResetWalksTheLibraryAgain() async throws {
         let h = try await makeHarness(photos: Array(Self.six.prefix(2)))
@@ -219,16 +261,17 @@ import XCTest
         h.conditions.update { $0.network = .expensive }
         let worker = makeWorker(h)
         worker.start()
-        try await Task.sleep(for: .milliseconds(300))
+        try await until("The metered hold was not shown.") { worker.progress.hold == .metered }
+        try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(h.server.requested, [], "Nothing downloads on cellular.")
-        XCTAssertEqual(worker.progress.hold, .metered)
         h.conditions.update { $0.network = .constrained }
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(h.server.requested, [], "Nothing downloads in Low Data Mode.")
+        XCTAssertEqual(worker.progress.hold, .metered)
         h.conditions.update { $0.network = .none }
+        try await until("The offline hold was not shown.") { worker.progress.hold == .offline }
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(h.server.requested, [], "Nothing is tried without a network.")
-        XCTAssertEqual(worker.progress.hold, .offline)
         h.conditions.update { $0.network = .unmetered }
         try await until("Coverage did not resume on Wi-Fi.") { h.server.requested.count == 2 }
         await worker.stop()
@@ -240,17 +283,17 @@ import XCTest
         h.conditions.update { $0.lowPower = true }
         let worker = makeWorker(h)
         worker.start()
-        try await Task.sleep(for: .milliseconds(300))
+        try await until("The Low Power hold was not shown.") { worker.progress.hold == .lowPower }
+        try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(h.server.requested, [])
-        XCTAssertEqual(worker.progress.hold, .lowPower)
         h.conditions.update { $0.lowPower = false; $0.thermal = .serious }
+        try await until("The thermal hold was not shown.") { worker.progress.hold == .thermal }
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(h.server.requested, [])
-        XCTAssertEqual(worker.progress.hold, .thermal)
         h.conditions.update { $0.thermal = .fair; $0.appActive = false }
+        try await until("The background hold was not shown.") { worker.progress.hold == .background }
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(h.server.requested, [])
-        XCTAssertEqual(worker.progress.hold, .background)
         h.conditions.setAppActive(true)
         try await until("Coverage did not resume.") { h.server.requested.count == 2 }
         await worker.stop()
@@ -285,8 +328,76 @@ import XCTest
         XCTAssertEqual(h.server.requested.count, 4)
         h.server.fails.store(false, ordering: .relaxed)
         try await until("Coverage did not carry on after the pause.") { worker.statistics.completedPasses == 1 }
-        XCTAssertEqual(h.server.requested.count, 6, "Each photo was asked for once; the failed ones wait for the next pass.")
-        XCTAssertEqual(worker.progress.stored, 2)
+        XCTAssertEqual(h.server.requested.count, 6, "Each photo was asked for once in the pass.")
+        XCTAssertEqual(worker.progress.stored, 2, "The counts stay honest.")
+        var saved = await h.store.coverageState()
+        XCTAssertNil(saved.mark, "A pass in which a download failed leaves the library unverified.")
+        // The server is left alone once more, then only the photos that failed are asked for.
+        try await until("The pause before the next pass was not shown.") { worker.progress.hold == .serverFailing }
+        try await until("The failed photos were not fetched by the next pass.") { worker.statistics.completedPasses == 2 }
+        XCTAssertEqual(h.server.requested.count, 10)
+        XCTAssertEqual(Set(h.server.requested.suffix(4)), ["p1", "p2", "p3", "p4"], "Present files are never fetched again.")
+        XCTAssertEqual(worker.progress.stored, 6)
+        saved = await h.store.coverageState()
+        let revision = try await h.index.derivedRevision()
+        XCTAssertEqual(saved.mark, revision, "Verified once every photo is on disk.")
+        await worker.stop()
+    }
+
+    /// A photo whose download fails in a recheck is checked again after a pause, and the mark
+    /// waits for it, so a kill meanwhile finds the index past the mark at the next launch.
+    func testARecheckThatFailsKeepsTheMarkAndTriesAgain() async throws {
+        let h = try await makeHarness(photos: Array(Self.six.prefix(2)))
+        let worker = makeWorker(h)
+        worker.start()
+        try await until("The first pass did not finish.") { worker.statistics.completedPasses == 1 }
+        let verified = try await h.index.derivedRevision()
+        h.server.fails.store(true, ordering: .relaxed)
+        _ = try await h.index.apply([Self.photo("p1", taken: Self.six[0].taken, revision: "r2")], epoch: h.index.epoch())
+        var change = await makeChange(h)
+        change.mediaRevisions = ["p1": "r2"]
+        h.feed.send(change)
+        try await until("The changed photo was not asked for.") { h.server.requested.count == 3 }
+        try await until("The server was not left alone after the failure.") { worker.progress.hold == .serverFailing }
+        var saved = await h.store.coverageState()
+        XCTAssertEqual(saved.mark, verified, "The mark waits for the photo that failed.")
+        h.server.fails.store(false, ordering: .relaxed)
+        try await until("The failed photo was not asked for again.") { h.server.requested.count == 4 }
+        XCTAssertEqual(h.server.requested.last, "p1")
+        let moved = try await h.index.derivedRevision()
+        try await until("The mark did not follow the recheck.") { await h.store.coverageState().mark == moved }
+        saved = await h.store.coverageState()
+        XCTAssertEqual(saved.stored, 2)
+        XCTAssertEqual(worker.statistics.passes, 1, "No pass is walked for a recheck that failed.")
+        await worker.stop()
+    }
+
+    /// Clear browsing cache in the middle of a pass: the page under way is not saved into the
+    /// emptied store, and the next pass starts from the newest photo with fresh counts, so every
+    /// file is there in the end and the counts say so.
+    func testClearingTheStoreDuringAPassStartsItOver() async throws {
+        let h = try await makeHarness(photos: Self.six)
+        h.server.block(["p3"])
+        let worker = makeWorker(h)
+        worker.start()
+        try await until("Page two did not start.") { h.server.requested.contains("p4") }
+        let underWay = await h.store.coverageState()
+        XCTAssertNotNil(underWay.cursor, "Page one is saved.")
+        // The user clears the cache while page two downloads.
+        await h.store.removeAll()
+        XCTAssertFalse(h.store.contains(assetID: "p1", revision: "r1"))
+        h.server.block([])
+        try await until("The pass from the newest photo did not finish.") { worker.statistics.completedPasses == 1 && !worker.isRunning }
+        for photo in Self.six {
+            XCTAssertTrue(h.store.contains(assetID: photo.id, revision: "r1"), "\(photo.id) is on disk.")
+        }
+        XCTAssertEqual(worker.statistics.passes, 2, "The pass under way ended; one from the newest photo followed.")
+        let saved = await h.store.coverageState()
+        let revision = try await h.index.derivedRevision()
+        XCTAssertEqual(saved.stored, 6)
+        XCTAssertEqual(saved.total, 6)
+        XCTAssertEqual(saved.mark, revision)
+        XCTAssertEqual(worker.progress.stored, 6)
         await worker.stop()
     }
 
