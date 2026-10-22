@@ -6,9 +6,11 @@ import Foundation
 @MainActor enum LegacyNotificationBridge {
     /// The library of the account `scope` names changed. `collections` asks for the shelves to
     /// reload; `accessChanged` says photos may have become unavailable.
-    static func libraryChanged(scope: String, collections: Bool, accessChanged: Bool) {
-        NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil,
-                                        userInfo: ["scope": scope, "collections": collections, "accessChanged": accessChanged])
+    /// `change`, when the sync published one, rides along so search results can drop its deletions.
+    static func libraryChanged(scope: String, collections: Bool, accessChanged: Bool, change: LibraryChange? = nil) {
+        var info: [String: Any] = ["scope": scope, "collections": collections, "accessChanged": accessChanged]
+        if let change { info["change"] = change }
+        NotificationCenter.default.post(name: .ilyichLibraryChanged, object: nil, userInfo: info)
     }
 
     /// A change the account's sync published. The shelves reload for albums, people, partners,
@@ -16,7 +18,7 @@ import Foundation
     static func libraryChanged(_ change: LibraryChange, scope: String, accessChanged: Bool) {
         let collections = !change.albums.isEmpty || !change.people.isEmpty || change.partnersChanged || change.memoriesChanged
             || change.configurationChanged || change.reset || change.overflow
-        libraryChanged(scope: scope, collections: collections, accessChanged: accessChanged)
+        libraryChanged(scope: scope, collections: collections, accessChanged: accessChanged, change: change)
     }
 
     /// What the account `scope` names keeps on the phone was cleared or changed, so the feed reloads.
