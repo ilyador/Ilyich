@@ -351,12 +351,13 @@ extension TransferStore {
         return page
     }
 
-    /// Photos still to be added to each album, by album ID, and how many of them have a failed job.
+    /// Photos still to be added to each album, by album ID, and how many of them failed: their backup job, or
+    /// the album add itself (B4), which waits for the user's retry.
     func albumUploadCounts() throws -> [String: AlbumUploadCount] {
         var counts: [String: AlbumUploadCount] = [:]
         try database().run("""
-            SELECT d.album_id,count(*),sum(CASE WHEN j.state='failed' THEN 1 ELSE 0 END) FROM album_destinations d \
-            LEFT JOIN jobs j ON j.lane='library' AND j.source_key=d.local_id WHERE d.state='pending' GROUP BY d.album_id
+            SELECT d.album_id,count(*),sum(CASE WHEN d.state='failed' OR j.state='failed' THEN 1 ELSE 0 END) FROM album_destinations d \
+            LEFT JOIN jobs j ON j.lane='library' AND j.source_key=d.local_id WHERE d.state IN ('pending','failed') GROUP BY d.album_id
             """) { row in
             if let album = row.text(0) { counts[album] = AlbumUploadCount(pending: Int(row.integer(1) ?? 0), failed: Int(row.integer(2) ?? 0)) }
         }
