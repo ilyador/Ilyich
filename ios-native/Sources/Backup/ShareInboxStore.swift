@@ -142,8 +142,9 @@ import IlyichShareInbox
         }
     }
 
-    func refreshProgress() async {
-        guard isRunning, let value = await BackgroundUploads.sharing.progressSnapshot(), value.expected > 0 else { return }
+    /// The upload's progress, as the share session reports it, a few times a second at most.
+    func applyProgress(_ value: UploadProgressSnapshot) {
+        guard isRunning, value.expected > 0 else { return }
         progress = min(1, Double(value.sent) / Double(value.expected))
     }
 

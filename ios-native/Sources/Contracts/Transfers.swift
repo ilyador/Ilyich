@@ -165,7 +165,11 @@ struct TransferSnapshot: Hashable, Sendable {
     var bytesSent: Int64
     var bytesExpected: Int64
     var bytesPerSecond: Int64?
+    /// The last error to show, until the next run clears it.
     var lastMessage: String?
+    /// What backup is doing, in words, for the status line. Nil from the transfer engine, whose
+    /// phase says it; today's backup (LegacyCoordinatorBackend) words it itself.
+    var activity: String? = nil
 }
 
 enum EnqueueResult: Hashable, Sendable {
@@ -184,8 +188,14 @@ struct TransferRequest: Hashable, Sendable {
     var displayName: String?
     /// The notification batch the job counts in.
     var batch: UUID?
-    /// The server album a photo joins once backed up (B4). Ignored for a shared file.
-    var album: String?
+    /// The server album a photo joins once backed up (B4, Upload to album). Ignored for a shared file.
+    var album: String? = nil
+}
+
+/// Photos still waiting to join a server album after their backup, and how many of them failed.
+struct AlbumUploadCount: Hashable, Sendable {
+    var pending: Int
+    var failed: Int
 }
 
 /// A job as the queue and failure lists show it.
@@ -214,6 +224,8 @@ protocol TransferControlling: Sendable {
     func enqueue(_ requests: [TransferRequest]) async throws -> EnqueueResult
     func cancel(_ sources: [TransferSource]) async throws
     func setPreferences(_ preferences: TransferPreferences) async throws
+    /// The preferences in effect, nil before any were saved.
+    func preferences() async throws -> TransferPreferences?
     /// Retries failed jobs: those named, or every one for nil. An explicit retry also lifts an
     /// account block whose cause has gone.
     func retry(_ sources: [TransferSource]?) async throws
@@ -222,7 +234,8 @@ protocol TransferControlling: Sendable {
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem]
     func historyPage(offset: Int, limit: Int) async throws -> [TransferHistoryItem]
     func failures(limit: Int) async throws -> [TransferQueueItem]
-    func albumUploadCounts() async throws -> [String: Int]
+    /// Photos waiting for each server album, by album ID.
+    func albumUploadCounts() async throws -> [String: AlbumUploadCount]
 }
 
 // MARK: Receipts

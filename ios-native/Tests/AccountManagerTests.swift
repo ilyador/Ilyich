@@ -610,7 +610,52 @@ import XCTest
         XCTAssertEqual(people?.fixtureCredential?.token, "ui-test-many-people")
     }
 
+    /// An account's backup is taken up each time the account becomes active, not only at launch
+    /// (REBUILD_ROADMAP.md, Critic's corrections, B8): signing out and in as someone else without
+    /// relaunching shows the new account's backup, with no screen calling activate().
+    func testSigningOutAndBackInShowsTheNewAccountsBackupState() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let alice = credential("alice", on: server), bob = credential("bob", on: server)
+        let container = temporaryDirectory()
+        var aliceState = LegacyGoldens.backupState()
+        aliceState.paused = true
+        aliceState.transferNotification = nil
+        try writeBackupState(aliceState, for: alice, in: container)
+        var bobState = BackupState()
+        bobState.confirmed = ["B0B00000-0000-4000-8000-000000000001/L0/001": Date(timeIntervalSinceReferenceDate: 700_000_000)]
+        bobState.preferences.triggerDelay = 300
+        try writeBackupState(bobState, for: bob, in: container)
+        var environment = self.environment()
+        environment.usesDevicePhotos = true
+        environment.backupContainer = container
+        let coordinator = BackupCoordinator()
+        let harness = makeHarness(alice, server: server, environment: environment, uploads: LiveAccountDevice(backup: { coordinator }))
+        let store = BackupStore(backend: LegacyCoordinatorBackend(coordinator: coordinator), photos: .unavailable, debounce: .zero)
+
+        await harness.manager.restore()
+        try await until("The backup screens did not show Alice's backup.") { store.confirmed == 3 && store.preferences.triggerDelay == 120 }
+        XCTAssertEqual(coordinator.activeScope, alice.account.digest)
+        XCTAssertEqual(store.failures.count, 1)
+
+        await harness.manager.signOut(.user)
+        try await until("Signing out did not empty the backup screens.") { store.confirmed == 0 && store.failures.isEmpty }
+        try await harness.manager.completeSSO(login("bob"), server: server.baseURL)
+
+        try await until("The backup screens did not show Bob's backup.") { store.confirmed == 1 && store.preferences.triggerDelay == 300 }
+        XCTAssertEqual(coordinator.activeScope, bob.account.digest)
+        XCTAssertEqual(harness.log.all.filter { $0.hasPrefix("activateBackup") }, ["activateBackup(alice)", "activateBackup(bob)"])
+        await signOutAfterwards(harness)
+    }
+
     // MARK: - Support
+
+    private func writeBackupState(_ state: BackupState, for credential: StoredCredential, in container: URL) throws {
+        let folder = container.appendingPathComponent(AccountStoragePaths(credential.account).backup, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try JSONEncoder().encode(state).write(to: folder.appendingPathComponent("state.json"))
+    }
 
     /// What an ordinary sign-out records, in order.
     private static let signOutSteps = ["stopUploads", "endCasting", "removeCredential", "reloadWidgets", "clearNotifications",
@@ -817,6 +862,10 @@ final class FakeAccountDevice: AccountDevice {
         self.uploadsStop = uploadsStop
     }
 
+    func activateBackup(for credential: StoredCredential, container: URL?) async {
+        log.append("activateBackup(\(credential.userID))")
+        await uploads?.activateBackup(for: credential, container: container)
+    }
     func stopUploads(keepingAutomaticBackup: Bool) async {
         log.append(keepingAutomaticBackup ? "stopUploads(keepingAutomaticBackup)" : "stopUploads")
         await uploadsStop?.wait()

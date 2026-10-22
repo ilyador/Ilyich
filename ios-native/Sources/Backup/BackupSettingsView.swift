@@ -2,7 +2,7 @@ import SwiftUI
 import Photos
 
 struct BackupSettingsView: View {
-    @State private var backup = BackupCoordinator.shared
+    @State private var backup = BackupStore.shared
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -11,13 +11,13 @@ struct BackupSettingsView: View {
 
             if !backup.failures.isEmpty {
                 Section("Uploads needing retry") {
-                    Button("Retry failed uploads") { Task { await backup.start() } }
+                    Button("Retry failed uploads") { Task { await backup.retryFailures() } }
                         .disabled(backup.isRunning).requiresWriteAccess()
-                    ForEach(backup.failures) { failure in
+                    ForEach(backup.failures, id: \.source) { failure in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(failure.filename)
-                            Text(failure.message).font(.footnote).foregroundStyle(.secondary)
-                            Text(failure.date, style: .relative).font(.caption).foregroundStyle(.secondary)
+                            Text(failure.displayName ?? "Photo in selected album")
+                            Text(failure.message ?? "").font(.footnote).foregroundStyle(.secondary)
+                            if let date = failure.failedAt { Text(date, style: .relative).font(.caption).foregroundStyle(.secondary) }
                         }
                     }
                 }
@@ -73,14 +73,10 @@ struct BackupSettingsView: View {
         }
         .navigationTitle("Device backup")
         .navigationBarTitleDisplayMode(.inline)
-        .task {
-            await backup.activate()
-            while !Task.isCancelled {
-                await backup.refreshProgress()
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-        .onChange(of: backup.preferences) { _, _ in backup.savePreferences() }
+        // The account's backup is taken up as it signs in; progress arrives as it is sent.
+        .task { await backup.refreshLibrary() }
+        .onChange(of: backup.preferences) { _, _ in backup.preferencesChanged() }
+        .onDisappear { Task { await backup.flushPreferences() } }
         .onChange(of: scenePhase) { _, value in if value == .active { Task { await backup.refreshLibrary() } } }
     }
 
@@ -101,15 +97,15 @@ struct BackupSettingsView: View {
 
 /// Transfer ticks update this small section rather than rebuilding every album picker.
 private struct BackupStatusSection: View {
-    @State private var backup = BackupCoordinator.shared
+    @State private var backup = BackupStore.shared
     var body: some View {
     Section {
         Label(backup.activity, systemImage: backup.isRunning ? "arrow.triangle.2.circlepath" : "icloud.and.arrow.up")
-        if let progress = backup.progress { ProgressView(value: progress).accessibilityLabel("Current file progress") }
-        if backup.totalTransferBytes > 0 {
-            LabeledContent("Transferred", value: "\(ByteCountFormatter.string(fromByteCount: backup.bytesTransferred, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: backup.totalTransferBytes, countStyle: .file))")
+        if let progress = backup.snapshot.fileProgress { ProgressView(value: progress).accessibilityLabel("Current file progress") }
+        if backup.snapshot.bytesExpected > 0 {
+            LabeledContent("Transferred", value: "\(ByteCountFormatter.string(fromByteCount: backup.snapshot.bytesSent, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: backup.snapshot.bytesExpected, countStyle: .file))")
         }
-        if let rate = backup.transferRate { LabeledContent("Upload speed", value: "\(ByteCountFormatter.string(fromByteCount: rate, countStyle: .file))/s") }
+        if let rate = backup.snapshot.bytesPerSecond { LabeledContent("Upload speed", value: "\(ByteCountFormatter.string(fromByteCount: rate, countStyle: .file))/s") }
         LabeledContent("Remaining", value: backup.remaining.formatted())
         if backup.remaining > 0 { NavigationLink("View upload queue") { BackupQueueView() } }
         LabeledContent("Confirmed uploads", value: backup.confirmed.formatted())

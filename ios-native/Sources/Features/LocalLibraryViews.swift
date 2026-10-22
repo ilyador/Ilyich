@@ -9,7 +9,7 @@ struct LocalLibraryView: View {
     @State private var initialized = false
     @State private var watchingUploads = false
     @State private var library = DeviceBrowserStore()
-    @State private var backup = BackupCoordinator.shared
+    @State private var backup = BackupStore.shared
     @State private var selection = Set<String>()
     @State private var selecting = false
     @State private var viewing: LocalPhoto?

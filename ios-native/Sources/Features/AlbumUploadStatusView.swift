@@ -3,10 +3,10 @@ import SwiftUI
 struct AlbumUploadStatusView: View {
     let albumID: String
     var onCompleted: () -> Void = { }
-    @State private var backup = BackupCoordinator.shared
+    @State private var backup = BackupStore.shared
     @State private var showingBackup = false
-    private var pending: Int { backup.pendingAlbumUploadCount(albumID) }
-    private var failed: Int { backup.failedAlbumUploadCount(albumID) }
+    private var pending: Int { backup.albumUploads[albumID]?.pending ?? 0 }
+    private var failed: Int { backup.albumUploads[albumID]?.failed ?? 0 }
     var body: some View {
         Group {
             if pending > 0 {
@@ -24,7 +24,6 @@ struct AlbumUploadStatusView: View {
                 }.buttonStyle(.plain).accessibilityElement(children: .combine)
             }
         }
-        .task { await backup.activate() }
         .onChange(of: pending) { old, current in if old > 0 && current == 0 { onCompleted() } }
         .onChange(of: backup.isRunning) { _, running in if !running && pending > 0 { onCompleted() } }
         .sheet(isPresented: $showingBackup, onDismiss: onCompleted) {

@@ -30,7 +30,9 @@ struct LibraryView: View {
     @State private var albums: [Album] = []
     @State private var features: ServerFeatures?
     @State private var deviceIndex = DeviceTimelineIndex()
+    /// Today's backup state, whose preferences and receipts place phone photos in the timeline.
     @State private var backup = BackupCoordinator.shared
+    @State private var backupStore = BackupStore.shared
     @State private var placesDrag: CGFloat = 0
     /// The name typed for an album made from the selection.
     @State private var albumName = ""
@@ -230,7 +232,8 @@ struct LibraryView: View {
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
         .task {
             model.refreshSharedFiles()
-            if session.environment.usesDevicePhotos { await backup.activate(); refreshDeviceIndex() }
+            // The account's backup is taken up as it signs in; the index follows it below.
+            if session.environment.usesDevicePhotos { refreshDeviceIndex() }
             guard !store.started else { return }; store.started = true
             await store.reload(); await loadShelfData()
         }
@@ -264,6 +267,7 @@ struct LibraryView: View {
         .onChange(of: showPlaces) { _, shown in Haptics.earth(rising: shown) }
         .onChange(of: backup.preferences) { _, _ in refreshDeviceIndex() }
         .onChange(of: backup.isRunning) { _, running in if !running { refreshDeviceIndex() } }
+        .onChange(of: backup.activeScope) { _, _ in refreshDeviceIndex() }
         .onDisappear { deviceIndex.stop() }
         .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session) }
         // Everything presented has closed, so shared files that arrived meanwhile can show.
@@ -531,9 +535,9 @@ struct LibraryView: View {
             } else {
                 Button {
                     let localIDs = store.selectedLocalPhotos.map(\.id)
-                    Task { await backup.enqueue(localIDs: localIDs) }
+                    Task { _ = await backupStore.enqueue(localIDs: localIDs, albumID: nil) }
                 } label: { Image(systemName: "icloud.and.arrow.up").frame(width: 44, height: 44) }
-                    .accessibilityLabel("Back up selected phone photos").requiresWriteAccess().disabled(backup.isRunning)
+                    .accessibilityLabel("Back up selected phone photos").requiresWriteAccess().disabled(backupStore.isRunning)
             }
             Button { navigator.present(.selectionActions(SelectionSnapshot(assets: store.selectedAssets, local: store.selectedDevicePhotos))) } label: {
                 Image(systemName: "ellipsis").frame(width: 44, height: 44)

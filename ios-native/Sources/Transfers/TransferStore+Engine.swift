@@ -351,11 +351,14 @@ extension TransferStore {
         return page
     }
 
-    /// Photos still to be added to each album, by album ID.
-    func albumUploadCounts() throws -> [String: Int] {
-        var counts: [String: Int] = [:]
-        try database().run("SELECT album_id,count(*) FROM album_destinations WHERE state='pending' GROUP BY album_id") { row in
-            if let album = row.text(0) { counts[album] = Int(row.integer(1) ?? 0) }
+    /// Photos still to be added to each album, by album ID, and how many of them have a failed job.
+    func albumUploadCounts() throws -> [String: AlbumUploadCount] {
+        var counts: [String: AlbumUploadCount] = [:]
+        try database().run("""
+            SELECT d.album_id,count(*),sum(CASE WHEN j.state='failed' THEN 1 ELSE 0 END) FROM album_destinations d \
+            LEFT JOIN jobs j ON j.lane='library' AND j.source_key=d.local_id WHERE d.state='pending' GROUP BY d.album_id
+            """) { row in
+            if let album = row.text(0) { counts[album] = AlbumUploadCount(pending: Int(row.integer(1) ?? 0), failed: Int(row.integer(2) ?? 0)) }
         }
         return counts
     }

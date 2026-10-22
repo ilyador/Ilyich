@@ -8,6 +8,12 @@ struct LiveAccountDevice: AccountDevice {
     /// The backup sign-out stops: the app's own, or in a test one over a folder of the test's.
     var backup: @MainActor @Sendable () -> BackupCoordinator = { BackupCoordinator.shared }
 
+    func activateBackup(for credential: StoredCredential, container: URL?) async {
+        let coordinator = await backup()
+        let folder = container?.appendingPathComponent(AccountStoragePaths(credential.account).backup, isDirectory: true)
+        await coordinator.activate(credential, folder: folder)
+    }
+
     /// Pauses backup, switching automatic backup off unless `keepingAutomaticBackup`, and stops
     /// shared uploads.
     func stopUploads(keepingAutomaticBackup: Bool) async {

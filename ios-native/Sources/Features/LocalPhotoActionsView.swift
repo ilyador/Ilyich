@@ -7,7 +7,7 @@ struct LocalPhotoActionsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("shareFileType") private var quality = "original"
     @AppStorage("shareDownloadCloud") private var allowCloud = false
-    @State private var backup = BackupCoordinator.shared
+    @State private var backup = BackupStore.shared
     @State private var store: DevicePhotoActionsStore
     @State private var operation: Task<Void, Never>?
     @State private var confirmDelete = false
