@@ -251,10 +251,12 @@ struct LibraryView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { notification in
             guard notification.userInfo?["scope"] as? String == api.cacheScope else { return }
-            // Search results drop deleted photos at once; a search with text is not read again.
-            if let change = notification.userInfo?["change"] as? LibraryChange { store.prune(change) }
+            let change = notification.userInfo?["change"] as? LibraryChange
             Task {
-                if store.query.isEmpty { await store.reload(preservingPosition: true) }
+                // The feed applies the change in place: what it removed leaves at once and only the
+                // months it touched are read again. A search with text is not read again.
+                if let change { await store.apply(change) }
+                else if store.query.isEmpty { await store.reload(preservingPosition: true) }
                 if notification.userInfo?["collections"] as? Bool == true { await collections.load() }
             }
         }

@@ -22,6 +22,13 @@ protocol TimelineFeedConsumer: AnyObject, Sendable {
 /// screen, after 1 s, then 2, 4, 8, 16 and every 30 s; a refusal waits for Retry. `invalidate`
 /// marks months stale: they stay shown and are read again when the grid wants them, and a load on
 /// its way is kept, not restarted; a month that failed is forgotten, so the grid can ask again.
+///
+/// A photo the store took out before the source had changed (a deletion or a lock made here, a
+/// photo that left a feed) is withheld (F4): a month read before the source says so leaves it out,
+/// in this feed and in the next one opened, so the library a filter clears back to cannot bring it
+/// back either. A change that names the photo, or the sync that follows the store's own change,
+/// confirms it: reads begun after that are trusted, and the months it was taken out of are read
+/// again, so a photo taken out by mistake comes back.
 actor TimelineFeed {
     /// Names one opening of a feed: its query and the plan its months come from.
     struct Ticket: Hashable, Sendable {
@@ -60,7 +67,27 @@ actor TimelineFeed {
         case restore([MonthKey: [Asset]])
         case replace(Asset)
         case remove(Set<String>)
+        /// Photos the store took out before the source changed: no read of the feeds `scope`
+        /// names brings them back until they are confirmed.
+        case withhold(Set<String>, from: Withholding)
+        /// Photos a change named, or every photo withheld when nil, as after the sync that follows
+        /// the store's own change: the source has them as they now are.
+        case confirm(Set<String>?)
+        /// Photos a change took out: only a load already on its way, which read the source before
+        /// the change, still leaves them out.
+        case forget(Set<String>)
         case close
+    }
+
+    /// The feeds a withheld photo stays out of.
+    enum Withholding: Hashable, Sendable {
+        /// Every feed with this trash state: the photo was deleted, locked, put in Trash or taken
+        /// out of it.
+        case trash(LibraryQuery.Trash)
+        /// This feed only: the photo left it, as an unfavorited photo leaves Favorites.
+        case query(LibraryQuery)
+        /// Every feed.
+        case all
     }
 
     static let concurrentLimit = 3
@@ -69,8 +96,13 @@ actor TimelineFeed {
     static let retryBackoff: ClosedRange<Duration> = .seconds(1)...(.seconds(30))
 
     private struct Session { let ticket: Ticket; let query: LibraryQuery; let plan: QueryPlan }
-    private struct Load { let id: UUID; let task: Task<[Asset], any Error>; var stale = false }
+    /// `sequence` orders the loads by when they began, which says whether a load read the source
+    /// before a change confirmed a withheld photo.
+    private struct Load { let id: UUID; let sequence: UInt64; let task: Task<[Asset], any Error>; var stale = false }
     private struct Failure { var message: String; var attempts = 0; var transient = false; var due = false }
+    /// A withheld photo: the feeds it stays out of, the first load that may show it again (`.max`
+    /// until it is confirmed), and the months it was taken out of, read again once it is.
+    private struct Withheld { var scope: Withholding; var trustedFrom: UInt64; var months: Set<MonthKey> = [] }
 
     private let source: any TimelineSource
     /// What the grid shows right now, ahead of the viewport command that follows it.
@@ -93,6 +125,11 @@ actor TimelineFeed {
     private var target: MonthKey?
     private var failures: [MonthKey: Failure] = [:]
     private var retries: [MonthKey: Task<Void, Never>] = [:]
+    /// Photos no read before their confirmation may bring back. They outlive the feed they were
+    /// taken out of: the next one opened reads the same source.
+    private var withheld: [String: Withheld] = [:]
+    /// The sequence the next load begins with.
+    private var nextLoad: UInt64 = 1
 
     init(source: any TimelineSource, viewport: Viewport = Viewport()) { self.source = source; onScreen = viewport }
 
@@ -113,6 +150,9 @@ actor TimelineFeed {
             case .restore(let months): restore(months)
             case .replace(let asset): replace(asset)
             case .remove(let ids): remove(ids)
+            case .withhold(let ids, let scope): withhold(ids, from: scope)
+            case .confirm(let ids): confirm(ids)
+            case .forget(let ids): forget(ids)
             case .close: close()
             }
         }
@@ -198,7 +238,8 @@ actor TimelineFeed {
 
     private func restore(_ months: [MonthKey: [Asset]]) {
         for (month, assets) in months where buckets[month] != nil && loads[month] == nil {
-            resident[month] = assets; stale.remove(month)
+            // Read before anything was withheld.
+            resident[month] = withholding(assets, readFrom: 0); stale.remove(month)
         }
         // Loaded in the feed's order, so the oldest months make room first.
         recent = resident.keys.sorted { (positions[$0] ?? 0) > (positions[$1] ?? 0) }
@@ -213,6 +254,57 @@ actor TimelineFeed {
 
     private func remove(_ ids: Set<String>) {
         for month in Array(resident.keys) { resident[month]?.removeAll { ids.contains($0.id) } }
+    }
+
+    /// Comes before the store's `remove`, while the months still hold the photos.
+    private func withhold(_ ids: Set<String>, from scope: Withholding) {
+        var months: [String: Set<MonthKey>] = [:]
+        for (month, assets) in resident {
+            for asset in assets where ids.contains(asset.id) { months[asset.id, default: []].insert(month) }
+        }
+        for id in ids {
+            withheld[id] = Withheld(scope: scope, trustedFrom: .max, months: months[id, default: []].union(withheld[id]?.months ?? []))
+        }
+    }
+
+    /// The source has these photos as they now are: a load that begins from now on reads them as
+    /// they are, while one already on its way still leaves them out. The months they were taken out
+    /// of are read again when the grid wants them, so a photo taken out by mistake comes back.
+    private func confirm(_ ids: Set<String>?) {
+        var reread = Set<MonthKey>()
+        for id in ids ?? Set(withheld.keys) {
+            guard var entry = withheld[id], entry.trustedFrom == .max else { continue }
+            entry.trustedFrom = nextLoad
+            reread.formUnion(entry.months)
+            withheld[id] = entry
+        }
+        forgetConfirmed()
+        if !reread.isEmpty { invalidate(reread) }
+    }
+
+    /// A change took these out, and the store with it: only loads already on their way read them.
+    private func forget(_ ids: Set<String>) {
+        for id in ids { withheld[id] = Withheld(scope: .all, trustedFrom: nextLoad) }
+        forgetConfirmed()
+    }
+
+    /// What a load that began at `sequence` may show of `assets`.
+    private func withholding(_ assets: [Asset], readFrom sequence: UInt64) -> [Asset] {
+        guard !withheld.isEmpty, let query = session?.query else { return assets }
+        return assets.filter { asset in
+            guard let entry = withheld[asset.id], sequence < entry.trustedFrom else { return true }
+            switch entry.scope {
+            case .all: return false
+            case .trash(let trash): return query.trash != trash
+            case .query(let withheldFrom): return query != withheldFrom
+            }
+        }
+    }
+
+    /// A confirmed photo no load on its way began before is trusted everywhere: it is let go.
+    private func forgetConfirmed() {
+        let oldest = loads.values.map(\.sequence).min() ?? nextLoad
+        withheld = withheld.filter { $0.value.trustedFrom > oldest }
     }
 
     private func invalidate(_ months: Set<MonthKey>?) {
@@ -347,13 +439,15 @@ actor TimelineFeed {
         guard let session, let bucket = buckets[month] else { return }
         failures[month]?.due = false
         let id = UUID(), ticket = session.ticket, query = session.query, plan = session.plan, source = source
+        let sequence = nextLoad
+        nextLoad += 1
         let task = Task {
             let result: Result<[Asset], any Error>
             do { result = .success(try await FeedMonthProbe.measure { try await source.month(bucket, of: query, plan: plan) }) }
             catch { result = .failure(error) }
             return try await landed(month, load: id, ticket: ticket, result: result)
         }
-        loads[month] = Load(id: id, task: task)
+        loads[month] = Load(id: id, sequence: sequence, task: task)
     }
 
     /// A load has ended. Its slot goes first, so the next month starts while this one is
@@ -361,9 +455,11 @@ actor TimelineFeed {
     private func landed(_ month: MonthKey, load id: UUID, ticket: Ticket, result: Result<[Asset], any Error>) async throws -> [Asset] {
         guard let load = loads[month], load.id == id else { throw CancellationError() }
         loads[month] = nil
+        defer { forgetConfirmed() }
         guard let session, session.ticket == ticket else { throw CancellationError() }
         switch result {
-        case .success(let assets):
+        case .success(let read):
+            let assets = withholding(read, readFrom: load.sequence)
             let fresh = !load.stale
             resident[month] = assets
             recent.removeAll { $0 == month }; recent.append(month)

@@ -216,7 +216,8 @@ import XCTest
     }
 
     /// The library saved behind a filter comes back with at most twelve months, those nearest where
-    /// it was left, and a month it kept is not read again.
+    /// it was left, and a month it kept is not read again: neither by the check against the source
+    /// that follows a clear (F4), whose counts agree with it, nor for a selection.
     func testRestoredMonthsStayWithinTheResidentBound() async throws {
         let api = FeedLibrary(months: Self.months(20))
         let store = LibraryStore(source: api)
@@ -228,10 +229,12 @@ import XCTest
 
         store.setFeed(.favorites, title: "Favorites")
         try await until("Favorites did not replace the library.") { !store.isReplacingFeed && store.filterTitle == "Favorites" }
+        let summaries = await api.summaries
         store.clearFilters()
         XCTAssertLessThanOrEqual(store.loaded.count, TimelineFeed.residentLimit)
         XCTAssertEqual(Set(store.loaded.keys), Set(store.buckets[4...15].map(\.id)), "The months nearest the anchor are kept.")
         XCTAssertEqual(store.restorePosition?.section, anchor)
+        try await until("The restored library was not counted again.") { await api.summaries > summaries && !store.isLoading }
 
         let before = await api.calls
         store.navigation.section = 10; store.isSelecting = true
@@ -239,7 +242,8 @@ import XCTest
         try await until("The month was not selected.") { !store.isSelectingGroup }
         XCTAssertEqual(store.selected, [anchor + "#saved"], "A kept month serves selection as it was.")
         let after = await api.calls
-        XCTAssertEqual(after, before, "A kept month is not read again.")
+        XCTAssertEqual(after[anchor], before[anchor], "A kept month is not read again.")
+        XCTAssertNil(after[anchor], "The kept month's rows are the saved ones; the source was never asked for it.")
     }
 
     /// Show in timeline for a photo whose month is already loading joins that load: no second
@@ -340,6 +344,7 @@ private actor FeedLibrary: FakeFeedSource {
     private var failures: [String: (remaining: Int, error: any Error)] = [:]
     private(set) var calls: [String: Int] = [:]
     private(set) var cancelled: [String: Int] = [:]
+    private(set) var summaries = 0
 
     init(months: [String], delay: Duration = .zero, slow: [String: Duration] = [:]) {
         self.months = months; self.delay = delay; self.slow = slow
@@ -349,7 +354,8 @@ private actor FeedLibrary: FakeFeedSource {
     func fail(_ bucket: String, times: Int, with error: any Error) { failures[bucket] = (times, error) }
 
     func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] {
-        months.sorted(by: >).map { TimeBucket(timeBucket: $0, count: 1) }
+        summaries += 1
+        return months.sorted(by: >).map { TimeBucket(timeBucket: $0, count: 1) }
     }
     func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] {
         calls[bucket, default: 0] += 1

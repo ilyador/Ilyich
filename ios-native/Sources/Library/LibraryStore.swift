@@ -212,9 +212,9 @@ private struct SavedTimeline {
     /// The months on screen, for the feed to read at once: the viewport command that follows
     /// them through the queue must not let a load that lands first evict a month just scrolled on.
     @ObservationIgnored private let feedViewport = TimelineFeed.Viewport()
-    /// The feed open in it: its ticket names every delivery, and its query and plan say whether a
-    /// reload may keep the months on their way.
-    @ObservationIgnored private var feedSession: (ticket: TimelineFeed.Ticket, query: LibraryQuery, plan: QueryPlan)?
+    /// The feed open in it, shown or pending behind the frozen one: its ticket names every
+    /// delivery, and its query and plan say whether a reload may keep the months on their way.
+    @ObservationIgnored private var feedSession: FeedSession?
     /// The feed shown's ticket, for tests that deliver a month as the feed would.
     var feedTicket: TimelineFeed.Ticket? { feedSession?.ticket }
     /// Commands on their way to the feed, sent in order by one task. The month queue drives no
@@ -243,7 +243,12 @@ private struct SavedTimeline {
     private var timelineSections: [LibrarySection] = []
     private var frozenFeed: FrozenFeed?
     private var searchGeneration = UUID()
+    /// The library as it was left when a filter or search opened, patched by what changes
+    /// meanwhile (F4).
     private var originalTimeline: SavedTimeline?
+    /// The saved library's months a change touched meanwhile, read again once it is back; nil when
+    /// a change named none and every month is read again.
+    @ObservationIgnored private var savedStaleMonths: Set<MonthKey>? = []
     @ObservationIgnored var position: GridPosition? {
         didSet { updateVisibleResultsTitle() }
     }
@@ -473,13 +478,20 @@ private struct SavedTimeline {
         return (max(0, i - 1)...min(sections.count - 1, i + 1)).flatMap(phonePhotos)
     }
 
-    func reload(preservingPosition: Bool = false) async {
+    /// Reads the feed shown again. `preservingPosition` is a sync's or a refresh's reload: the grid
+    /// keeps its place and, while the query and plan stand, the feed keeps its session and the
+    /// months on their way. `invalidating` names the months it reads again when the grid wants
+    /// them, every month when nil; a typed change names only those it touched (F4).
+    func reload(preservingPosition: Bool = false, invalidating months: Set<MonthKey>? = nil) async {
         groupSelectionTask?.cancel(); groupSelectionID = UUID(); isSelectingGroup = false
         queryTask?.cancel()
         searchGeneration = UUID(); isSearching = false
         generation = UUID(); let current = generation
+        // The banner goes, so the months it named are asked for again with the rest (F2).
+        let failed = Set(bucketErrors.keys.compactMap { monthKey($0) })
         isLoading = true; error = nil; bucketErrors = [:]
-        if preservingPosition { restorePosition = position }
+        // A feed pending behind a frozen one opens at its top: the position is the frozen feed's.
+        if preservingPosition { restorePosition = frozenFeed == nil ? position : nil }
         else {
             // The feed starts over: its months are dropped and a new one opens once planned. With
             // nothing projected yet, the phone's latest photos place the months.
@@ -505,20 +517,31 @@ private struct SavedTimeline {
                 usesMetadata = true; showingResults = true
                 await loadResults(preservingPosition ? .refresh : .first); return
             }
+            let keepsSession: Bool
             if preservingPosition, let session = feedSession, session.query == query, session.plan == plan {
-                // A sync's reload of the feed shown: every month is stale and read again when the
-                // grid wants it, shown meanwhile; a month on its way keeps coming, not restarted.
-                send(.invalidate(nil))
+                // A sync's reload of the feed shown: the months it names are stale and read again
+                // when the grid wants them, shown meanwhile; a month on its way keeps coming.
+                send(.invalidate(months.map { $0.union(failed) }))
+                keepsSession = true
             } else {
                 openFeed(query, plan: plan)
+                keepsSession = false
             }
             let response = try await source.summary(query, plan: plan)
             guard generation == current else { return }
             let previousSections = timelineSections
             remoteBuckets = response
+            if keepsSession, let months {
+                // A month the summary counts otherwise than its rows, which the change didn't name,
+                // is read again too, so no placeholder stays (FEED-5).
+                let counts = Dictionary(response.map { ($0.id, $0.count) }, uniquingKeysWith: { first, _ in first })
+                let miscounted = Set(loaded.compactMap { id, rows in counts[id] == rows.count ? nil : monthKey(id) }).subtracting(months)
+                if !miscounted.isEmpty { send(.invalidate(miscounted)) }
+            }
             loadMonthPlaces(query, plan: plan)
             refreshStructure(); project()
-            if preservingPosition && previousSections != timelineSections { resetID = UUID() }
+            // While a feed is pending the grid shows the frozen one, which these sections don't move.
+            if preservingPosition && frozenFeed == nil && previousSections != timelineSections { resetID = UUID() }
             // Background sync keeps the viewport heading; scrolling/restoration
             // publishes a new visible month if the returned sections move it.
             if !preservingPosition && frozenFeed == nil { title = Self.monthTitle(buckets.first?.date) }
@@ -527,24 +550,14 @@ private struct SavedTimeline {
                 requestBucket(index)
                 if index + 1 < buckets.count { requestBucket(index + 1) }
             }
-            for index in 0..<min(2, buckets.count) { requestBucket(index) }
-            if frozenFeed != nil {
-                // The first months of the feed on its way, joined rather than polled for. A month
-                // only the phone has is not loaded, as before.
-                for month in (0..<min(2, buckets.count)).compactMap({ monthKeys[$0] }) where monthBuckets[month] != nil {
-                    _ = try? await assets(of: month)
-                }
-                // Their rows land with their projections.
-                await settleProjections()
-                guard generation == current else { return }
-                if buckets.isEmpty || (0..<min(2, buckets.count)).allSatisfy({
-                    let id = buckets[$0].id
-                    return loaded[id] != nil && bucketErrors[id] == nil
-                }) {
+            for index in 0..<min(FeedSession.firstMonths, buckets.count) { requestBucket(index) }
+            if frozenFeed != nil, let readiness = await settlePendingFeed(current) {
+                if case .failed(let message) = readiness {
+                    // The feed shown stays, with Retry and Clear.
+                    error = message
+                } else {
                     if !preservingPosition { title = Self.monthTitle(buckets.first?.date) }
                     commitFrozenFeed()
-                } else if let failure = bucketErrors.values.first {
-                    error = failure
                 }
             }
         } catch is CancellationError {} catch { if generation == current { self.error = error.localizedDescription } }
@@ -609,8 +622,9 @@ private struct SavedTimeline {
         let date = asset.localDateTime ?? asset.fileCreatedAt
         navigationTask = Task {
             if !reuseTimeline && !restoreSaved { await reload() }
-            if restoreSaved, let plan = saved?.plan { await replanRestoredLibrary(plan, anchor: saved?.position) }
-            guard !Task.isCancelled, error == nil else { return }
+            if restoreSaved, let plan = saved?.plan { await revalidateRestoredLibrary(plan, anchor: saved?.position) }
+            // The restored library has its months even when checking it against the source failed.
+            guard !Task.isCancelled, restoreSaved || error == nil else { return }
             let current = generation
             guard let date, let index = nearestBucket(to: date) else {
                 error = "Couldn't find this photo's date in the timeline."; return
@@ -744,9 +758,15 @@ private struct SavedTimeline {
             error = nil; isLoading = false; isSearching = false; originalTimeline = nil
             // The library's places come back with it, unless they were never counted.
             if places.places(of: feedQuery) == nil { loadMonthPlaces(feedQuery, plan: plan) }
+            // Then it is checked against the source: counted again, and its months read again as
+            // the grid wants them, so what changed while the filter showed reaches it (F4).
             let anchor = saved.position, current = generation
-            Task { guard generation == current else { return }; await replanRestoredLibrary(plan, anchor: anchor) }
-        } else { scheduleReload() }
+            Task { guard generation == current else { return }; await revalidateRestoredLibrary(plan, anchor: anchor) }
+        } else {
+            // A library that never loaded is loaded now, and saved again by the next filter.
+            originalTimeline = nil
+            scheduleReload()
+        }
     }
 
     func search(_ text: String) {
@@ -947,9 +967,26 @@ private struct SavedTimeline {
         updateVisibleResultsTitle()
     }
 
+    /// A photo's fresh record, from the viewer or its details (F4). The saved library keeps its
+    /// place: it takes the record, or loses the photo when the record takes it out of the library
+    /// (archived, locked, put in Trash). In the feed shown the record decides the same way
+    /// (FeedMembership): a photo it takes out leaves in place, the grid keeping where it is, and
+    /// any other shows its new record. What the record can't tell (an album, a person, a place, a
+    /// search) the sync's change reconciles by reading the photo's month again.
     func update(_ asset: Asset) {
-        originalTimeline = nil
-        if asset.visibility == .locked { Task { await reload() }; return }
+        if let saved = originalTimeline {
+            if FeedMembership.of(asset, in: .library, userID: source.userID) == .excluded {
+                originalTimeline = saved.removing([asset.id])
+                send(.withhold([asset.id], from: .query(.library)))
+            } else {
+                originalTimeline = saved.replacing(asset)
+            }
+        }
+        if let shown = shownQuery, FeedMembership.of(asset, in: shown, userID: source.userID) == .excluded {
+            if !showingResults { send(.withhold([asset.id], from: .query(shown))) }
+            removeRows([asset.id])
+            return
+        }
         if let i = results.firstIndex(where: { $0.id == asset.id }) {
             results[i] = asset
             if let feed = searchFeed { Task { await feed.replace(asset) } }
@@ -966,10 +1003,27 @@ private struct SavedTimeline {
         project()
     }
     /// Takes photos out of the feed at once, before the server's refresh confirms it, so a deleted
-    /// photo can't be opened while that is on its way.
+    /// photo can't be opened while that is on its way. The saved library loses them too and keeps
+    /// its place (F4), and no month read before the server's change can bring them back: a photo
+    /// deleted, locked or restored from Trash leaves every feed with the trash state it had.
     func removeLocally(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
-        originalTimeline = nil
+        originalTimeline = originalTimeline?.removing(ids)
+        send(.withhold(ids, from: .trash(shownQuery?.trash ?? feedQuery.trash)))
+        removeRows(ids)
+    }
+
+    /// The query of what the grid shows: the feed's, or the search's; nil before a search has one.
+    private var shownQuery: LibraryQuery? {
+        guard showingResults else { return feedQuery }
+        return searchFeed?.request.search.query
+    }
+
+    /// Takes photos out of what the grid shows, in place: search results, and the feed's rows,
+    /// whose months are redone off the main actor and count fewer; a month left with nothing goes
+    /// whole. The grid keeps where it is.
+    private func removeRows(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
         if let feed = searchFeed {
             removedResultIDs.formUnion(ids)
             Task { await feed.prune(ids) }
@@ -1005,17 +1059,109 @@ private struct SavedTimeline {
         revision += 1
         project()
     }
+    /// Brings the feed up to date after a change made here. The saved library stays: the change
+    /// the sync publishes patches it (F4). Once the sync has run, the photos taken out here are as
+    /// the source has them, so its months are trusted again, and those months are read again: a
+    /// photo taken out that is still there (a stack's cover after a stack change) comes back.
     func refreshAfterMutation() async {
-        originalTimeline = nil
         do {
             let change = try await source.refresh()
-            // A change the pass found was published, and LibraryView reloads the feed on it unless a
+            send(.confirm(nil))
+            // A change the pass found was published, and LibraryView applies it to the feed unless a
             // search is showing. Reloading here as well would load every month twice.
             if let change, !change.isEmpty, query.isEmpty { return }
             await reload(preservingPosition: true)
         }
         catch is CancellationError { }
         catch { self.error = error.localizedDescription }
+    }
+
+    /// A change the account's sync published (F4). What it removed, or what the account may no
+    /// longer see, leaves at once, here and in the saved library, and no month read before the
+    /// change brings it back. The months it touched are read again when the grid wants them,
+    /// shown meanwhile, and the feed is counted again; the saved library's are read again once a
+    /// filter clears back to it. A change that names no item one by one (a reset, an overflow), or
+    /// that changes how feeds are served or what a stack or partner shows, reads every month
+    /// again. A text search is not read again, as before: its results only drop what went.
+    func apply(_ change: LibraryChange) async {
+        prune(change)
+        let gone = change.removed.union(change.accessLost)
+        // The photos it names are as the source now has them; those it took out stay out of any
+        // month read before it.
+        if !gone.isEmpty { send(.forget(gone)) }
+        let named = Set(change.upserted.keys).union(gone).union(change.mediaRevisions.keys)
+        if !named.isEmpty { send(.confirm(named)) }
+        let everything = change.reset || change.overflow || change.routingChanged || change.configurationChanged
+            || change.partnersChanged || !change.stacks.isEmpty
+        if change.reset || change.overflow {
+            // Anything it held may be gone: a filter clears back to the library read afresh.
+            originalTimeline = nil
+        } else if originalTimeline != nil {
+            if !gone.isEmpty { originalTimeline = originalTimeline?.removing(gone) }
+            if everything { savedStaleMonths = nil }
+            else { savedStaleMonths?.formUnion(Self.months(touchedBy: change, in: originalTimeline?.assets ?? [:])) }
+        }
+        guard query.isEmpty else { return }
+        if showingResults {
+            // Results are read again, as before, unless the change touched no photo, album or person.
+            if !named.isEmpty || everything || !change.albums.isEmpty || !change.people.isEmpty { await reload(preservingPosition: true) }
+            return
+        }
+        removeRows(gone)
+        // An album or a person can lose photos without their months being named (an album or a
+        // person deleted, faces merged): such a feed reads all its months again.
+        let scoped = !feedQuery.predicates.albums.isDisjoint(with: change.albums) || !feedQuery.predicates.people.isDisjoint(with: change.people)
+        if everything || scoped { await reload(preservingPosition: true); return }
+        let months = Self.months(touchedBy: change, in: loaded)
+        if !change.upserted.isEmpty || !gone.isEmpty { await reload(preservingPosition: true, invalidating: months) }
+        else if !months.isEmpty { send(.invalidate(months)) }
+    }
+
+    /// The months a change touched among those `rows` hold: those its photos left and joined, and
+    /// those holding a photo whose media changed.
+    private static func months(touchedBy change: LibraryChange, in rows: [String: [Asset]]) -> Set<MonthKey> {
+        var months = Set<MonthKey>()
+        for move in change.upserted.values {
+            if let from = move.from { months.insert(from) }
+            if let to = move.to { months.insert(to) }
+        }
+        if !change.mediaRevisions.isEmpty {
+            for (bucket, assets) in rows where assets.contains(where: { change.mediaRevisions[$0.id] != nil }) {
+                if let month = MonthKey(bucketID: bucket) { months.insert(month) }
+            }
+        }
+        return months
+    }
+
+    /// Waits until the pending feed's first months have come to something (F4): each server month
+    /// is joined, queued or not (FEED-3), and its rows land with their projection; a month only
+    /// the phone has is ready as it is (FEED-2). The first months are worked out again after each
+    /// round, since a month that came back empty leaves the feed (FEED-5) and the next takes its
+    /// place. Nil once a newer load or scope has taken over.
+    private func settlePendingFeed(_ current: UUID) async -> FeedSession.Readiness? {
+        var readiness = FeedSession.Readiness.waiting
+        for _ in 0..<3 {
+            for month in firstMonths().compactMap(\.join) { _ = try? await assets(of: month) }
+            await settleProjections()
+            guard generation == current else { return nil }
+            readiness = FeedSession.readiness(firstMonths().map(\.state))
+            guard readiness == .waiting else { return readiness }
+        }
+        // Every load joined has ended without a failure, yet a first month has no rows (a load the
+        // feed dropped, months emptying one after another): the feed shows, and those months load
+        // as the grid shows them, rather than the grid staying frozen with nothing on its way.
+        return readiness
+    }
+
+    /// The first months of the feed being loaded, and for each one still loading, the month to join.
+    private func firstMonths() -> [(state: FeedSession.Month, join: MonthKey?)] {
+        (0..<min(FeedSession.firstMonths, buckets.count)).map { index in
+            let id = buckets[index].id
+            if let message = bucketErrors[id] { return (.failed(message), nil) }
+            guard remoteIDs.contains(id) else { return (.phoneOnly, nil) }
+            if loaded[id] != nil { return (.loaded, nil) }
+            return (.loading, monthKeys[index])
+        }
     }
 
     /// Closes the feed: its loads stop and nothing it delivers after is shown. Commands still
@@ -1028,10 +1174,10 @@ private struct SavedTimeline {
 
     /// Opens a feed for `query` as `plan` serves it. Every delivery carries its ticket.
     private func openFeed(_ query: LibraryQuery, plan: QueryPlan) {
-        let ticket = TimelineFeed.Ticket()
-        feedSession = (ticket, query, plan)
+        let session = FeedSession(query, plan: plan)
+        feedSession = session
         lastVisibleMonths = nil; sentMonths = nil; feedViewport.show([])
-        send(.open(ticket, query, plan))
+        send(.open(session.ticket, query, plan))
     }
 
     /// A saved library comes back at once, on a feed of its own with the months it had: twelve
@@ -1045,6 +1191,10 @@ private struct SavedTimeline {
         let remote = Set(saved.buckets.map(\.id))
         projections = saved.projections.filter { loaded[$0.key] != nil || !remote.contains($0.key) }
         dirty = [:]
+        // A month that lost photos while it was saved has its rows but not yet its days.
+        for (id, projection) in projections where projection.days.reduce(0, { $0 + $1.count }) != projection.entries.count {
+            markDirty(id, .edit)
+        }
         projectedDevice = saved.device; deviceDirty = true
         // Where the grid is going back to, so a row the phone's photos move meanwhile anchors there.
         position = saved.position
@@ -1150,22 +1300,26 @@ private struct SavedTimeline {
         let current = generation
         Task { guard generation == current else { return }; await reload() }
     }
-    /// The saved library comes back at once with the plan it was left with. A routing change that
-    /// arrived while a filter or search was open (the offline library becoming readable, or going
-    /// away) reached only the feed shown, so the library plans again and, on a new backend,
+    /// The saved library comes back at once with the plan it was left with, then is checked
+    /// against the source (F4): it is counted again and its months are read again as the grid
+    /// wants them, shown meanwhile, so whatever changed while a filter or search was open reaches
+    /// it. A routing change that arrived meanwhile (the offline library becoming readable, or
+    /// going away) reached only the feed shown, so the library plans again and, on a new backend,
     /// reopens there anchored where it was left.
-    private func replanRestoredLibrary(_ saved: QueryPlan, anchor: GridPosition?) async {
-        let current = generation
+    private func revalidateRestoredLibrary(_ saved: QueryPlan, anchor: GridPosition?) async {
+        let current = generation, stale = savedStaleMonths
+        savedStaleMonths = []
         guard let plan = try? await source.plan(feedQuery), generation == current, !Task.isCancelled,
               !isFiltered, !showingResults else { return }
-        if plan.backend == saved.backend { feedPlan = plan; return }
-        position = anchor
-        await reload(preservingPosition: true)
+        if plan.backend != saved.backend { position = anchor }
+        // The months changes touched while it was saved, and any the summary counts otherwise.
+        await reload(preservingPosition: true, invalidating: stale)
     }
     private func rememberOriginal() {
         if originalTimeline == nil && !isFiltered && !showingResults {
             originalTimeline = SavedTimeline(buckets: remoteBuckets, assets: loaded, projections: projections, device: projectedDevice,
                                              position: position, title: title, plan: feedPlan)
+            savedStaleMonths = []
         }
     }
 
@@ -1348,6 +1502,45 @@ private struct PendingLoad {
     let ticket: TimelineFeed.Ticket
     var assets: [Asset]
     let fresh: Bool
+}
+
+/// The saved library, patched while a filter or search shows (F4). Its place and title stay.
+private extension SavedTimeline {
+    /// Without these photos: their rows go, their months count fewer, and a month left with none
+    /// of the server's photos goes from the summary. A month's days are redone once it is back.
+    func removing(_ ids: Set<String>) -> SavedTimeline {
+        var assets = self.assets, projections = self.projections, removed: [String: Int] = [:]
+        for (bucket, rows) in self.assets {
+            let kept = rows.filter { !ids.contains($0.id) }
+            guard kept.count != rows.count else { continue }
+            removed[bucket] = rows.count - kept.count
+            assets[bucket] = kept
+            projections[bucket] = projections[bucket]?.removing(ids)
+        }
+        guard !removed.isEmpty else { return self }
+        let buckets = self.buckets.compactMap { bucket -> TimeBucket? in
+            guard let gone = removed[bucket.id] else { return bucket }
+            return bucket.count > gone ? TimeBucket(timeBucket: bucket.timeBucket, count: bucket.count - gone) : nil
+        }
+        let kept = Set(buckets.map(\.id))
+        for bucket in removed.keys where !kept.contains(bucket) { assets[bucket] = nil }
+        return SavedTimeline(buckets: buckets, assets: assets, projections: projections, device: device, position: position,
+                             title: title, plan: plan)
+    }
+
+    /// With a photo's newer record, its phone copy kept beside it.
+    func replacing(_ asset: Asset) -> SavedTimeline {
+        var assets = self.assets, projections = self.projections, changed = false
+        for (bucket, rows) in self.assets {
+            guard let index = rows.firstIndex(where: { $0.id == asset.id }) else { continue }
+            assets[bucket]?[index] = asset
+            projections[bucket] = projections[bucket]?.replacing(asset)
+            changed = true
+        }
+        guard changed else { return self }
+        return SavedTimeline(buckets: buckets, assets: assets, projections: projections, device: device, position: position,
+                             title: title, plan: plan)
+    }
 }
 
 extension LibraryStore: TimelineFeedConsumer {
