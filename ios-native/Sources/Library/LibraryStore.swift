@@ -705,6 +705,7 @@ private struct FrozenFeed {
         let date = asset.localDateTime ?? asset.fileCreatedAt
         navigationTask = Task {
             if !reuseTimeline && !restoreSaved { await reload() }
+            if restoreSaved, let plan = saved?.3 { await replanRestoredLibrary(plan, anchor: saved?.1) }
             guard !Task.isCancelled, error == nil else { return }
             let current = generation
             guard let date, let index = nearestBucket(to: date) else {
@@ -831,6 +832,8 @@ private struct FrozenFeed {
             error = nil; isLoading = false; isSearching = false; originalTimeline = nil
             // The library's places come back with it, unless they were never counted.
             if placesByFilter[feedQuery] == nil { loadMonthPlaces(feedQuery, plan: plan) }
+            let anchor = saved.1, current = generation
+            Task { guard generation == current else { return }; await replanRestoredLibrary(plan, anchor: anchor) }
         } else { scheduleReload() }
     }
 
@@ -1065,6 +1068,18 @@ private struct FrozenFeed {
     private func scheduleReload() {
         let current = generation
         Task { guard generation == current else { return }; await reload() }
+    }
+    /// The saved library comes back at once with the plan it was left with. A routing change that
+    /// arrived while a filter or search was open (the offline library becoming readable, or going
+    /// away) reached only the feed shown, so the library plans again and, on a new backend,
+    /// reopens there anchored where it was left.
+    private func replanRestoredLibrary(_ saved: QueryPlan, anchor: GridPosition?) async {
+        let current = generation
+        guard let plan = try? await source.plan(feedQuery), generation == current, !Task.isCancelled,
+              !isFiltered, !showingResults else { return }
+        if plan.backend == saved.backend { feedPlan = plan; return }
+        position = anchor
+        await reload(preservingPosition: true)
     }
     private func rememberOriginal() {
         if originalTimeline == nil && !isFiltered && !showingResults {

@@ -107,9 +107,18 @@ final class LibraryQueryTests: XCTestCase {
         XCTAssertNotEqual(lisbon, otherMarkers)
         XCTAssertNotEqual(LibraryQuery.place(lisbon).stableKey, LibraryQuery.place(sameCount).stableKey)
         XCTAssertEqual(LibraryQuery.place(lisbon).stableKey, LibraryQuery.library.stableKey + "&place=Lisbon#" + lisbon.revision)
+        // A real place ID joins its names with '|' and goes in raw, as the feed's cache key had it
+        // before Q5, so the place keeps its cached months and places across the upgrade.
+        let portugal = PlaceMembership(placeID: "Portugal|Lisboa|São Paulo", assetIDs: ["a"], markerQuery: "")
+        XCTAssertEqual(LibraryQuery.place(portugal).stableKey,
+                       "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&place=Portugal|Lisboa|São Paulo#" + portugal.revision)
+        // The place comes last and nothing before it can say '&place=', so it can't pose as another item.
+        let tricky = PlaceMembership(placeID: "Lisbon&isFavorite=true", assetIDs: ["a"], markerQuery: "")
+        var favoriteLisbon = LibraryQuery.favorites
+        favoriteLisbon.predicates.place = tricky
+        XCTAssertNotEqual(LibraryQuery.place(tricky).stableKey, favoriteLisbon.stableKey)
+        XCTAssertFalse(LibraryQuery.place(tricky).stableKey.contains("&isFavorite=true&place="))
         // Free text can't pose as another item.
-        let tricky = PlaceMembership(placeID: "São Paulo&isFavorite=true", assetIDs: ["a"], markerQuery: "")
-        XCTAssertTrue(LibraryQuery.place(tricky).stableKey.contains("&place=S%C3%A3o%20Paulo%26isFavorite%3Dtrue#"))
         XCTAssertTrue(LibraryQuery.library.refined(text: "a&b=c", mode: .context).stableKey.hasSuffix("&query=a%26b%3Dc"))
     }
 }

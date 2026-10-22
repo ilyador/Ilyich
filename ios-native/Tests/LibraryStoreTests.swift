@@ -110,6 +110,29 @@ import XCTest
         store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
+    func testClearingAFilterReopensTheLibraryOnTheBackendRoutingMovedItTo() async throws {
+        let api = RoutingAPIFixture()
+        let store = LibraryStore(source: api, placesDelay: .zero)
+        await store.reload()
+        XCTAssertEqual(store.feedPlan?.backend, .serverTimeline)
+        let position = GridPosition(section: "2024-10-01T00:00:00Z", item: 0, offset: 7, assetID: "photo")
+        store.position = position
+
+        store.setFeed(.favorites, title: "Favorites")
+        try await until("Favorites never planned.") { store.feedPlan != nil && !store.isLoading }
+        // The first sync finishes while Favorites is open: only the feed shown hears of it.
+        await api.setIndexReadable(true)
+        store.clearFilters()
+        XCTAssertEqual(store.restorePosition, position, "The library comes back at once where it was left.")
+        try await until("The library kept the plan it was left with.") {
+            let readsIndex = await api.libraryReads.last == .index
+            return store.feedPlan?.backend == .index && readsIndex
+        }
+        XCTAssertEqual(store.restorePosition, position, "Reopening on the index keeps the place in the library.")
+        store.stop()
+        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+    }
+
     func testLibrarySearchesNeverReachTheLockedFolder() async throws {
         let library = try XCTUnwrap(SearchFilter.library.visibility?.in)
         XCTAssertEqual(Set(library), ["timeline", "archive"])
@@ -856,6 +879,26 @@ private actor PlacesAPIFixture: FakeFeedSource {
         if delay > .zero { try await Task.sleep(for: delay) }
         return places[query.predicates.people.first] ?? []
     }
+}
+
+/// A one-month library whose routing moves to the index when told, recording the backend each
+/// library month was read from.
+private actor RoutingAPIFixture: FakeFeedSource {
+    nonisolated let cacheScope = "test-routing-" + UUID().uuidString
+    private var indexReadable = false
+    var libraryReads: [QueryPlan.Backend] = []
+    func setIndexReadable(_ readable: Bool) { indexReadable = readable }
+    func plan(_ query: LibraryQuery) async throws -> QueryPlan {
+        try QueryPlanner.plan(query, context: PlannerContext(indexReadable: indexReadable))
+    }
+    func summary(_ query: LibraryQuery, plan: QueryPlan) async throws -> [TimeBucket] {
+        if query == .library { libraryReads.append(plan.backend) }
+        return [.init(timeBucket: "2024-10-01T00:00:00Z", count: 1)]
+    }
+    func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] { [.init(timeBucket: "2024-10-01T00:00:00Z", count: 1)] }
+    func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] { [Asset(id: "photo")] }
+    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { .page([]) }
+    func search(_ query: SearchQuery) async throws -> SearchResponse { .page([]) }
 }
 
 private actor LibraryAPIFixture: FakeFeedSource {
