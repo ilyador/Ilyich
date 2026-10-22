@@ -40,7 +40,10 @@ import XCTest
         var windows: [GridViewport.Windows] = []
         /// The months whose photos are known; the others have no entries yet.
         var loaded: Set<Int>
-        var scrubbing = false
+        /// The rail's finger is down, as the rail tells the viewport.
+        var scrubbing = false {
+            didSet { if scrubbing { viewport.beginScrub() } else { viewport.endScrub() } }
+        }
 
         init(sections: Int = 40, perSection: Int = 100, loaded: Set<Int>? = nil) {
             layout.columns = 4
@@ -57,7 +60,6 @@ import XCTest
             viewport.entry = { [unowned self] path in
                 self.loaded.contains(path.section) ? .remote(Asset(id: Harness.id(path), mediaRevision: "1")) : nil
             }
-            viewport.isScrubbing = { [unowned self] in self.scrubbing }
             viewport.shortSide = { 128 }
             viewport.submit = { [unowned self] windows in self.windows.append(windows) }
         }
@@ -363,13 +365,11 @@ import XCTest
         let h = Harness()
         let clock = Mutex(1_000.0)
         let conditions = CoverageConditions(now: { clock.withLock { $0 } })
-        let navigation = TimelinePosition()
-        navigation.onMotionChange = { conditions.setMoving($0) }
+        h.viewport.onMotionChange = { conditions.setMoving($0) }
         let policy = CoveragePolicy.today
         XCTAssertNil(policy.hold(conditions.snapshot, now: clock.withLock { $0 }))
 
         // The finger touches the rail and scrubs.
-        navigation.isScrubbing = true
         h.scrubbing = true
         XCTAssertEqual(policy.hold(conditions.snapshot, now: clock.withLock { $0 }), .moving)
         h.scroll(by: h.screen * 4, over: 0.4, frames: 24)
@@ -386,13 +386,52 @@ import XCTest
         XCTAssertTrue(h.frames.isRunning, "The finger is still down; a lift must be noticed.")
 
         // The finger lifts: the grid is at rest, and coverage waits the hold out.
-        navigation.isScrubbing = false
         h.scrubbing = false
         let lifted = clock.withLock { $0 }
         h.hold(for: 0.02, frames: 1)
         XCTAssertEqual(Self.kind(try XCTUnwrap(h.windows.last).motion), "idle")
         XCTAssertEqual(policy.hold(conditions.snapshot, now: lifted + 1), .settling(until: lifted + ViewportPolicy.coverageHold))
         XCTAssertNil(policy.hold(conditions.snapshot, now: lifted + ViewportPolicy.coverageHold))
+    }
+
+    /// The phase stands in for the store's old isScrolling (T4): a drag and its coast are
+    /// scrolling, for the rail's puck; a drag, a coast and the rail's finger are moving, for
+    /// coverage. A finger held still is still a drag. The rail taking a coasting grid ends the
+    /// coast, and a coast whose end UIKit never reports ends once the grid has stood still for
+    /// half a second.
+    func testThePhaseFollowsTheDragTheCoastAndTheRail() {
+        let h = Harness()
+        var scrolling: [Bool] = [], moving: [Bool] = []
+        h.viewport.onScrollingChange = { scrolling.append($0) }
+        h.viewport.onMotionChange = { moving.append($0) }
+        h.viewport.willBeginDragging()
+        XCTAssertEqual(h.viewport.phase, .dragging)
+        h.scroll(by: h.screen, over: 0.2, frames: 12)
+        h.hold(for: 0.2, frames: 12)
+        XCTAssertEqual(Self.kind(h.viewport.motion), "idle", "The photos on screen may download…")
+        XCTAssertEqual(h.viewport.phase, .dragging, "…but the finger is still down: the puck stays.")
+        h.viewport.didEndDragging(decelerate: true)
+        XCTAssertEqual(h.viewport.phase, .decelerating)
+        h.scroll(by: h.screen, over: 0.2, frames: 12)
+        // The rail takes the coasting grid, and lets go.
+        h.scrubbing = true
+        XCTAssertEqual(h.viewport.phase, .scrubbing)
+        h.scrubbing = false
+        XCTAssertEqual(h.viewport.phase, .idle)
+        XCTAssertEqual(scrolling, [true, false])
+        XCTAssertEqual(moving, [true, false])
+
+        // A coast a jump took the grid from: UIKit never reports its end.
+        h.viewport.willBeginDragging()
+        h.scroll(by: h.screen, over: 0.2, frames: 12)
+        h.viewport.didEndDragging(decelerate: true)
+        h.scroll(by: h.screen / 2, over: 0.1, frames: 6)
+        h.hold(for: 0.3, frames: 18)
+        XCTAssertEqual(h.viewport.phase, .decelerating, "Still for under half a second, the coast may go on.")
+        h.hold(for: 0.3, frames: 18)
+        XCTAssertEqual(h.viewport.phase, .idle)
+        XCTAssertEqual(scrolling, [true, false, true, false])
+        XCTAssertEqual(moving, [true, false, true, false])
     }
 
     /// The month on screen becomes ready: its photos, and those ahead, are asked for at once,

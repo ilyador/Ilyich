@@ -46,62 +46,6 @@ private struct SavedTimeline {
     /// The plan its months came from; nil before the library ever loaded.
     let plan: QueryPlan?
 }
-/// The time rail drives the grid's offset directly, so scrubbing is one continuous movement
-/// instead of jumps from row to row through view updates.
-@MainActor final class GridScroller {
-    weak var collection: UICollectionView?
-
-    private var range: ClosedRange<CGFloat>? {
-        guard let collection else { return nil }
-        let top = -collection.adjustedContentInset.top
-        let bottom = collection.contentSize.height + collection.adjustedContentInset.bottom - collection.bounds.height
-        return top...max(top, bottom)
-    }
-
-    /// How far the timeline scrolls, in points.
-    var scrollableHeight: CGFloat? { range.map { $0.upperBound - $0.lowerBound } }
-
-    /// How far down the timeline the grid is, from 0 to 1.
-    var fraction: CGFloat? {
-        guard let collection, let range, range.upperBound > range.lowerBound else { return nil }
-        return min(1, max(0, (collection.contentOffset.y - range.lowerBound) / (range.upperBound - range.lowerBound)))
-    }
-
-    func scroll(toFraction fraction: CGFloat) {
-        guard let collection, let range else { return }
-        let y = range.lowerBound + min(1, max(0, fraction)) * (range.upperBound - range.lowerBound)
-        collection.setContentOffset(CGPoint(x: 0, y: y.rounded(.toNearestOrEven)), animated: false)
-    }
-
-    /// Where a month starts on the rail, from the grid's own layout.
-    func fraction(ofSection section: Int) -> CGFloat? {
-        guard let range, range.upperBound > range.lowerBound,
-              let top = (collection?.collectionViewLayout as? VirtualPhotoLayout)?.top(ofSection: section) else { return nil }
-        return min(1, max(0, (top - range.lowerBound) / (range.upperBound - range.lowerBound)))
-    }
-
-    func scroll(toSection section: Int, animated: Bool) {
-        guard let collection, let range, let top = (collection.collectionViewLayout as? VirtualPhotoLayout)?.top(ofSection: section) else { return }
-        collection.setContentOffset(CGPoint(x: 0, y: min(range.upperBound, max(range.lowerBound, top - collection.adjustedContentInset.top))), animated: animated)
-    }
-}
-
-@MainActor @Observable final class TimelinePosition {
-    var section = 0
-    var item = 0
-    var isScrolling = false { didSet { motionChanged(wasMoving: oldValue || isScrubbing) } }
-    /// The finger is on the time rail.
-    var isScrubbing = false { didSet { motionChanged(wasMoving: isScrolling || oldValue) } }
-    /// Told when the grid starts or stops moving, by a scroll or a scrub, for work that waits
-    /// for it to rest (coverage).
-    @ObservationIgnored var onMotionChange: ((Bool) -> Void)?
-
-    var isMoving: Bool { isScrolling || isScrubbing }
-
-    private func motionChanged(wasMoving: Bool) {
-        if wasMoving != isMoving { onMotionChange?(isMoving) }
-    }
-}
 
 @MainActor @Observable final class LibraryStore {
     /// Where the feed reads: the account's library repository.
@@ -170,8 +114,6 @@ private struct SavedTimeline {
     @ObservationIgnored private var groupSelectionTask: Task<Void, Never>?
     @ObservationIgnored private var groupSelectionID = UUID()
     let navigation = TimelinePosition()
-    /// The rail moves the grid through this directly, at the finger's pace.
-    @ObservationIgnored let scroller = GridScroller()
     /// What the feed shows. Its plan, made when the feed loads, serves every month it reads.
     private(set) var feedQuery = LibraryQuery.library
     /// How the feed shown is served, as of its last load; nil before then.

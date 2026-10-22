@@ -17,6 +17,8 @@ struct PhotoGrid: UIViewRepresentable {
     let bottomInset: CGFloat
     var onDensityChange: ((Int) -> Void)? = nil
     var onOpenLocal: ((LocalPhoto) -> Void)? = nil
+    /// The grid's motion, shared with the rail that scrubs it; a grid without a rail has its own.
+    var viewport: GridViewport? = nil
     let onOpen: (Asset) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -42,7 +44,6 @@ struct PhotoGrid: UIViewRepresentable {
         view.refreshControl = refresh
         context.coordinator.collection = view
         context.coordinator.viewport.attach(view)
-        store.scroller.collection = view
         let selection = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.selectByDragging(_:)))
         selection.minimumPressDuration = 0.35
         view.addGestureRecognizer(selection)
@@ -184,14 +185,14 @@ struct PhotoGrid: UIViewRepresentable {
         var binder: ThumbnailBinder { didSet { binder.needsDemand = { [weak self] in self?.viewport.setNeedsDemand() } } }
         /// How the grid moves and what it is about to show. It sends the demand at most once per
         /// frame; the policy decides from its motion what may download.
-        let viewport = GridViewport()
+        let viewport: GridViewport
         init(_ parent: PhotoGrid) {
             self.parent = parent
+            viewport = parent.viewport ?? GridViewport()
             binder = ThumbnailBinder(pipeline: parent.pipeline)
             super.init()
             binder.needsDemand = { [weak self] in self?.viewport.setNeedsDemand() }
             viewport.entry = { [weak self] path in self?.parent.store.entry(section: path.section, item: path.item) }
-            viewport.isScrubbing = { [weak self] in self?.parent.store.navigation.isScrubbing ?? false }
             viewport.shortSide = { [weak self] in
                 guard let self, let collection else { return 128 }
                 return thumbnailPixels(collection) ?? 128
@@ -491,15 +492,12 @@ struct PhotoGrid: UIViewRepresentable {
         }
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             parent.store.cancelPendingNavigation()
-            parent.store.navigation.isScrolling = true
             viewport.willBeginDragging()
         }
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-            if !decelerate { parent.store.navigation.isScrolling = false }
             viewport.didEndDragging(decelerate: decelerate)
         }
         func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-            parent.store.navigation.isScrolling = false
             viewport.didEndDecelerating()
         }
         func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { viewport.didEndScrollingAnimation() }
