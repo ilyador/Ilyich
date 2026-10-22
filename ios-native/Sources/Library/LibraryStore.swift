@@ -26,8 +26,8 @@ struct ScrollRequest: Equatable {
 private struct FrozenFeed {
     let sections: [LibrarySection]
     let assets: [String: [Asset]]
-    let mergedEntries: [String: [LibraryEntry]]
-    let dayGroups: [String: [TimelineDayGroup]]
+    /// Its months as projected: rows, days and places.
+    let projections: [String: MonthProjector.Projection]
     let remoteToLocal: [String: LocalPhoto]
     let showingResults: Bool
     let totalCount: Int
@@ -38,6 +38,9 @@ private struct FrozenFeed {
 private struct SavedTimeline {
     let buckets: [TimeBucket]
     let assets: [String: [Asset]]
+    /// Its months as projected, and the phone's photos they were projected with.
+    let projections: [String: MonthProjector.Projection]
+    let device: MergedTimeline
     let position: GridPosition?
     let title: String
     /// The plan its months came from; nil before the library ever loaded.
@@ -106,9 +109,28 @@ private struct SavedTimeline {
     var buckets: [TimeBucket] = []
     var loaded: [String: [Asset]] = [:]
     private var remoteBuckets: [TimeBucket] = []
+    /// The phone's photos as last published, for selection, the viewer and the next projection.
     private var deviceTimeline = MergedTimeline()
-    private var merged: [String: [LibraryEntry]] = [:]
-    private var dayGroupCache: [String: [TimelineDayGroup]] = [:]
+    /// The grid's months as projected off the main actor (F3): each bucket's rows, days and
+    /// places. A loaded month and its projection land together; a month only the phone has is
+    /// projected as soon as the grid knows it.
+    private var projections: [String: MonthProjector.Projection] = [:]
+    /// The phone's photos as the sections and projections reflect them.
+    @ObservationIgnored private var projectedDevice = MergedTimeline()
+    /// A snapshot arrived that the projections do not reflect yet.
+    @ObservationIgnored private var deviceDirty = false
+    /// Months to project again, and why.
+    @ObservationIgnored private var dirty: [String: ProjectionReason] = [:]
+    /// Months the feed delivered, shown with their rows once projected.
+    @ObservationIgnored private var pendingLoads: [String: PendingLoad] = [:]
+    /// The projection run on its way; one at a time, the next taking everything that changed meanwhile.
+    @ObservationIgnored private var projecting: Task<Void, Never>?
+    /// Moves whenever the months or the feed change under a run, which then applies nothing and starts over.
+    @ObservationIgnored private var structureVersion = 0
+    /// The server's months by bucket, the bucket of each "YYYY-MM" shown, and each bucket's title, formatted once.
+    @ObservationIgnored private var remoteIDs: Set<String> = []
+    @ObservationIgnored private var bucketOfMonth: [String: String] = [:]
+    @ObservationIgnored private var titles: [String: String] = [:]
     private let includesDevicePhotos: Bool
     var results: [Asset] = []
     var isLoading = false
@@ -241,30 +263,18 @@ private struct SavedTimeline {
         return (Array(selectedLocalRecords.values) + Array(selectedMatchedCopies.values)).filter { seen.insert($0.id).inserted }
     }
     var matchingDevicePhotos: [String: LocalPhoto] { deviceTimeline.remoteToLocal }
+    /// The phone's photos changed. The months they changed in are projected again off the main
+    /// actor and land together with the sections, so nothing here costs the frame; an identical
+    /// snapshot changes nothing. While a feed is being replaced the snapshot waits for the commit.
     func updateDeviceTimeline(_ snapshot: MergedTimeline) {
-        let previousMatches = deviceTimeline.remoteToLocal
-        let previousEntries = merged
-        let previousSections = timelineSections
         deviceTimeline = snapshot
-        guard !isReplacingFeed else { return }
-        guard mergesDevicePhotos else {
-            if previousMatches != snapshot.remoteToLocal { revision += 1 }
-            return
-        }
-        updateSections()
-        let rowsChanged = previousSections != timelineSections
-            || previousEntries.mapValues { $0.map(\.id) } != merged.mapValues { $0.map(\.id) }
-        // Indexing publishes discovery and fingerprint progress independently. An
-        // identical snapshot must not recycle every visible cell or move the grid.
-        guard rowsChanged || previousEntries != merged || previousMatches != snapshot.remoteToLocal else { return }
-        revision += 1
-        guard rowsChanged else { return }
-        restorePosition = position
-        if let id = restorePosition?.assetID, id.hasPrefix("local:"),
-           let remote = snapshot.localToRemote[String(id.dropFirst(6))] {
-            restorePosition?.assetID = remote
-        }
-        resetID = UUID()
+        deviceDirty = true
+        project()
+    }
+
+    /// Waits until every month that changed has been projected and shown.
+    func settleProjections() async {
+        while let task = projecting { await task.value }
     }
 
     func restoredIndex(for position: GridPosition) -> (section: Int, item: Int)? {
@@ -272,7 +282,7 @@ private struct SavedTimeline {
             if let id = position.assetID {
                 for (section, bucket) in frozenFeed.sections.enumerated() {
                     if let item = frozenFeed.assets[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
-                    if let item = frozenFeed.mergedEntries[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
+                    if let item = frozenFeed.projections[bucket.id]?.entries.firstIndex(where: { $0.id == id }) { return (section, item) }
                 }
             }
             guard let section = frozenFeed.sections.firstIndex(where: { $0.id == position.section }),
@@ -282,8 +292,8 @@ private struct SavedTimeline {
         if let id = position.assetID {
             if showingResults, let item = results.firstIndex(where: { $0.id == id }) { return (0, item) }
             for (section, bucket) in buckets.enumerated() {
-                if mergesDevicePhotos, let item = merged[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
-                if !mergesDevicePhotos, let item = loaded[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
+                if let item = projections[bucket.id]?.entries.firstIndex(where: { $0.id == id }) { return (section, item) }
+                if projections[bucket.id] == nil, let item = loaded[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
             }
         }
         guard let section = sections.firstIndex(where: { $0.id == position.section }), sections[section].count > 0 else { return nil }
@@ -355,8 +365,9 @@ private struct SavedTimeline {
                 if let month, monthBuckets[month] != nil { assets = try await self.assets(of: month) }
                 try Task.checkCancellation()
                 guard generation == current, isSelecting else { return }
-                let entries = mergesDevicePhotos ? deviceTimeline.entries(remote: assets, bucket: bucket)
-                    : assets.map { LibraryEntry.remote($0) }
+                let entries = await mergedEntries(remote: assets, bucket: bucket)
+                try Task.checkCancellation()
+                guard generation == current, isSelecting else { return }
                 let ids = Set(entries.map(\.id))
                 if !selecting { selected.subtract(ids) }
                 else {
@@ -377,30 +388,17 @@ private struct SavedTimeline {
     var canSelectMonth: Bool { !showingResults && buckets.indices.contains(navigation.section) }
     var canScrubTimeline: Bool { !isReplacingFeed && !showingResults && !buckets.isEmpty }
 
-    /// Up to two most common places (city, else country) among already loaded assets.
-    func placeSummary(for assets: [Asset]) -> String? {
-        var counts: [String: Int] = [:]
-        for asset in assets {
-            guard let exif = asset.exifInfo else { continue }
-            let city = exif.city?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let country = exif.country?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let name = city.isEmpty ? country : city
-            if !name.isEmpty { counts[name, default: 0] += 1 }
-        }
-        let ranked = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-        return ranked.isEmpty ? nil : ranked.prefix(2).map(\.key).joined(separator: " · ")
-    }
-    /// Place summary for one month: its loaded photos, or else the local index's count of them.
+    /// Place summary for one month: its loaded photos' (computed in the projection), or else the
+    /// local index's count of them.
     func placeSummary(section: Int) -> String? {
         if let frozenFeed {
             guard frozenFeed.sections.indices.contains(section) else { return nil }
             let id = frozenFeed.sections[section].id
-            guard let assets = frozenFeed.assets[id] else { return MonthPlaces.summary(frozenFeed.places[id]) }
-            return placeSummary(for: assets) ?? MonthPlaces.summary(frozenFeed.places[id])
+            return frozenFeed.projections[id]?.placeSummary ?? MonthPlaces.summary(frozenFeed.places[id])
         }
         guard !showingResults, buckets.indices.contains(section) else { return nil }
-        guard let assets = loaded[buckets[section].id] else { return MonthPlaces.summary(monthPlaces[buckets[section].id]) }
-        return placeSummary(for: assets) ?? MonthPlaces.summary(monthPlaces[buckets[section].id])
+        let id = buckets[section].id
+        return projections[id]?.placeSummary ?? MonthPlaces.summary(monthPlaces[id])
     }
 
     /// The places of a whole year, for the rail's year lens.
@@ -460,35 +458,35 @@ private struct SavedTimeline {
     /// Search/filter results when showing them, otherwise the month under the viewport.
     var currentPlaceSummary: String? {
         if let frozenFeed {
-            if frozenFeed.showingResults { return placeSummary(for: frozenFeed.assets["results"] ?? []) }
+            if frozenFeed.showingResults { return MonthProjector.placeSummary(of: frozenFeed.assets["results"] ?? []) }
             return placeSummary(section: navigation.section)
         }
-        return showingResults ? placeSummary(for: results) : placeSummary(section: navigation.section)
+        return showingResults ? MonthProjector.placeSummary(of: results) : placeSummary(section: navigation.section)
     }
 
+    /// A row of the grid, from its month's projection. A loaded month whose projection has not
+    /// landed shows the server's rows in its order meanwhile.
     func entry(section: Int, item: Int) -> LibraryEntry? {
         if let frozenFeed {
             guard frozenFeed.sections.indices.contains(section) else { return nil }
             let key = frozenFeed.sections[section].id
-            if let entries = frozenFeed.mergedEntries[key], entries.indices.contains(item) { return entries[item] }
+            if let entries = frozenFeed.projections[key]?.entries { return entries.indices.contains(item) ? entries[item] : nil }
             guard let assets = frozenFeed.assets[key], assets.indices.contains(item) else { return nil }
             return .remote(assets[item], local: frozenFeed.remoteToLocal[assets[item].id])
         }
-        if mergesDevicePhotos, buckets.indices.contains(section) {
-            let key = buckets[section].id
-            if let entries = merged[key], entries.indices.contains(item) { return entries[item] }
-            return nil
-        }
+        if showingResults { return asset(section: section, item: item).map { .remote($0, local: deviceTimeline.remoteToLocal[$0.id]) } }
+        guard buckets.indices.contains(section) else { return nil }
+        if let entries = projections[buckets[section].id]?.entries { return entries.indices.contains(item) ? entries[item] : nil }
         return asset(section: section, item: item).map { .remote($0, local: deviceTimeline.remoteToLocal[$0.id]) }
     }
 
     func dayGroups(section: Int) -> [TimelineDayGroup] {
         if let frozenFeed {
             guard frozenFeed.sections.indices.contains(section) else { return [] }
-            return frozenFeed.dayGroups[frozenFeed.sections[section].id] ?? []
+            return frozenFeed.projections[frozenFeed.sections[section].id]?.days ?? []
         }
         guard !showingResults, buckets.indices.contains(section) else { return [] }
-        return dayGroupCache[buckets[section].id] ?? []
+        return projections[buckets[section].id]?.days ?? []
     }
 
     func asset(section: Int, item: Int) -> Asset? {
@@ -528,10 +526,12 @@ private struct SavedTimeline {
         isLoading = true; error = nil; bucketErrors = [:]
         if preservingPosition { restorePosition = position }
         else {
-            // The feed starts over: its months are dropped and a new one opens once planned.
+            // The feed starts over: its months are dropped and a new one opens once planned. With
+            // nothing projected yet, the phone's latest photos place the months.
             cancelRequests()
-            remoteBuckets = []; buckets = []; loaded = [:]
-            updateSections()
+            remoteBuckets = []; buckets = []; loaded = [:]; projections = [:]; dirty = [:]
+            projectedDevice = deviceTimeline; deviceDirty = false
+            refreshStructure(); project()
             if frozenFeed == nil { resetID = UUID() }
         }
         defer { if generation == current { isLoading = false } }
@@ -562,7 +562,7 @@ private struct SavedTimeline {
             let previousSections = timelineSections
             remoteBuckets = response
             loadMonthPlaces(query, plan: plan)
-            updateSections()
+            refreshStructure(); project()
             if preservingPosition && previousSections != timelineSections { resetID = UUID() }
             // Background sync keeps the viewport heading; scrolling/restoration
             // publishes a new visible month if the returned sections move it.
@@ -579,6 +579,8 @@ private struct SavedTimeline {
                 for month in (0..<min(2, buckets.count)).compactMap({ monthKeys[$0] }) where monthBuckets[month] != nil {
                     _ = try? await assets(of: month)
                 }
+                // Their rows land with their projections.
+                await settleProjections()
                 guard generation == current else { return }
                 if buckets.isEmpty || (0..<min(2, buckets.count)).allSatisfy({
                     let id = buckets[$0].id
@@ -672,7 +674,8 @@ private struct SavedTimeline {
                 }
             }
             guard !Task.isCancelled, generation == current else { return }
-            let entries = mergesDevicePhotos ? deviceTimeline.entries(remote: assets, bucket: bucket) : assets.map { LibraryEntry.remote($0) }
+            let entries = await mergedEntries(remote: assets, bucket: bucket)
+            guard !Task.isCancelled, generation == current else { return }
             let distance = { (entry: LibraryEntry) in abs(entry.date.timeIntervalSince(date)) }
             guard let target = entries.first(where: { $0.id == asset.id }) ?? entries.min(by: { distance($0) < distance($1) }),
                   let item = entries.firstIndex(where: { $0.id == target.id }) else {
@@ -993,12 +996,16 @@ private struct SavedTimeline {
             results[i] = asset
             if let feed = searchFeed { Task { await feed.replace(asset) } }
         }
+        // Only the photo's month is projected again, off the main actor; the record shows at once.
         for key in Array(loaded.keys) {
-            if let i = loaded[key]?.firstIndex(where: { $0.id == asset.id }) { loaded[key]?[i] = asset }
+            if let i = loaded[key]?.firstIndex(where: { $0.id == asset.id }) { loaded[key]?[i] = asset; markDirty(key, .edit) }
+        }
+        for key in Array(pendingLoads.keys) {
+            if let i = pendingLoads[key]?.assets.firstIndex(where: { $0.id == asset.id }) { pendingLoads[key]?.assets[i] = asset; markDirty(key, .edit) }
         }
         send(.replace(asset))
-        updateMergedEntries()
         revision += 1
+        project()
     }
     /// Takes photos out of the feed at once, before the server's refresh confirms it, so a deleted
     /// photo can't be opened while that is on its way.
@@ -1016,16 +1023,29 @@ private struct SavedTimeline {
             let before = loaded[key]?.count ?? 0
             loaded[key]?.removeAll { ids.contains($0.id) }
             let gone = before - (loaded[key]?.count ?? 0)
-            if gone > 0 { removed[key] = gone }
+            guard gone > 0 else { continue }
+            removed[key] = gone
+            // The rows go at once; the month's days are redone off the main actor.
+            projections[key] = projections[key]?.removing(ids)
+            markDirty(key, .edit)
+        }
+        for key in Array(pendingLoads.keys) {
+            let before = pendingLoads[key]?.assets.count ?? 0
+            pendingLoads[key]?.assets.removeAll { ids.contains($0.id) }
+            if before != pendingLoads[key]?.assets.count { markDirty(key, .edit) }
         }
         if !removed.isEmpty {
             remoteBuckets = remoteBuckets.compactMap { bucket in
                 guard let gone = removed[bucket.id] else { return bucket }
                 return bucket.count > gone ? TimeBucket(timeBucket: bucket.timeBucket, count: bucket.count - gone) : nil
             }
-            updateSections()
+            // A month with nothing left goes whole.
+            let kept = Set(remoteBuckets.map(\.id))
+            for key in removed.keys where !kept.contains(key) { loaded[key] = nil }
+            refreshStructure()
         }
         revision += 1
+        project()
     }
     func refreshAfterMutation() async {
         originalTimeline = nil
@@ -1044,6 +1064,7 @@ private struct SavedTimeline {
     /// queued go first, in order; they belong to the feed being closed, and `close` undoes them.
     private func cancelRequests() {
         feedSession = nil; lastVisibleMonths = nil; sentMonths = nil; feedViewport.show([])
+        pendingLoads = [:]; structureVersion += 1
         send(.close)
     }
 
@@ -1061,10 +1082,19 @@ private struct SavedTimeline {
         openFeed(feedQuery, plan: plan); feedPlan = plan
         remoteBuckets = saved.buckets; title = saved.title
         loaded = Self.resident(saved.assets, buckets: saved.buckets, around: saved.position?.section)
-        updateSections()
+        // Its months come back projected as they were left, with the phone's photos of that time;
+        // the photos the phone has now are merged in off the main actor, once it is on screen.
+        let remote = Set(saved.buckets.map(\.id))
+        projections = saved.projections.filter { loaded[$0.key] != nil || !remote.contains($0.key) }
+        dirty = [:]
+        projectedDevice = saved.device; deviceDirty = true
+        // Where the grid is going back to, so a row the phone's photos move meanwhile anchors there.
+        position = saved.position
+        refreshStructure()
         var months: [MonthKey: [Asset]] = [:]
         for (id, assets) in loaded { if let month = monthKey(id) { months[month] = assets } }
         send(.restore(months))
+        project()
     }
 
     /// Up to twelve of a saved feed's months, those nearest the anchor first.
@@ -1138,9 +1168,8 @@ private struct SavedTimeline {
         let currentSections = liveSections
         guard currentSections.contains(where: { $0.count > 0 }) else { return }
         let visibleAssets = showingResults ? ["results": results] : loaded
-        frozenFeed = FrozenFeed(sections: currentSections, assets: visibleAssets, mergedEntries: merged,
-                                dayGroups: dayGroupCache, remoteToLocal: deviceTimeline.remoteToLocal,
-                                showingResults: showingResults,
+        frozenFeed = FrozenFeed(sections: currentSections, assets: visibleAssets, projections: projections,
+                                remoteToLocal: projectedDevice.remoteToLocal, showingResults: showingResults,
                                 totalCount: showingResults ? results.count : buckets.reduce(0) { $0 + $1.count },
                                 places: monthPlaces)
     }
@@ -1149,6 +1178,8 @@ private struct SavedTimeline {
         frozenFeed = nil
         resetID = UUID()
         revision += 1
+        // The phone's photos that arrived while the feed was frozen are merged in now.
+        project()
     }
     private func updateVisibleResultsTitle() {
         guard showingResults, frozenFeed == nil else { return }
@@ -1175,71 +1206,160 @@ private struct SavedTimeline {
     }
     private func rememberOriginal() {
         if originalTimeline == nil && !isFiltered && !showingResults {
-            originalTimeline = SavedTimeline(buckets: remoteBuckets, assets: loaded, position: position, title: title, plan: feedPlan)
+            originalTimeline = SavedTimeline(buckets: remoteBuckets, assets: loaded, projections: projections, device: projectedDevice,
+                                             position: position, title: title, plan: feedPlan)
         }
     }
-    private func updateSections() {
-        buckets = mergesDevicePhotos ? deviceTimeline.buckets(remote: remoteBuckets) : remoteBuckets
+
+    // MARK: - Sections and projections (F3)
+
+    /// The grid's months from the server's and the phone's as projected: the sections, each one's
+    /// month, the bucket the source reads for each month it has, and the feed's order, which it
+    /// hears once per change. Projections of months no longer shown go; a month only the phone
+    /// has that is new to the grid is projected. Cheap: nothing here reads a photo.
+    private func refreshStructure() {
+        let merging = mergesDevicePhotos
+        buckets = merging ? projectedDevice.buckets(remote: remoteBuckets) : remoteBuckets
+        remoteIDs = Set(remoteBuckets.map(\.id))
         monthKeys = buckets.map { monthKey($0.id) }
         monthBuckets = Dictionary(remoteBuckets.compactMap { bucket in monthKey(bucket.id).map { ($0, bucket.id) } },
                                   uniquingKeysWith: { first, _ in first })
-        updateMergedEntries()
-        timelineSections = buckets.map { .init(id: $0.id, count: $0.count, title: Self.monthTitle($0.date)) }
-        // The feed hears the order once per change, not once per snapshot.
+        bucketOfMonth = Dictionary(buckets.map { (String($0.id.prefix(7)), $0.id) }, uniquingKeysWith: { first, _ in first })
+        timelineSections = buckets.map { .init(id: $0.id, count: $0.count, title: title(of: $0)) }
+        let shown = Set(buckets.map(\.id))
+        for id in projections.keys where !shown.contains(id) { projections[id] = nil }
+        for id in pendingLoads.keys where !shown.contains(id) { pendingLoads[id] = nil }
+        for id in dirty.keys where !shown.contains(id) { dirty[id] = nil }
+        if merging {
+            for bucket in buckets where !remoteIDs.contains(bucket.id) && projections[bucket.id] == nil { markDirty(bucket.id, .device) }
+        }
+        structureVersion += 1
         let order = monthKeys.compactMap { $0 }
         if sentMonths?.order != order || sentMonths?.buckets != monthBuckets {
             sentMonths = (order, monthBuckets)
             send(.months(order, buckets: monthBuckets))
         }
     }
-    private func updateMergedEntries() {
-        var entries: [String: [LibraryEntry]] = [:], days: [String: [TimelineDayGroup]] = [:]
-        let remoteKeys = Set(remoteBuckets.map(\.id)), merging = mergesDevicePhotos
-        for bucket in buckets {
-            let month = mergedMonth(bucket.id, remote: remoteKeys.contains(bucket.id), merging: merging)
-            entries[bucket.id] = month.entries; days[bucket.id] = month.days
-        }
-        merged = entries; dayGroupCache = days
+
+    private func markDirty(_ bucket: String, _ reason: ProjectionReason) {
+        dirty[bucket, default: []].formUnion(reason)
     }
-    /// Only these months changed: one just loaded and those let go to make room. Redoing every
-    /// loaded month on each load took a large share of the main thread while scrubbing.
-    private func updateMergedEntries(of ids: [String]) {
-        let merging = mergesDevicePhotos
-        for id in ids {
-            let month = buckets.contains(where: { $0.id == id })
-                ? mergedMonth(id, remote: remoteBuckets.contains(where: { $0.id == id }), merging: merging) : (entries: nil, days: nil)
-            merged[id] = month.entries; dayGroupCache[id] = month.days
-        }
-    }
-    /// One month's rows merged with the photos only on this phone, when they are merged, and its days.
-    private func mergedMonth(_ id: String, remote: Bool, merging: Bool) -> (entries: [LibraryEntry]?, days: [TimelineDayGroup]?) {
-        let entries: [LibraryEntry]?
-        if !merging { entries = loaded[id]?.map { .remote($0) } }
-        else if let assets = loaded[id] { entries = deviceTimeline.entries(remote: assets, bucket: id) }
-        else if !remote { entries = deviceTimeline.entries(remote: [], bucket: id) }
-        else { entries = nil }
-        let days = entries.flatMap { $0.isEmpty ? nil : Self.dayGroups($0) }
-        return (merging ? entries : nil, days)
-    }
-    /// Runs of photos taken on the same day. Their dates are wall times stored as UTC, and a UTC
-    /// day is a whole 86,400 seconds from midnight, so the day is worked out by hand; asking the
-    /// calendar for the start of every photo's day was most of the cost of loading a month.
-    nonisolated static func dayGroups(_ entries: [LibraryEntry]) -> [TimelineDayGroup] {
-        var style = Date.FormatStyle().month(.wide).day().year()
-        style.timeZone = TimeZone(secondsFromGMT: 0)!
-        var groups: [TimelineDayGroup] = []
-        var currentDay: Double?
-        for (item, entry) in entries.enumerated() {
-            let day = (entry.date.timeIntervalSinceReferenceDate / 86_400).rounded(.down)
-            if currentDay == day {
-                groups[groups.count - 1].count += 1
-            } else {
-                groups.append(TimelineDayGroup(startItem: item, count: 1,
-                                               title: Date(timeIntervalSinceReferenceDate: day * 86_400).formatted(style)))
-                currentDay = day
+
+    /// Projects what changed, off the main actor: the months delivered or edited, and, after a
+    /// snapshot, the months the phone's photos changed in (by digest) and, when the matches
+    /// changed, every loaded month. One run at a time; the next takes everything that changed
+    /// meanwhile. A snapshot waits while a feed is being replaced, for the feed that commits.
+    private func project() {
+        guard projecting == nil else { return }
+        var months = dirty
+        // The months shown, and those the snapshot adds: a month only the phone has, new to the grid.
+        var shown = Set(buckets.map(\.id))
+        let device: MergedTimeline? = deviceDirty && frozenFeed == nil ? deviceTimeline : nil
+        if let device {
+            deviceDirty = false
+            if mergesDevicePhotos {
+                for key in device.changedMonths(since: projectedDevice) {
+                    let bucket = bucketOfMonth[key] ?? key + "-01"
+                    months[bucket, default: []].insert(.device); shown.insert(bucket)
+                }
+            }
+            if device.matchesDigest != projectedDevice.matchesDigest {
+                for id in Set(loaded.keys).union(pendingLoads.keys) { months[id, default: []].insert(.device) }
             }
         }
-        return groups
+        months = months.filter { shown.contains($0.key) }
+        guard !months.isEmpty else {
+            // A snapshot that changes no month, as discovery and fingerprint progress often publish.
+            if let device { projectedDevice = device }
+            dirty = [:]
+            return
+        }
+        dirty = [:]
+        let phone = device ?? projectedDevice, merging = mergesDevicePhotos
+        var inputs: [MonthProjector.Input] = [], unprojected: [String] = []
+        for bucket in months.keys {
+            let remote = pendingLoads[bucket]?.assets ?? loaded[bucket]
+            let phoneOnly = merging ? phone.phoneOnly(in: bucket) : []
+            // A server month not loaded has no rows to show; a month only the phone has always does.
+            guard remote != nil || (!remoteIDs.contains(bucket) && !phoneOnly.isEmpty) else { unprojected.append(bucket); continue }
+            inputs.append(.init(bucket: bucket, remote: remote ?? [], phoneOnly: phoneOnly, matches: phone.remoteToLocal, merges: merging,
+                                previous: projections[bucket]))
+        }
+        let version = structureVersion
+        projecting = Task { [inputs, unprojected, months, device, version] in
+            let results = await MonthProjector.project(inputs)
+            self.apply(results, unprojected: unprojected, reasons: months, device: device, version: version)
+        }
+    }
+
+    /// Shows a run's months: their rows (with the feed's delivery, for a loaded month), days and
+    /// places, then the sections after a snapshot. A month changed again meanwhile is left to the
+    /// next run. The phone's photos moving a row the grid shows restore its anchor, as before.
+    private func apply(_ results: [MonthProjector.Result], unprojected: [String], reasons: [String: ProjectionReason],
+                       device: MergedTimeline?, version: Int) {
+        projecting = nil
+        defer { project() }
+        guard version == structureVersion else {
+            // The feed or its months changed under the run: everything it took is asked again.
+            for (bucket, reason) in reasons { markDirty(bucket, reason) }
+            if device != nil { deviceDirty = true }
+            return
+        }
+        var changed = false, rowsMoved = false, structureChanged = false, committed = 0
+        for result in results where dirty[result.bucket] == nil {
+            let id = result.bucket
+            if let pending = pendingLoads[id] {
+                pendingLoads[id] = nil
+                guard pending.ticket == feedSession?.ticket, remoteIDs.contains(id) else { continue }
+                loaded[id] = pending.assets; bucketErrors[id] = nil
+                committed += 1
+                if pending.fresh, let index = remoteBuckets.firstIndex(where: { $0.id == id }), remoteBuckets[index].count != pending.assets.count {
+                    // FEED-5: the month's own count stands over the summary's, so a month smaller
+                    // than its summary leaves no placeholder, and a larger one shows every photo.
+                    structureChanged = true
+                    if pending.assets.isEmpty { remoteBuckets.remove(at: index); loaded[id] = nil; projections[id] = nil; continue }
+                    remoteBuckets[index] = TimeBucket(timeBucket: id, count: pending.assets.count)
+                }
+            }
+            if result.changed || projections[id] == nil {
+                if result.rowsChanged, projections[id] != nil, reasons[id]?.contains(.device) == true { rowsMoved = true }
+                projections[id] = result.projection; changed = true
+            }
+        }
+        for id in unprojected where dirty[id] == nil && projections[id] != nil { projections[id] = nil; changed = true }
+        if let device { projectedDevice = device }
+        if device != nil || structureChanged {
+            let before = timelineSections
+            refreshStructure()
+            if device != nil && before != timelineSections { rowsMoved = true }
+        }
+        if rowsMoved {
+            // The grid keeps the photo it shows; a phone photo matched meanwhile is its server record now.
+            if let anchor = position, buckets.contains(where: { $0.id == anchor.section }) {
+                restorePosition = anchor
+                if let id = anchor.assetID, id.hasPrefix("local:"), let remote = projectedDevice.localToRemote[String(id.dropFirst(6))] {
+                    restorePosition?.assetID = remote
+                }
+            }
+            resetID = UUID()
+        }
+        if changed || committed > 0 || structureChanged { revision += 1 }
+        for _ in 0..<committed { FeedMonthProbe.committed() }
+    }
+
+    /// A month's rows merged with the phone's photos as published, off the main actor, for a
+    /// selection or a date navigation; a feed that does not merge them lists the server's.
+    private func mergedEntries(remote: [Asset], bucket: String) async -> [LibraryEntry] {
+        guard mergesDevicePhotos else { return remote.map { .remote($0) } }
+        let phone = deviceTimeline
+        return await MonthProjector.merge(remote: remote, phoneOnly: phone.phoneOnly(in: bucket), matches: phone.remoteToLocal)
+    }
+
+    private func title(of bucket: TimeBucket) -> String {
+        if let title = titles[bucket.id] { return title }
+        let title = Self.monthTitle(bucket.date)
+        titles[bucket.id] = title
+        return title
     }
     private static func monthTitle(_ date: Date?) -> String {
         guard let date else { return "Library" }
@@ -1249,27 +1369,34 @@ private struct SavedTimeline {
     }
 }
 
+/// Why a month is projected again: it was delivered by the feed, a record in it was edited or
+/// removed, or the phone's photos changed. Only the phone's photos move the grid's anchor.
+private struct ProjectionReason: OptionSet, Sendable {
+    let rawValue: UInt8
+    static let load = ProjectionReason(rawValue: 1)
+    static let edit = ProjectionReason(rawValue: 2)
+    static let device = ProjectionReason(rawValue: 4)
+}
+
+/// A month the feed delivered, waiting for its projection.
+private struct PendingLoad {
+    let ticket: TimelineFeed.Ticket
+    var assets: [Asset]
+    let fresh: Bool
+}
+
 extension LibraryStore: TimelineFeedConsumer {
+    /// A month arrived. It is projected off the main actor and shown with its rows; the months
+    /// let go to make room go now, as the grid cannot be on them.
     func monthLoaded(_ ticket: TimelineFeed.Ticket, month: MonthKey, assets: [Asset], fresh: Bool, evicting: [MonthKey]) {
         guard ticket == feedSession?.ticket, let id = monthBuckets[month] else { return }
-        var changed = [id]
         for evicted in evicting {
-            guard let gone = monthBuckets[evicted], loaded[gone] != nil else { continue }
-            loaded[gone] = nil; changed.append(gone)
+            guard let gone = monthBuckets[evicted], loaded[gone] != nil || pendingLoads[gone] != nil else { continue }
+            loaded[gone] = nil; pendingLoads[gone] = nil; projections[gone] = nil; dirty[gone] = nil
         }
-        loaded[id] = assets
-        bucketErrors[id] = nil
-        if fresh, let index = remoteBuckets.firstIndex(where: { $0.id == id }), remoteBuckets[index].count != assets.count {
-            // FEED-5: the month's own count stands over the summary's, so a month smaller than its
-            // summary leaves no placeholder, and a larger one shows every photo.
-            if assets.isEmpty { remoteBuckets.remove(at: index); loaded[id] = nil }
-            else { remoteBuckets[index] = TimeBucket(timeBucket: id, count: assets.count) }
-            updateSections()
-        } else {
-            updateMergedEntries(of: changed)
-        }
-        revision += 1
-        FeedMonthProbe.committed()
+        pendingLoads[id] = PendingLoad(ticket: ticket, assets: assets, fresh: fresh)
+        markDirty(id, .load)
+        project()
     }
 
     func monthFailed(_ ticket: TimelineFeed.Ticket, month: MonthKey, message: String) {

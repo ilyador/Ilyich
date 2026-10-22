@@ -235,9 +235,9 @@ import XCTest
             if current == day { expected[expected.count - 1].count += 1 }
             else { expected.append(TimelineDayGroup(startItem: item, count: 1, title: day.formatted(style))); current = day }
         }
-        XCTAssertEqual(LibraryStore.dayGroups(entries), expected)
+        XCTAssertEqual(MonthProjector.dayGroups(entries), expected)
         XCTAssertEqual(expected.count, 8)
-        XCTAssertEqual(LibraryStore.dayGroups([]), [])
+        XCTAssertEqual(MonthProjector.dayGroups([]), [])
     }
 
     /// Each month loaded redoes only its own rows and days; a month let go for room loses them, and

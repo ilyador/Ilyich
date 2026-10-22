@@ -62,6 +62,7 @@ import XCTest
         try await until("The server's month did not load.") { store.loaded[january] != nil }
         let taken = try XCTUnwrap(APIDate.parse("2026-02-10T12:00:00Z"))
         store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone-only", date: taken)]))
+        await store.settleProjections()
         XCTAssertEqual(store.sections.first?.id, "2026-02-01", "The phone's newer month leads the library.")
 
         store.setFeed(.favorites, title: "Favorites")
@@ -125,6 +126,7 @@ import XCTest
         for section in 5...8 { store.requestBucket(section) }
         let taken = try XCTUnwrap(APIDate.parse("2026-01-10T12:00:00Z"))
         store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone-only", date: taken)]))
+        await store.settleProjections()
         XCTAssertEqual(store.sections.first?.id, "2026-01-01", "The phone's month is now the first section.")
         let loaded = await eventually(within: .seconds(3)) { store.loaded[asked] != nil }
         XCTAssertTrue(loaded, "A month asked for loads once a slot frees.")
