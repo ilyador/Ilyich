@@ -36,6 +36,9 @@ struct AccountEnvironment: Sendable {
     /// The folder that holds each account's Backup/<digest>/state.json: nil for the App Group
     /// container, a folder for tests.
     var backupContainer: URL?
+    /// URL protocols put in front of the media sessions (thumbnails, previews, originals): nil on
+    /// the phone; a UI test can take the media offline with them.
+    var mediaProtocolClasses: [AnyClass]?
 
     /// The app on the phone.
     static let live = AccountEnvironment()
@@ -66,6 +69,9 @@ struct AccountEnvironment: Sendable {
         environment.importsBackupState = false
         environment.resetsInterfaceState = true
         environment.keepsShelvesOpen = arguments.contains("--ui-testing-shelves-stay-open")
+        // The fixture server is shared by every test run, so a launch that wants its media
+        // offline fails the requests in the app instead; the library itself still loads.
+        if arguments.contains("--ui-testing-offline-media") { environment.mediaProtocolClasses = [OfflineMediaProtocol.self] }
         environment.fixtureAccount = AccountID(server: fixtureServer, userID: fixtureUserID)
         if arguments.contains("--ui-testing-library") {
             // The fixture serves a long People shelf to this session's own token.
@@ -81,6 +87,17 @@ struct AccountEnvironment: Sendable {
         usesDeviceStorage ? KeychainCredentialStore() : EphemeralCredentialStore(fixtureCredential)
     }
 }
+
+#if DEBUG
+/// Every media request fails as if the phone had no network, for a UI test that checks what the
+/// grid shows from what it has stored (REBUILD_ROADMAP.md T3).
+final class OfflineMediaProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)) }
+    override func stopLoading() {}
+}
+#endif
 
 /// A credential kept only in memory, for UI tests and unit tests: nothing reaches the Keychain.
 final class EphemeralCredentialStore: CredentialStore {

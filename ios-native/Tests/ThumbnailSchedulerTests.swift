@@ -250,6 +250,43 @@ final class ThumbnailSchedulerTests: XCTestCase {
         scheduler.withdraw(source)
     }
 
+    /// Passing photos faster than they could arrive, the grid is served from the disk; between the
+    /// policy's two speeds the decision stands, and under the slow mark the screen downloads.
+    func testAFastGridUsesTheDiskUntilItSlows() async throws {
+        let server = FakeServer(holds: false)
+        let scheduler = ThumbnailScheduler(store: FakeStore(storing: ["stored"]), memory: DecodedThumbnailCache(),
+                                           fetcher: ThumbnailFetcher(load: { id, _, _ in try await server.load(id) }))
+        let deliveries = listen(scheduler)
+        let source = UUID()
+        scheduler.submit(Self.demand([("stored", .visible), ("missing", .visible)], motion: .flinging(speed: 4)), from: source)
+        try await until("The stored photo was not shown.") { deliveries.all.contains { $0.assetID == "stored" } }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(server.requested, [], "Nothing downloads at four screens a second.")
+
+        scheduler.submit(Self.demand([("stored", .visible), ("missing", .visible)], motion: .flinging(speed: 2)), from: source)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(server.requested, [], "Slowing to two screens a second, the grid is still fast.")
+
+        scheduler.submit(Self.demand([("stored", .visible), ("missing", .visible)], motion: .flinging(speed: 1)), from: source)
+        try await until("The slowing grid did not download what it shows.") { deliveries.all.contains { $0.assetID == "missing" } }
+        XCTAssertEqual(server.requested, ["missing"])
+        scheduler.withdraw(source)
+    }
+
+    /// Where a fling lands downloads while the grid is still fast; the photos passing by wait.
+    func testTheFlingTargetDownloadsWhileTheGridIsFast() async throws {
+        let server = FakeServer(holds: false)
+        let scheduler = ThumbnailScheduler(store: FakeStore(), memory: DecodedThumbnailCache(),
+                                           fetcher: ThumbnailFetcher(load: { id, _, _ in try await server.load(id) }))
+        let deliveries = listen(scheduler)
+        let source = UUID()
+        scheduler.submit(Self.demand([("passing", .visible), ("coming", .ahead), ("landing", .target)], motion: .flinging(speed: 5)), from: source)
+        try await until("The landing photo did not download.") { deliveries.all.contains { $0.assetID == "landing" } }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(server.requested, ["landing"])
+        scheduler.withdraw(source)
+    }
+
     // MARK: - Decodes
 
     func testObsoleteDiskDecodesNeverStart() async throws {

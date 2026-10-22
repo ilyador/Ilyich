@@ -30,9 +30,12 @@ struct ThumbnailDelivery: Sendable {
 /// ask for single photos and wait. Each photo revision has one job, whoever wants it.
 ///
 /// - Disk decodes run on a few lanes off the main thread, most urgent band first. While the grid
-///   scrubs, the photo that came on screen last decodes first; otherwise the one nearest the
-///   middle. A lane checks the job's wanted flag before reading the file, so a photo that scrolled
-///   away is never decoded.
+///   scrubs or passes photos faster than they could arrive (ViewportPolicy), the photo that came
+///   on screen last decodes first; otherwise the one nearest the middle. A lane checks the job's
+///   wanted flag before reading the file, so a photo that scrolled away is never decoded.
+/// - While the grid is fast, only where it will land (the target band) may download; the screen
+///   is served from memory and the disk. The decision stands between the policy's two speeds, so
+///   a speed hovering near one does not start and stop downloads every frame.
 /// - Photos renders phone photos' thumbnails on the same lanes, through the device source, which
 ///   also keeps Photos' caching manager one window ahead of the grid (T6). They never download.
 ///   One Photos could not render (gone, or only in iCloud) waits like a failing download, twice
@@ -134,6 +137,8 @@ final class ThumbnailScheduler: Sendable {
         var wanted: [Source: Set<Key>] = [:]
         /// The phone photos each grid wants that memory lacks, for Photos to render ahead.
         var deviceWindows: [Source: DeviceWindow] = [:]
+        /// Whether each grid passes photos faster than they could arrive, as of its last demand.
+        var fast: [Source: Bool] = [:]
         var serial = 0
         var decoding = 0
         var fetching = 0
@@ -261,7 +266,13 @@ final class ThumbnailScheduler: Sendable {
     }
 
     private func apply(_ demand: ViewportDemand, from source: Source) {
-        let scrubbing = demand.motion == .scrubbing
+        // Fast is scrubbing, or passing photos faster than they could arrive; between the policy's
+        // speeds the grid's last decision stands.
+        let fast = state.withLock { state -> Bool in
+            let fast = ViewportPolicy.isFast(demand.motion, wasFast: state.fast[source] ?? false)
+            state.fast[source] = demand.items.isEmpty ? nil : fast
+            return fast
+        }
         var wants: [Key: Want] = [:]
         var devices: [Key: DeviceAssetID] = [:]
         for item in demand.items {
@@ -273,7 +284,7 @@ final class ThumbnailScheduler: Sendable {
             if memory.image(assetID: key.assetID, revision: key.revision, shortSide: request.shortSide) != nil { continue }
             if let id = request.key.deviceID { devices[key] = id }
             let want = Want(band: item.band, rank: item.rank, shortSide: request.shortSide,
-                            network: !scrubbing || item.band == .target)
+                            network: ViewportPolicy.allowsNetwork(item.band, fast: fast))
             wants[key] = wants[key].map { $0.merged(want) } ?? want
         }
         // Photos renders ahead the phone photos wanted, at the largest cell, except those it
@@ -306,7 +317,7 @@ final class ThumbnailScheduler: Sendable {
             for (key, var want) in wants {
                 var job = state.jobs[key] ?? Job(key: key, token: token, generation: state.generation,
                                                  device: devices[key], onDisk: onDisk[key] ?? true)
-                if scrubbing && want.band == .visible {
+                if fast && want.band == .visible {
                     let previous = job.grid[source]
                     want.lifo = previous?.band == .visible && previous?.lifo != 0 ? previous!.lifo : -serial
                 }
@@ -692,6 +703,7 @@ final class ThumbnailScheduler: Sendable {
             state.jobs = [:]
             state.wanted = [:]
             state.deviceWindows = [:]
+            state.fast = [:]
             state.mailbox = [:]
             return waiters
         }

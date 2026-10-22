@@ -354,7 +354,7 @@ final class DeviceThumbnailTests: XCTestCase {
         /// The status symbol's image view; the photo itself draws into a plain view's layer.
         func symbol() -> UIImage? { cell.contentView.subviews.lazy.compactMap { ($0 as? UIImageView)?.image }.first }
         XCTAssertTrue(binder.bind(cell, toDevice: photo, shortSide: 128))
-        binder.submit(viewport: cell.frame, ahead: [], shortSide: 128, motion: .idle(since: 0))
+        binder.submit(GridViewport.Windows(visible: cell.frame, visibleBand: .visible, ahead: [], behind: [], target: [], shortSide: 128, motion: .idle(since: 0)))
         try await untilOnMain("The failure was not shown.") { cell.binding?.stage == .failed }
         XCTAssertNotNil(symbol(), "The cell says Photos holds the photo only in iCloud.")
         XCTAssertEqual(cell.accessibilityLabel, "Preview unavailable, \(photo.title)")

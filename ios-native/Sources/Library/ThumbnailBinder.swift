@@ -181,10 +181,12 @@ import UIKit
 
     // MARK: Demand
 
-    /// What the grid wants: the cells on screen in `viewport` that lack their exact thumbnail,
-    /// nearest the middle first, then the photos about to scroll in, at `shortSide` pixels.
-    /// `motion` says whether the network may be used for them.
-    func submit(viewport: CGRect, ahead: [Ahead], shortSide: Int, motion: Motion) {
+    /// What the grid wants: the cells on screen that lack their exact thumbnail, nearest the
+    /// middle first, then where a fling will land, the photos about to scroll in and those just
+    /// passed, as the viewport read them off the layout. The demand's motion says, through the
+    /// policy, which of them may use the network.
+    func submit(_ windows: GridViewport.Windows) {
+        let viewport = windows.visible
         let middle = CGPoint(x: viewport.midX, y: viewport.midY)
         var onScreen: [(binding: Binding, distance: CGFloat)] = []
         var shown = Set<ThumbnailKey>()
@@ -199,22 +201,30 @@ import UIKit
         }
         onScreen.sort { $0.distance < $1.distance }
         var items: [ViewportDemand.Item] = []
-        items.reserveCapacity(onScreen.count + ahead.count)
+        items.reserveCapacity(onScreen.count + windows.target.count + windows.ahead.count + windows.behind.count)
         for (rank, entry) in onScreen.enumerated() {
             let binding = entry.binding
             items.append(.init(request: ThumbnailRequest(key: binding.key, thumbhash: binding.thumbhash, shortSide: binding.shortSide),
-                               band: .visible, rank: rank))
+                               band: windows.visibleBand, rank: rank))
         }
-        for (rank, entry) in ahead.sorted(by: { $0.distance < $1.distance }).prefix(Self.aheadLimit).enumerated()
-            where !shown.contains(entry.key) {
-            items.append(.init(request: ThumbnailRequest(key: entry.key, thumbhash: entry.thumbhash, shortSide: shortSide),
-                               band: .ahead, rank: rank))
+        // Each window comes nearest the screen first, and no photo is asked for twice.
+        var hashes: [String] = []
+        let bands: [(DemandBand, [Ahead])] = [(.target, windows.target), (.ahead, windows.ahead), (.behind, windows.behind)]
+        for (band, photos) in bands {
+            var rank = 0
+            for photo in photos where !shown.contains(photo.key) {
+                shown.insert(photo.key)
+                items.append(.init(request: ThumbnailRequest(key: photo.key, thumbhash: photo.thumbhash, shortSide: windows.shortSide),
+                                   band: band, rank: rank))
+                rank += 1
+                if band != .behind, let hash = photo.thumbhash { hashes.append(hash) }
+            }
         }
-        scheduler.submit(ViewportDemand(generation: pipeline.mediaToken(), items: items, motion: motion), from: source)
+        // The sketches of photos about to scroll in decode now, off the main thread, so their
+        // cells have them at once; those just passed still have theirs.
+        ThumbHashSketches.shared.prefetch(hashes)
+        scheduler.submit(ViewportDemand(generation: pipeline.mediaToken(), items: items, motion: windows.motion), from: source)
     }
-
-    /// Photos about to scroll in; past this many the farthest have usually scrolled past already.
-    static let aheadLimit = 120
 
     // MARK: Deliveries
 

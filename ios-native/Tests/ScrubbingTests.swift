@@ -130,7 +130,7 @@ import XCTest
         let binder = ThumbnailBinder(pipeline: pipeline)
         // As in a scrub: the grid moves too fast to decode sketches or download here.
         cell.configure(entry: .remote(asset), binder: binder, selected: false, selecting: false, month: nil)
-        binder.submit(viewport: cell.frame, ahead: [], shortSide: 100, motion: .scrubbing)
+        binder.submit(GridViewport.Windows(visible: cell.frame, visibleBand: .visible, ahead: [], behind: [], target: [], shortSide: 100, motion: .scrubbing))
         try await until("The stored thumbnail never drew.", within: .seconds(30)) { cell.showsThumbnail }
         withExtendedLifetime(binder) {}
         XCTAssertNil(ThumbHashSketches.shared.cached(ahead[ahead.count - 1]), "It drew while the sketches ahead of its own were still decoding.")
