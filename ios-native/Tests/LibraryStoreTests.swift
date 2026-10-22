@@ -530,36 +530,44 @@ import XCTest
     }
 
     func testDeduplicationKeepsTheVisiblePhotoAnchoredWhenEarlierRowsDisappear() async throws {
+        let bucket = "2026-01-01T00:00:00Z"
         let api = LibraryAPIFixture([])
         let store = LibraryStore(source: api, includesDevicePhotos: true)
         await store.reload()
+        try await until("The timeline did not load.") { store.loaded[bucket] != nil }
         let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
         let photos = [LocalPhoto(id: "a", date: date), LocalPhoto(id: "b", date: date.addingTimeInterval(-60))]
         store.updateDeviceTimeline(MergedTimeline(photos: photos))
-        store.loaded = ["2026-01-01T00:00:00Z": [Asset(id: "timeline-photo")]]
+        await store.settleProjections()
+        store.loaded = [bucket: [Asset(id: "timeline-photo")]]
         store.updateDeviceTimeline(MergedTimeline(photos: photos))
-        store.position = GridPosition(section: "2026-01-01T00:00:00Z", item: 1, offset: 17, assetID: "local:b")
+        await store.settleProjections()
+        store.position = GridPosition(section: bucket, item: 1, offset: 17, assetID: "local:b")
         store.updateDeviceTimeline(MergedTimeline(photos: photos, associations: ["a": "timeline-photo"]))
+        await store.settleProjections()
         let position = try XCTUnwrap(store.restorePosition)
         XCTAssertEqual(store.restoredIndex(for: position)?.item, 0)
         XCTAssertEqual(position.offset, 17)
         store.updateDeviceTimeline(MergedTimeline(photos: photos, associations: ["a": "timeline-photo", "b": "timeline-photo"]))
+        await store.settleProjections()
         XCTAssertEqual(store.restorePosition?.assetID, "timeline-photo")
         store.stop()
     }
 
-    func testRepeatedDeviceSnapshotKeepsGridIdentityAndLocalEditStillInvalidatesMedia() throws {
+    func testRepeatedDeviceSnapshotKeepsGridIdentityAndLocalEditStillInvalidatesMedia() async throws {
         let api = LibraryAPIFixture([])
         let store = LibraryStore(source: api, includesDevicePhotos: true)
         let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
         let photo = LocalPhoto(id: "phone", date: date, modified: date)
         let snapshot = MergedTimeline(photos: [photo])
         store.updateDeviceTimeline(snapshot)
+        await store.settleProjections()
         let reset = store.resetID, revision = store.revision
         store.position = GridPosition(section: "2026-01-01", item: 0, offset: 17, assetID: "local:phone")
         store.isSelecting = true; store.select(.local(photo))
 
         store.updateDeviceTimeline(snapshot) // Discovery and fingerprint completion can be identical.
+        await store.settleProjections()
         XCTAssertEqual(store.resetID, reset)
         XCTAssertEqual(store.revision, revision)
         XCTAssertNil(store.restorePosition)
@@ -567,9 +575,71 @@ import XCTest
 
         let edited = LocalPhoto(id: "phone", date: date, modified: date.addingTimeInterval(60))
         store.updateDeviceTimeline(MergedTimeline(photos: [edited]))
+        await store.settleProjections()
         XCTAssertEqual(store.resetID, reset, "A media revision change should reconfigure the same row.")
         XCTAssertGreaterThan(store.revision, revision)
         XCTAssertEqual(store.entry(section: 0, item: 0)?.local?.modified, edited.modified)
+        store.stop()
+    }
+
+    /// F3: a snapshot from the phone projects only the months its photos changed in, and the
+    /// other months keep their rows; an identical snapshot projects nothing.
+    func testDevicePublishUpdatesOnlyItsMonth() async throws {
+        let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
+        let api = try datedFixture()
+        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        await store.reload()
+        try await until("The first months did not load.") { store.loaded[march] != nil && store.loaded[february] != nil }
+        await store.settleProjections()
+        let marchRow = try XCTUnwrap(store.entry(section: 0, item: 0))
+        let date = try XCTUnwrap(APIDate.parse("2026-02-10T12:00:00Z"))
+        MonthProjector.Probe.start()
+        defer { MonthProjector.Probe.stop() }
+        store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone", date: date)]))
+        await store.settleProjections()
+        XCTAssertEqual(MonthProjector.Probe.runs.flatMap(\.buckets), [february], "Only February is projected again.")
+        XCTAssertEqual(store.sections.map(\.count), [1, 2, 2])
+        XCTAssertEqual(store.entry(section: 0, item: 0), marchRow, "March keeps its rows.")
+        XCTAssertEqual(store.entry(section: 1, item: 0)?.local?.id, "phone")
+
+        // A month only the phone has is new to the grid: it alone is projected.
+        let older = try XCTUnwrap(APIDate.parse("2024-01-10T12:00:00Z"))
+        let photos = [LocalPhoto(id: "phone", date: date), LocalPhoto(id: "older", date: older)]
+        store.updateDeviceTimeline(MergedTimeline(photos: photos))
+        await store.settleProjections()
+        XCTAssertEqual(MonthProjector.Probe.runs.last?.buckets, ["2024-01-01"])
+        XCTAssertEqual(store.sections.map(\.id), [march, february, Self.june, "2024-01-01"])
+        XCTAssertEqual(store.entry(section: 3, item: 0)?.local?.id, "older")
+
+        let runs = MonthProjector.Probe.runs.count, revision = store.revision, reset = store.resetID
+        store.updateDeviceTimeline(MergedTimeline(photos: photos))
+        await store.settleProjections()
+        XCTAssertEqual(MonthProjector.Probe.runs.count, runs, "An identical snapshot projects nothing.")
+        XCTAssertEqual(store.revision, revision)
+        XCTAssertEqual(store.resetID, reset)
+        store.stop()
+    }
+
+    /// F3: months are projected off the main actor, from the feed's deliveries, the phone's
+    /// snapshots and an edited record alike.
+    func testProjectionsNeverRunOnMain() async throws {
+        let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
+        let api = try datedFixture()
+        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        MonthProjector.Probe.start()
+        defer { MonthProjector.Probe.stop() }
+        await store.reload()
+        try await until("The first months did not load.") { store.loaded[march] != nil && store.loaded[february] != nil }
+        let date = try XCTUnwrap(APIDate.parse("2026-02-10T12:00:00Z"))
+        store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone", date: date)]))
+        await store.settleProjections()
+        store.update(Asset(id: "march", originalFileName: "march.jpg"))
+        await store.settleProjections()
+        let runs = MonthProjector.Probe.runs
+        XCTAssertGreaterThanOrEqual(runs.filter { !$0.buckets.isEmpty }.count, 3, "The loads, the snapshot and the edit each project.")
+        XCTAssertTrue(runs.allSatisfy { !$0.onMain }, "No projection ran on the main thread.")
+        XCTAssertEqual(store.entry(section: 0, item: 0)?.remote?.originalFileName, "march.jpg")
+        XCTAssertEqual(store.entry(section: 1, item: 0)?.local?.id, "phone")
         store.stop()
     }
 

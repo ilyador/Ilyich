@@ -21,13 +21,20 @@ enum LibraryEntry: Hashable, Identifiable, Sendable {
     }
 }
 
+/// The phone's photos as the merged library shows them at one moment: the phone-only ones by
+/// month ("YYYY-MM"), newest first, and the server photo each backed-up one matched. Each month
+/// and the matches carry a digest, so a consumer finds the months a publish changed without
+/// reading the photos (F3); the digests hold within one process only.
 struct MergedTimeline: Sendable {
-    var localOnly: [String: [LocalPhoto]] = [:]
-    var remoteToLocal: [String: LocalPhoto] = [:]
+    let localOnly: [String: [LocalPhoto]]
+    let remoteToLocal: [String: LocalPhoto]
     let localToRemote: [String: String]
+    let monthDigests: [String: Int]
+    let matchesDigest: Int
 
     init(photos: [LocalPhoto] = [], associations: [String: String] = [:]) {
         localToRemote = associations
+        var localOnly: [String: [LocalPhoto]] = [:], remoteToLocal: [String: LocalPhoto] = [:]
         for photo in photos {
             if let remote = associations[photo.id] {
                 if remoteToLocal[remote] == nil { remoteToLocal[remote] = photo }
@@ -37,7 +44,11 @@ struct MergedTimeline: Sendable {
             }
         }
         for key in localOnly.keys { localOnly[key]?.sort { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) } }
+        self.localOnly = localOnly; self.remoteToLocal = remoteToLocal
+        monthDigests = localOnly.mapValues(Self.digest)
+        matchesDigest = Self.digest(remoteToLocal)
     }
+
     func buckets(remote: [TimeBucket]) -> [TimeBucket] {
         var remaining = Set(localOnly.keys)
         var result = remote.map { bucket in
@@ -47,16 +58,25 @@ struct MergedTimeline: Sendable {
         result += remaining.map { TimeBucket(timeBucket: $0 + "-01", count: localOnly[$0]?.count ?? 0) }
         return result.sorted { $0.id > $1.id }
     }
-    /// A month's photos, the server's and the phone-only ones together, newest first by the time
-    /// taken, then by ID, as the index and the server's months are ordered.
-    func entries(remote: [Asset], bucket: String) -> [LibraryEntry] {
-        let items = remote.map { LibraryEntry.remote($0, local: remoteToLocal[$0.id]) }
-            + (localOnly[String(bucket.prefix(7))] ?? []).map(LibraryEntry.local)
-        return items.sorted { $0.date == $1.date ? $0.id < $1.id : $0.date > $1.date }
+
+    /// The phone-only photos of a bucket's month.
+    func phoneOnly(in bucket: String) -> [LocalPhoto] { localOnly[String(bucket.prefix(7))] ?? [] }
+
+    /// The months whose phone-only photos differ from an earlier snapshot's, including months
+    /// that appeared or emptied.
+    func changedMonths(since earlier: MergedTimeline) -> Set<String> {
+        Set(monthDigests.keys).union(earlier.monthDigests.keys).filter { monthDigests[$0] != earlier.monthDigests[$0] }
     }
+
     static func monthKey(_ date: Date) -> String {
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let parts = calendar.dateComponents([.year, .month], from: date)
         return String(format: "%04d-%02d", parts.year ?? 1970, parts.month ?? 1)
+    }
+
+    private static func digest<Value: Hashable>(_ value: Value) -> Int {
+        var hasher = Hasher()
+        hasher.combine(value)
+        return hasher.finalize()
     }
 }
