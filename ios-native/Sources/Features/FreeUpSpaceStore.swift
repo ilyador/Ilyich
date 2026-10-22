@@ -47,14 +47,22 @@ extension EnvironmentValues {
     @ObservationIgnored private var sizes: [String: Int64?] = [:]
     @ObservationIgnored private var operation: Task<Void, Never>?
     @ObservationIgnored private var following: [Task<Void, Never>] = []
+    @ObservationIgnored private let now: @Sendable () -> Date
+    /// The check on screen, so one dropped as a whole while the screen wasn't following is seen.
+    @ObservationIgnored private var scanID: UUID?
+    /// The owner picked a cutoff that isn't saved yet. Until then it is the saved number of days
+    /// before today, worked out again each time, so it never drifts as days pass.
+    @ObservationIgnored private var cutoffEdited = false
 
-    init(service: CleanupService, settings: CleanupSettingsStore = CleanupSettingsStore(), adapter: PhotoKitAdapter = .shared) {
+    init(service: CleanupService, settings: CleanupSettingsStore = CleanupSettingsStore(), adapter: PhotoKitAdapter = .shared,
+         now: @escaping @Sendable () -> Date = { Date() }) {
         self.service = service
         self.settings = settings
         self.adapter = adapter
+        self.now = now
         let saved = settings.load()
         permission = adapter.authorization
-        cutoff = saved.cutoff()
+        cutoff = saved.cutoff(now: now())
         keepFavorites = saved.keepFavorites
         keepMediaType = saved.keepMediaType
         keptAlbumIDs = saved.keptAlbumIDs ?? []
@@ -75,16 +83,20 @@ extension EnvironmentValues {
                 }
             })
         }
-        // Back from another screen: what changed meanwhile is no longer offered.
-        if checked {
-            let live = await service.liveCandidates
-            drop(Set(candidates.map(\.id)).subtracting(live))
+        // Back from another screen: what changed meanwhile is no longer offered, and a check
+        // dropped as a whole meanwhile asks to be made again.
+        if checked, !checking {
+            if await service.currentScanID != scanID {
+                clear(); message = Self.checkAgain
+            } else {
+                let live = await service.liveCandidates
+                drop(Set(candidates.map(\.id)).subtracting(live))
+            }
         }
         await refreshFilters()
-        if !filtersReady {
-            cutoff = settings.load().cutoff()
-            filtersReady = true
-        }
+        // The results on screen were found with the cutoff shown, so it stays while they do.
+        if !checked, !checking, !cutoffEdited { cutoff = settings.load().cutoff(now: now()) }
+        filtersReady = true
     }
 
     func disappear() {
@@ -122,7 +134,7 @@ extension EnvironmentValues {
 
     // MARK: Settings
 
-    func setCutoff(_ date: Date) { guard date != cutoff else { return }; cutoff = date; invalidate() }
+    func setCutoff(_ date: Date) { guard date != cutoff else { return }; cutoff = date; cutoffEdited = true; invalidate() }
 
     func setKeepFavorites(_ value: Bool) {
         guard value != keepFavorites else { return }
@@ -150,22 +162,27 @@ extension EnvironmentValues {
     }
 
     private func clear() {
-        selection = []; candidates = []; exclusions = []; sizes = [:]; checked = false; message = nil
+        selection = []; candidates = []; exclusions = []; sizes = [:]; checked = false; message = nil; scanID = nil
     }
 
     // MARK: Commands
 
-    func check() {
-        guard !checking, !removing else { return }
+    /// Starts a check; the task is for tests to wait on.
+    @discardableResult func check() -> Task<Void, Never>? {
+        guard !checking, !removing else { return nil }
         operation?.cancel()
-        operation = Task { await runCheck() }
+        let task = Task { await runCheck() }
+        operation = task
+        return task
     }
 
     private func runCheck() async {
         checking = true; defer { checking = false }
         clear()
         guard PhotoKitAdapter.canRead(adapter.authorization) else { failure = CleanupCheckError.photosAccess.errorDescription; return }
-        settings.setCutoffDaysAgo(max(0, Calendar.current.dateComponents([.day], from: cutoff, to: Date()).day ?? 0))
+        if !cutoffEdited { cutoff = settings.load().cutoff(now: now()) }
+        settings.setCutoffDaysAgo(max(0, Calendar.current.dateComponents([.day], from: cutoff, to: now()).day ?? 0))
+        cutoffEdited = false
         do {
             let result = try await service.scan(cutoff: cutoff)
             let photos = await adapter.photos(withIDs: result.candidates.map(\.localID))
@@ -178,6 +195,7 @@ extension EnvironmentValues {
             exclusions = Dictionary(grouping: result.exclusions, by: \.value)
                 .map { ExclusionGroup(exclusion: $0.key, ids: $0.value.map(\.key).sorted()) }
                 .sorted { $0.ids.count == $1.ids.count ? $0.exclusion.rawValue < $1.exclusion.rawValue : $0.ids.count > $1.ids.count }
+            scanID = result.id
             checked = true
         } catch is CancellationError {
         } catch { failure = error.localizedDescription }
@@ -224,9 +242,11 @@ extension EnvironmentValues {
         case .invalidated:
             guard checked || checking else { return }
             operation?.cancel(); operation = nil
-            clear(); message = "Your account, Photos access or library changed. Check again."
+            clear(); message = Self.checkAgain
         }
     }
+
+    private static let checkAgain = "Your account, Photos access or library changed. Check again."
 
     private func drop(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }

@@ -1,5 +1,6 @@
 import Foundation
 import IlyichPlatform
+import os
 
 /// A phone photo a check found safe to remove: backed up, verified on the server, unchanged.
 struct CleanupCandidate: Hashable, Sendable {
@@ -27,6 +28,8 @@ struct CleanupScanResult: Sendable {
     let candidates: [CleanupCandidate]
     /// Every other backed-up phone photo, with why it stays.
     let exclusions: [String: CleanupExclusion]
+    /// The most server checks that were in flight at once.
+    var peakRequests = 0
 }
 
 /// Why a check no longer holds as a whole (DS11).
@@ -180,6 +183,9 @@ actor CleanupService {
     /// The candidates the current check still offers.
     var liveCandidates: Set<String> { current.map { Set($0.candidates.keys) } ?? [] }
 
+    /// The current check's id, or nil once none holds.
+    var currentScanID: UUID? { current?.id }
+
     // MARK: - Checking
 
     /// Checks which backed-up phone photos may be removed, with `cutoff` from the settings when
@@ -206,7 +212,32 @@ actor CleanupService {
         if let reason { emit(.invalidated(reason)) }
     }
 
+    private static let log = Logger(subsystem: PerfSignpost.subsystem, category: PerfSignpost.Category.cleanup)
+
     private func runScan(token: UUID, cutoff: Date?) async throws -> CleanupScanResult {
+        // The P4 perf gate: time to candidates and the most server checks in flight at once.
+        let signposter = PerfSignpost.cleanup
+        let interval = signposter.isEnabled ? signposter.beginInterval(PerfSignpost.cleanupScan, id: signposter.makeSignpostID()) : nil
+        let clock = ContinuousClock(), start = clock.now
+        var outcome = "failed", receiptCount = 0, verified = 0, peak = 0, found = 0
+        defer {
+            let elapsed = clock.now - start
+            if let interval {
+                signposter.endInterval(PerfSignpost.cleanupScan, interval,
+                                       "outcome=\(outcome, privacy: .public) receipts=\(receiptCount) verified=\(verified) peakGets=\(peak) candidates=\(found)")
+            }
+            Self.log.notice("cleanup.scan \(outcome, privacy: .public) in \(elapsed.formatted(.units(allowed: [.seconds, .milliseconds])), privacy: .public): receipts=\(receiptCount) verified=\(verified) peakGets=\(peak) candidates=\(found)")
+        }
+        do {
+            let result = try await scanOnce(token: token, cutoff: cutoff, receiptCount: &receiptCount, verified: &verified, peak: &peak)
+            outcome = "completed"; found = result.candidates.count
+            return result
+        } catch is CancellationError {
+            outcome = "cancelled"; throw CancellationError()
+        }
+    }
+
+    private func scanOnce(token: UUID, cutoff: Date?, receiptCount: inout Int, verified: inout Int, peak: inout Int) async throws -> CleanupScanResult {
         startWatching()
         dirty = []; dirtyWhole = false; pendingServer = []
         guard let fence = fence() else { throw CleanupCheckError.signedOut }
@@ -216,6 +247,7 @@ actor CleanupService {
         let cutoff = cutoff ?? settings.cutoff()
         guard let known = await receipts.receipts(account: account) else { throw CleanupCheckError.receiptsUnavailable }
         try Task.checkCancellation()
+        receiptCount = known.count
         let kept = try await device.members(of: settings.keptAlbumIDs ?? [])
 
         // On the phone first, in batches, so no photo the phone rules out costs a request.
@@ -236,7 +268,9 @@ actor CleanupService {
         }
 
         // Then the server, strictly, at most `verificationLimit` at once. A 401 throws and ends it.
-        let verdicts = try await Self.verify(survivors.map(\.0), with: verifier, limit: verificationLimit)
+        verified = survivors.count
+        let (verdicts, inFlight) = try await Self.verify(survivors.map(\.0), with: verifier, limit: verificationLimit)
+        peak = inFlight
         try Task.checkCancellation()
         var candidates: [String: CleanupCandidate] = [:]
         for (receipt, asset) in survivors {
@@ -265,7 +299,7 @@ actor CleanupService {
             let left = $0.asset.created ?? .distantPast, right = $1.asset.created ?? .distantPast
             return left == right ? $0.localID < $1.localID : left > right
         }
-        return CleanupScanResult(id: current!.id, candidates: ordered, exclusions: exclusions)
+        return CleanupScanResult(id: current!.id, candidates: ordered, exclusions: exclusions, peakRequests: peak)
     }
 
     /// Why the phone keeps this photo, or nil when the server should be asked (DS2, DS3, DS7).
@@ -285,27 +319,28 @@ actor CleanupService {
                                                          inKeptAlbum: kept.contains(asset.id.rawValue))
     }
 
-    /// Each receipt's verdict, with at most `limit` checks in flight.
+    /// Each receipt's verdict, with at most `limit` checks in flight, and the most that were.
     private nonisolated static func verify(_ receipts: [CleanupReceipt], with verifier: RemoteCopyVerifier,
-                                           limit: Int) async throws -> [String: RemoteCopyVerifier.Verdict] {
+                                           limit: Int) async throws -> ([String: RemoteCopyVerifier.Verdict], peak: Int) {
         try await withThrowingTaskGroup(of: (String, RemoteCopyVerifier.Verdict).self) { group in
             var results: [String: RemoteCopyVerifier.Verdict] = [:]
-            var next = 0
+            var next = 0, inFlight = 0, peak = 0
             while next < min(limit, receipts.count) {
                 let receipt = receipts[next]
                 group.addTask { (receipt.localID, try await verifier.verify(receipt)) }
-                next += 1
+                next += 1; inFlight += 1; peak = max(peak, inFlight)
             }
             while let (id, verdict) = try await group.next() {
                 results[id] = verdict
+                inFlight -= 1
                 if next < receipts.count, !Task.isCancelled {
                     let receipt = receipts[next]
                     group.addTask { (receipt.localID, try await verifier.verify(receipt)) }
-                    next += 1
+                    next += 1; inFlight += 1; peak = max(peak, inFlight)
                 }
             }
             try Task.checkCancellation()
-            return results
+            return (results, peak)
         }
     }
 
@@ -346,7 +381,7 @@ actor CleanupService {
 
         // DS5: only the selection is verified again, right before Photos is asked.
         let verdicts: [String: RemoteCopyVerifier.Verdict]
-        do { verdicts = try await Self.verify(reviewed.map(\.receipt), with: verifier, limit: verificationLimit) }
+        do { verdicts = try await Self.verify(reviewed.map(\.receipt), with: verifier, limit: verificationLimit).0 }
         catch is CleanupAborted { invalidate(.account); return .failed(CleanupAborted().errorDescription ?? "") }
         catch { return .blocked(.checkAgain) }
         let failed = Set(reviewed.map(\.localID).filter {

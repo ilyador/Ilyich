@@ -80,6 +80,7 @@ import XCTest
 
         XCTAssertEqual(result.candidates.count, 30)
         XCTAssertEqual(h.remote.maxInFlight, 6)
+        XCTAssertEqual(result.peakRequests, 6, "The check reports the most it had in flight, for the P4 perf gate.")
     }
 
     // MARK: - Re-verification at remove

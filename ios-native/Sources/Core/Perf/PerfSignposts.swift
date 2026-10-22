@@ -18,6 +18,7 @@ enum PerfSignpost {
         static let transfer = "transfer"
         static let memory = "memory"
         static let perf = "perf"
+        static let cleanup = "cleanup"
     }
 
     /// From a cell's bind to its first real thumbnail. The end carries the source.
@@ -41,6 +42,9 @@ enum PerfSignpost {
     /// The app's phys_footprint, sampled.
     static let memFootprint: StaticString = "mem.footprint"
     static let perfScenario: StaticString = "perf.scenario"
+    /// One Free up space check, to its candidates. The end carries the receipts, the photos
+    /// verified with the server, the most server checks in flight at once and the candidates.
+    static let cleanupScan: StaticString = "cleanup.scan"
 
     /// Every name by category.
     static let catalog: [(category: String, names: [StaticString])] = [
@@ -53,6 +57,7 @@ enum PerfSignpost {
         (Category.transfer, [transferStage, transferSubmit, transferCommit]),
         (Category.memory, [memFootprint]),
         (Category.perf, [perfScenario]),
+        (Category.cleanup, [cleanupScan]),
     ]
 
     static let thumbnails = signposter(Category.thumbnails)
@@ -64,6 +69,7 @@ enum PerfSignpost {
     static let transfer = signposter(Category.transfer)
     static let memory = signposter(Category.memory)
     static let perf = signposter(Category.perf)
+    static let cleanup = signposter(Category.cleanup)
 
     private static func signposter(_ category: String) -> OSSignposter {
         PerfRecorder.shared == nil ? .disabled : OSSignposter(subsystem: subsystem, category: category)
