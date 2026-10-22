@@ -315,11 +315,14 @@ struct EngineWindowWork: BackgroundWindowWork {
 /// - Pause switches automatic backup off and pauses the library lane;
 /// - Back up now (manual) looks for new photos in the backup albums and uploads them, retrying
 ///   failed photos once, then ends as a run always has;
-/// - Back up selected and Upload to album start uploading the photos, even while paused;
-/// - Retry failed uploads retries them and runs as Back up now does;
+/// - Back up selected and Upload to album start uploading the photos, even while paused, and
+///   retry one that failed; a share's Upload retries a file that failed too;
+/// - Retry failed uploads retries the failed photos and runs as Back up now does;
 /// - switching Automatic backup on or off starts or winds down automatic backup.
 /// The snapshot's remaining count includes failed photos, which the queue lists, and its activity
-/// words what the engine is doing as the status line always has.
+/// words what the engine is doing as the status line always has. The failures the backup screen
+/// lists are the phone's photos', as they always were; each lane's queue lists its failed jobs,
+/// which is where the Shared files sheet finds a file's error.
 struct EngineBackend: TransferControlling {
     let engine: TransferEngine<ContinuousClock>
     let store: TransferStore
@@ -365,9 +368,12 @@ struct EngineBackend: TransferControlling {
 
     func preferences() async throws -> TransferPreferences? { try await engine.preferences() }
 
+    /// Named jobs are retried as they are. Retry failed uploads (nil) is a manual run, which
+    /// retries every failed photo and the album adds and stacks that failed after an upload; a
+    /// shared file is retried from the Shared files sheet, as it always was.
     func retry(_ sources: [TransferSource]?) async throws {
-        try await engine.retry(sources)
-        if sources == nil { try await engine.runManually(discovery) }
+        guard sources == nil else { return try await engine.retry(sources) }
+        try await engine.runManually(discovery)
     }
 
     func snapshots() async -> AsyncStream<TransferSnapshot> {
@@ -385,11 +391,11 @@ struct EngineBackend: TransferControlling {
     }
 
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem] {
-        lane == .library ? try await store.backupQueuePage(after: seq, limit: limit) : try await engine.queuePage(lane: lane, after: seq, limit: limit)
+        try await store.listedQueuePage(lane: lane, after: seq, limit: limit)
     }
 
     func historyPage(offset: Int, limit: Int) async throws -> [TransferHistoryItem] { try await engine.historyPage(offset: offset, limit: limit) }
-    func failures(limit: Int) async throws -> [TransferQueueItem] { try await engine.failures(limit: limit) }
+    func failures(limit: Int) async throws -> [TransferQueueItem] { try await store.failures(lane: .library, limit: limit) }
     func albumUploadCounts() async throws -> [String: AlbumUploadCount] { try await engine.albumUploadCounts() }
 
     /// The engine's snapshot as the backup screen shows it.

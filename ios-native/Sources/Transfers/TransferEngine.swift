@@ -110,9 +110,12 @@ struct JobContext: Sendable {
 /// executor's pipeline for it (B3), which takes the turns within it.
 ///
 /// The run intent gates only the library lane. An account block stops both lanes until the user
-/// acts; nothing automatic lifts it. An engine-wide wait lasts until a condition changes. A
-/// transient failure retries after a backoff, keeping the job eligible; an item failure waits for
-/// the user, which a manual run does for every failed photo at its start.
+/// acts; nothing automatic lifts it, except that turning read-only mode off, the user's own act,
+/// lifts its block. Turning it on also does what the toggle always did: backup pauses, with
+/// automatic backup switched off, and shared uploads stop, so turning it off resumes nothing (the
+/// owner's decision). An engine-wide wait lasts until a condition changes. A transient failure
+/// retries after a backoff, keeping the job eligible; an item failure waits for the user, which a
+/// manual run does for every failed photo at its start.
 ///
 /// It runs only on a database it owns (TransferStore.claimForEngine, or B9's authoritative
 /// import), never on the shadow copy a shadow import rewrites.
@@ -327,6 +330,12 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     func enqueue(_ requests: [TransferRequest]) async throws -> EnqueueResult {
+        // A read-only block that outlived read-only mode (a refusal handled after it went off)
+        // doesn't refuse the user's own uploads.
+        if blocker == .readOnly, restriction(authorization.current()) == nil {
+            blocker = nil
+            try await saveEngineState()
+        }
         if let refusal = blocker ?? restriction(authorization.current()) { return .refused(refusal) }
         let result = try await store.enqueue(requests)
         await changed()
@@ -582,8 +591,10 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                 if ranSinceDrain {
                     ranSinceDrain = false
                     followUp?(.drained)
-                    await settleManualRun()
                 }
+                // A manual run ends once nothing is left, whoever finished its last photo: a job
+                // of this loop, or recovery applying an outcome after a relaunch (refresh).
+                if intent == .manual, counts.remaining == 0 { await settleManualRun() }
             }
             let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
             await sleep(until: active.count < concurrency ? try? await store.nextRetry(lanes: lanes) : nil)
@@ -768,19 +779,41 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         } else {
             // Uploads taken under another write generation are fenced; the jobs run again.
             await releaseActive { $0.writeGeneration != snapshot?.writeGeneration }
+            // Read-only mode is off: its block goes. Turning it on paused backup and stopped
+            // shared uploads, so nothing resumes (the owner's decision), and the user's own
+            // uploads are taken again.
+            if blocker == .readOnly {
+                blocker = nil
+                try? await saveEngineState()
+            }
         }
         await changed()
     }
 
-    /// Stops both lanes until the user acts. The running job gives its lease back, keeping its
-    /// stage.
+    /// Stops both lanes until the user acts. The running jobs give their leases back, keeping
+    /// their stages. Read-only mode coming on does what the toggle always did besides: backup
+    /// pauses, switching automatic backup off, and shared uploads stop, their files staying in the
+    /// inbox. The pause is saved with the block, so a relaunch keeps both.
     private func block(_ restriction: AccountRestriction) async {
-        if blocker != restriction {
+        let entering = blocker != restriction
+        if entering {
             blocker = restriction
+            if restriction == .readOnly { await pauseForReadOnly() }
             // An ended session's block is this engine's alone: the database outlives the session.
             if restriction != .signedOut { try? await saveEngineState() }
         }
         await releaseActive()
+        if entering, restriction == .readOnly { _ = try? await store.removeUnfailedJobs(lane: .share) }
+    }
+
+    /// Read-only mode came on: the library lane pauses and automatic backup goes off, as Pause
+    /// does.
+    private func pauseForReadOnly() async {
+        intent = .paused
+        guard var paused = preferences, paused.automatic else { return }
+        paused.automatic = false
+        preferences = paused
+        try? await store.savePreferences(paused)
     }
 
     /// An explicit command lifts the block if its cause has gone. A changed token never clears:

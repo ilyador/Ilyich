@@ -169,10 +169,21 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
         } catch { self.error = error.localizedDescription }
     }
 
+    /// Which accounts this coordinator may take up. TransferHost limits it to the account it chose
+    /// today's backup for, or to none while the account signed in can't use it, so nothing that
+    /// wakes today's backup (a background window, a session's events, a screen's command) takes up
+    /// an account whose records the transfer engine owns. Any, for tests of today's backup.
+    enum TakeUp: Equatable {
+        case any
+        case only(String?)
+    }
+    @ObservationIgnored var takesUp = TakeUp.any
+
     /// Takes up `session`'s backup state, from `folder` or from its Backup folder in the App
     /// Group, and carries on with a run it left unfinished. The account already taken up only
     /// reads its albums again. AccountManager calls this each time an account becomes active.
     func activate(_ session: StoredCredential, folder: URL? = nil) async {
+        if case .only(let scope) = takesUp, scope != session.scope { return }
         do {
             guard session.scope != saved?.scope else { await refreshLibrary(); return }
             guard !isRunning else { throw BackupError.message("Pause the active backup before switching accounts.") }

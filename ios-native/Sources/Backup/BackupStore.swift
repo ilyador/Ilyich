@@ -6,7 +6,9 @@ import Photos
 /// What the backup screens show and the commands they send (REBUILD_ROADMAP.md B8). It follows
 /// the backend's snapshots, which arrive as backup changes, never by polling, and rereads the
 /// failures, album counts and preferences with each. Preference edits are written once they
-/// settle, and before any command, so a command always runs with what the screen shows.
+/// settle, and before any command, so a command always runs with what the screen shows. An edit
+/// made before the backend's preferences were read (while the account's backup was prepared) is
+/// not taken (StalePreferencesEdit), and the backend's show instead.
 @MainActor @Observable final class BackupStore: BackupEnqueuing {
     /// The app's store, over the process's backup engine: the account's transfer engine, or
     /// today's backup (TransferHost).
@@ -137,9 +139,22 @@ import Photos
         let previous = writing, backend = backend
         writing = Task { [weak self] in
             await previous?.value
-            do { try await backend.setPreferences(value) } catch { self?.commandError = error.localizedDescription }
+            var stale = false
+            do { try await backend.setPreferences(value) }
+            catch is StalePreferencesEdit { stale = true }
+            catch { self?.commandError = error.localizedDescription }
             self?.writes -= 1
+            if stale { await self?.showStoredPreferences(insteadOf: value) }
         }
+    }
+
+    /// The backend didn't take an edit the screen made before it read the backend's preferences,
+    /// as while the account's backup was prepared: the backend's show, unless the screen changed
+    /// again meanwhile.
+    private func showStoredPreferences(insteadOf edit: TransferPreferences) async {
+        guard let stored = try? await backend.preferences(), writes == 0, pendingWrite == nil, preferences == edit else { return }
+        adopted = stored
+        if preferences != stored { preferences = stored }
     }
 
     // MARK: Snapshots
@@ -209,18 +224,23 @@ extension AccountRestriction {
 }
 
 /// What the Shared files sheet shows and the commands it sends (REBUILD_ROADMAP.md B8, B9).
-/// Uploads start and pause through TransferControlling. The inbox's batches are read from
-/// ShareInboxStore, the inbox's owner. While the transfer engine runs the account's uploads, what
-/// is uploading, its progress and each file's error come from the engine's share lane; otherwise
-/// from today's ShareInboxStore, whose progress arrives from the share session as it is sent.
+/// Uploads start and pause through the process's backend (TransferHost), which waits while the
+/// account's backup is prepared and never reaches today's uploads unless the process runs them.
+/// The inbox's batches are read from ShareInboxStore, the inbox's owner. While the transfer engine
+/// runs the account's uploads, what is uploading, its progress and each file's error come from the
+/// engine's share lane; while today's backup runs, from ShareInboxStore, whose progress arrives
+/// from the share session as it is sent.
 @MainActor @Observable final class ShareInboxModel {
     let api: APIClient
     @ObservationIgnored private let inbox: ShareInboxStore
-    @ObservationIgnored private let backend: any TransferControlling
-    /// The engine's share lane is the source of the upload's state.
-    @ObservationIgnored private let onEngine: Bool
+    @ObservationIgnored private let backend: BackupBackendRouter
     @ObservationIgnored private var following: Task<Void, Never>?
+    /// Files whose upload stopped rather than finished, by Pause upload or by read-only mode: their
+    /// files stay in the inbox, and they don't count as uploaded.
+    @ObservationIgnored private var stopped: Set<String> = []
     private var engineState = EngineShares()
+    /// Why the last Upload or Pause upload wasn't carried out.
+    private var commandError: String?
 
     /// The engine's share lane as the sheet shows it.
     private struct EngineShares: Equatable {
@@ -232,21 +252,16 @@ extension AccountRestriction {
         var error: String?
     }
 
-    init(api: APIClient, inbox: ShareInboxStore = .shared, backend: (any TransferControlling)? = nil, engine: EngineBackend? = TransferHost.shared.backend.engine) {
+    init(api: APIClient, inbox: ShareInboxStore = .shared, backend: BackupBackendRouter = TransferHost.shared.backend) {
         self.api = api
         self.inbox = inbox
-        if let backend {
-            self.backend = backend
-            onEngine = false
-        } else if let engine {
-            self.backend = engine
-            onEngine = true
-        } else {
-            self.backend = LegacyCoordinatorBackend(inbox: inbox, shareClient: api)
-            onEngine = false
-        }
-        if onEngine { follow() }
+        self.backend = backend
+        follow()
     }
+
+    /// The engine's share lane is the source of the upload's state, unless the process runs
+    /// today's backup.
+    private var onEngine: Bool { !backend.routesToLegacy }
 
     var batches: [SharedBatch] { inbox.batches }
     var unreadableBatches: Int { inbox.unreadableBatches }
@@ -255,11 +270,11 @@ extension AccountRestriction {
     var progress: Double? { onEngine ? engineState.progress : inbox.progress }
     var completed: Int { onEngine ? engineState.completed : inbox.completed }
     var errors: [String: String] { onEngine ? engineState.errors : inbox.errors }
-    var error: String? { onEngine ? engineState.error ?? inbox.error : inbox.error }
+    var error: String? { onEngine ? engineState.error ?? commandError ?? inbox.error : commandError ?? inbox.error }
 
     func refresh() async { await inbox.refresh() }
 
-    /// Uploads the selected files.
+    /// Uploads the selected files, a file that failed included.
     func upload(selected: Set<String>) async {
         let requests = batches.flatMap { batch in
             batch.attachments.filter { selected.contains($0.id) }.map {
@@ -268,14 +283,20 @@ extension AccountRestriction {
             }
         }
         guard !requests.isEmpty else { return }
+        stopped.subtract(selected)
+        commandError = nil
         if onEngine { engineState.completed = 0 }
-        _ = try? await backend.enqueue(requests)
+        do {
+            if case .refused(let restriction) = try await backend.enqueue(requests) { commandError = restriction.backupMessage }
+        } catch { commandError = error.localizedDescription }
     }
 
     /// Pause upload: the files not yet sent stay.
     func pause() async {
         let sources = batches.flatMap { batch in batch.attachments.map { TransferSource.shared(batch: batch.id, attachment: $0.id) } }
-        try? await backend.cancel(sources)
+        stopped.formUnion(batches.flatMap { $0.attachments.map(\.id) })
+        commandError = nil
+        do { try await backend.cancel(sources) } catch { commandError = error.localizedDescription }
     }
 
     func discard(_ batch: SharedBatch) { inbox.discard(batch) }
@@ -292,17 +313,25 @@ extension AccountRestriction {
     }
 
     private func read(_ snapshot: TransferSnapshot) async {
-        guard let queue = try? await backend.queuePage(lane: .share, after: nil, limit: 1_000),
-              let failures = try? await backend.failures(limit: 1_000) else { return }
+        guard onEngine, let page = try? await backend.queuePage(lane: .share, after: nil, limit: 1_000) else { return }
         var next = engineState
-        let attachments = queue.compactMap(\.attachment)
+        var attachments: [String] = []
         var errors: [String: String] = [:]
-        for failure in failures { if let attachment = failure.attachment { errors[attachment] = failure.message ?? "This file couldn’t be uploaded." } }
-        // A file that left the queue without failing was uploaded.
-        let finished = Set(next.queued).subtracting(attachments).subtracting(errors.keys)
-        next.completed += finished.count
+        for item in page {
+            guard let attachment = item.attachment else { continue }
+            if item.state == .failed {
+                errors[attachment] = item.message ?? "This file couldn’t be uploaded."
+            } else {
+                attachments.append(attachment)
+            }
+        }
+        // A file that left the queue without failing was uploaded, unless its upload was stopped:
+        // by Pause upload, or by read-only mode, which stops shared uploads.
+        let left = Set(next.queued).subtracting(attachments).subtracting(errors.keys)
+        if snapshot.phase == .blocked(.readOnly) { stopped.formUnion(left) }
+        next.completed += left.subtracting(stopped).count
         next.queued = attachments
-        next.current = queue.first { [.staging, .staged, .submitting, .submitted, .finalizing].contains($0.state) }?.attachment
+        next.current = page.first { [.staging, .staged, .submitting, .submitted, .finalizing].contains($0.state) }?.attachment
         next.progress = next.current == nil ? nil : snapshot.fileProgress
         next.errors = errors
         if case .blocked(let restriction) = snapshot.phase, restriction != .readOnly, !attachments.isEmpty {
@@ -310,10 +339,10 @@ extension AccountRestriction {
         } else {
             next.error = nil
         }
-        let left = next.queued != engineState.queued
+        let moved = next.queued != engineState.queued
         if next != engineState { engineState = next }
         // Uploaded files leave their batch's manifest.
-        if left { await inbox.refresh() }
+        if moved { await inbox.refresh() }
     }
 }
 
