@@ -169,12 +169,12 @@ final class ThumbnailDiskStoreTests: XCTestCase {
         let usage = await store.currentUsage()
         XCTAssertEqual(usage, before, "Every file is listed.")
         XCTAssertEqual(measuredUsage(api.cacheScope), before, "Nothing was removed or rewritten.")
-        let decoder = ThumbnailDecoder(store: store, decoded: { _, _ in })
+        let scheduler = ThumbnailScheduler(store: store, memory: DecodedThumbnailCache(),
+                                           fetcher: ThumbnailFetcher(load: { _, _, _ in throw URLError(.notConnectedToInternet) }))
         for asset in assets {
             XCTAssertTrue(store.contains(assetID: asset.id, revision: asset.cacheRevision), asset.id)
-            let request = ThumbnailDecoder.Request(identity: MediaCacheIdentity(scope: api.cacheScope, asset: asset, size: .thumbnail, pixelSize: 64),
-                                                   assetID: asset.id, revision: asset.cacheRevision)
-            let image = await decoder.image(request)
+            let image = try await scheduler.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: 64, network: false,
+                                                  token: store.fence.token())
             XCTAssertNotNil(image, asset.id)
         }
         XCTAssertTrue(server.requests.isEmpty, "Nothing was downloaded.")

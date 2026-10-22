@@ -42,7 +42,9 @@ final class MediaPipelineTests: XCTestCase {
         let asset = Asset(id: "ahead")
         await ThumbnailDiskStore.shared(scope: api.cacheScope).store(png, assetID: asset.id, revision: asset.cacheRevision)
 
-        pipeline.prefetchThumbnails([asset], pixelSize: 8)
+        let item = ViewportDemand.Item(request: ThumbnailRequest(key: .server(assetID: asset.id, revision: asset.cacheRevision),
+                                                                 thumbhash: nil, shortSide: 8), band: .ahead, rank: 0)
+        pipeline.scheduler.submit(ViewportDemand(generation: pipeline.mediaToken(), items: [item], motion: .scrubbing), from: UUID())
 
         let deadline = Date().addingTimeInterval(5)
         while pipeline.cachedImage(for: asset, pixelSize: 8) == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
