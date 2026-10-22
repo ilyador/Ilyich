@@ -221,6 +221,8 @@ private struct SavedTimeline {
     /// The feed open in it: its ticket names every delivery, and its query and plan say whether a
     /// reload may keep the months on their way.
     @ObservationIgnored private var feedSession: (ticket: TimelineFeed.Ticket, query: LibraryQuery, plan: QueryPlan)?
+    /// The feed shown's ticket, for tests that deliver a month as the feed would.
+    var feedTicket: TimelineFeed.Ticket? { feedSession?.ticket }
     /// Commands on their way to the feed, sent in order by one task. The month queue drives no
     /// view: observing it made SwiftUI update the grid on every scrolled frame.
     @ObservationIgnored private var feedCommands: [TimelineFeed.Command] = []
@@ -783,6 +785,9 @@ private struct SavedTimeline {
             cancelRequests(); generation = UUID(); searchGeneration = UUID()
             restoreTimeline(saved, plan: plan)
             restorePosition = saved.position; frozenFeed = nil; resetID = UUID(); revision += 1
+            // The phone's photos that changed while the filter showed are merged in now, as at a
+            // commit: the restore ran while the filter was still frozen, so it could not take them.
+            project()
             error = nil; isLoading = false; isSearching = false; originalTimeline = nil
             // The library's places come back with it, unless they were never counted.
             if placesByFilter[feedQuery] == nil { loadMonthPlaces(feedQuery, plan: plan) }
@@ -1294,7 +1299,8 @@ private struct SavedTimeline {
 
     /// Shows a run's months: their rows (with the feed's delivery, for a loaded month), days and
     /// places, then the sections after a snapshot. A month changed again meanwhile is left to the
-    /// next run. The phone's photos moving a row the grid shows restore its anchor, as before.
+    /// next run, with this run's reasons for it; a server month the feed let go meanwhile stays
+    /// gone. The phone's photos moving a row the grid shows restore its anchor, as before.
     private func apply(_ results: [MonthProjector.Result], unprojected: [String], reasons: [String: ProjectionReason],
                        device: MergedTimeline?, version: Int) {
         projecting = nil
@@ -1305,6 +1311,9 @@ private struct SavedTimeline {
             if device != nil { deviceDirty = true }
             return
         }
+        // A month changed again during the run is the next run's, for this run's reasons as well:
+        // a phone change this run carried still restores the anchor when that month's rows move.
+        for (bucket, reason) in reasons where dirty[bucket] != nil { markDirty(bucket, reason) }
         var changed = false, rowsMoved = false, structureChanged = false, committed = 0
         for result in results where dirty[result.bucket] == nil {
             let id = result.bucket
@@ -1321,6 +1330,9 @@ private struct SavedTimeline {
                     remoteBuckets[index] = TimeBucket(timeBucket: id, count: pending.assets.count)
                 }
             }
+            // A server month the feed let go during the run has no rows: its projection stays gone,
+            // or it would outlive the twelve resident months, out of reach of removals and edits.
+            guard loaded[id] != nil || !remoteIDs.contains(id) else { continue }
             if result.changed || projections[id] == nil {
                 if result.rowsChanged, projections[id] != nil, reasons[id]?.contains(.device) == true { rowsMoved = true }
                 projections[id] = result.projection; changed = true
