@@ -22,6 +22,8 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     private var responses: [Int: Data] = [:]
     private var waiting: [Int: CheckedContinuation<UploadReceipt, any Error>] = [:]
     private var eventsCompletion: (@Sendable () -> Void)?
+    private var progressObserver: (@Sendable (UploadProgressSnapshot) -> Void)?
+    private var progressReported: (taskID: Int, time: ContinuousClock.Instant)?
     private var session: URLSession!
 
     private init(identifier: String) {
@@ -88,9 +90,23 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
         for task in tasks { task.cancel() }
     }
 
-    func progressSnapshot() async -> UploadProgressSnapshot? {
-        guard let task = await session.allTasks.first else { return nil }
-        return UploadProgressSnapshot(taskID: task.taskIdentifier, sent: task.countOfBytesSent, expected: task.countOfBytesExpectedToSend)
+    /// Hands each upload's progress to `observer` as the session reports it, at most four times
+    /// a second per upload and always at its last byte, so no screen has to poll for it.
+    func observeProgress(_ observer: @escaping @Sendable (UploadProgressSnapshot) -> Void) {
+        lock.withLock { progressObserver = observer }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        let now = ContinuousClock.now
+        let observer = lock.withLock { () -> (@Sendable (UploadProgressSnapshot) -> Void)? in
+            guard let observer = progressObserver else { return nil }
+            if let last = progressReported, last.taskID == task.taskIdentifier, last.time.duration(to: now) < .milliseconds(250),
+               totalBytesSent < totalBytesExpectedToSend { return nil }
+            progressReported = (task.taskIdentifier, now)
+            return observer
+        }
+        observer?(UploadProgressSnapshot(taskID: task.taskIdentifier, sent: totalBytesSent, expected: totalBytesExpectedToSend))
     }
 
     func hasActiveTransfer() async -> Bool { await session.allTasks.contains { $0.state == .running } }

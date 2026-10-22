@@ -87,17 +87,20 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     case failed(String)
 }
 
-/// Adds photos to the backup queue (BackupCoordinator implements it).
+/// Adds photos to the backup queue (BackupStore implements it, over TransferControlling).
 @MainActor protocol BackupEnqueuing: AnyObject {
     func enqueue(localIDs: [String], albumID: String?) async -> BackupEnqueueOutcome
 }
 
-@MainActor @Observable final class BackupCoordinator: BackupEnqueuing {
+@MainActor @Observable final class BackupCoordinator {
     static let shared = BackupCoordinator()
     var preferences = BackupPreferences()
     private(set) var albums: [DeviceAlbum] = []
     private(set) var permission = PhotoKitAdapter.shared.authorization
-    private(set) var isRunning = false
+    private(set) var isRunning = false {
+        // Nothing is being sent once a run ends.
+        didSet { if !isRunning { clearTransferProgress() } }
+    }
     private(set) var remaining = 0
     private(set) var confirmed = 0
     private(set) var progress: Double?
@@ -116,6 +119,22 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     func failedAlbumUploadCount(_ albumID: String) -> Int {
         state.pendingAlbumAdds?.filter { $0.value.contains(albumID) && state.failures?[$0.key] != nil }.count ?? 0
     }
+    /// Every album's photos waiting for it, and how many of those need retry.
+    var albumUploadCounts: [String: AlbumUploadCount] {
+        var counts: [String: AlbumUploadCount] = [:]
+        for (localID, albums) in state.pendingAlbumAdds ?? [:] {
+            let failed = state.failures?[localID] != nil
+            for album in albums {
+                counts[album, default: AlbumUploadCount(pending: 0, failed: 0)].pending += 1
+                if failed { counts[album, default: AlbumUploadCount(pending: 0, failed: 0)].failed += 1 }
+            }
+        }
+        return counts
+    }
+    /// The account whose backup state is taken up, by its digest; nil while none is.
+    var activeScope: String? { saved?.scope }
+    /// Finding new photos in the selected albums.
+    var isDiscovering: Bool { discovery != nil }
     private(set) var activity = "Choose albums to back up"
     private(set) var error: String?
     private var state = BackupState()
@@ -141,13 +160,24 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     func activate() async {
         do {
             guard let session = try KeychainCredentialStore().load() else { return }
+            await activate(session)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// Takes up `session`'s backup state, from `folder` or from its Backup folder in the App
+    /// Group, and carries on with a run it left unfinished. The account already taken up only
+    /// reads its albums again. AccountManager calls this each time an account becomes active.
+    func activate(_ session: StoredCredential, folder: URL? = nil) async {
+        do {
             guard session.scope != saved?.scope else { await refreshLibrary(); return }
             guard !isRunning else { throw BackupError.message("Pause the active backup before switching accounts.") }
-            guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try AppGroup.identifier) else {
-                throw BackupError.message("The app’s shared storage is unavailable. Check the app’s signing and reinstall.")
+            if let folder { try load(session, folder: folder) }
+            else {
+                guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: try AppGroup.identifier) else {
+                    throw BackupError.message("The app’s shared storage is unavailable. Check the app’s signing and reinstall.")
+                }
+                try load(session, folder: group.appendingPathComponent("Backup", isDirectory: true).appendingPathComponent(session.scope, isDirectory: true))
             }
-            let folder = group.appendingPathComponent("Backup", isDirectory: true).appendingPathComponent(session.scope, isDirectory: true)
-            try load(session, folder: folder)
             await refreshLibrary()
             BackupLifecycle.shared.configure()
             if state.transferNotification?.terminalFailures != nil { await replayFinishedTransferNotification() }
@@ -444,7 +474,7 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
                         try persist()
                     }
                     if state.current == nil {
-                        activity = "Preparing full-size photo"
+                        activity = "Preparing full-size photo"; clearTransferProgress()
                         let folder = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
                         let prepared: PreparedPhoto
                         do {
@@ -614,7 +644,7 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     private func transfer(file: UploadFile, sidecar: UploadFile?, fields: [String: String], prepared: PreparedPhoto,
                           session: StoredCredential, runID: UUID) async throws -> BackupRemoteFile {
         try requireTransferConditions()
-        activity = "Checking \(file.filename)"; progress = nil
+        activity = "Checking \(file.filename)"; progress = nil; clearTransferProgress()
         let checksum = try await UploadBody.work { try UploadBody.checksum(file.url) }
         _ = try currentSession(runID)
         let api = try backupClient(for: session)
@@ -663,19 +693,26 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
         return BackupRemoteFile(id: receipt.id, checksum: checksum)
     }
 
-    func refreshProgress() async {
-        guard isRunning, let value = await BackgroundUploads.shared.progressSnapshot() else {
-            bytesTransferred = 0; totalTransferBytes = 0; transferRate = nil; lastProgress = nil
-            return
-        }
+    /// The upload's progress, as the backup session reports it, a few times a second at most.
+    /// The speed is measured over a second or more, as the screen once sampled it.
+    func applyProgress(_ value: UploadProgressSnapshot, at now: Date = Date()) {
+        guard isRunning else { return }
         bytesTransferred = max(0, value.sent); totalTransferBytes = max(0, value.expected)
         if value.expected > 0 { progress = min(1, Double(value.sent) / Double(value.expected)) }
-        let now = Date()
         if let lastProgress, lastProgress.id == value.taskID, value.sent >= lastProgress.sent {
             let elapsed = now.timeIntervalSince(lastProgress.time)
-            transferRate = elapsed > 0 ? Int64(Double(value.sent - lastProgress.sent) / elapsed) : nil
+            guard elapsed >= 1 else { return }
+            transferRate = Int64(Double(value.sent - lastProgress.sent) / elapsed)
         } else { transferRate = nil }
         lastProgress = (value.taskID, now, value.sent)
+    }
+
+    /// No file is being sent: between files, and once a run ends.
+    private func clearTransferProgress() {
+        if bytesTransferred != 0 { bytesTransferred = 0 }
+        if totalTransferBytes != 0 { totalTransferBytes = 0 }
+        if transferRate != nil { transferRate = nil }
+        lastProgress = nil
     }
 
     func reportSchedulingError(_ error: Error) {

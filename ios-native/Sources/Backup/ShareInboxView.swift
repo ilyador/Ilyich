@@ -3,10 +3,15 @@ import SwiftUI
 
 struct ShareInboxView: View {
     let api: APIClient
-    @State private var inbox = ShareInboxStore.shared
+    @State private var inbox: ShareInboxModel
     @State private var selection = Set<String>()
     @State private var discard: SharedBatch?
     @Environment(\.dismiss) private var dismiss
+
+    init(api: APIClient) {
+        self.api = api
+        _inbox = State(initialValue: ShareInboxModel(api: api))
+    }
 
     var body: some View {
         NavigationStack {
@@ -18,9 +23,9 @@ struct ShareInboxView: View {
                     if inbox.isRunning {
                         if let progress = inbox.progress { ProgressView(value: progress) }
                         else { ProgressView("Uploading") }
-                        Button("Pause upload", role: .destructive) { inbox.cancel() }
+                        Button("Pause upload", role: .destructive) { Task { await inbox.pause() } }
                     } else if !inbox.batches.isEmpty {
-                        Button("Upload \(selection.count) selected") { inbox.upload(selected: selection, api: api) }
+                        Button("Upload \(selection.count) selected") { let selected = selection; Task { await inbox.upload(selected: selected) } }
                             .disabled(selection.isEmpty || api.isReadOnly)
                     }
                     if let error = inbox.error { Text(error).foregroundStyle(.red) }
@@ -58,10 +63,6 @@ struct ShareInboxView: View {
             .task {
                 await inbox.refresh()
                 selection = Set(inbox.batches.flatMap { $0.attachments.map(\.id) })
-                while !Task.isCancelled {
-                    await inbox.refreshProgress()
-                    try? await Task.sleep(for: .seconds(1))
-                }
             }
             .onChange(of: inbox.batches.flatMap { $0.attachments.map(\.id) }) { _, ids in selection.formIntersection(ids) }
         }

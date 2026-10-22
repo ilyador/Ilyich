@@ -472,7 +472,12 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         try await store.failures(limit: limit)
     }
 
-    func albumUploadCounts() async throws -> [String: Int] {
+    func preferences() async throws -> TransferPreferences? {
+        if let preferences { return preferences }
+        return try await store.preferences()
+    }
+
+    func albumUploadCounts() async throws -> [String: AlbumUploadCount] {
         try await store.albumUploadCounts()
     }
 

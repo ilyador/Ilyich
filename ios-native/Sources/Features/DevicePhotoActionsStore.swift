@@ -37,7 +37,7 @@ enum DevicePhotoChange: Equatable, Sendable {
          authorize: @escaping @MainActor () throws -> Void = DevicePhotoActionsStore.requireWriteSession) {
         self.photos = photos
         self.device = device
-        self.backup = backup ?? BackupCoordinator.shared
+        self.backup = backup ?? BackupStore.shared
         self.exporter = exporter
         self.authorize = authorize
     }

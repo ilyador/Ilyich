@@ -55,6 +55,10 @@ struct SignOutPolicy: Equatable, Sendable {
 /// The device-wide services that still hold some of an account's work until later milestones
 /// move it into the runtime, and the stores sign-out clears outside it.
 protocol AccountDevice: Sendable {
+    /// Takes up the account's backup state, from `container` (nil for the App Group), each time
+    /// the account becomes active: at launch and after every sign-in, so the backup screens show
+    /// the account signed in without a relaunch.
+    func activateBackup(for credential: StoredCredential, container: URL?) async
     /// Stops backup and shared uploads, and switches automatic backup off unless
     /// `keepingAutomaticBackup`. The backup state stays on disk with its receipts.
     func stopUploads(keepingAutomaticBackup: Bool) async
@@ -284,6 +288,9 @@ actor AccountManager {
             message = nil
             await publish()
             await runtime.start()
+            if phase == .active, environment.usesDevicePhotos {
+                await dependencies.device.activateBackup(for: credential, container: environment.backupContainer)
+            }
         } catch {
             phase = .signedOut(nil)
             message = error.localizedDescription

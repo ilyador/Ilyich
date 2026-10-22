@@ -10,7 +10,7 @@ struct DiagnosticsView: View {
     @State private var timeline: CachedTimelineUsage?
     @State private var syncStatistics: EntityStoreStatistics?
     @State private var statisticsError: String?
-    @State private var backup = BackupCoordinator.shared
+    @State private var backup = BackupStore.shared
     @State private var clearing = false
     @State private var confirmReset = false
     @State private var resetMessage: String?
@@ -29,7 +29,7 @@ struct DiagnosticsView: View {
                 LabeledContent("State", value: backup.isRunning ? "Running" : "Paused")
                 LabeledContent("Remaining", value: backup.remaining.formatted())
                 LabeledContent("Confirmed", value: backup.confirmed.formatted())
-                LabeledContent("Failed", value: backup.failures.count.formatted())
+                LabeledContent("Failed", value: backup.snapshot.failed.formatted())
                 NavigationLink("Backup details") { BackupSettingsView() }
             }
             if let session, session.runtime?.transfers != nil {
