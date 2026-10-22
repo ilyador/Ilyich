@@ -229,6 +229,11 @@ private struct SavedTimeline {
     @ObservationIgnored private var monthKeyByBucket: [String: MonthKey] = [:]
     /// What the feed was last told, so a scrolled frame or a repeated snapshot sends nothing.
     @ObservationIgnored private var lastVisibleMonths: Set<MonthKey>?
+    /// The buckets of the months the grid last reported on screen (tests).
+    var visibleBucketIDs: Set<String> {
+        guard let months = lastVisibleMonths else { return [] }
+        return Set(months.compactMap { monthBuckets[$0] })
+    }
     @ObservationIgnored private var sentMonths: (order: [MonthKey], buckets: [MonthKey: String])?
     private var queryTask: Task<Void, Never>?
     @ObservationIgnored private var navigationTask: Task<Void, Never>?

@@ -374,7 +374,9 @@ actor TimelineFeed {
                 if isWanted(month) { enqueue(month) }
             }
             let evicted = evict()
-            startQueued()
+            // The queue holds a few months at a time; a sparse feed (an album with a photo or two a
+            // month) shows more than that on one screen, so the rest are asked for as slots free.
+            requestWanted()
             await consumer?.monthLoaded(ticket, month: month, assets: assets, fresh: fresh, evicting: evicted)
             return assets
         case .failure(let error):
@@ -382,7 +384,7 @@ actor TimelineFeed {
                 // Dropped for a month the grid left behind (the server answers with URLError.cancelled),
                 // not failed; asked for again if the grid is back on it.
                 if isWanted(month) { enqueue(month) }
-                startQueued()
+                requestWanted()
                 throw CancellationError()
             }
             // A cancellation that was not this load's (the transport shut down under it) passes
@@ -393,7 +395,8 @@ actor TimelineFeed {
             failure.transient = cancelled || Self.isTransient(error); failure.due = false
             failures[month] = failure
             scheduleRetry(month)
-            startQueued()
+            // The rest of the screen goes on; this month waits for its retry or Retry.
+            requestWanted()
             if !cancelled { await consumer?.monthFailed(ticket, month: month, message: failure.message) }
             throw error
         }
