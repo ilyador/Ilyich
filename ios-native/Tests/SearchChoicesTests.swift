@@ -96,9 +96,12 @@ import XCTest
     }
 
     /// The switch starts off: a Photo content search sends verify: false. Turning it on runs the
-    /// search again with the server's check.
+    /// search again with the server's check. Only a checked search's verification is kept, so the
+    /// card shows only once the checked search has answered, even from a server that reports a
+    /// check on every search, as the UI fixture does.
     func testTheSwitchTogglesVerificationInTheRequest() async throws {
-        let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")])
+        let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")],
+                                 verification: Verification(status: .complete, checked: 10, rejected: 9))
         let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
         removeCachesAfterwards(api.cacheScope)
@@ -107,14 +110,102 @@ import XCTest
         store.search("red hat")
         try await until("The search was not sent.") { await api.smart.count == 1 && !store.isSearching }
         XCTAssertFalse(store.checksPhotoContent)
+        XCTAssertNil(store.verification, "An unchecked search has no check to show.")
         store.setChecksContent(true)
         XCTAssertTrue(store.checksPhotoContent)
+        XCTAssertNil(store.verification, "Nothing is checked until the checked search answers.")
         try await until("The search did not run again.") { await api.smart.count == 2 && !store.isSearching }
+        XCTAssertEqual(store.verification?.status, .complete)
         store.setChecksContent(false)
         try await until("The search did not run again.") { await api.smart.count == 3 && !store.isSearching }
+        XCTAssertNil(store.verification)
         let verify = await api.smart.map(\.verify)
         XCTAssertEqual(verify, [false, nil, false])
         XCTAssertEqual(store.results.map(\.id), ["shown"])
+
+        // Neither a field search nor More's filtered view is checked, with the switch on.
+        store.setChecksContent(true)
+        try await until("The search did not run again.") { await api.smart.count == 4 && !store.isSearching }
+        store.applySearchOptions(mode: .filename, filter: SearchFilter())
+        try await until("The filename search was not sent.") { await api.metadata.count == 1 && !store.isSearching }
+        XCTAssertNil(store.verification)
+        store.search("")
+        store.applySearchOptions(mode: .context, filter: SearchFilter(isFavorite: BoolFilter(eq: true)))
+        try await until("The filtered view was not loaded.") { await api.metadata.count == 2 && !store.isSearching }
+        XCTAssertNil(store.verification)
+    }
+
+    /// Plain browsing never applies the choices: at rest, removing a chip, the mode's or a
+    /// filter's with another left, changes only the choices. More's Apply opens the filtered view.
+    func testRemovingAChipWhileBrowsingPlainlyOpensNothing() async throws {
+        let suite = "search-choices-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let storage = SearchChoicesStorage(scope: "server|alice", defaults: defaults)
+        storage.save(SearchChoices(mode: .filename, filter: SearchFilter(type: StringFilter(eq: "VIDEO"), isFavorite: BoolFilter(eq: true))))
+        let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")])
+        removeCachesAfterwards(api.cacheScope)
+        let store = LibraryStore(source: api, placesDelay: .zero, choices: storage)
+        defer { store.stop() }
+
+        store.removeChoice(.mode)
+        XCTAssertFalse(store.isBrowsingChoices, "The mode's chip removed at rest opens nothing.")
+        store.removeChoice(.favorites)
+        XCTAssertFalse(store.isBrowsingChoices, "Nor does a filter's, with another left.")
+        XCTAssertNil(store.filterTitle)
+        XCTAssertFalse(store.choicesApply)
+        XCTAssertEqual(store.searchChoices.chips().map(\.kind), [.type])
+
+        store.applySearchOptions(mode: .context, filter: store.searchChoices.filter)
+        XCTAssertTrue(store.isBrowsingChoices, "More's Apply opens the filtered view with what is left.")
+        try await until("The filtered view was not loaded.") { await api.metadata.count == 1 && !store.isSearching }
+        let sent = await api.metadata.map(\.filter.type)
+        XCTAssertEqual(sent, [StringFilter(eq: "VIDEO")], "The chips removed at rest sent nothing.")
+    }
+
+    /// A visibility chosen outside the feed's own leaves nothing to find: Only archived inside
+    /// Favorites, which keeps to the timeline, or Left out inside the archive. The search shows no
+    /// photos, as any filter that matches none does, rather than failing, and asks nothing.
+    func testAVisibilityOutsideTheFeedFindsNothingRatherThanFailing() async throws {
+        var archivedPhoto = Asset(id: "archived")
+        archivedPhoto.visibility = .archive
+        let api = SearchRecorder(userID: "alice", items: [archivedPhoto])
+        let store = LibraryStore(source: api, placesDelay: .zero)
+        defer { store.stop() }
+        removeCachesAfterwards(api.cacheScope)
+
+        // In the library, which is searched with the archive, Only archived keeps to the archive.
+        store.applySearchOptions(mode: .context, filter: SearchFilter(visibility: StringFilter(eq: "archive")))
+        try await until("The archived view was not loaded.") { await api.metadata.count == 1 && !store.isSearching }
+        XCTAssertNil(store.error)
+        let archived = await api.metadata.last?.filter.visibility
+        XCTAssertEqual(archived, StringFilter(in: ["archive"]))
+        XCTAssertEqual(store.results.map(\.id), ["archived"])
+
+        store.setFeed(.favorites, title: "Favorites")
+        var revision = store.revision
+        store.search("beach")
+        try await until("The search did not finish.") { store.revision > revision && !store.isSearching }
+        XCTAssertNil(store.error, "Nothing can match, so the search finds nothing; it doesn't fail.")
+        XCTAssertEqual(store.sections.map(\.id), ["results"])
+        XCTAssertEqual(store.totalCount, 0)
+        revision = store.revision
+        store.retryCurrent()
+        try await until("The retry did not finish.") { store.revision > revision && !store.isSearching }
+        XCTAssertNil(store.error)
+
+        // More's filtered view over the archive, with Left out, finds nothing too.
+        store.setFeed(.archive, title: "Archive")
+        revision = store.revision
+        store.applySearchOptions(mode: .context, filter: SearchFilter(visibility: StringFilter(eq: "timeline")))
+        XCTAssertTrue(store.isBrowsingChoices)
+        try await until("The filtered view did not finish.") { store.revision > revision && !store.isSearching }
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.sections.map(\.id), ["results"])
+        XCTAssertEqual(store.totalCount, 0)
+        let smart = await api.smart.count, metadata = await api.metadata.count
+        XCTAssertEqual(smart, 0, "Nothing to find, so nothing is asked.")
+        XCTAssertEqual(metadata, 1)
     }
 
     /// Filters chosen with no text show the feed narrowed as one list, with a chip each; removing

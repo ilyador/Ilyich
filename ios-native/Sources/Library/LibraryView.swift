@@ -367,8 +367,8 @@ struct LibraryView: View {
             if let albumID = store.feedQuery.predicates.albums.first {
                 AlbumUploadStatusView(albumID: albumID) { Task { await store.refreshAfterMutation() } }
             }
-            // Only a search with the AI check on is checked; another has no check to report.
-            if store.checksPhotoContent, let verification = store.verification {
+            // The store keeps a verification only for results a checked search returned.
+            if let verification = store.verification {
                 verificationView(verification)
             }
         }
