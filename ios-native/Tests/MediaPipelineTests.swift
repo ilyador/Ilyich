@@ -14,7 +14,7 @@ final class MediaPipelineTests: XCTestCase {
             UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
         }
         let kept = Asset(id: "kept"), gone = Asset(id: "gone")
-        let disk = ThumbnailStore(scope: api.cacheScope)
+        let disk = ThumbnailDiskStore.shared(scope: api.cacheScope)
         for asset in [kept, gone] { await disk.store(png, assetID: asset.id, revision: asset.cacheRevision) }
         for asset in [kept, gone] {
             let image = await pipeline.storedThumbnail(for: asset, pixelSize: 8)
@@ -40,7 +40,7 @@ final class MediaPipelineTests: XCTestCase {
             UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
         }
         let asset = Asset(id: "ahead")
-        await ThumbnailStore(scope: api.cacheScope).store(png, assetID: asset.id, revision: asset.cacheRevision)
+        await ThumbnailDiskStore.shared(scope: api.cacheScope).store(png, assetID: asset.id, revision: asset.cacheRevision)
 
         pipeline.prefetchThumbnails([asset], pixelSize: 8)
 

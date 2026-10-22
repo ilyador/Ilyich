@@ -18,15 +18,16 @@ private final class CachedImage: Sendable {
     init(_ image: PreparedImage, revision: String = "") { self.image = image; self.revision = revision }
 }
 
-/// The decoded caches, with an index from each photo to its entries, so a photo's images can be
+/// The decoded previews and full-size images (grid thumbnails live in DecodedThumbnailCache),
+/// with an index from each photo to its entries, so a photo's images can be
 /// forgotten by its ID. Every write and removal of a photo's entries happens under the index's
 /// lock, after a check of the media fence, so a decode that finishes after its photo was
 /// forgotten never reaches memory. NSCache is thread-safe and has no delegate here, so it never
 /// calls back into the lock.
 private final class MediaMemory: @unchecked Sendable {
     let decoded = NSCache<NSString, CachedImage>()
-    /// The newest thumbnail and preview of each asset at whatever size it was decoded. The viewer
-    /// opens on it while a sharper copy loads.
+    /// The newest preview of each asset at whatever size it was decoded. The viewer opens on it
+    /// while a sharper copy loads.
     let latest = NSCache<NSString, CachedImage>()
     let fence: MediaFence
     private struct Index {
@@ -139,7 +140,9 @@ actor MediaPipeline {
     private let thumbnailLimiter = ImageWorkLimiter(limit: 6)
     /// Thumbnail bytes live in their own store, so they skip the URL cache.
     private let thumbnailSession: URLSession
-    private let thumbnails: ThumbnailStore
+    private let thumbnails: ThumbnailDiskStore
+    /// Grid thumbnails decoded in memory, readable from any thread.
+    private nonisolated let thumbs: DecodedThumbnailCache
     private let decoder: ThumbnailDecoder
     private struct ThumbnailFlight {
         let task: Task<Data, Error>
@@ -148,8 +151,8 @@ actor MediaPipeline {
         var started = false
     }
     private var thumbnailFlights: [String: ThumbnailFlight] = [:]
-    /// NSCache is thread-safe, so views can read it synchronously and draw a cached image in
-    /// their first frame instead of flashing empty while an actor hop completes.
+    /// The caches are thread-safe, so views can read them synchronously and draw a cached image
+    /// in their first frame instead of flashing empty while an actor hop completes.
     private nonisolated let memory: MediaMemory
     private nonisolated var decoded: NSCache<NSString, CachedImage> { memory.decoded }
     private nonisolated var latest: NSCache<NSString, CachedImage> { memory.latest }
@@ -174,7 +177,8 @@ actor MediaPipeline {
 
     /// `protocolClasses` serve the downloads, and `earlierURLCacheEntries` says whether the URL
     /// cache holds entries from an earlier launch, for tests; it is measured otherwise.
-    init(client: APIClient, memoryLimit: Int = 160 * 1024 * 1024, diskLimit: Int = 300 * 1024 * 1024,
+    /// `memoryLimit` is for previews and full-size images; grid thumbnails have their own budget.
+    init(client: APIClient, memoryLimit: Int = 64 * 1024 * 1024, diskLimit: Int = 300 * 1024 * 1024,
          protocolClasses: [AnyClass]? = nil, earlierURLCacheEntries: Bool? = nil) {
         self.client = client
         urlCacheHasUnindexedEntries = earlierURLCacheEntries
@@ -202,14 +206,22 @@ actor MediaPipeline {
         thumbnailConfiguration.timeoutIntervalForRequest = 30
         if let protocolClasses { thumbnailConfiguration.protocolClasses = protocolClasses }
         thumbnailSession = URLSession(configuration: thumbnailConfiguration, delegate: SameOriginRedirectDelegate(origin: client.baseURL), delegateQueue: nil)
-        thumbnails = ThumbnailStore(scope: client.cacheScope)
+        let thumbnails = ThumbnailDiskStore.shared(scope: client.cacheScope)
+        self.thumbnails = thumbnails
         let memory = MediaMemory(fence: thumbnails.fence)
         self.memory = memory
-        decoder = ThumbnailDecoder(store: thumbnails) { image, request in memory.remember(image, as: request.identity, token: request.token) }
+        let thumbs = DecodedThumbnailCache()
+        self.thumbs = thumbs
+        let fence = thumbnails.fence
+        decoder = ThumbnailDecoder(store: thumbnails) { image, request in
+            thumbs.insert(image, assetID: request.assetID, revision: request.revision, shortSide: request.identity.pixelSize) {
+                fence.admits(request.assetID, since: request.token)
+            }
+        }
         let decoded = memory.decoded, latest = memory.latest
         decoded.totalCostLimit = memoryLimit
         decoded.countLimit = 2_000
-        latest.totalCostLimit = memoryLimit / 4
+        latest.totalCostLimit = 40 * 1024 * 1024
         latest.countLimit = 600
         faces.totalCostLimit = 24 * 1024 * 1024
         faces.countLimit = 1_500
@@ -223,9 +235,11 @@ actor MediaPipeline {
         if urlCacheHasUnindexedEntries == nil { urlCacheHasUnindexedEntries = byteCache.currentDiskUsage > 0 }
     }
 
-    /// A decoded copy already in memory, or nil. Never waits and never loads.
+    /// A decoded copy already in memory, or nil. Never waits and never loads. For a grid thumbnail
+    /// `pixelSize` is the cell's short side, and a copy decoded for a larger cell serves too.
     nonisolated func cachedImage(for asset: Asset, size: MediaSize = .thumbnail, pixelSize: Int, edited: Bool = true) -> PreparedImage? {
         guard asset.visibility != .locked else { return nil }
+        if size == .thumbnail, edited { return thumbs.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) }
         let identity = MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: size, pixelSize: pixelSize, edited: edited)
         return decoded.object(forKey: identity.stableKey as NSString)?.image
     }
@@ -233,6 +247,7 @@ actor MediaPipeline {
     /// The newest thumbnail or preview of an asset at any size. Without a revision any version
     /// matches, for views that know only the asset's ID.
     nonisolated func latestImage(assetID: String, size: MediaSize, revision: String? = nil) -> PreparedImage? {
+        if size == .thumbnail { return thumbs.largest(assetID: assetID, revision: revision) }
         guard let cached = latest.object(forKey: Self.latestKey(scope: client.cacheScope, resource: "assets/\(assetID)", size: size.rawValue) as NSString),
               revision == nil || cached.revision == revision else { return nil }
         return cached.image
@@ -290,17 +305,16 @@ actor MediaPipeline {
     /// and scrubbing use this, so the server is asked only for what the user stops to look at.
     nonisolated func storedThumbnail(for asset: Asset, pixelSize: Int) async -> PreparedImage? {
         guard asset.visibility != .locked else { return nil }
-        let request = thumbnailRequest(asset, pixelSize: pixelSize)
-        if let image = decoded.object(forKey: request.identity.stableKey as NSString) { return image.image }
-        return await decoder.image(request)
+        if let image = thumbs.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) { return image }
+        return await decoder.image(thumbnailRequest(asset, pixelSize: pixelSize))
     }
 
     /// Photos about to scroll in move from disk to memory, behind the ones on screen.
     nonisolated func prefetchThumbnails(_ assets: [Asset], pixelSize: Int) {
         decoder.prefetch(assets.compactMap { asset in
-            guard asset.visibility != .locked else { return nil }
-            let request = thumbnailRequest(asset, pixelSize: pixelSize)
-            return decoded.object(forKey: request.identity.stableKey as NSString) == nil ? request : nil
+            guard asset.visibility != .locked,
+                  thumbs.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) == nil else { return nil }
+            return thumbnailRequest(asset, pixelSize: pixelSize)
         })
     }
 
@@ -312,6 +326,11 @@ actor MediaPipeline {
         ThumbnailDecoder.Request(identity: MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: .thumbnail, pixelSize: pixelSize),
                                  assetID: asset.id, revision: asset.cacheRevision, token: token ?? fence.token())
     }
+
+    /// The grid shows this photo: memory pressure and the budget keep its thumbnail. Every pin is
+    /// matched by one unpin.
+    nonisolated func pinThumbnail(_ assetID: String) { thumbs.pin(assetID) }
+    nonisolated func unpinThumbnail(_ assetID: String) { thumbs.unpin(assetID) }
 
     nonisolated func hasStoredThumbnail(_ asset: Asset) -> Bool {
         thumbnails.contains(assetID: asset.id, revision: asset.cacheRevision)
@@ -326,18 +345,19 @@ actor MediaPipeline {
     }
 
     private func thumbnail(_ asset: Asset, pixelSize: Int, network: Bool, token: UInt64) async throws -> PreparedImage? {
-        let request = thumbnailRequest(asset, pixelSize: pixelSize, token: token), identity = request.identity
-        if let image = decoded.object(forKey: identity.stableKey as NSString) { return image.image }
+        let request = thumbnailRequest(asset, pixelSize: pixelSize, token: token)
+        if let image = thumbs.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) { return image }
         let epoch = generation
         // The decoder remembers what it decodes, and a reset drops it.
         if let stored = await decoder.image(request) { return stored }
         try Task.checkCancellation()
         guard network else { return nil }
         let data = try await thumbnailData(asset, token: token)
-        let image = try await Task.detached(priority: .userInitiated) { try Self.downsample(data, pixelSize: pixelSize) }.value
+        let image = try await Task.detached(priority: .userInitiated) { try Self.downsampleThumbnail(data, shortSide: pixelSize) }.value
         try Task.checkCancellation()
         guard epoch == generation, fence.admits(asset.id, since: token) else { throw CancellationError() }
-        memory.remember(image, as: identity, token: token)
+        let gate = fence
+        thumbs.insert(image, assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) { gate.admits(asset.id, since: token) }
         return image
     }
 
@@ -370,12 +390,9 @@ actor MediaPipeline {
                             let (data, response) = try await session.data(for: request)
                             try ServerFailure.check(response, body: data)
                             await limiter.release()
-                            // Waiters get the bytes now. The flight stays joinable until the file
-                            // is written, so nobody downloads it twice meanwhile.
-                            Task.detached(priority: .utility) { [weak self] in
-                                await store.store(data, assetID: asset.id, revision: revision, token: token)
-                                await self?.endThumbnail(key)
-                            }
+                            // The store can read the bytes at once, so the flight can end now.
+                            store.enqueueWrite(data, assetID: asset.id, revision: revision, token: token)
+                            await self.endThumbnail(key)
                             return data
                         } catch {
                             await limiter.release(); await self.endThumbnail(key)
@@ -571,6 +588,7 @@ actor MediaPipeline {
         faceFlights.removeAll()
         faces.removeAllObjects()
         memory.removeAll()
+        thumbs.removeAll()
         byteCache.removeAllCachedResponses()
         cachedRequests.removeAll()
         urlCacheHasUnindexedEntries = false
@@ -602,6 +620,7 @@ actor MediaPipeline {
         guard !revisions.isEmpty else { return }
         for (id, revision) in revisions {
             memory.refresh(id, revision: revision, scope: client.cacheScope)
+            thumbs.refresh(assetID: id, revision: revision)
             if let requests = cachedRequests.removeValue(forKey: id) {
                 for request in requests { byteCache.removeCachedResponse(for: request) }
             }
@@ -623,6 +642,7 @@ actor MediaPipeline {
         guard !assetIDs.isEmpty else { return }
         fence.forget(assetIDs)
         memory.forget(assetIDs, scope: client.cacheScope)
+        thumbs.forget(assetIDs)
         for (key, flight) in thumbnailFlights where assetIDs.contains(String(key.prefix { $0 != "|" })) {
             flight.task.cancel(); thumbnailFlights.removeValue(forKey: key)
         }
@@ -658,9 +678,14 @@ actor MediaPipeline {
 
     func cacheUsage() async -> MediaCacheUsage {
         MediaCacheUsage(memoryBytes: byteCache.currentMemoryUsage, diskBytes: byteCache.currentDiskUsage + (await thumbnails.currentUsage()),
-                        pendingLoads: flights.count + thumbnailFlights.count + decoder.pendingCount, decodedMemoryLimit: decoded.totalCostLimit)
+                        pendingLoads: flights.count + thumbnailFlights.count + decoder.pendingCount,
+                        decodedMemoryLimit: decoded.totalCostLimit + thumbs.budget)
     }
-    func trimMemory() { memory.removeAll() }
+    /// A memory warning: previews go, and every grid thumbnail not on screen.
+    func trimMemory() {
+        memory.removeAll()
+        thumbs.trimUnpinned()
+    }
 
     nonisolated static func downsample(_ data: Data, pixelSize: Int) throws -> PreparedImage {
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
@@ -670,6 +695,31 @@ actor MediaPipeline {
                 kCGImageSourceShouldCacheImmediately: true,
                 kCGImageSourceThumbnailMaxPixelSize: max(1, pixelSize)
               ] as CFDictionary) else {
+            throw APIError.invalidResponse("This image could not be decoded.")
+        }
+        return PreparedImage(cgImage: cgImage)
+    }
+
+    /// A grid thumbnail decoded to fill a cell whose short side is `shortSide` pixels: the image's
+    /// short side reaches it, so aspect-fill never stretches, and it is never decoded larger than
+    /// the file.
+    nonisolated static func downsampleThumbnail(_ data: Data, shortSide: Int) throws -> PreparedImage {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+            throw APIError.invalidResponse("This image could not be decoded.")
+        }
+        var longSide = max(1, shortSide)
+        if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+           let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue, width > 0, height > 0 {
+            let short = min(width, height), long = max(width, height)
+            longSide = shortSide >= short ? long : Int((Double(shortSide) * Double(long) / Double(short)).rounded(.up))
+        }
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: longSide
+        ] as CFDictionary) else {
             throw APIError.invalidResponse("This image could not be decoded.")
         }
         return PreparedImage(cgImage: cgImage)

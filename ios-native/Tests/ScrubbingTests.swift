@@ -122,7 +122,7 @@ import XCTest
         let png = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).pngData { context in
             UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
         }
-        await ThumbnailStore(scope: api.cacheScope).store(png, assetID: asset.id, revision: asset.cacheRevision)
+        await ThumbnailDiskStore.shared(scope: api.cacheScope).store(png, assetID: asset.id, revision: asset.cacheRevision)
         let ahead = Array(fresh.prefix(2_000))
         ThumbHashSketches.shared.prefetch(ahead)
 
