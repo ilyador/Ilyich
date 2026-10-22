@@ -1,12 +1,16 @@
 import Foundation
 import IlyichPlatform
+import SwiftUI
+import UIKit
 import XCTest
 @testable import Ilyich
 
-/// The feed keyed by month (F2): months come from the viewport, not from cells; a sync's reload
-/// keeps the loads on their way; a month that failed for a passing reason is asked again while it
-/// is on screen; a saved library comes back within the resident bound; a date navigation joins
-/// the load on its way; and the whole-snapshot cache is gone.
+/// The feed keyed by month (F2): months come from the viewport, not from cells, and the grid
+/// reports its viewport after a reset too; a sync's reload keeps the loads on their way and lets
+/// a refused month be asked for again; a month that failed for a passing reason is asked again
+/// while it is on screen; a month just scrolled on is safe from eviction before the feed has
+/// handled its viewport; a saved library comes back within the resident bound; a date navigation
+/// joins the load on its way; and the whole-snapshot cache is gone.
 @MainActor final class TimelineFeedTests: XCTestCase {
     /// The grid asks for no month itself: the months on screen and their neighbours load from the
     /// viewport the store hears of, after the feed's first two.
@@ -61,6 +65,91 @@ import XCTest
         XCTAssertEqual(calls[second], 2, "A month on screen is read once more, no more.")
         XCTAssertEqual(calls[first], 2)
         XCTAssertEqual(calls[third], 1)
+    }
+
+    /// The grid tells the feed what new rows or a reset put on screen, not only what a scroll
+    /// did: UIKit reports no scroll for an offset that did not move, and cells ask for no month,
+    /// so a feed whose first two months fill less than a screen (a cold start, Favorites opened
+    /// from the top of the library) loads every month shown without the user dragging.
+    func testTheGridReportsItsViewportAfterAReloadWithoutAScroll() async throws {
+        let api = FeedLibrary(months: Self.months(24))
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        let client = try APIClient(baseURL: XCTUnwrap(URL(string: "https://media.example")), accessToken: "feed-session",
+                                   userID: "feed-" + UUID().uuidString)
+        let pipeline = MediaPipeline(client: client)
+        addTeardownBlock { await pipeline.removeAll() }
+        // A phone's screen of one photo a month in three columns: a row a month, some seven rows.
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: .zero)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        window.rootViewController = UIHostingController(rootView: PhotoGrid(store: store, pipeline: pipeline, columns: 3,
+                                                                              topInset: 0, bottomInset: 0) { _ in })
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+
+        await store.reload()
+        let first = Set(store.buckets.prefix(2).map(\.id))
+        try await until("The first months did not load.") { first.isSubset(of: store.loaded.keys) }
+        let shown = Set(store.buckets.prefix(6).map(\.id))
+        try await until("The months on screen beyond the first two did not load without a scroll.") { shown.isSubset(of: store.loaded.keys) }
+        XCTAssertEqual(store.navigation.section, 0, "The grid reported where it is.")
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertLessThanOrEqual(store.loaded.count, 9, "Only the months on screen and beside them load.")
+    }
+
+    /// A sync's reload takes the banner and its Retry down and marks every month stale, the
+    /// refused ones too: a month that failed with a refusal is asked for again when the grid wants
+    /// it, so no month stays placeholders for good.
+    func testASyncReloadLetsARefusedMonthBeAskedForAgain() async throws {
+        let months = Self.months(6)
+        let api = FeedLibrary(months: months)
+        let refused = months[2]
+        await api.fail(refused, times: 1, with: ServerFailure.http(403, nil))
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        store.visibleSections([2])
+        try await until("The refusal was not reported.") { store.bucketErrors[refused] != nil }
+        try await Task.sleep(for: .milliseconds(200))
+        var calls = await api.calls
+        XCTAssertEqual(calls[refused], 1, "A refusal is not retried by itself.")
+        XCTAssertNil(store.loaded[refused])
+
+        await store.reload(preservingPosition: true)
+        XCTAssertEqual(store.bucketErrors, [:], "The reload takes the banner down.")
+        try await until("The refused month on screen was not asked for again after the sync.") { store.loaded[refused] != nil }
+        calls = await api.calls
+        XCTAssertEqual(calls[refused], 2)
+    }
+
+    /// The months the grid reports on screen are safe from eviction at once, before the feed has
+    /// handled the viewport behind them in its queue: a load that lands in between keeps the month
+    /// that has just scrolled on and lets the next least recent go instead.
+    func testAMonthJustScrolledOnIsNotEvictedBeforeItsViewportArrives() async throws {
+        let months = Self.months(14)
+        // The month the grid moves to lands during the race; the one beside it never does.
+        let api = FeedLibrary(months: months, slow: [months[12]: .milliseconds(300), months[13]: .seconds(10)])
+        let keys = try months.map { try XCTUnwrap(MonthKey(bucketID: $0)) }
+        let viewport = TimelineFeed.Viewport()
+        let feed = TimelineFeed(source: api, viewport: viewport)
+        let recorder = FeedRecorder()
+        let ticket = TimelineFeed.Ticket()
+        let plan = try await api.plan(.library)
+        await feed.handle([.attach(recorder), .open(ticket, .library, plan),
+                           .months(keys, buckets: Dictionary(uniqueKeysWithValues: zip(keys, months)))])
+        // Twelve months resident, the first the least recently loaded.
+        for key in keys.prefix(TimelineFeed.residentLimit) { _ = try await feed.assets(of: key, ticket: ticket) }
+        XCTAssertEqual(recorder.loaded.count, TimelineFeed.residentLimit)
+        XCTAssertEqual(recorder.evicted, [])
+
+        await feed.handle([.viewport(visible: [keys[12]])])
+        // The grid is back at the top before the feed hears of it through the queue.
+        viewport.show([keys[0]])
+        try await until("The month the grid moved to never landed.") { recorder.loaded[keys[12]] != nil }
+        XCTAssertEqual(recorder.evicted, [keys[1]], "The month just scrolled on stays; the next least recent goes.")
+        XCTAssertNotNil(recorder.loaded[keys[0]])
+        await feed.handle([.close])
     }
 
     /// A month on screen that failed for a passing reason is asked again by itself, after a
@@ -200,6 +289,18 @@ import XCTest
         }
         XCTFail(message)
     }
+}
+
+/// Takes the feed's deliveries as the store does: a month shown, the months let go, the failures.
+@MainActor private final class FeedRecorder: TimelineFeedConsumer {
+    var loaded: [MonthKey: [Asset]] = [:]
+    var evicted: [MonthKey] = []
+    var failed: [MonthKey: String] = [:]
+    func monthLoaded(_ ticket: TimelineFeed.Ticket, month: MonthKey, assets: [Asset], fresh: Bool, evicting: [MonthKey]) {
+        for gone in evicting { loaded[gone] = nil }
+        loaded[month] = assets; evicted += evicting
+    }
+    func monthFailed(_ ticket: TimelineFeed.Ticket, month: MonthKey, message: String) { failed[month] = message }
 }
 
 /// A library of one photo a month, named by the month and the number of the call that read it.

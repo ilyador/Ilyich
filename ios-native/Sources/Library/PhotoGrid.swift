@@ -112,6 +112,10 @@ struct PhotoGrid: UIViewRepresentable {
                     view.setContentOffset(CGPoint(x: 0, y: attributes.frame.minY + position.offset), animated: false)
                 } else { view.setContentOffset(CGPoint(x: 0, y: -topInset), animated: false) }
             }
+            // New rows or a reset change what is on screen without a scroll, and UIKit reports
+            // none for an offset that did not move (a feed opened from the top of the one before,
+            // or a cold start). Cells no longer ask for their months, so the viewport is published.
+            coordinator.publishPositionAfterReload(resetID: store.resetID)
         }
         if groupingChanged && !reset {
             // Loading a neighboring month changes header geometry, not item identity.
@@ -502,6 +506,17 @@ struct PhotoGrid: UIViewRepresentable {
                 guard let self, let collection = self.collection,
                       self.parent.store.resetID == resetID,
                       self.parent.store.scrollRequest?.id == requestID else { return }
+                collection.layoutIfNeeded()
+                self.publishVisiblePosition()
+            }
+        }
+        /// The grid's rows changed under it: what is on screen is published once this update is
+        /// over, so the feed hears of the months new rows or a reset put there without a scroll.
+        func publishPositionAfterReload(resetID: UUID) {
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, let collection = self.collection, self.parent.store.resetID == resetID,
+                      !self.parent.store.isReplacingFeed else { return }
                 collection.layoutIfNeeded()
                 self.publishVisiblePosition()
             }

@@ -184,6 +184,9 @@ private struct SavedTimeline {
     /// The feed's months, loaded off the main actor as the grid needs them (F2). `loaded` and
     /// `bucketErrors` mirror what it delivers; the grid reads the mirror.
     @ObservationIgnored private let feed: TimelineFeed
+    /// The months on screen, for the feed to read at once: the viewport command that follows
+    /// them through the queue must not let a load that lands first evict a month just scrolled on.
+    @ObservationIgnored private let feedViewport = TimelineFeed.Viewport()
     /// The feed open in it: its ticket names every delivery, and its query and plan say whether a
     /// reload may keep the months on their way.
     @ObservationIgnored private var feedSession: (ticket: TimelineFeed.Ticket, query: LibraryQuery, plan: QueryPlan)?
@@ -219,7 +222,7 @@ private struct SavedTimeline {
         self.source = source; self.includesDevicePhotos = includesDevicePhotos; self.placesDelay = placesDelay
         choicesStorage = choices
         searchChoices = choices?.load() ?? SearchChoices()
-        feed = TimelineFeed(source: source)
+        feed = TimelineFeed(source: source, viewport: feedViewport)
         send(.attach(self))
     }
     private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && feedQuery == .library }
@@ -595,6 +598,7 @@ private struct SavedTimeline {
         let months = Set(indices.compactMap { monthKeys.indices.contains($0) ? monthKeys[$0] : nil })
         guard months != lastVisibleMonths else { return }
         lastVisibleMonths = months
+        feedViewport.show(months)
         send(.viewport(visible: months))
     }
 
@@ -1030,7 +1034,7 @@ private struct SavedTimeline {
     /// Closes the feed: its loads stop and nothing it delivers after is shown. Commands still
     /// queued go first, in order; they belong to the feed being closed, and `close` undoes them.
     private func cancelRequests() {
-        feedSession = nil; lastVisibleMonths = nil; sentMonths = nil
+        feedSession = nil; lastVisibleMonths = nil; sentMonths = nil; feedViewport.show([])
         send(.close)
     }
 
@@ -1038,7 +1042,7 @@ private struct SavedTimeline {
     private func openFeed(_ query: LibraryQuery, plan: QueryPlan) {
         let ticket = TimelineFeed.Ticket()
         feedSession = (ticket, query, plan)
-        lastVisibleMonths = nil; sentMonths = nil
+        lastVisibleMonths = nil; sentMonths = nil; feedViewport.show([])
         send(.open(ticket, query, plan))
     }
 
