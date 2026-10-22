@@ -41,7 +41,7 @@ final class SignpostNamesTests: XCTestCase {
 
     /// The summary and the signposts' metadata use these words too.
     func testSourcesPlaceholdersAndBackendsKeepTheirNames() {
-        XCTAssertEqual(ThumbSource.allCases.map(\.name), ["memory", "memoryOther", "disk", "network"])
+        XCTAssertEqual(ThumbSource.allCases.map(\.name), ["memory", "memoryOther", "disk", "network", "device"])
         XCTAssertEqual(ThumbPlaceholder.allCases.map(\.name), ["sketch", "empty", "awaitingMonth", "color"])
         XCTAssertEqual([QueryPlan.Backend.index, .serverTimeline, .serverSearch].map(FeedMonthProbe.name),
                        ["index", "serverTimeline", "serverSearch"])

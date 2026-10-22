@@ -14,12 +14,15 @@ extension ThumbnailDiskStore: ThumbnailStoring {}
 
 /// A grid thumbnail on its way to the main thread, or the news that it could not be loaded.
 struct ThumbnailDelivery: Sendable {
+    /// As ThumbnailKey.assetID names it.
     let assetID: String
     let revision: String
     /// Nil when the photo could not be loaded.
     let image: PreparedImage?
     /// Where the bytes came from.
     let fromNetwork: Bool
+    /// A phone photo Photos holds only in iCloud, which the grid never downloads.
+    var inCloud = false
 }
 
 /// The one place grid thumbnails are loaded. Grids say what they want as a whole, replacing what
@@ -30,6 +33,8 @@ struct ThumbnailDelivery: Sendable {
 ///   scrubs, the photo that came on screen last decodes first; otherwise the one nearest the
 ///   middle. A lane checks the job's wanted flag before reading the file, so a photo that scrolled
 ///   away is never decoded.
+/// - Photos renders phone photos' thumbnails on the same lanes, through the device source, which
+///   also keeps Photos' caching manager one window ahead of the grid (T6). They never download.
 /// - Downloads start most urgent band first, each band only while fewer downloads than its
 ///   ceiling are running, so coverage never takes the slots the screen needs. A download that has
 ///   started finishes and is stored even if nobody wants it any more: the server does the work
@@ -91,6 +96,8 @@ final class ThumbnailScheduler: Sendable {
         let key: Key
         let token: UInt64
         let generation: Int
+        /// The phone photo this is, when Photos renders it instead of the disk or the server.
+        var device: DeviceAssetID?
         var grid: [Source: Want] = [:]
         var waiters: [UUID: Waiter] = [:]
         var phase = Phase.idle
@@ -111,6 +118,11 @@ final class ThumbnailScheduler: Sendable {
         }
     }
 
+    private struct DeviceWindow {
+        var ids: Set<DeviceAssetID>
+        var pixels: Int
+    }
+
     private struct State {
         var jobs: [Key: Job] = [:]
         /// Each grid's latest demand not yet worked in.
@@ -118,6 +130,8 @@ final class ThumbnailScheduler: Sendable {
         var mailboxScheduled = false
         /// The photos each grid wants now.
         var wanted: [Source: Set<Key>] = [:]
+        /// The phone photos each grid wants that memory lacks, for Photos to render ahead.
+        var deviceWindows: [Source: DeviceWindow] = [:]
         var serial = 0
         var decoding = 0
         var fetching = 0
@@ -132,12 +146,16 @@ final class ThumbnailScheduler: Sendable {
         let side: Int
         let bytes: Data?
         let flag: Flag
+        /// Set when Photos renders this one instead of a lane decoding a file.
+        let device: DeviceAssetID?
     }
 
     private let state = Mutex(State())
     private let store: any ThumbnailStoring
     private let memory: DecodedThumbnailCache
     private let fetcher: ThumbnailFetcher
+    /// Phone photos' thumbnails, when the account browses the phone's photos too.
+    private let device: (any DeviceThumbnailProviding)?
     private let lanes: Int
     private let queue = DispatchQueue(label: "ilyich.thumbnail-scheduler", qos: .userInitiated)
     private let decodeQueue = DispatchQueue(label: "ilyich.thumbnail-decode", qos: .userInitiated, attributes: .concurrent)
@@ -157,12 +175,14 @@ final class ThumbnailScheduler: Sendable {
     private var fence: MediaFence { store.fence }
 
     /// With `watchesNetwork`, photos waiting after a failure are tried again as soon as the
-    /// network comes back.
-    init(store: any ThumbnailStoring, memory: DecodedThumbnailCache, fetcher: ThumbnailFetcher, lanes: Int = 3,
+    /// network comes back. Without `device`, phone photos in a demand are left alone.
+    init(store: any ThumbnailStoring, memory: DecodedThumbnailCache, fetcher: ThumbnailFetcher,
+         device: (any DeviceThumbnailProviding)? = nil, lanes: Int = 3,
          watchesNetwork: Bool = false, willDecode: (@Sendable (String) -> Void)? = nil) {
         self.store = store
         self.memory = memory
         self.fetcher = fetcher
+        self.device = device
         self.lanes = max(1, lanes)
         self.willDecode = willDecode
         monitor = watchesNetwork ? NWPathMonitor() : nil
@@ -225,26 +245,45 @@ final class ThumbnailScheduler: Sendable {
             return state.mailbox
         }
         for (source, demand) in mail { apply(demand, from: source) }
+        if let device, !mail.isEmpty {
+            // Photos renders ahead what every grid wants of the phone, at the largest cell.
+            let window = state.withLock { state -> DeviceWindow in
+                state.deviceWindows.values.reduce(into: DeviceWindow(ids: [], pixels: 0)) { union, window in
+                    union.ids.formUnion(window.ids)
+                    union.pixels = max(union.pixels, window.pixels)
+                }
+            }
+            device.preheat(window.ids, pixels: window.pixels)
+        }
         pump()
     }
 
     private func apply(_ demand: ViewportDemand, from source: Source) {
         let scrubbing = demand.motion == .scrubbing
         var wants: [Key: Want] = [:]
+        var devices: [Key: DeviceAssetID] = [:]
+        var window = DeviceWindow(ids: [], pixels: 0)
         for item in demand.items {
-            guard case .server(let assetID, let revision) = item.request.key else { continue }
-            let key = Key(assetID: assetID, revision: revision)
+            let request = item.request
+            let key = Key(assetID: request.key.assetID, revision: request.key.revision)
+            // Phone photos need the device source; without one they are left alone.
+            if request.key.deviceID != nil && device == nil { continue }
             // What memory has already needs nothing.
-            if memory.image(assetID: assetID, revision: revision, shortSide: item.request.shortSide) != nil { continue }
-            let want = Want(band: item.band, rank: item.rank, shortSide: item.request.shortSide,
+            if memory.image(assetID: key.assetID, revision: key.revision, shortSide: request.shortSide) != nil { continue }
+            if let id = request.key.deviceID {
+                devices[key] = id
+                window.ids.insert(id)
+                window.pixels = max(window.pixels, request.shortSide)
+            }
+            let want = Want(band: item.band, rank: item.rank, shortSide: request.shortSide,
                             network: !scrubbing || item.band == .target)
             wants[key] = wants[key].map { $0.merged(want) } ?? want
         }
-        // The disk is asked about new photos only, outside the lock.
+        // The disk is asked about new photos only, outside the lock. Photos always has its own.
         let known = state.withLock { state in Set(wants.keys.filter { state.jobs[$0] != nil }) }
         var onDisk: [Key: Bool] = [:]
         for key in wants.keys where !known.contains(key) {
-            onDisk[key] = store.contains(assetID: key.assetID, revision: key.revision)
+            onDisk[key] = devices[key] != nil || store.contains(assetID: key.assetID, revision: key.revision)
         }
         let token = demand.generation
         state.withLock { state in
@@ -257,7 +296,7 @@ final class ThumbnailScheduler: Sendable {
             }
             for (key, var want) in wants {
                 var job = state.jobs[key] ?? Job(key: key, token: token, generation: state.generation,
-                                                 onDisk: onDisk[key] ?? true)
+                                                 device: devices[key], onDisk: onDisk[key] ?? true)
                 if scrubbing && want.band == .visible {
                     let previous = job.grid[source]
                     want.lifo = previous?.band == .visible && previous?.lifo != 0 ? previous!.lifo : -serial
@@ -267,6 +306,7 @@ final class ThumbnailScheduler: Sendable {
                 state.jobs[key] = job
             }
             state.wanted[source] = wants.isEmpty ? nil : Set(wants.keys)
+            state.deviceWindows[source] = window.ids.isEmpty ? nil : window
         }
     }
 
@@ -439,16 +479,26 @@ final class ThumbnailScheduler: Sendable {
             while let work = nextDecode() {
                 var image: PreparedImage?
                 var skipped = false
+                var inCloud = false
                 if work.flag.wanted.load(ordering: .relaxed) {
                     willDecode?(work.key.assetID)
-                    image = autoreleasepool { () -> PreparedImage? in
-                        guard let data = work.bytes ?? store.data(assetID: work.key.assetID, revision: work.key.revision) else { return nil }
-                        return try? MediaPipeline.downsampleThumbnail(data, shortSide: work.side)
+                    if let id = work.device {
+                        // Photos renders it, at the cell's size, while this lane waits.
+                        switch device?.thumbnail(id, pixels: work.side) {
+                        case .image(let rendered): image = rendered
+                        case .unavailable(let cloud): inCloud = cloud
+                        case nil: break
+                        }
+                    } else {
+                        image = autoreleasepool { () -> PreparedImage? in
+                            guard let data = work.bytes ?? store.data(assetID: work.key.assetID, revision: work.key.revision) else { return nil }
+                            return try? MediaPipeline.downsampleThumbnail(data, shortSide: work.side)
+                        }
                     }
                 } else {
                     skipped = true
                 }
-                finishDecode(work, image: image, skipped: skipped)
+                finishDecode(work, image: image, skipped: skipped, inCloud: inCloud)
             }
         }
     }
@@ -470,11 +520,11 @@ final class ThumbnailScheduler: Sendable {
             job.decodingSide = want.shortSide
             state.jobs[best.key] = job
             return DecodeWork(key: job.key, generation: job.generation, token: job.token, side: want.shortSide,
-                              bytes: job.fetched, flag: job.flag)
+                              bytes: job.fetched, flag: job.flag, device: job.device)
         }
     }
 
-    private func finishDecode(_ work: DecodeWork, image: PreparedImage?, skipped: Bool) {
+    private func finishDecode(_ work: DecodeWork, image: PreparedImage?, skipped: Bool, inCloud: Bool = false) {
         let key = work.key, fence = fence
         var admitted = false
         if let image {
@@ -520,6 +570,14 @@ final class ThumbnailScheduler: Sendable {
                 job.waiters = [:]
                 if !job.grid.isEmpty {
                     delivery = ThumbnailDelivery(assetID: key.assetID, revision: key.revision, image: nil, fromNetwork: true)
+                }
+                job.grid = [:]
+            } else if work.device != nil {
+                // Photos has nothing to give for it: gone, or only in iCloud. Nobody else can help.
+                for waiter in job.waiters.values { resumes.append((waiter.continuation, .success(nil))) }
+                job.waiters = [:]
+                if !job.grid.isEmpty {
+                    delivery = ThumbnailDelivery(assetID: key.assetID, revision: key.revision, image: nil, fromNetwork: false, inCloud: inCloud)
                 }
                 job.grid = [:]
             } else {
@@ -608,11 +666,13 @@ final class ThumbnailScheduler: Sendable {
             }
             state.jobs = [:]
             state.wanted = [:]
+            state.deviceWindows = [:]
             state.mailbox = [:]
             return waiters
         }
         outbox.withLock { $0.deliveries = [] }
         fetcher.clearBackoff()
+        device?.stop()
         for waiter in waiters { waiter.resume(throwing: CancellationError()) }
         // The grids' cells still waiting for thumbnails ask again.
         DispatchQueue.main.async { [self] in

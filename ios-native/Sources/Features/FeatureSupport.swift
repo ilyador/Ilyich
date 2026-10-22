@@ -16,13 +16,24 @@ struct FeatureEmpty: View {
     }
 }
 
+/// The pixels a tile of `size` points decodes its thumbnail at: its short side, and no less than
+/// the grid's smallest cell, so tiles and cells share one decoded copy.
+@MainActor func tilePixels(_ size: CGSize, scale: CGFloat) -> Int {
+    max(128, Int((min(size.width, size.height) * scale).rounded(.up)))
+}
+
+/// A tile that knows its photo only by ID: an album cover, a place, a memory. The offline library
+/// names the photo and its revision, so the thumbnail comes through the thumbnail service with no
+/// asset round trip; only a photo the library lacks is fetched first (T6).
 struct FeatureThumbnail: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let assetID: String?
+    /// Reloads the tile when it changes, as an album's cover may with its update time.
     var revision: String = ""
     @State private var image: UIImage?
     @State private var failed = false
+    @Environment(\.displayScale) private var scale
     init(api: APIClient, pipeline: MediaPipeline, assetID: String?, revision: String = "") {
         self.api = api; self.pipeline = pipeline; self.assetID = assetID; self.revision = revision
         _image = State(initialValue: assetID.flatMap { pipeline.latestImage(assetID: $0, size: .thumbnail) }?.uiImage)
@@ -39,17 +50,18 @@ struct FeatureThumbnail: View {
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-        }
-        .task(id: (assetID ?? "") + revision) {
-            failed = false
-            guard let assetID else { image = nil; return }
-            image = pipeline.latestImage(assetID: assetID, size: .thumbnail)?.uiImage
-            do {
-                let asset = try await api.asset(id: assetID)
-                let result = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: 600)
-                try Task.checkCancellation()
-                image = result.uiImage
-            } catch is CancellationError { } catch { failed = true }
+            .task(id: (assetID ?? "") + "|" + revision + "|" + String(tilePixels(geometry.size, scale: scale))) {
+                failed = false
+                guard let assetID else { image = nil; return }
+                if let cached = pipeline.latestImage(assetID: assetID, size: .thumbnail) { image = cached.uiImage }
+                guard geometry.size.width > 0, geometry.size.height > 0 else { return }
+                do {
+                    let result = try await pipeline.thumbnail(assetID: assetID, shortSide: tilePixels(geometry.size, scale: scale),
+                                                              fetch: { try await api.asset(id: $0) })
+                    try Task.checkCancellation()
+                    image = result.uiImage
+                } catch is CancellationError { } catch { if image == nil { failed = true } }
+            }
         }
         .accessibilityHidden(true)
     }
@@ -89,10 +101,13 @@ struct PersonThumbnail: View {
     }
 }
 
+/// A tile for a photo it already has, such as the rail's lens or a duplicate: the thumbnail at the
+/// tile's own size, through the thumbnail service.
 struct FeatureAssetImage: View {
     let pipeline: MediaPipeline
     let asset: Asset
     @State private var image: UIImage?
+    @Environment(\.displayScale) private var scale
     init(pipeline: MediaPipeline, asset: Asset) {
         self.pipeline = pipeline; self.asset = asset
         _image = State(initialValue: pipeline.latestImage(assetID: asset.id, size: .thumbnail, revision: asset.cacheRevision)?.uiImage)
@@ -103,12 +118,13 @@ struct FeatureAssetImage: View {
                 Color.secondary.opacity(0.12)
                 if let image { Image(uiImage: image).resizable().scaledToFill() }
             }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-        }
-        .task(id: asset.id + asset.cacheRevision) {
-            do {
-                let result = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: 500)
-                try Task.checkCancellation(); image = result.uiImage
-            } catch is CancellationError { } catch { image = nil }
+            .task(id: asset.id + "|" + asset.cacheRevision + "|" + String(tilePixels(geometry.size, scale: scale))) {
+                guard geometry.size.width > 0, geometry.size.height > 0 else { return }
+                do {
+                    let result = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: tilePixels(geometry.size, scale: scale))
+                    try Task.checkCancellation(); image = result.uiImage
+                } catch { }
+            }
         }.accessibilityHidden(true)
     }
 }

@@ -167,7 +167,6 @@ private struct GlobeSurface: UIViewRepresentable {
         var api: APIClient?
         var pipeline: MediaPipeline?
         var photoMarkers: [GlobePhotoMarker] = []
-        let markerImageCache = GlobeMarkerImageCache()
         var displayLink: CADisplayLink?
         var lastTimestamp: CFTimeInterval = 0
         private var focusTransition: FocusTransition?
@@ -461,7 +460,7 @@ private struct GlobeSurface: UIViewRepresentable {
                 guard index < visible.count else { marker.isHidden = true; marker.cancelImage(); continue }
                 marker.frame = placed[index]; marker.isHidden = false
                 marker.isSelected = visible[index].1.id == focusedPlaceID
-                marker.configure(place: visible[index].1, api: api, pipeline: pipeline, cache: markerImageCache)
+                marker.configure(place: visible[index].1, api: api, pipeline: pipeline)
             }
             host?.accessibilityElements = photoMarkers.filter { !$0.isHidden }
         }
@@ -965,34 +964,28 @@ enum GlobeArt {
         let width = min(availableWidth, min(lines == 2 ? 340 : 240, max(132, ceil(textWidth + countWidth) + min(52, height - 18) + 46)))
         return .init(width: width, height: height)
     }
-    func configure(place: PlaceCollection, api: APIClient, pipeline: MediaPipeline, cache: GlobeMarkerImageCache) {
+    /// The marker's thumbnail comes through the thumbnail service, which keeps it in memory with
+    /// the grid's: a photo seen before draws in this frame, and the library names the photo and
+    /// its revision, so a new one needs no asset round trip (T6).
+    func configure(place: PlaceCollection, api: APIClient, pipeline: MediaPipeline) {
         self.place = place; nameLabel.text = place.title; countLabel.text = place.assetIDs.count.formatted()
         accessibilityLabel = "\(place.title), \(place.assetIDs.count) items"
         guard let id = place.assetIDs.first, id != imageID else { return }
-        imageTask?.cancel(); imageID = id; thumbnail.image = nil
-        if let image = cache.images[id] { thumbnail.image = image; return }
+        imageTask?.cancel(); imageID = id
+        thumbnail.image = pipeline.latestImage(assetID: id, size: .thumbnail)?.uiImage
+        guard thumbnail.image == nil else { return }
+        let pixels = max(128, Int(Self.thumbnailEdge * traitCollection.displayScale))
         imageTask = Task { [weak self] in
             do {
                 try await Task.sleep(for: .milliseconds(120))
-                let asset = try await api.asset(id: id)
-                let image = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: 120)
+                let image = try await pipeline.thumbnail(assetID: id, shortSide: pixels, fetch: { try await api.asset(id: $0) })
                 try Task.checkCancellation()
                 guard let self, self.imageID == id else { return }
-                let uiImage = image.uiImage
-                self.thumbnail.image = uiImage; cache.insert(uiImage, id: id)
+                self.thumbnail.image = image.uiImage
             } catch { }
         }
     }
     func cancelImage() { imageTask?.cancel(); imageTask = nil; imageID = nil }
-}
-
-
-@MainActor private final class GlobeMarkerImageCache {
-    var images: [String: UIImage] = [:]
-    private var order: [String] = []
-    func insert(_ image: UIImage, id: String) {
-        if images[id] == nil { order.append(id) }
-        images[id] = image
-        if order.count > 64 { images.removeValue(forKey: order.removeFirst()) }
-    }
+    /// The round thumbnail's largest edge, in points.
+    private static let thumbnailEdge: CGFloat = 52
 }

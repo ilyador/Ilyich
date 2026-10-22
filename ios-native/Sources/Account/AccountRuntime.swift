@@ -112,7 +112,9 @@ final class AccountRuntime: Sendable {
         let api: APIClient
         do { api = try dependencies.clients.make(credential.server, credential, .session(authorization)) }
         catch { authorization.end(); throw error }
-        let pipeline = MediaPipeline(client: api)
+        // Phone photos' grid thumbnails come from Photos through the thumbnail service (T6).
+        let pipeline = MediaPipeline(client: api, device: environment.usesDevicePhotos
+                                        ? DeviceThumbnailSource(imaging: PhotoKitAdapter.thumbnails) : nil)
         let work = OwnedWork()
         let check = SessionCheck(api: api, work: work, enabled: environment.validatesSession) { error in await expired(id, error) }
         var library: LibraryServices?
@@ -120,6 +122,9 @@ final class AccountRuntime: Sendable {
         if environment.syncsLibrary, credential.requiresPasswordChange != true {
             do {
                 let entities = try LibraryIndex(scope: api.cacheScope, userID: credential.userID, directory: environment.libraryDirectory)
+                // Feature tiles, globe markers and the like name their photo from the library,
+                // with its revision, instead of asking the server for it first (T6).
+                pipeline.setIndexedAssets { id in try? await entities.asset(id: id) }
                 let native = NativeSync(api: api, store: entities)
                 let device = dependencies.device
                 // Only the boards the screens observe are made on the main actor.

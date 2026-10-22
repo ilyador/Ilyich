@@ -169,11 +169,16 @@ actor MediaPipeline {
     private var privateGeneration = UUID()
     private var privateKeys = Set<MediaCacheIdentity>()
 
+    /// Names a server photo from the offline library, with its revision, so a tile that knows only
+    /// an ID needs no round trip to the server. Set once the account's index is open.
+    private nonisolated let indexedAssets = Mutex<(@Sendable (String) async -> Asset?)?>(nil)
+
     /// `protocolClasses` serve the downloads, and `earlierURLCacheEntries` says whether the URL
     /// cache holds entries from an earlier launch, for tests; it is measured otherwise.
     /// `memoryLimit` is for previews and full-size images; grid thumbnails have their own budget.
+    /// `device` renders phone photos' thumbnails, when the account browses the phone's photos.
     init(client: APIClient, memoryLimit: Int = 64 * 1024 * 1024, diskLimit: Int = 300 * 1024 * 1024,
-         protocolClasses: [AnyClass]? = nil, earlierURLCacheEntries: Bool? = nil) {
+         protocolClasses: [AnyClass]? = nil, earlierURLCacheEntries: Bool? = nil, device: (any DeviceThumbnailProviding)? = nil) {
         self.client = client
         urlCacheHasUnindexedEntries = earlierURLCacheEntries
         let scope = SHA256.hash(data: Data(client.cacheScope.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -199,7 +204,8 @@ actor MediaPipeline {
         let thumbs = DecodedThumbnailCache()
         self.thumbs = thumbs
         scheduler = ThumbnailScheduler(store: thumbnails, memory: thumbs,
-                                       fetcher: ThumbnailFetcher(client: client, protocolClasses: protocolClasses), watchesNetwork: true)
+                                       fetcher: ThumbnailFetcher(client: client, protocolClasses: protocolClasses),
+                                       device: device, watchesNetwork: true)
         let decoded = memory.decoded, latest = memory.latest
         decoded.totalCostLimit = memoryLimit
         decoded.countLimit = 2_000
@@ -281,6 +287,25 @@ actor MediaPipeline {
 
     /// The media fence's token now, for work that will store or remember a photo's media later.
     nonisolated func mediaToken() -> UInt64 { fence.token() }
+
+    /// Where a photo known only by its ID is looked up before the server: the offline library.
+    nonisolated func setIndexedAssets(_ lookup: (@Sendable (String) async -> Asset?)?) {
+        indexedAssets.withLock { $0 = lookup }
+    }
+
+    /// The grid thumbnail of a photo a tile knows only by its ID, for a tile of `shortSide`
+    /// pixels: the offline library names the photo and its revision, so the thumbnail comes from
+    /// memory, the disk or the server's thumbnail endpoint with no asset round trip. Only a photo
+    /// the library lacks is first fetched with `fetch`, the server's GET assets/{id}.
+    func thumbnail(assetID: String, shortSide: Int, fetch: @Sendable (String) async throws -> Asset) async throws -> PreparedImage {
+        let lookup = indexedAssets.withLock { $0 }
+        var named: Asset?
+        if let lookup { named = await lookup(assetID) }
+        try Task.checkCancellation()
+        if named == nil { named = try await fetch(assetID) }
+        guard let named else { throw CancellationError() }
+        return try await image(for: named, size: .thumbnail, pixelSize: shortSide)
+    }
 
     private func mediaRequest(_ asset: Asset, size: MediaSize, edited: Bool) async throws -> URLRequest {
         try await client.authorizedRequest(path: "assets/\(asset.id)/thumbnail", query: [

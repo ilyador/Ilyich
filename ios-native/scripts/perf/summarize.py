@@ -12,7 +12,7 @@ import math
 import os
 import sys
 
-SOURCES = ("memory", "memoryOther", "disk", "network")
+SOURCES = ("memory", "memoryOther", "disk", "network", "device")
 DASH = "—"
 
 
