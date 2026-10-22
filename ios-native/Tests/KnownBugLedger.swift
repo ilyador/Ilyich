@@ -454,10 +454,18 @@ import XCTest
     // cannot serve. In this test host that means the simulator's own saved session and Photos
     // library. From B2 on, the transfer engine runs behind fakes, where B9 pins both.
     //
-    // CLEAN-1 (one 404 aborts the cleanup check, P4). verifiedLocalDeletionCandidates needs the
-    // same Keychain credential, and PhotoKitAdapter.removalShape must find a real PHAsset before the GET
-    // that fails, so it cannot run without a device's photos. P4's CleanupService takes its PhotoKit
-    // adapter and its remote verifier as seams.
+    // MARK: - Cleanup
+
+    /// CLEAN-1, fixed in P4. One missing server copy used to abort the whole cleanup check; now it
+    /// excludes only that photo, and the others are still offered.
+    func testOneMissingServerCopyExcludesOnlyThatPhotoFromCleanup() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("kept"); h.addBackedUp("gone")
+        h.remote.set("server-gone", .failure(ServerFailure.notFound))
+        let result = try await h.service.scan()
+        XCTAssertEqual(result.candidates.map(\.localID), ["kept"])
+        XCTAssertEqual(result.exclusions["gone"], .notOnServer)
+    }
 
     // MARK: - Support
 

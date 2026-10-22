@@ -111,7 +111,7 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     /// How many photos failed, without sorting them.
     var failureCount: Int { state.failures?.count ?? 0 }
     /// Display associations for the active server/user. These are historical
-    /// receipts; local deletion must use verifiedLocalDeletionCandidates().
+    /// receipts; local deletion goes through CleanupService, which verifies them again.
     var associations: [String: BackupReceipt] { state.receipts ?? [:] }
     var queuedLocalIDs: [String] { state.queue }
     func failure(for localID: String) -> BackupFailure? { state.failures?[localID] }
@@ -388,71 +388,35 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
 
     private static let unavailable = "Backup isn’t available. Sign in again, then retry."
 
-    /// A past upload is not sufficient for deleting local data: recheck current
-    /// server ownership, checksum, trash state, pair and local revision now.
-    func verifiedLocalDeletionCandidates() async throws -> [String] {
-        await activate()
-        let runID = generation
-        let session = try currentSession(runID)
-        let api = try backupClient(for: session)
-        var ids: [String] = []
-        var measured: [String: BackupReceipt] = [:]
-        for (localID, receipt) in state.receipts ?? [:] {
-            _ = try currentSession(runID)
-            guard await Self.canRemove(localID, revision: receipt.modificationDate) else { continue }
-            let remote: BackupRemoteAsset = try await api.request(.get, path: "assets/\(receipt.original.id)")
-            guard receipt.original.matches(remote, ownerID: session.userID) else { continue }
-            var counted = receipt
-            counted.original.byteCount = remote.knownByteCount
-            if let motion = receipt.motion {
-                guard remote.livePhotoVideoId == motion.id else { continue }
-                let remoteMotion: BackupRemoteAsset = try await api.request(.get, path: "assets/\(motion.id)")
-                guard motion.matches(remoteMotion, ownerID: session.userID) else { continue }
-                counted.motion?.byteCount = remoteMotion.knownByteCount
-            }
-            _ = try currentSession(runID)
-            if await Self.canRemove(localID, revision: receipt.modificationDate) { ids.append(localID); measured[localID] = counted }
-        }
-        // Record sizes only for receipts that are unchanged since verification began.
+    /// The receipts of the account `scope` names, for cleanup (LegacyStateReceipts), or nil
+    /// while another account's backup state, or none, is taken up.
+    func cleanupReceipts(scope: String) -> [String: BackupReceipt]? {
+        guard saved?.scope == scope else { return nil }
+        return state.receipts ?? [:]
+    }
+
+    /// Takes up the signed-in account's backup state if it is the one `scope` names, then its receipts.
+    func activateForCleanup(scope: String) async -> [String: BackupReceipt]? {
+        guard saved?.scope != scope else { return cleanupReceipts(scope: scope) }
+        guard let session = try? KeychainCredentialStore().load(), session.scope == scope else { return nil }
+        await activate(session)
+        return cleanupReceipts(scope: scope)
+    }
+
+    /// Keeps the sizes a cleanup check measured, each only where the receipt is still the one the
+    /// check verified: a receipt replaced meanwhile keeps what it has.
+    func recordVerifiedSizes(_ sizes: [String: VerifiedSize], scope: String) {
+        guard saved?.scope == scope else { return }
         var changed = false
-        for (localID, counted) in measured {
-            guard let current = state.receipts?[localID], current.modificationDate == counted.modificationDate,
-                  current.original.id == counted.original.id, current.motion?.id == counted.motion?.id,
-                  current.original.byteCount != counted.original.byteCount || current.motion?.byteCount != counted.motion?.byteCount else { continue }
+        for (localID, size) in sizes {
+            guard let current = state.receipts?[localID], CleanupReceipt(localID: localID, current) == size.receipt,
+                  current.original.byteCount != size.original || (current.motion != nil && current.motion?.byteCount != size.motion) else { continue }
             var updated = current
-            updated.original.byteCount = counted.original.byteCount
-            updated.motion?.byteCount = counted.motion?.byteCount
+            updated.original.byteCount = size.original
+            updated.motion?.byteCount = size.motion
             state.receipts?[localID] = updated; changed = true
         }
         if changed { try? persist() }
-        return ids.sorted()
-    }
-
-    /// Keeps adjusted, RAW+JPEG and auxiliary resources until all their variants have verified
-    /// server receipts, which a plain original receipt cannot prove: only a single original or a
-    /// Live Photo, still at the receipt's revision, may be removed.
-    private static func canRemove(_ localID: String, revision: Date) async -> Bool {
-        let shape = await PhotoKitAdapter.shared.removalShape(of: localID, revision: revision)
-        return shape == .singleOriginal || shape == .livePhoto
-    }
-
-    /// Total original bytes (still/video plus paired motion) from the last verification, or nil if any is unknown.
-    func verifiedOriginalByteCount(for localIDs: Set<String>) -> Int64? {
-        var total: Int64 = 0
-        for localID in localIDs {
-            guard let receipt = state.receipts?[localID], let original = receipt.original.byteCount else { return nil }
-            var bytes = original
-            if let motion = receipt.motion {
-                guard let motionBytes = motion.byteCount else { return nil }
-                let (sum, overflow) = bytes.addingReportingOverflow(motionBytes)
-                guard !overflow else { return nil }
-                bytes = sum
-            }
-            let (sum, overflow) = total.addingReportingOverflow(bytes)
-            guard !overflow else { return nil }
-            total = sum
-        }
-        return total
     }
 
     private func run(retryFailures: Bool = false) {

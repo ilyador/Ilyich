@@ -18,6 +18,8 @@ import IlyichPlatform
     private(set) var authorization: AuthorizationSnapshot?
     /// A read-only change is still pausing uploads.
     private(set) var isApplyingReadOnly = false
+    /// The open account's Free up space, which the app puts in the environment.
+    private(set) var freeUpSpace: FreeUpSpaceStore?
     @ObservationIgnored let manager: AccountManager
     @ObservationIgnored private let presence: AppPresence
     @ObservationIgnored private var readOnlyChange: UUID?
@@ -144,6 +146,8 @@ import IlyichPlatform
             following?.cancel(); following = nil
             readOnlyChange = nil; isApplyingReadOnly = false
             runtime = state.runtime
+            freeUpSpace?.disappear()
+            freeUpSpace = state.runtime.map { FreeUpSpaceStore(service: $0.cleanup) }
             authorization = state.runtime?.authorization.snapshot
             if let runtime = state.runtime { follow(runtime.authorization) }
         }

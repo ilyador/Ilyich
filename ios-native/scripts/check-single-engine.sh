@@ -24,7 +24,7 @@
 #   5. changes the library, rather than through PhotoKitAdapter.perform, which journals each change
 #      and checks it again inside its change block;
 #   6. fetches assets or requests their media itself, rather than through the adapter's reads and
-#      its one shared image manager (P3). Free up space keeps its own fetches until P4 rebuilds it.
+#      its one shared image manager (P3).
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
@@ -81,7 +81,6 @@ reject "only the Photos adapter in Sources/Device observes the library; subscrib
 reject "only the Photos adapter in Sources/Device changes the library; use PhotoKitAdapter.perform, which journals the change" \
     < <(code_lines 'performChanges|PHAssetChangeRequest|PHAssetCreationRequest|PHAssetCollectionChangeRequest|PHCollectionListChangeRequest' | grep -v '^Sources/Device/' || true)
 reject "only the Photos adapter in Sources/Device fetches assets or requests their media; use its reads and PhotoKitAdapter.media" \
-    Sources/Features/LocalLibraryViews.swift \
     < <(code_lines 'PHImageManager|PHCachingImageManager|PHAsset\.fetchAssets' | grep -v '^Sources/Device/' || true)
 
 if [ "$failures" -gt 0 ]; then

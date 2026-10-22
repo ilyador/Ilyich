@@ -38,6 +38,7 @@ import SwiftUI
             }
             // Every control that changes something reads what the account may do from here.
             .environment(\.authorization, session.authorization)
+            .environment(\.freeUpSpace, session.freeUpSpace)
             .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }
