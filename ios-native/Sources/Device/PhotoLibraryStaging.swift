@@ -130,12 +130,6 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         stagingReader.candidates([localID]).first.flatMap(\.modified)
     }
 
-    /// How the asset is made, if it is still at `revision`. Nil when it is gone or changed.
-    func removalShape(of localID: String, revision: Date) -> ResourceShape? {
-        guard let asset = Self.asset(localID), asset.modificationDate == revision else { return nil }
-        return ResourceShape.classify(PHAssetResource.assetResources(for: asset).map(\.type), isVideo: asset.mediaType == .video)
-    }
-
     /// Phone photos for the merged timeline: each one, its cloud identifier, and whether Photos
     /// holds no edit of it.
     nonisolated func timelineItems(included: Set<String>, excluded: Set<String>) async throws -> [DeviceTimelineItem] {

@@ -7,7 +7,7 @@ import XCTest
 /// Photos for the adapter's tests. Assets live in a table. A change block runs on a serial queue of
 /// the fake's own, as Photos runs it, and what it asks for applies only once the change commits. A
 /// test can hold a change at iOS's prompt, fail it, or change an asset just before its block runs.
-final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingReading {
+final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingReading, CleanupAssetReading {
     struct Favorite: Equatable, Sendable {
         let ids: [DeviceAssetID]
         let value: Bool
@@ -48,6 +48,16 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingRea
         /// While set, each album or member read waits for it, as a long enumeration of a large library would.
         var readGate: DispatchSemaphore?
         var readsWaiting = 0
+        /// How each asset is made, for cleanup's reads. An asset without is a single photo taken in 2020.
+        var facts: [DeviceAssetID: Facts] = [:]
+        var cleanupReads = 0
+    }
+
+    /// What cleanup reads beyond an asset's state.
+    struct Facts: Hashable, Sendable {
+        var created: Date? = Date(timeIntervalSince1970: 1_580_000_000)
+        var isVideo = false
+        var shape: ResourceShape = .singleOriginal
     }
 
     private let state: Mutex<State>
@@ -73,6 +83,17 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingRea
         update(id) { DeviceAssetState(id: $0.id, revision: AssetRevision(referenceSeconds: revision), isFavorite: $0.isFavorite,
                                       canDelete: $0.canDelete, canEditProperties: $0.canEditProperties) }
     }
+
+    /// Sets how an asset is made, for cleanup's reads.
+    func setFacts(_ id: String, _ facts: Facts) { state.withLock { $0.facts[DeviceAssetID(rawValue: id)] = facts } }
+
+    /// Favorites or unfavorites an asset in place, keeping its revision.
+    func setFavorite(_ id: String, _ value: Bool) {
+        update(id) { DeviceAssetState(id: $0.id, revision: $0.revision, isFavorite: value, canDelete: $0.canDelete, canEditProperties: $0.canEditProperties) }
+    }
+
+    /// Times cleanup read assets.
+    var cleanupReads: Int { state.withLock { $0.cleanupReads } }
 
     func setDeletable(_ id: String, _ value: Bool) {
         update(id) { DeviceAssetState(id: $0.id, revision: $0.revision, isFavorite: $0.isFavorite, canDelete: value, canEditProperties: $0.canEditProperties) }
@@ -207,6 +228,21 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingRea
         return state.withLock { state in
             if onMain { state.readsOnMainThread += 1 }
             return Set(ids).compactMap { state.assets[$0] }
+        }
+    }
+
+    // MARK: - CleanupAssetReading
+
+    func cleanupAssets(_ ids: [DeviceAssetID]) -> [DeviceAsset] {
+        read { state in
+            state.cleanupReads += 1
+            return Set(ids).compactMap { id -> DeviceAsset? in
+                guard let asset = state.assets[id] else { return nil }
+                let facts = state.facts[id] ?? Facts()
+                return DeviceAsset(id: id, revision: asset.revision, created: facts.created, isVideo: facts.isVideo,
+                                   isLive: facts.shape == .livePhoto, isFavorite: asset.isFavorite, location: nil, shape: facts.shape,
+                                   canDelete: asset.canDelete, canEditProperties: asset.canEditProperties)
+            }
         }
     }
 

@@ -300,6 +300,12 @@ Also: CleanupSettingsStore (same keys and messaging-album default); RemoteCopyVe
 3. Decline the iOS prompt: nothing removed and no error.
 4. Accept: exactly the selection lands in Recently Deleted; server copies intact; receipts marked.
 5. Turn on read-only during review: remove is blocked.
+- **As built:**
+  - `CleanupService` (Sources/Cleanup), one per account, owned by `AccountRuntime` and shut down first in `cancelAndJoin`. A check filters receipts on the phone in batches of 250 (revision, shape, deletability, settings, kept albums), then verifies the rest with `RemoteCopyVerifier`, at most 6 at once; a 401 (session expired, or a bare 401 from a proxy) aborts. The critic's DS4 and DS11 corrections apply: Locked Folder and offline server copies are excluded, archived ones count; a receipt, Photos or server change drops only the candidates it names, while settings, Photos access, the account, its token or its access epoch invalidate the whole check. A server change that resets or overflows also invalidates it.
+  - Removal stays shut. `CleanupRemovalGate.isOpen` (CleanupPolicy.swift) is false, so Remove is unavailable as before and the service refuses before anything else; the owner's device gate above has not run. Opening it is that one line plus deleting `testFreeUpSpaceRemoveStaysClosedUntilTheDeviceGate`. This replaces "delete CleanupRemoval": the flag is renamed and kept, by the integrator's decision. The tests open the gate only on a service over FakePhotoKit.
+  - Until B9, a cleanup removal is recorded only in the device_mutation journal (origin cleanup with the account digest and the expected revisions). `LegacyStateReceipts.markLocallyDeleted` writes nothing, since state.json has no field for it; B9's importer sets receipts.local_deleted_at from those journal rows.
+  - Free up space's check now shows, below the candidates, every other backed-up phone photo grouped by why it stays, each group opening its first 300 photos. The device gate needs those reasons; nothing else on the screen changed.
+  - No optional index prefilter: the receipts already bound the work, and nothing it would skip costs a request.
 
 ### Q3 — Index reads, server-equivalent order and precise access purge
 

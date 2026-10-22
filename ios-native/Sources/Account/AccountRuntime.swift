@@ -28,6 +28,8 @@ final class AccountRuntime: Sendable {
     let work: OwnedWork
     /// The child sessions Cast receivers are given; sign-out revokes them before it logs out.
     let castGrants: CastGrantStore
+    /// Free up space's checks and removals (REBUILD_ROADMAP.md P4). Shut down first at teardown.
+    let cleanup: CleanupService
     private let device: any AccountDevice
     private let presence: AppPresence
     private let backupStateCopyDelay: Duration
@@ -58,7 +60,7 @@ final class AccountRuntime: Sendable {
 
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
-                 device: any AccountDevice, presence: AppPresence, backupStateCopyDelay: Duration) {
+                 cleanup: CleanupService, device: any AccountDevice, presence: AppPresence, backupStateCopyDelay: Duration) {
         self.id = id
         self.credential = credential
         self.authorization = authorization
@@ -70,6 +72,7 @@ final class AccountRuntime: Sendable {
         self.check = check
         self.work = work
         self.castGrants = CastGrantStore(server: api)
+        self.cleanup = cleanup
         self.device = device
         self.presence = presence
         self.backupStateCopyDelay = backupStateCopyDelay
@@ -119,9 +122,11 @@ final class AccountRuntime: Sendable {
             let folder = container?.appendingPathComponent(AccountStoragePaths(account).backup, isDirectory: true)
             transfers = TransferServices(store: store, importer: LegacyBackupImporter(mode: .shadow, store: store, folder: folder))
         }
+        let cleanup = makeCleanup(credential, authorization: authorization, api: api, library: library,
+                                  credentials: environment.credentialStore())
         return AccountRuntime(id: id, credential: credential, authorization: authorization, api: api, pipeline: pipeline,
                               library: library, libraryError: libraryError, transfers: transfers, check: check, work: work,
-                              device: dependencies.device, presence: presence, backupStateCopyDelay: dependencies.backupStateCopyDelay)
+                              cleanup: cleanup, device: dependencies.device, presence: presence, backupStateCopyDelay: dependencies.backupStateCopyDelay)
     }
 
     /// Starts the account's work once the screens show it: the warmer once the offline library is
@@ -146,6 +151,7 @@ final class AccountRuntime: Sendable {
     /// the session check, read-only changes still on their way and the shadow import, which rolls
     /// back. Then the transfers database closes. It stays on disk, whatever the reason for ending.
     func cancelAndJoin() async {
+        await cleanup.shutdown()
         if let library {
             await library.warmer.stop()
             await library.sync.shutdown()
@@ -153,6 +159,26 @@ final class AccountRuntime: Sendable {
         }
         await work.cancelAndJoin()
         await transfers?.store.close()
+    }
+
+    /// The account's cleanup service. Nothing touches Photos or the backup state until a check
+    /// starts. Its receipts are today's backup state (LegacyStateReceipts, until B9); its server
+    /// reads are strict, over the account's client; removing needs the saved credential to still
+    /// be this session's.
+    private static func makeCleanup(_ credential: StoredCredential, authorization: AuthorizationState, api: APIClient,
+                                    library: LibraryServices?, credentials: any CredentialStore) -> CleanupService {
+        let server = APITransferServer(client: api)
+        var serverChanges: (@Sendable () async -> AsyncStream<LibraryChange>)?
+        if let sync = library?.sync { serverChanges = { await sync.changes() } }
+        let remote: @Sendable (String) async throws -> BackupRemoteAsset = { try await server.remoteAsset(id: $0) }
+        let credentialIsCurrent: @Sendable () -> Bool = {
+            guard let saved = try? credentials.load() else { return false }
+            return saved.scope == credential.scope && saved.token == credential.token
+        }
+        return CleanupService(
+            account: credential.account.digest, ownerID: credential.userID, authorization: authorization, receipts: LegacyStateReceipts(),
+            device: { PhotoKitCleanupDevice(adapter: .shared, reader: SystemPhotoKit()) },
+            remote: remote, credentialIsCurrent: credentialIsCurrent, serverChanges: serverChanges)
     }
 
     // MARK: Transfers
