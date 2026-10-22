@@ -292,6 +292,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         waitUntil = nil
         consecutiveServerErrors = 0
         _ = try? await store.requeueWaiting()
+        followUp?(.conditionsChanged)
         await changed()
     }
 

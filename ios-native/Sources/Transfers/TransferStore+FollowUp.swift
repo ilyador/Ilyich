@@ -195,6 +195,23 @@ extension TransferStore {
                            [.integer(Int64(failed)), .text(id.uuidString)])
     }
 
+    /// A batch whose last notification went out has jobs to run again (more were added to it, or
+    /// a failed one was retried): it starts over, so it gets a started and a last notification
+    /// again. Its counts carry on.
+    func reopenNotificationBatch(_ id: UUID) throws {
+        try database().run("UPDATE notification_batches SET started_posted=0,terminal_posted=0,failed=NULL WHERE id=? AND terminal_posted=1",
+                           [.text(id.uuidString)])
+    }
+
+    /// The batches of these jobs, which run again, start over as reopenNotificationBatch says.
+    /// Called in the transaction that requeues them, so the notifier never sees them finished.
+    static func reopenNotificationBatches(_ db: TransferSQLite, ofJobsIn match: String, _ arguments: [TransferSQLite.Value]) throws {
+        try db.run("""
+            UPDATE notification_batches SET started_posted=0,terminal_posted=0,failed=NULL \
+            WHERE terminal_posted=1 AND id IN (SELECT batch_id FROM jobs WHERE id IN (\(match)))
+            """, arguments)
+    }
+
     /// Batches whose last notification went out and that no job counts in any more.
     @discardableResult
     func pruneNotificationBatches() throws -> Int {

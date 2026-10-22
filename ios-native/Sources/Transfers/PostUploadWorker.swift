@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// What brings the post-upload work round: the engine calls it, never waiting for the work.
 enum FollowUpTrigger: Hashable, Sendable {
@@ -12,6 +13,10 @@ enum FollowUpTrigger: Hashable, Sendable {
     case manualRun
     /// The user retried every failure, the follow-ups' among them.
     case retried
+    /// A device condition changed (power, temperature): a pass the conditions stopped runs again.
+    case conditionsChanged
+    /// A row's backoff after a failure that may pass by itself ran out.
+    case retryDue
 }
 
 /// The work an upload leaves for later (B4, dormant until B9): nothing in the app creates it, and
@@ -29,8 +34,11 @@ enum FollowUpTrigger: Hashable, Sendable {
 ///    one that fails doesn't stop the others.
 /// A failure only the user can change (no permission, an album or asset that is gone, a refusal)
 /// fails that row, which a manual run or Retry tries again. One that may pass by itself (the
-/// network, the server) leaves it pending for the next pass, at most five times. One about the
-/// account (an expired session, read-only mode) stops the pass and blames nothing.
+/// network, the server) leaves it pending, at most five times, each time backing off longer
+/// (30 s, 1, 2 and 4 min) before a pass tries it again, so a short outage during a run doesn't
+/// use up its tries on the commits that follow. One about the account (an expired session,
+/// read-only mode) stops the pass and blames nothing, and so do the device's conditions (Require
+/// charging, a hot phone), checked before each request as BackupCoordinator does today.
 actor PostUploadWorker {
     /// IDs per PUT albums/<id>/assets, as today's linked-album sync sends them.
     static let batchSize = 500
@@ -49,16 +57,50 @@ actor PostUploadWorker {
     private var stopped = false
     /// The token the worker started under: a pass stops once the session changes.
     private var tokenDigest: String?
+    private let now: @Sendable () -> Date
+    /// Whether the device's conditions let transfers run, given Require charging.
+    private let conditionsPermit: @Sendable (_ requireCharging: Bool) async -> Bool
+    /// Rows that failed for a reason that may pass by itself, with when a pass may try them again.
+    /// Kept in memory: a relaunch tries them at once, and their attempts still count.
+    private var backoff: [RowKey: Date] = [:]
+    private var retryWake: Task<Void, Never>?
+    /// A pass that was to sync linked albums stopped first: the next pass syncs them.
+    private var linkedAlbumsOwed = false
+    /// Require charging, as the pass under way read it.
+    private var requireCharging = false
+
+    private enum RowKey: Hashable {
+        case album(String, localID: String)
+        case stack(Int64)
+    }
 
     /// What the last pass did, for diagnostics and the backup screens.
     private(set) var lastReport = PostUploadReport()
 
-    init(store: TransferStore, server: any TransferServerAPI, photos: any PhotoLibraryStaging, authorization: any TransferAuthorizing) {
+    init(store: TransferStore, server: any TransferServerAPI, photos: any PhotoLibraryStaging, authorization: any TransferAuthorizing,
+         now: @escaping @Sendable () -> Date = { Date() },
+         conditionsPermit: @escaping @Sendable (_ requireCharging: Bool) async -> Bool = PostUploadWorker.deviceConditionsPermit) {
         self.store = store
         self.server = server
         self.photos = photos
         self.authorization = authorization
+        self.now = now
+        self.conditionsPermit = conditionsPermit
         tokenDigest = authorization.current()?.tokenDigest
+    }
+
+    /// BackupLifecycle.conditionsPermitBackup: not while the phone is hot, and only while charging
+    /// when Require charging is on.
+    static let deviceConditionsPermit: @Sendable (Bool) async -> Bool = { requireCharging in
+        let thermal = ProcessInfo.processInfo.thermalState
+        guard thermal != .serious, thermal != .critical else { return false }
+        guard requireCharging else { return true }
+        return await MainActor.run { [.charging, .full].contains(UIDevice.current.batteryState) }
+    }
+
+    /// How long a row waits after its `attempts`th failure that may pass by itself.
+    static func backoffDelay(afterAttempts attempts: Int) -> TimeInterval {
+        30 * pow(2, Double(min(max(attempts, 1), 8) - 1))
     }
 
     /// Asks for a pass, returning at once: the engine never waits for post-upload work.
@@ -76,6 +118,8 @@ actor PostUploadWorker {
     func stop() async {
         stopped = true
         pending = []
+        retryWake?.cancel()
+        retryWake = nil
         loop?.cancel()
         await loop?.value
     }
@@ -92,8 +136,13 @@ actor PostUploadWorker {
         while !pending.isEmpty, !stopped, !Task.isCancelled {
             let triggers = pending
             pending = []
+            // The user asked: what backs off is tried now.
+            if triggers.contains(.manualRun) || triggers.contains(.retried) { backoff = [:] }
             if triggers.contains(.manualRun) { _ = try? await store.requeueFailedFollowUps() }
-            lastReport = await runPass(linkedAlbums: triggers.contains(.drained) || triggers.contains(.manualRun))
+            let linked = linkedAlbumsOwed || triggers.contains(.drained) || triggers.contains(.manualRun)
+            lastReport = await runPass(linkedAlbums: linked)
+            if linked { linkedAlbumsOwed = lastReport.stopped }
+            scheduleRetryWake()
         }
         loop = nil
         let waiters = idleWaiters
@@ -107,12 +156,17 @@ actor PostUploadWorker {
     /// Sync albums on.
     func runPass(linkedAlbums: Bool) async -> PostUploadReport {
         var report = PostUploadReport()
+        let started = now()
+        backoff = backoff.filter { $0.value > started }
         do {
+            let preferences = try await store.preferences()
+            requireCharging = preferences?.requireCharging ?? false
             try await addToAlbums(&report)
             try await stack(&report)
-            if linkedAlbums, try await store.preferences()?.syncAlbums == true { try await syncLinkedAlbums(&report) }
+            if linkedAlbums, preferences?.syncAlbums == true { try await syncLinkedAlbums(&report) }
         } catch let stop as PassStopped {
             report.stoppedBy = stop.restriction
+            report.waitingForDevice = stop.waitingForDevice
             report.stopped = true
         } catch {
             // The database failed: nothing was decided, the next pass tries again.
@@ -124,15 +178,41 @@ actor PostUploadWorker {
 
     private struct PassStopped: Error {
         let restriction: AccountRestriction?
+        var waitingForDevice = false
     }
 
-    /// Throws PassStopped unless the account may change things on the server now.
-    private func ensureAllowed() throws {
+    /// Throws PassStopped unless the account may change things on the server now and the device's
+    /// conditions let transfers run.
+    private func ensureAllowed() async throws {
         try checkCancellation()
         guard let snapshot = authorization.current() else { throw PassStopped(restriction: .signedOut) }
         if let tokenDigest, snapshot.tokenDigest != tokenDigest { throw PassStopped(restriction: .sessionExpired) }
         if snapshot.requiresPasswordChange { throw PassStopped(restriction: .passwordChange) }
         if snapshot.readOnly { throw PassStopped(restriction: .readOnly) }
+        guard await conditionsPermit(requireCharging) else { throw PassStopped(restriction: nil, waitingForDevice: true) }
+        try checkCancellation()
+    }
+
+    /// Records a row's outcome for its backoff: a retry waits, anything else forgets it.
+    private func noteBackoff(_ key: RowKey, _ outcome: FollowUpOutcome, attempts: Int) {
+        if case .retry = outcome {
+            backoff[key] = now().addingTimeInterval(Self.backoffDelay(afterAttempts: attempts + 1))
+        } else {
+            backoff[key] = nil
+        }
+    }
+
+    /// Asks for a pass when the earliest backoff runs out.
+    private func scheduleRetryWake() {
+        retryWake?.cancel()
+        retryWake = nil
+        guard !stopped, let due = backoff.values.min() else { return }
+        let delay = max(due.timeIntervalSince(now()), 0)
+        retryWake = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            await self?.request(.retryDue)
+        }
     }
 
     private func checkCancellation() throws {
@@ -145,10 +225,12 @@ actor PostUploadWorker {
         for album in try await store.albumsWithRunnableDestinations() {
             var after: String?
             while true {
-                let rows = try await store.runnableAlbumDestinations(album: album, after: after, limit: Self.batchSize)
-                guard let last = rows.last else { break }
+                let page = try await store.runnableAlbumDestinations(album: album, after: after, limit: Self.batchSize)
+                guard let last = page.last else { break }
                 after = last.localID
-                try ensureAllowed()
+                let rows = page.filter { backoff[.album(album, localID: $0.localID)] == nil }
+                guard !rows.isEmpty else { continue }
+                try await ensureAllowed()
                 let ids = Array(Set(rows.compactMap(\.remoteID))).sorted()
                 let outcomes: [(row: AlbumDestinationRow, outcome: FollowUpOutcome)]
                 do {
@@ -166,7 +248,10 @@ actor PostUploadWorker {
                     outcomes = rows.map { ($0, decision) }
                 }
                 try await store.finishAlbumDestinations(album: album, outcomes)
-                for (_, outcome) in outcomes { report.count(outcome, in: \.albums) }
+                for (row, outcome) in outcomes {
+                    report.count(outcome, in: \.albums)
+                    noteBackoff(.album(album, localID: row.localID), outcome, attempts: row.attempts)
+                }
                 if outcomes.contains(where: { if case .failed = $0.outcome { true } else { false } }) { report.failedAlbums.insert(album) }
             }
         }
@@ -175,8 +260,8 @@ actor PostUploadWorker {
     // MARK: Stacks
 
     private func stack(_ report: inout PostUploadReport) async throws {
-        for task in try await store.pendingStackTasks() {
-            try ensureAllowed()
+        for task in try await store.pendingStackTasks() where backoff[.stack(task.id)] == nil {
+            try await ensureAllowed()
             let outcome: FollowUpOutcome
             do {
                 try await server.createStack([task.assetID, task.previousAssetID])
@@ -186,6 +271,7 @@ actor PostUploadWorker {
             }
             try await store.finishStackTask(task.id, outcome)
             report.count(outcome, in: \.stacks)
+            noteBackoff(.stack(task.id), outcome, attempts: task.attempts)
         }
     }
 
@@ -196,7 +282,7 @@ actor PostUploadWorker {
     /// else the one with its name, else a new one, linked, and its photos added 500 at a time.
     private func syncLinkedAlbums(_ report: inout PostUploadReport) async throws {
         guard let preferences = try await store.preferences() else { return }
-        try ensureAllowed()
+        try await ensureAllowed()
         var remote: [Album]
         do { remote = try await server.ownedAlbums() } catch {
             // Nothing can be matched without the server's albums; the next run tries again.
@@ -211,7 +297,7 @@ actor PostUploadWorker {
             let members = await photos.albumMembers(local.id, excluded: preferences.excludedAlbums)
             let assetIDs = Set(try await store.receipts(for: members).values.map(\.original.id)).sorted()
             guard !assetIDs.isEmpty else { continue }
-            try ensureAllowed()
+            try await ensureAllowed()
             do {
                 let album: Album
                 if let existing = remote.first(where: { $0.id == linked[local.id] }) ?? remote.first(where: { $0.albumName == local.title }) {
@@ -225,7 +311,7 @@ actor PostUploadWorker {
                     linked[local.id] = album.id
                 }
                 for offset in stride(from: 0, to: assetIDs.count, by: Self.batchSize) {
-                    try ensureAllowed()
+                    try await ensureAllowed()
                     let batch = Array(assetIDs[offset..<min(offset + Self.batchSize, assetIDs.count)])
                     let results = try await server.addToAlbum(album.id, assetIDs: batch)
                     guard results.count == batch.count, results.allSatisfy({ $0.success || $0.error == "duplicate" }) else {
@@ -302,6 +388,8 @@ struct PostUploadReport: Hashable, Sendable {
     /// network did, or the worker stopped.
     var stopped = false
     var stoppedBy: AccountRestriction?
+    /// The device's conditions (Require charging, a hot phone) stopped it.
+    var waitingForDevice = false
     var message: String?
 
     mutating func count(_ outcome: FollowUpOutcome, in counts: WritableKeyPath<PostUploadReport, Counts>) {

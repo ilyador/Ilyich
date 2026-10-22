@@ -69,6 +69,43 @@ import XCTest
         await h.tearDown()
     }
 
+    func testABatchGivenJobsAfterItsLastNotificationStartsOver() async throws {
+        let h = try await TransferEngineHarness()
+        let batch = UUID()
+        _ = try await h.store.enqueue(["p1", "p2"].map { request($0, batch: batch) })
+        let poster = FakeNotificationPoster()
+        let notifier = TransferNotifier(store: h.store, poster: poster, authorization: h.authorization)
+        try await h.engine.setIntent(.automatic)
+        h.executor.script("p2", .fail { TransferItemFailure.unreadableFile })
+        try await h.engine.start()
+        try await untilTransfers("both jobs ran") {
+            let counts = try await h.store.counts()
+            return counts.failed == 1 && counts.remaining == 0
+        }
+        await notifier.refresh()
+        XCTAssertEqual(poster.posts.last, .finished(batch, kind: "Backup", total: 2, completed: 1, failed: 1))
+
+        // More of the batch is approved: it starts over in the same transaction, so even a job
+        // that finishes before the notifier looks gets its notification.
+        _ = try await h.engine.enqueue([request("p3", batch: batch)])
+        let reopened = try await h.store.notificationBatches().first { $0.id == batch }
+        XCTAssertEqual(reopened?.terminalPosted, false)
+        XCTAssertEqual(reopened?.startedPosted, false)
+        XCTAssertEqual(reopened?.total, 3)
+        try await untilTransfers("p3 backed up") { try await h.confirmed("p3") }
+        await notifier.refresh()
+        XCTAssertEqual(poster.posts.last, .finished(batch, kind: "Backup", total: 3, completed: 2, failed: 1))
+
+        // A failed job retried starts it over too.
+        try await h.engine.retry([.photo(DeviceAssetID(rawValue: "p2"))])
+        let retried = try await h.store.notificationBatches().first { $0.id == batch }
+        XCTAssertEqual(retried?.terminalPosted, false)
+        try await untilTransfers("p2 backed up") { try await h.confirmed("p2") }
+        await notifier.refresh()
+        XCTAssertEqual(poster.posts.last, .finished(batch, kind: "Backup", total: 3, completed: 3, failed: 0))
+        await h.tearDown()
+    }
+
     func testABatchThatFinishedBeforeItsNotificationGetsOnlyTheLastOne() async throws {
         let h = try await TransferEngineHarness()
         let batch = UUID()

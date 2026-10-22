@@ -28,6 +28,7 @@ final class FakeFollowUpServer: TransferServerAPI {
     var stackCalls: [[String]] { state.withLock { $0.stackCalls } }
     var created: [String] { state.withLock { $0.created } }
     func failAlbum(_ album: String, _ error: @escaping @Sendable () -> any Error) { state.withLock { $0.albumErrors[album] = error } }
+    func clearAlbumFailures() { state.withLock { $0.albumErrors = [:] } }
     /// The album already holds the asset.
     func holdInAlbum(_ asset: String) { state.withLock { _ = $0.duplicates.insert(asset) } }
     func failStacks(_ error: @escaping @Sendable () -> any Error) { state.withLock { $0.stackError = error } }
@@ -90,12 +91,17 @@ struct PostUploadHarness {
     static let albumB = "22222222-2222-4222-8222-222222222222"
     static let revision = AssetRevision(referenceSeconds: 700_000_000.25)
 
-    init() async throws {
+    /// The worker's clock, which a test moves.
+    let clock = Locked(Date(timeIntervalSinceReferenceDate: 800_000_000))
+
+    init(conditionsPermit: @escaping @Sendable (Bool) async -> Bool = { _ in true }) async throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("PostUpload-" + UUID().uuidString, isDirectory: true)
         store = TransferStore(url: folder.appendingPathComponent("transfers.sqlite"))
         try await store.claimForEngine()
         try await store.savePreferences(LibraryJobHarness.preferences())
-        worker = PostUploadWorker(store: store, server: server, photos: staging, authorization: authorization)
+        let clock = clock
+        worker = PostUploadWorker(store: store, server: server, photos: staging, authorization: authorization, now: { clock.value },
+                                  conditionsPermit: conditionsPermit)
     }
 
     /// Queues the photo, with the album if any, and commits its upload as the engine would.
@@ -190,6 +196,99 @@ final class PostUploadTests: XCTestCase {
         XCTAssertEqual(result.alreadyBackedUp, 1)
         _ = await h.worker.runPass(linkedAlbums: false)
         XCTAssertEqual(h.server.albumCalls, [FakeFollowUpServer.AlbumCall(album: PostUploadHarness.albumA, ids: ["asset-p1"])])
+        await h.tearDown()
+    }
+
+    func testAStaleReceiptDoesNotNameTheAlbumsServerCopy() async throws {
+        let h = try await PostUploadHarness()
+        try await h.backUp("p1")
+        // p1 is edited and backed up again, committed without a receipt: the old receipt stays.
+        let edited = AssetRevision(referenceSeconds: 700_000_100)
+        _ = try await h.store.enqueue([TransferRequest(source: .photo(DeviceAssetID(rawValue: "p1")), origin: .selection, revision: edited)])
+        let job = try await h.store.job(lane: .library, sourceKey: "p1")
+        let committed = try await h.store.complete(TransferCompletion(job: try XCTUnwrap(job).id, lease: nil, localID: "p1", revision: edited,
+                                                                      assetID: "asset-p1-edited", receipt: nil, confirmedAt: Date()))
+        XCTAssertTrue(committed)
+
+        let result = try await h.store.enqueue([TransferRequest(source: .photo(DeviceAssetID(rawValue: "p1")), origin: .albumUpload,
+                                                                revision: edited, album: PostUploadHarness.albumA)])
+        XCTAssertEqual(result.queued, 1, "the server ID comes from uploading again, not from the pre-edit receipt")
+        let rows = try await h.store.albumDestinations()
+        XCTAssertEqual(rows.map(\.remoteID), [nil])
+        _ = await h.worker.runPass(linkedAlbums: false)
+        XCTAssertTrue(h.server.albumCalls.isEmpty, "the pre-edit copy never joins the album")
+        await h.tearDown()
+    }
+
+    func testAFailureThatMayPassBacksOffInsteadOfUsingUpItsTries() async throws {
+        let h = try await PostUploadHarness()
+        try await h.backUp("p1", album: PostUploadHarness.albumA)
+        h.server.failAlbum(PostUploadHarness.albumA) { ServerFailure.http(500, nil) }
+
+        let first = await h.worker.runPass(linkedAlbums: false)
+        XCTAssertEqual(first.albums.retrying, 1)
+        // The passes after the next commits leave it alone while it backs off.
+        for _ in 0..<6 { _ = await h.worker.runPass(linkedAlbums: false) }
+        XCTAssertEqual(h.server.albumCalls.count, 1)
+        var rows = try await h.store.albumDestinations()
+        XCTAssertEqual(rows.first?.state, "pending")
+        XCTAssertEqual(rows.first?.attempts, 1)
+
+        // Once the backoff runs out it is tried again, and the outage is over.
+        h.clock.mutate { $0 += PostUploadWorker.backoffDelay(afterAttempts: 1) + 1 }
+        h.server.failAlbum(PostUploadHarness.albumA) { ServerFailure.http(500, nil) }
+        let second = await h.worker.runPass(linkedAlbums: false)
+        XCTAssertEqual(second.albums.retrying, 1)
+        XCTAssertEqual(h.server.albumCalls.count, 2)
+        XCTAssertGreaterThan(PostUploadWorker.backoffDelay(afterAttempts: 2), PostUploadWorker.backoffDelay(afterAttempts: 1))
+        h.clock.mutate { $0 += PostUploadWorker.backoffDelay(afterAttempts: 2) + 1 }
+        h.server.clearAlbumFailures()
+        let third = await h.worker.runPass(linkedAlbums: false)
+        XCTAssertEqual(third.albums.done, 1)
+        rows = try await h.store.albumDestinations()
+        XCTAssertTrue(rows.isEmpty)
+
+        // A manual run tries at once what backs off.
+        try await h.backUp("p2", album: PostUploadHarness.albumB)
+        h.server.failAlbum(PostUploadHarness.albumB) { ServerFailure.http(500, nil) }
+        _ = await h.worker.runPass(linkedAlbums: false)
+        let calls = h.server.albumCalls.count
+        await h.worker.request(.manualRun)
+        await h.worker.idle()
+        XCTAssertEqual(h.server.albumCalls.count, calls + 1)
+        await h.tearDown()
+    }
+
+    func testRequireChargingStopsThePassUnplugged() async throws {
+        let plugged = Locked(false)
+        let asked = Locked<[Bool]>([])
+        let h = try await PostUploadHarness(conditionsPermit: { requireCharging in
+            asked.mutate { $0.append(requireCharging) }
+            return !requireCharging || plugged.value
+        })
+        var preferences = LibraryJobHarness.preferences()
+        preferences.requireCharging = true
+        preferences.includedAlbums = ["trips"]
+        preferences.syncAlbums = true
+        try await h.store.savePreferences(preferences)
+        h.staging.add("t1", album: "trips")
+        try await h.backUp("t1", album: PostUploadHarness.albumA)
+
+        let unplugged = await h.worker.runPass(linkedAlbums: true)
+        XCTAssertTrue(unplugged.stopped)
+        XCTAssertTrue(unplugged.waitingForDevice)
+        XCTAssertNil(unplugged.stoppedBy)
+        XCTAssertTrue(h.server.albumCalls.isEmpty)
+        XCTAssertTrue(h.server.created.isEmpty)
+        let rows = try await h.store.albumDestinations()
+        XCTAssertEqual(rows.first?.attempts, 0, "waiting blames nothing")
+        XCTAssertEqual(Set(asked.value), [true])
+
+        plugged.mutate { $0 = true }
+        let charging = await h.worker.runPass(linkedAlbums: true)
+        XCTAssertFalse(charging.stopped)
+        XCTAssertEqual(charging.albums.done, 1)
+        XCTAssertEqual(charging.linkedAlbums, 1)
         await h.tearDown()
     }
 

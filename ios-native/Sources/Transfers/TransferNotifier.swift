@@ -29,7 +29,9 @@ import Foundation
 /// but the next notification. Each batch gets a started notification once, when it has jobs to
 /// run, and a last one once, when none is left to run: finished, or needing attention when some
 /// failed. The database records each as posted, so neither goes out again after a relaunch; one
-/// whose batch finished before its start was posted gets only the last. A batch whose every job
+/// whose batch finished before its start was posted gets only the last. A batch that finished and
+/// then got jobs again (more files approved, a failure retried) starts over: a started
+/// notification, then a last one counting the whole batch. A batch whose every job
 /// was cancelled is withdrawn quietly. A post that completes after `stop()` (sign-out, the end of
 /// the account's runtime) or after the session ended is withdrawn and not recorded.
 @MainActor final class TransferNotifier {
@@ -101,7 +103,10 @@ import Foundation
                     guard posted(batch.id, since: started) else { return }
                 }
                 try? await store.markTerminalPosted(batch.id, failed: failed)
-            } else if !batch.startedPosted {
+            } else if batch.terminalPosted || !batch.startedPosted {
+                // Finished once, and given jobs again: it starts over. The store reopens it when it
+                // requeues; this catches any other way a job comes back.
+                if batch.terminalPosted { try? await store.reopenNotificationBatch(batch.id) }
                 guard authorization.current() != nil else { return }
                 await poster.started(id: batch.id, kind: batch.kind.title, total: batch.total)
                 guard posted(batch.id, since: started) else { return }
