@@ -24,6 +24,10 @@ struct LibraryView: View {
     @State private var model: LibraryScreenModel
     @State private var searchText = ""
     @State private var edgeInteraction = LibraryEdgeInteraction()
+    /// How the grid moves: its scroll delegate and the rail's finger both drive it (T4).
+    @State private var viewport: GridViewport
+    /// The time rail's finger, month and lens, which the edge pan drives in its own callback.
+    @State private var rail: TimeRailController
     @State private var librarySize: CGSize = .zero
     @State private var shelf: Shelf = .root
     /// The people, albums, features and shelf order the shelves show.
@@ -65,8 +69,12 @@ struct LibraryView: View {
         // the files an earlier build kept are imported once (F5).
         let places = MonthPlacesService(source: repository, store: session.entities, authorization: session.runtime?.authorization,
                                         legacy: session.entities.map { LegacyPlacesImport.live(scope: api.cacheScope, index: $0) })
-        _store = State(initialValue: LibraryStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos,
-                                                     choices: SearchChoicesStorage(scope: api.cacheScope), places: places))
+        let store = LibraryStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos,
+                                 choices: SearchChoicesStorage(scope: api.cacheScope), places: places)
+        _store = State(initialValue: store)
+        let viewport = GridViewport()
+        _viewport = State(initialValue: viewport)
+        _rail = State(initialValue: TimeRailController(feed: store, viewport: viewport))
         _collections = State(initialValue: CollectionsStore(api: api, people: PeopleDirectory(source: api),
                                                                order: ShelfOrder(scope: api.cacheScope), pipeline: pipeline))
         _model = State(initialValue: LibraryScreenModel(lookup: api, inbox: ShareInboxStore.shared))
@@ -95,7 +103,7 @@ struct LibraryView: View {
                           onDensityChange: { columns = $0 }, onOpenLocal: { photo in
                     // While typing, a tap on the grid only puts the keyboard away.
                     if searchFocused { searchFocused = false } else { navigator.present(.phoneViewer(photo)) }
-                }) { asset in
+                }, viewport: viewport) { asset in
                     if searchFocused { searchFocused = false }
                     else { navigator.present(.viewer(ViewerRoute(asset: asset, source: .feed, albumContext: nil))) }
                 }.ignoresSafeArea()
@@ -187,7 +195,7 @@ struct LibraryView: View {
                   }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }.zIndex(1)
                 if !shelves && !searchFocused && store.canScrubTimeline && store.query.isEmpty {
-                    TimeRail(store: store, pipeline: pipeline, viewportWidth: geometry.size.width, interaction: edgeInteraction)
+                    TimeRail(store: store, rail: rail, pipeline: pipeline, viewportWidth: geometry.size.width)
                         .frame(width: 44).padding(.top, max(52, chromeHeight + 16)).padding(.bottom, showPlaces ? geometry.size.height * 0.42 : 100)
                         .frame(maxWidth: .infinity, alignment: .trailing).zIndex(2)
                 }
@@ -207,7 +215,7 @@ struct LibraryView: View {
             .modifier(PresentationHost(navigator: navigator, level: 0) { route, level in presented(route, level: level) })
             // The viewer zooms out of its grid cell and back into the cell of the photo it closes on.
             .background {
-                ViewerZoomPresenter(item: viewerItem, sourceView: { store.zoomSourceView(for: $0) }, authorization: authorization,
+                ViewerZoomPresenter(item: viewerItem, sourceView: { viewport.scroller.zoomSourceView(for: $0, in: store) }, authorization: authorization,
                                     onDismiss: { navigator.layerDidDismiss(level: 0) }) { asset, transition, close in
                     AnyView(assetViewer(asset, transition: transition, close: close))
                 }
@@ -273,7 +281,7 @@ struct LibraryView: View {
             for await snapshot in await index.snapshots() { store.updateDeviceTimeline(snapshot.timeline) }
         }
         .onChange(of: showPlaces) { _, shown in Haptics.earth(rising: shown) }
-        .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session) }
+        .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session, viewport: viewport, rail: rail) }
         // Everything presented has closed, so shared files that arrived meanwhile can show.
         .onChange(of: navigator.layers.isEmpty) { _, empty in if empty { model.refreshSharedFiles() } }
         .onChange(of: navigator.isViewing) { _, viewing in session.coverage?.conditions.setViewing(viewing) }
@@ -281,7 +289,7 @@ struct LibraryView: View {
             // Keeping the library's thumbnails offline waits whenever the user scrolls or scrubs,
             // and for a moment after.
             let session = session
-            store.navigation.onMotionChange = { moving in session.coverage?.conditions.setMoving(moving) }
+            viewport.onMotionChange = { moving in session.coverage?.conditions.setMoving(moving) }
         }
     }
 
@@ -745,7 +753,8 @@ struct LibraryView: View {
                 if edgeInteraction.isCancelling { closeShelves() } else { edgeInteraction.endStroke() }
             }
         case .trailing:
-            edgeInteraction.timePan = value
+            // In the gesture's own callback: once the rail is open, the grid moves before this returns.
+            rail.handle(value)
         }
     }
 

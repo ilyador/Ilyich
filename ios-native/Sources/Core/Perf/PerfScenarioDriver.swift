@@ -75,8 +75,10 @@ struct SplitMix64 {
 /// Runs one perf scenario on the real grid and writes what the recorder measured to
 /// Library/Caches/IlyichPerf, where scripts/perf/record.sh fetches it. It ships in every build
 /// and does nothing unless the app was launched with -IlyichPerfScenario. It moves the grid only
-/// as the time rail and a scroll do, through the store's scroller, and it never changes the
-/// library or the server: no backup, upload, deletion or edit.
+/// as the time rail and a scroll do: rail scrubs through the rail's controller, so the lens and
+/// the column follow as they do for a finger, and flings through the grid's viewport as UIKit
+/// reports a fling (T4). It never changes the library or the server: no backup, upload, deletion
+/// or edit.
 @MainActor final class PerfScenarioDriver {
     static let shared: PerfScenarioDriver? = PerfRecorder.shared.flatMap { recorder in
         PerfScenarioConfiguration(arguments: ProcessInfo.processInfo.arguments)
@@ -112,8 +114,18 @@ struct SplitMix64 {
     private let frames: PerfFrameClock
     private let memory: MemorySampler
     private let watchdog: HangWatchdog
+    /// The library's grid: its feed, how it moves and its rail.
+    private struct Grid {
+        let store: LibraryStore
+        let viewport: GridViewport
+        let rail: TimeRailController
+        var scroller: GridScrollController { viewport.scroller }
+    }
+
     private weak var store: LibraryStore?
     private weak var session: AccountSession?
+    private weak var viewport: GridViewport?
+    private weak var rail: TimeRailController?
     private var task: Task<Void, Never>?
     private var launchInterval: OSSignpostIntervalState?
     private var launchedAt = Date()
@@ -132,10 +144,12 @@ struct SplitMix64 {
     /// Starts measuring before the app's first frame. Does nothing without -IlyichPerfScenario.
     static func arm() { shared?.start() }
 
-    /// The library's store and session, once the library is on screen.
-    func attach(store: LibraryStore, session: AccountSession) {
+    /// The library's store, session, grid motion and rail, once the library is on screen.
+    func attach(store: LibraryStore, session: AccountSession, viewport: GridViewport, rail: TimeRailController) {
         self.store = store
         self.session = session
+        self.viewport = viewport
+        self.rail = rail
     }
 
     private func start() {
@@ -152,16 +166,17 @@ struct SplitMix64 {
     private func run() async {
         guard await firstContent() else { return await finish(.noFirstContent) }
         try? await Task.sleep(for: Self.settle)
-        guard let store, store.scroller.collection != nil else { return await finish(.noGrid) }
+        guard let store, let viewport, let rail, viewport.scroller.collection != nil else { return await finish(.noGrid) }
+        let grid = Grid(store: store, viewport: viewport, rail: rail)
         say("PERF READY \(configuration.scenario.rawValue)")
         // relaunch-check measures the launch itself; the others what follows READY.
         if configuration.scenario != .relaunchCheck { recorder.beginWindow() }
         thermalAtStart = ProcessInfo.processInfo.thermalState
         let signposter = PerfSignpost.perf
         let interval = signposter.isEnabled ? signposter.beginInterval(PerfSignpost.perfScenario, "\(self.configuration.scenario.rawValue, privacy: .public)") : nil
-        await perform(store)
+        await perform(grid)
         if let interval { signposter.endInterval(PerfSignpost.perfScenario, interval) }
-        await finish(store.scroller.collection == nil ? .noGrid : .completed)
+        await finish(grid.scroller.collection == nil ? .noGrid : .completed)
     }
 
     // MARK: Launch
@@ -177,7 +192,7 @@ struct SplitMix64 {
 
     /// Checked on every frame until it holds.
     private func checkFirstContent() {
-        guard let collection = store?.scroller.collection else { return }
+        guard let collection = viewport?.scroller.collection else { return }
         let cells = collection.visibleCells
         guard !cells.isEmpty else { return }
         let real = cells.count { ($0 as? PhotoCell)?.showsThumbnail == true }
@@ -191,56 +206,56 @@ struct SplitMix64 {
 
     // MARK: Scenarios
 
-    private func perform(_ store: LibraryStore) async {
+    private func perform(_ grid: Grid) async {
         switch configuration.scenario {
-        case .railRandom: await railRandom(store)
-        case .railSweep: await railSweep(store)
-        case .fling: await flings(store)
-        case .reverse: await reversals(store)
+        case .railRandom: await railRandom(grid)
+        case .railSweep: await railSweep(grid)
+        case .fling: await flings(grid)
+        case .reverse: await reversals(grid)
         case .relaunchCheck: break
         case .memoryWarning:
-            await railSweep(store)
+            await railSweep(grid)
             try? await Task.sleep(for: .seconds(1))
             trimMemory()
             // The footprint reported is the first sample 2 s after the trim.
             try? await Task.sleep(for: .milliseconds(2_500))
-            await railRandom(store)
+            await railRandom(grid)
         case .backgroundLoad:
-            await railRandom(store) { self.sampleBackground() }
+            await railRandom(grid) { self.sampleBackground() }
         }
     }
 
     /// Seeded jumps along the rail, each looked at while its photos load.
-    private func railRandom(_ store: LibraryStore, beforeEachJump: () -> Void = {}) async {
+    private func railRandom(_ grid: Grid, beforeEachJump: () -> Void = {}) async {
         for fraction in PerfScenarioPlan.jumps(seed: configuration.seed) {
             guard !Task.isCancelled else { return }
             beforeEachJump()
-            await jump(store, to: fraction)
+            await jump(grid, to: fraction)
             try? await Task.sleep(for: Self.dwell)
         }
     }
 
     /// The rail from the newest photos to the oldest at an even pace, a step every frame.
-    private func railSweep(_ store: LibraryStore) async {
-        beginScrub(store)
+    private func railSweep(_ grid: Grid) async {
+        grid.rail.beginDrivenScrub(atFraction: 0)
         let start = await frames.next()
         var progress = 0.0
         while progress < 1, !Task.isCancelled {
             let time = await frames.next()
             progress = min(1, (time - start) / Self.sweepSeconds)
-            store.scroller.scroll(toFraction: CGFloat(progress))
+            grid.rail.drive(toFraction: CGFloat(progress))
         }
-        endScrub(store)
+        grid.rail.endDrivenScrub()
         try? await Task.sleep(for: Self.dwell)
     }
 
     /// Flings down the library at seeded speeds, each coasting to a stop.
-    private func flings(_ store: LibraryStore) async {
-        await jump(store, to: 0.15)
+    private func flings(_ grid: Grid) async {
+        await jump(grid, to: 0.15)
         try? await Task.sleep(for: Self.dwell)
         for speed in PerfScenarioPlan.flingSpeeds(seed: configuration.seed, count: 10, in: 3...9) {
             guard !Task.isCancelled else { return }
-            await fling(store, screensPerSecond: speed)
+            await fling(grid, screensPerSecond: speed)
             try? await Task.sleep(for: .milliseconds(500))
         }
         try? await Task.sleep(for: Self.dwell)
@@ -248,61 +263,69 @@ struct SplitMix64 {
 
     /// Down, then straight back up through the photos just passed, again and again, each flick
     /// caught before it stops.
-    private func reversals(_ store: LibraryStore) async {
-        await jump(store, to: 0.3)
+    private func reversals(_ grid: Grid) async {
+        await jump(grid, to: 0.3)
         try? await Task.sleep(for: Self.dwell)
+        var coasting = false
         for (index, speed) in PerfScenarioPlan.flingSpeeds(seed: configuration.seed, count: 24, in: 4...8).enumerated() {
-            guard !Task.isCancelled else { return }
-            await fling(store, screensPerSecond: index.isMultiple(of: 2) ? speed : -speed, for: 0.7)
+            guard !Task.isCancelled else { break }
+            coasting = await fling(grid, screensPerSecond: index.isMultiple(of: 2) ? speed : -speed, for: 0.7)
+        }
+        if coasting {
+            // The last flick is caught too, and the finger lifts without moving.
+            grid.viewport.willBeginDragging()
+            grid.viewport.didEndDragging(decelerate: false)
         }
         try? await Task.sleep(for: Self.dwell)
     }
 
-    /// What the rail does for a finger: it holds coverage, drops pending navigation
-    /// and moves the grid.
-    private func jump(_ store: LibraryStore, to fraction: Double) async {
-        beginScrub(store)
-        store.scroller.scroll(toFraction: CGFloat(fraction))
+    /// What the rail does for a finger: it holds coverage, drops pending navigation and moves
+    /// the grid, the lens following.
+    private func jump(_ grid: Grid, to fraction: Double) async {
+        grid.rail.beginDrivenScrub(atFraction: CGFloat(fraction))
         _ = await frames.next()
-        endScrub(store)
-    }
-
-    private func beginScrub(_ store: LibraryStore) {
-        RailScrubProbe.began()
-        store.navigation.isScrubbing = true
-        store.cancelPendingNavigation()
-    }
-
-    private func endScrub(_ store: LibraryStore) {
-        store.navigation.isScrubbing = false
-        RailScrubProbe.ended()
+        grid.rail.endDrivenScrub()
     }
 
     /// One fling, slowing as UIScrollView's normal deceleration does, moved through the same
-    /// offset path the rail drives. Positive speeds go down the library, toward older photos.
-    private func fling(_ store: LibraryStore, screensPerSecond speed: Double, for limit: Double = .infinity) async {
-        guard let collection = store.scroller.collection, let height = store.scroller.scrollableHeight, height > 0,
-              let current = store.scroller.fraction else { return }
+    /// offset path the rail drives and told to the viewport as UIKit tells a fling: the drag
+    /// begins, ends with its velocity and landing, and the coast ends. A fling cut short by
+    /// `limit` is caught by the next drag, as a flick is, and returns true: it is still coasting.
+    /// Positive speeds go down the library, toward older photos.
+    @discardableResult
+    private func fling(_ grid: Grid, screensPerSecond speed: Double, for limit: Double = .infinity) async -> Bool {
+        let scroller = grid.scroller
+        guard let collection = scroller.collection, let height = scroller.scrollableHeight, height > 0,
+              let current = scroller.fraction else { return false }
         let screen = Double(collection.bounds.height)
         var fraction = Double(current), velocity = speed * screen
         let signposter = PerfSignpost.scrub
         let interval = signposter.isEnabled ? signposter.beginInterval(PerfSignpost.gridFling) : nil
         // As a drag starting does.
-        store.cancelPendingNavigation()
-        store.navigation.isScrolling = true
+        grid.store.cancelPendingNavigation()
+        grid.viewport.willBeginDragging()
+        // Where the coast would end, as UIKit says when the finger lets go: velocity in points
+        // per millisecond times rate / (1 - rate).
+        let landing = min(1, max(0, fraction + velocity / 1_000 * Self.decelerationRate / (1 - Self.decelerationRate) / Double(height)))
+        grid.viewport.willEndDragging(velocity: CGPoint(x: 0, y: velocity / 1_000),
+                                      target: CGPoint(x: 0, y: scroller.offset(atFraction: CGFloat(landing)) ?? collection.contentOffset.y))
+        grid.viewport.didEndDragging(decelerate: true)
         let start = await frames.next()
         var last = start
+        var coasting = true
         while !Task.isCancelled {
             let now = await frames.next()
             let elapsed = now - last
             last = now
             fraction = min(1, max(0, fraction + velocity * elapsed / Double(height)))
-            store.scroller.scroll(toFraction: CGFloat(fraction))
+            scroller.scroll(toFraction: CGFloat(fraction))
             velocity *= pow(Self.decelerationRate, elapsed * 1_000)
-            if abs(velocity) < Self.stopSpeed * screen || fraction <= 0 || fraction >= 1 || now - start >= limit { break }
+            if abs(velocity) < Self.stopSpeed * screen || fraction <= 0 || fraction >= 1 { coasting = false; break }
+            if now - start >= limit { break }
         }
-        store.navigation.isScrolling = false
+        if !coasting || Task.isCancelled { grid.viewport.didEndDecelerating() }
         if let interval { signposter.endInterval(PerfSignpost.gridFling, interval) }
+        return coasting && !Task.isCancelled
     }
 
     /// The app's own memory-pressure path: the notification iOS posts with a memory warning.
@@ -394,14 +417,14 @@ struct SplitMix64 {
             model: process.environment["SIMULATOR_MODEL_IDENTIFIER"] ?? machine,
             system: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
             physicalMemoryMB: PerfSummary.rounded(Double(process.physicalMemory) / 1_048_576),
-            maximumFramesPerSecond: store?.scroller.collection?.window?.windowScene?.screen.maximumFramesPerSecond ?? 0,
+            maximumFramesPerSecond: viewport?.scroller.collection?.window?.windowScene?.screen.maximumFramesPerSecond ?? 0,
             lowPowerMode: process.isLowPowerModeEnabled,
             thermalStateAtStart: Self.name(thermalAtStart), thermalStateAtEnd: Self.name(process.thermalState))
     }
 
     private func library() -> PerfSummary.Library? {
         guard let store else { return nil }
-        let columns = (store.scroller.collection?.collectionViewLayout as? VirtualPhotoLayout)?.columns ?? 0
+        let columns = (viewport?.scroller.collection?.collectionViewLayout as? VirtualPhotoLayout)?.columns ?? 0
         return PerfSummary.Library(months: store.buckets.count, photos: store.totalCount, columns: columns)
     }
 

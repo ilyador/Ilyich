@@ -73,7 +73,6 @@ struct LibraryShelfCarry: Equatable {
     var morphingID: String?
     var morphSize: CGSize?
     var carried: LibraryShelfCarry?
-    var timePan: LibraryEdgePan?
     @ObservationIgnored private var stroke: LibraryShelfStroke?
     @ObservationIgnored private var glowTask: Task<Void, Never>?
     @ObservationIgnored private var glowEnabled = false
