@@ -42,7 +42,7 @@ actor SyncEngine {
     }
 
     private let client: APIClient
-    private let entities: EntityStore
+    private let entities: LibraryIndex
     private let native: NativeSync
     private let pipeline: MediaPipeline
     private let warmer: ThumbnailWarmer
@@ -88,7 +88,7 @@ actor SyncEngine {
     let hub: LibraryChangeHub
 
     /// `connect` opens the live connection, the client's own by default.
-    init(client: APIClient, entities: EntityStore, native: NativeSync, pipeline: MediaPipeline, warmer: ThumbnailWarmer,
+    init(client: APIClient, entities: LibraryIndex, native: NativeSync, pipeline: MediaPipeline, warmer: ThumbnailWarmer,
          presence: AppPresence, check: SessionCheck, authorization: AuthorizationState, device: any AccountDevice,
          status: SyncStatusBoard, connect: (@Sendable () async throws -> ServerEventConnection)? = nil,
          debounce: Duration = .milliseconds(350), dependents: (any DependentFetching)? = nil, hub: LibraryChangeHub? = nil) {

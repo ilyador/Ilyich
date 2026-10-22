@@ -17,15 +17,15 @@ actor TimelineCache {
         if let value = epochs[scope] { return value }
         let value = UUID(); epochs[scope] = value; return value
     }
-    func load(scope: String, filter: TimelineFilter) -> TimelineSnapshot? {
-        guard filter.visibility != .locked else { return nil }
-        guard let data = try? Data(contentsOf: file(scope: scope, filter: filter)), data.count <= 50 * 1024 * 1024 else { return nil }
+    /// A feed's months as last seen. The Locked Folder has no LibraryQuery, so it is never kept.
+    func load(scope: String, query: LibraryQuery) -> TimelineSnapshot? {
+        guard let data = try? Data(contentsOf: file(scope: scope, query: query)), data.count <= 50 * 1024 * 1024 else { return nil }
         return try? APIJSON.decoder().decode(TimelineSnapshot.self, from: data)
     }
-    func save(_ snapshot: TimelineSnapshot, scope: String, filter: TimelineFilter, epoch: UUID) {
-        guard filter.visibility != .locked, epochs[scope] == epoch else { return }
+    func save(_ snapshot: TimelineSnapshot, scope: String, query: LibraryQuery, epoch: UUID) {
+        guard epochs[scope] == epoch else { return }
         do {
-            let url = file(scope: scope, filter: filter)
+            let url = file(scope: scope, query: query)
             let directory = url.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let data = try APIJSON.encoder().encode(snapshot)
@@ -60,8 +60,10 @@ actor TimelineCache {
         try? FileManager.default.removeItem(at: directory(scope))
     }
     private func directory(_ scope: String) -> URL { root.appendingPathComponent(hash(scope), isDirectory: true) }
-    private func file(scope: String, filter: TimelineFilter) -> URL {
-        directory(scope).appendingPathComponent(hash(filter.cacheKey) + ".json")
+    /// Named by the feed's stable key, which for the library and the shelves is today's key; a
+    /// feed whose key changed starts empty, and its old file ages out of the twelve kept.
+    private func file(scope: String, query: LibraryQuery) -> URL {
+        directory(scope).appendingPathComponent(hash(query.stableKey) + ".json")
     }
     private func hash(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
 }
@@ -81,17 +83,17 @@ actor TimelinePlacesCache {
     /// What a count begins under. It moves with every clear of the account's places.
     func epoch(scope: String) -> UInt64 { epochs[scope] ?? 0 }
 
-    func load(scope: String, filter: TimelineFilter) -> TimelinePlaces? {
-        guard filter.visibility != .locked, let data = try? Data(contentsOf: file(scope: scope, filter: filter)) else { return nil }
+    func load(scope: String, query: LibraryQuery) -> TimelinePlaces? {
+        guard let data = try? Data(contentsOf: file(scope: scope, query: query)) else { return nil }
         return try? JSONDecoder().decode(TimelinePlaces.self, from: data)
     }
     /// Keeps places counted under `epoch`, unless the account's places were cleared since.
     /// Returns false when they are refused for that.
     @discardableResult
-    func save(_ places: TimelinePlaces, scope: String, filter: TimelineFilter, epoch: UInt64) -> Bool {
-        guard filter.visibility != .locked, epoch == self.epoch(scope: scope) else { return false }
+    func save(_ places: TimelinePlaces, scope: String, query: LibraryQuery, epoch: UInt64) -> Bool {
+        guard epoch == self.epoch(scope: scope) else { return false }
         do {
-            let url = file(scope: scope, filter: filter)
+            let url = file(scope: scope, query: query)
             let directory = url.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try JSONEncoder().encode(places).write(to: url, options: .atomic)
@@ -114,8 +116,8 @@ actor TimelinePlacesCache {
         try? FileManager.default.removeItem(at: directory(scope))
     }
     private func directory(_ scope: String) -> URL { root.appendingPathComponent(hash(scope), isDirectory: true) }
-    private func file(scope: String, filter: TimelineFilter) -> URL {
-        directory(scope).appendingPathComponent(hash(filter.cacheKey) + ".json")
+    private func file(scope: String, query: LibraryQuery) -> URL {
+        directory(scope).appendingPathComponent(hash(query.stableKey) + ".json")
     }
     private func hash(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
 }

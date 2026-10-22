@@ -30,8 +30,8 @@ final class IndexReadsTests: XCTestCase {
         let newest = ["late-day", "taken-later", "taken-earlier", "name-a", "name-b", "tie-1", "tie-2"]
         let month = try await index.timeBucket("2026-02-01T00:00:00Z").map(\.id)
         XCTAssertEqual(month, newest)
-        var oldest = TimelineFilter(); oldest.order = "asc"
-        let ascending = try await index.timeBucket("2026-02-01T00:00:00Z", filter: oldest).map(\.id)
+        var oldest = LibraryQuery.library; oldest.ranking = .chronological(.takenAt, ascending: true)
+        let ascending = try await index.timeBucket("2026-02-01T00:00:00Z", of: oldest).map(\.id)
         XCTAssertEqual(ascending, ["tie-1", "tie-2", "name-a", "name-b", "taken-earlier", "taken-later", "late-day"],
                        "Oldest first, photos taken at one time still in ID order.")
         let across = try await index.timelineAssets().map(\.id)
@@ -43,10 +43,10 @@ final class IndexReadsTests: XCTestCase {
             Self.asset("added-last", taken: "2025-05-01T12:00:00Z", created: "2026-03-20T00:00:00Z"),
             Self.asset("added-late", taken: "2026-02-01T12:00:00Z", created: "2026-03-10T00:00:00Z"),
         ], epoch: index.epoch())
-        let added = TimelineFilter(orderBy: "createdAt")
-        let addedMonths = try await index.timeBuckets(filter: added)
+        var added = LibraryQuery.library; added.ranking = .chronological(.createdAt, ascending: false)
+        let addedMonths = try await index.timeBuckets(added)
         XCTAssertEqual(addedMonths.map(\.timeBucket), ["2026-03-01"])
-        let addedOrder = try await index.timeBucket("2026-03-01T00:00:00Z", filter: added).map(\.id)
+        let addedOrder = try await index.timeBucket("2026-03-01T00:00:00Z", of: added).map(\.id)
         XCTAssertEqual(addedOrder, ["added-last", "added-late", "added-first", "late-day", "name-a", "name-b", "taken-earlier", "taken-later", "tie-1", "tie-2"],
                        "Photos added at one time are in ID order.")
     }
@@ -60,9 +60,9 @@ final class IndexReadsTests: XCTestCase {
         let tie = Asset(id: "a-tie", fileCreatedAt: day.addingTimeInterval(9 * 3_600), localDateTime: day.addingTimeInterval(9 * 3_600))
         let earlier = Asset(id: "d-earlier", fileCreatedAt: day.addingTimeInterval(-86_400), localDateTime: day.addingTimeInterval(-86_400))
         let server = [morning, tie, night, earlier]
-        XCTAssertEqual(TimelineFilter().libraryOrder(server).map(\.id), ["c-night", "a-tie", "b-morning", "d-earlier"])
-        var oldest = TimelineFilter(); oldest.order = "asc"
-        XCTAssertEqual(oldest.libraryOrder(server).map(\.id), ["d-earlier", "a-tie", "b-morning", "c-night"])
+        XCTAssertEqual(try ServerTimelineRequest(.library, userID: "alice").libraryOrder(server).map(\.id), ["c-night", "a-tie", "b-morning", "d-earlier"])
+        var oldest = LibraryQuery.library; oldest.ranking = .chronological(.takenAt, ascending: true)
+        XCTAssertEqual(try ServerTimelineRequest(oldest, userID: "alice").libraryOrder(server).map(\.id), ["d-earlier", "a-tie", "b-morning", "c-night"])
     }
 
     // MARK: - Equivalence
@@ -77,38 +77,38 @@ final class IndexReadsTests: XCTestCase {
         let readable = try await index.isReadable()
         XCTAssertTrue(readable)
 
-        var presets: [(String, TimelineFilter)] = [
-            ("Library", TimelineFilter()),
-            ("Library with partners", TimelineFilter(withPartners: true)),
-            ("Favorites", TimelineFilter(isFavorite: true)),
-            ("Archive", TimelineFilter(visibility: .archive)),
-            ("Trash", TimelineFilter(visibility: nil, isTrashed: true, withStacked: false)),
-            ("Lightroom", TimelineFilter(isDeveloped: true)),
-            ("Album", TimelineFilter(albumID: "shared")),
-            ("My album", TimelineFilter(albumID: "mine")),
-            ("Person", TimelineFilter(personID: "maya")),
-            ("Place", TimelineFilter(place: TimelinePlace(id: "Lisbon", assetIDs: library.place))),
-            ("Partner", TimelineFilter(visibility: nil, userID: "bob")),
+        var trash = LibraryQuery.trash; trash.stacks = .all
+        var oldest = LibraryQuery.library; oldest.ranking = .chronological(.takenAt, ascending: true)
+        let presets: [(String, LibraryQuery, partners: Bool)] = [
+            ("Library", .library, false),
+            ("Library with partners", .library, true),
+            ("Favorites", .favorites, false),
+            ("Archive", .archive, false),
+            ("Trash", trash, false),
+            ("Lightroom", .lightroom, false),
+            ("Album", .album("shared"), false),
+            ("My album", .album("mine"), false),
+            ("Person", .person("maya"), false),
+            ("Place", .place(PlaceMembership(placeID: "Lisbon", assetIDs: library.place, markerQuery: "")), false),
+            ("Partner", .partner("bob"), false),
+            ("Recently added", .recentlyAdded, false),
+            ("Library, oldest first", oldest, false),
         ]
-        var recent = TimelineFilter(visibility: nil, userID: "alice", isTrashed: false); recent.orderBy = "createdAt"
-        presets.append(("Recently added", recent))
-        var oldest = TimelineFilter(); oldest.order = "asc"
-        presets.append(("Library, oldest first", oldest))
 
-        for (name, filter) in presets {
-            let expected = library.server(filter)
-            let months = try await index.timeBuckets(filter: filter)
+        for (name, query, partners) in presets {
+            let expected = library.server(try IndexFeedRequest(query, userID: "alice", includesPartners: partners))
+            let months = try await index.timeBuckets(query, includesPartners: partners)
             XCTAssertEqual(months.map(\.timeBucket), expected.map(\.month), "\(name): months")
             XCTAssertEqual(months.map(\.count), expected.map(\.ids.count), "\(name): counts")
             XCTAssertFalse(expected.isEmpty, "\(name) shows photos.")
             for month in expected {
-                let photos = try await index.timeBucket(month.month + "T00:00:00Z", filter: filter)
+                let photos = try await index.timeBucket(month.month + "T00:00:00Z", of: query, includesPartners: partners)
                 XCTAssertEqual(photos.map(\.id), month.ids, "\(name): \(month.month)")
             }
         }
 
         // A stack counts its photos as the server does: those in the timeline, not in the trash.
-        let stacked = try await index.timelineAssets(filter: TimelineFilter(), limit: 2_000).compactMap(\.stack)
+        let stacked = try await index.timelineAssets(limit: 2_000).compactMap(\.stack)
         XCTAssertFalse(stacked.isEmpty)
         for stack in stacked { XCTAssertEqual(stack.assetCount, library.stackCount(stack.id), stack.id) }
     }
@@ -120,7 +120,7 @@ final class IndexReadsTests: XCTestCase {
     /// and the face counts for its person, once.
     func testFaceArrivingBeforeItsSharedAssetCountsOnceTheAssetArrives() async throws {
         let index = try makeIndex()
-        let person = TimelineFilter(personID: "maya")
+        let person = LibraryQuery.person("maya")
         _ = try await index.apply([
             SyncEvents.event("PersonV1", #"{"id":"maya","name":"Maya","isHidden":false}"#, ack: "PersonV1|maya"),
             SyncEvents.event("AlbumV2", #"{"id":"trip","ownerId":"bob","name":"Trip","description":"","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","thumbnailAssetId":null,"isActivityEnabled":true,"order":"desc"}"#, ack: "AlbumV2|trip"),
@@ -128,7 +128,7 @@ final class IndexReadsTests: XCTestCase {
             Self.face("face-1", asset: "shared"),
             SyncEvents.complete(),
         ], epoch: index.epoch())
-        let early = try await index.timeBuckets(filter: person)
+        let early = try await index.timeBuckets(person)
         let stored = try await index.entityData(kind: "face", id: "face-1")
         XCTAssertEqual(early, [], "No photo yet.")
         XCTAssertNil(stored, "The face waits aside, not as a face of a photo the library lacks.")
@@ -143,14 +143,14 @@ final class IndexReadsTests: XCTestCase {
         XCTAssertEqual(queued, ["shared"], "The faces that waited are fetched.")
         let arrival = await DependentRepairer(index: index, fetcher: StaticFetcher(["shared": [Self.face("face-1", asset: "shared")]])).run()
         XCTAssertTrue(arrival.people.contains("maya"), "Maya's photos changed.")
-        let months = try await index.timeBuckets(filter: person)
+        let months = try await index.timeBuckets(person)
         XCTAssertEqual(months.map(\.count), [1])
         let photo = try await index.asset(id: "shared")
         XCTAssertEqual(photo?.people?.map(\.id), ["maya"])
 
         // The face again, and another of Maya on the same photo: still one photo.
         _ = try await index.apply([Self.face("face-1", asset: "shared"), Self.face("face-2", asset: "shared")], epoch: index.epoch())
-        let again = try await index.timeBuckets(filter: person)
+        let again = try await index.timeBuckets(person)
         XCTAssertEqual(again.map(\.count), [1])
 
         // A face of a photo in the Locked Folder is never kept, waiting or not.
@@ -210,7 +210,7 @@ final class IndexReadsTests: XCTestCase {
         XCTAssertEqual(repaired?.people?.map(\.id), ["maya"])
         let text = try await index.assetOCR(id: "photo").map(\.text)
         XCTAssertEqual(text, ["EXIT"])
-        let person = try await index.timeBuckets(filter: TimelineFilter(personID: "maya"))
+        let person = try await index.timeBuckets(.person("maya"))
         XCTAssertEqual(person.map(\.count), [1])
         XCTAssertTrue(change.people.contains("maya"))
         XCTAssertNotNil(change.upserted["photo"], "The photo's details changed.")
@@ -390,11 +390,11 @@ final class IndexReadsTests: XCTestCase {
         let readable = try await index.isReadable()
         XCTAssertTrue(readable)
         let clock = ContinuousClock()
-        let person = TimelineFilter(personID: "maya")
+        let person = LibraryQuery.person("maya")
         var months: [TimeBucket] = []
-        let listing = try await clock.measure { months = try await index.timeBuckets(filter: person) }
+        let listing = try await clock.measure { months = try await index.timeBuckets(person) }
         var newest: [Asset] = []
-        let loading = try await clock.measure { newest = try await index.timeBucket(months[0].timeBucket + "T00:00:00Z", filter: person) }
+        let loading = try await clock.measure { newest = try await index.timeBucket(months[0].timeBucket + "T00:00:00Z", of: person) }
         let library = try await clock.measure { _ = try await index.timeBuckets() }
         XCTAssertEqual(months.reduce(0) { $0 + $1.count }, 15_000)
         XCTAssertEqual(newest.count, months[0].count)
@@ -541,11 +541,11 @@ private struct ReferenceLibrary {
     var stacks: [String: String] = [:]
     let me = "alice"
 
-    func server(_ filter: TimelineFilter) -> [(month: String, ids: [String])] {
-        let createdOrder = filter.orderBy == "createdAt"
+    func server(_ filter: IndexFeedRequest) -> [(month: String, ids: [String])] {
+        let createdOrder = filter.byCreated
         let shown = assets.values.filter { included($0, filter) }
         let byMonth = Dictionary(grouping: shown) { String((createdOrder ? $0.created : $0.taken).prefix(7)) + "-01" }
-        let descending = filter.order != "asc"
+        let descending = !filter.ascending
         return byMonth.keys.sorted(by: descending ? (>) : (<)).map { month in
             // Within a month the library's order, not the server's: the time, then the ID, ascending.
             let ids = byMonth[month]!.sorted { a, b in
@@ -561,23 +561,23 @@ private struct ReferenceLibrary {
         assets.values.count { $0.stack == id && !$0.trashed && $0.visibility == "timeline" }
     }
 
-    private func included(_ photo: Photo, _ filter: TimelineFilter) -> Bool {
-        if let visibility = filter.visibility { guard photo.visibility == visibility.rawValue else { return false } }
+    private func included(_ photo: Photo, _ filter: IndexFeedRequest) -> Bool {
+        if let visibility = filter.visibility { guard photo.visibility == visibility else { return false } }
         else { guard ["timeline", "archive"].contains(photo.visibility) else { return false } }
-        guard photo.trashed == (filter.isTrashed == true) else { return false }
-        if let favorite = filter.isFavorite, photo.favorite != favorite { return false }
-        if let developed = filter.isDeveloped, photo.developed != developed { return false }
+        guard photo.trashed == filter.trashed else { return false }
+        if let favorite = filter.favorite, photo.favorite != favorite { return false }
+        if let developed = filter.developed, photo.developed != developed { return false }
         if let album = filter.albumID, albums[album]?.contains(photo.id) != true { return false }
         if let person = filter.personID, person != "maya" || !maya.contains(photo.id) { return false }
-        if let place = filter.place, !place.assetIDs.contains(photo.id) { return false }
-        if (filter.albumID == nil && filter.place == nil) || filter.userID != nil {
-            let owner = photo.owner == (filter.userID ?? me)
+        if let place = filter.placeAssetIDs, !place.contains(photo.id) { return false }
+        if (filter.albumID == nil && filter.placeAssetIDs == nil) || filter.ownerID != nil {
+            let owner = photo.owner == (filter.ownerID ?? me)
             // Bob shares with Alice and shows in her timeline; Carol only shares an album.
             let partner = filter.withPartners && photo.owner == "bob"
             let sharedAlbum = filter.personID != nil && albums["shared"]?.contains(photo.id) == true
             guard owner || partner || sharedAlbum else { return false }
         }
-        if filter.withStacked, let stack = photo.stack, let primary = stacks[stack], primary != photo.id { return false }
+        if filter.primaryOnly, let stack = photo.stack, let primary = stacks[stack], primary != photo.id { return false }
         return true
     }
 }

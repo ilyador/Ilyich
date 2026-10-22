@@ -14,11 +14,11 @@ import XCTest
         try await harness.primeIndex()
         harness.server.route("POST", "sync/stream", SyncEvents.stream([SyncEvents.asset("fresh"), SyncEvents.complete()]))
         let published = await harness.engine.changes()
-        let library = NativeLibraryAPI(client: harness.api, entities: harness.entities, sync: harness.engine)
+        let library = LibraryRepository(client: harness.api, index: harness.entities, sync: harness.engine)
 
         let refreshed = try await library.refresh()
 
-        let returned = try XCTUnwrap(refreshed, "NativeLibraryAPI.refresh returns the change.")
+        let returned = try XCTUnwrap(refreshed, "LibraryRepository.refresh returns the change.")
         XCTAssertEqual(returned.upserted, ["fresh": .init(from: nil, to: february)], "The refresh says what it changed.")
         XCTAssertEqual(returned.account, harness.authorization.account)
         XCTAssertEqual(returned.origin, .sync)

@@ -10,7 +10,7 @@ import XCTest
 @MainActor final class SyncHarness {
     let server: StubServer
     let api: APIClient
-    let entities: EntityStore
+    let entities: LibraryIndex
     let engine: SyncEngine
     let status: SyncStatusBoard
     let presence: AppPresence
@@ -23,7 +23,7 @@ import XCTest
     let warmer: ThumbnailWarmer
     let pipeline: MediaPipeline
 
-    fileprivate init(server: StubServer, api: APIClient, entities: EntityStore, engine: SyncEngine, status: SyncStatusBoard,
+    fileprivate init(server: StubServer, api: APIClient, entities: LibraryIndex, engine: SyncEngine, status: SyncStatusBoard,
                      presence: AppPresence, authorization: AuthorizationState, live: FakeLiveConnection, expiries: Recorded<String>,
                      notifications: Recorded<[String: Bool]>, warmer: ThumbnailWarmer, pipeline: MediaPipeline) {
         self.server = server; self.api = api; self.entities = entities; self.engine = engine; self.status = status
@@ -60,7 +60,7 @@ extension XCTestCase {
         let api = try APIClient(baseURL: server.baseURL, accessToken: "harness-session", userID: "alice",
                                 sessionConfiguration: server.configuration(), networkConfiguration: NetworkConfiguration())
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SyncHarness-" + UUID().uuidString, isDirectory: true)
-        let entities = try EntityStore(scope: api.cacheScope, userID: "alice", directory: directory)
+        let entities = try LibraryIndex(scope: api.cacheScope, userID: "alice", directory: directory)
         let account = AccountID(server: server.baseURL, userID: "alice")
         let authorization = AuthorizationState(account: account, token: "harness-session", readOnly: false, requiresPasswordChange: false, mirror: nil)
         let expiries = Recorded<String>()

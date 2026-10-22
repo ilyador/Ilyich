@@ -89,7 +89,7 @@ actor IndexReader {
     }
 
     /// A feed's photos across months, newest first by the time taken unless the feed asks otherwise.
-    func timelineAssets(filter: TimelineFilter = .init(), offset: Int = 0, limit: Int = 200) throws -> [Asset] {
+    func timelineAssets(_ filter: IndexFeedRequest, offset: Int = 0, limit: Int = 200) throws -> [Asset] {
         let (whereSQL, arguments) = feedPredicate(filter)
         let rows = try database.query("\(Self.feedSelect) WHERE \(whereSQL) ORDER BY \(Self.order(filter, month: false)) LIMIT ? OFFSET ?",
                                       arguments + [String(min(max(limit, 1), 2_000)), String(max(offset, 0))])
@@ -97,7 +97,7 @@ actor IndexReader {
     }
 
     /// A feed's months, newest first unless it asks otherwise, with how many photos each holds.
-    func timeBuckets(filter: TimelineFilter = .init()) throws -> [TimeBucket] {
+    func timeBuckets(_ filter: IndexFeedRequest) throws -> [TimeBucket] {
         let (whereSQL, arguments) = feedPredicate(filter)
         let month = Self.monthColumn(filter)
         return try database.query("SELECT \(month)||'-01',count(*) FROM asset_index i WHERE \(whereSQL) AND \(month) IS NOT NULL GROUP BY \(month) ORDER BY \(month) \(Self.direction(filter))", arguments).compactMap {
@@ -108,25 +108,25 @@ actor IndexReader {
 
     /// One month of a feed, by the time taken (or added, in created-at order), newest first unless
     /// the feed asks otherwise, then by ID.
-    func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) throws -> [Asset] {
+    func timeBucket(_ bucket: String, of filter: IndexFeedRequest) throws -> [Asset] {
         let (sql, arguments) = timeBucketQuery(bucket, filter: filter)
         return try decodeTimelineRows(try database.query(sql, arguments))
     }
 
     /// What SQLite plans for a month's query, for tests and diagnostics.
-    func timeBucketPlan(_ bucket: String, filter: TimelineFilter = .init()) throws -> [String] {
+    func timeBucketPlan(_ bucket: String, of filter: IndexFeedRequest) throws -> [String] {
         let (sql, arguments) = timeBucketQuery(bucket, filter: filter)
         return try database.query("EXPLAIN QUERY PLAN " + sql, arguments).compactMap { $0.last ?? nil }
     }
 
-    private func timeBucketQuery(_ bucket: String, filter: TimelineFilter) -> (String, [String?]) {
+    private func timeBucketQuery(_ bucket: String, filter: IndexFeedRequest) -> (String, [String?]) {
         let (whereSQL, arguments) = feedPredicate(filter)
         return ("\(Self.feedSelect) WHERE \(Self.monthColumn(filter))=? AND \(whereSQL) ORDER BY \(Self.order(filter, month: true))",
                 [String(bucket.prefix(7))] + arguments)
     }
 
     /// Located photos per month and place, for naming months and marking trips on the time rail.
-    func monthPlaces(filter: TimelineFilter = .init()) throws -> [MonthPlaceCount] {
+    func monthPlaces(_ filter: IndexFeedRequest) throws -> [MonthPlaceCount] {
         let (whereSQL, arguments) = feedPredicate(filter)
         let month = Self.monthColumn(filter)
         return try database.query("""
@@ -140,15 +140,15 @@ actor IndexReader {
         }
     }
 
-    private static func monthColumn(_ filter: TimelineFilter) -> String { filter.orderBy == "createdAt" ? "i.created_month" : "i.local_month" }
-    private static func direction(_ filter: TimelineFilter) -> String { filter.order == "asc" ? "ASC" : "DESC" }
+    private static func monthColumn(_ filter: IndexFeedRequest) -> String { filter.byCreated ? "i.created_month" : "i.local_month" }
+    private static func direction(_ filter: IndexFeedRequest) -> String { filter.ascending ? "ASC" : "DESC" }
     /// The library's order: the time taken, or the time added, newest first unless the feed asks
     /// otherwise, then the ID, ascending either way. Across months the month leads, which the time
     /// already decides. The columns follow asset_index_taken and asset_index_added, so SQLite reads
     /// a month newest first in order without sorting it.
-    private static func order(_ filter: TimelineFilter, month: Bool) -> String {
+    private static func order(_ filter: IndexFeedRequest, month: Bool) -> String {
         let way = direction(filter)
-        let time = filter.orderBy == "createdAt" ? "i.created_at" : "i.local_date_time"
+        let time = filter.byCreated ? "i.created_at" : "i.local_date_time"
         return ((month ? [] : ["\(monthColumn(filter)) \(way)"]) + ["\(time) \(way)", "i.id ASC"]).joined(separator: ",")
     }
 
@@ -344,29 +344,29 @@ actor IndexReader {
     }
     /// A feed's conditions on asset_index `i`. Membership comes from album_member and
     /// person_member, each read once rather than per photo.
-    private func feedPredicate(_ filter: TimelineFilter) -> (String, [String?]) {
+    private func feedPredicate(_ filter: IndexFeedRequest) -> (String, [String?]) {
         var conditions = ["i.visibility!='locked'"]
         var values: [String?] = []
-        if let visibility = filter.visibility { conditions.append("i.visibility=?"); values.append(visibility.rawValue) }
+        if let visibility = filter.visibility { conditions.append("i.visibility=?"); values.append(visibility) }
         else { conditions.append("i.visibility IN ('timeline','archive')") }
-        conditions.append("i.trashed=\(filter.isTrashed == true ? 1 : 0)")
-        if let favorite = filter.isFavorite { conditions.append("i.favorite=CAST(? AS INTEGER)"); values.append(favorite ? "1" : "0") }
-        if let developed = filter.isDeveloped { conditions.append("i.developed=CAST(? AS INTEGER)"); values.append(developed ? "1" : "0") }
+        conditions.append("i.trashed=\(filter.trashed ? 1 : 0)")
+        if let favorite = filter.favorite { conditions.append("i.favorite=CAST(? AS INTEGER)"); values.append(favorite ? "1" : "0") }
+        if let developed = filter.developed { conditions.append("i.developed=CAST(? AS INTEGER)"); values.append(developed ? "1" : "0") }
         if let album = filter.albumID {
             conditions.append("i.id IN (SELECT asset_id FROM album_member WHERE album_id=?)"); values.append(album)
         }
         if let person = filter.personID {
             conditions.append("i.id IN (SELECT asset_id FROM person_member WHERE person_id=?)"); values.append(person)
         }
-        if let place = filter.place {
+        if let place = filter.placeAssetIDs {
             // One parameter however many photos the place holds. They came from this account's
             // own map, so they need no owner check.
             conditions.append("i.id IN (SELECT value FROM json_each(?))")
-            values.append(String(decoding: (try? JSONEncoder().encode(place.assetIDs)) ?? Data("[]".utf8), as: UTF8.self))
+            values.append(String(decoding: (try? JSONEncoder().encode(place)) ?? Data("[]".utf8), as: UTF8.self))
         }
-        if (filter.albumID == nil && filter.place == nil) || filter.userID != nil {
+        if (filter.albumID == nil && filter.placeAssetIDs == nil) || filter.ownerID != nil {
             var owners = ["i.owner_id=?"]
-            values.append(filter.userID ?? userID)
+            values.append(filter.ownerID ?? userID)
             if filter.withPartners {
                 owners.append("i.owner_id IN (SELECT json_extract(p.payload,'$.sharedById') FROM entities p WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedWithId')=?\(filter.personID == nil ? " AND json_extract(p.payload,'$.inTimeline')=1" : ""))")
                 values.append(userID)
@@ -377,7 +377,7 @@ actor IndexReader {
             }
             conditions.append("(" + owners.joined(separator: " OR ") + ")")
         }
-        if filter.withStacked {
+        if filter.primaryOnly {
             conditions.append("(i.stack_id IS NULL OR NOT EXISTS(SELECT 1 FROM entities s WHERE s.kind='stack' AND s.id=i.stack_id AND json_extract(s.payload,'$.primaryAssetId')!=i.id))")
         }
         return (conditions.joined(separator: " AND "), values)

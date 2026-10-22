@@ -112,27 +112,27 @@ import XCTest
         let before = await cache.epoch(scope: scope), otherBefore = await cache.epoch(scope: other)
 
         await cache.removeAll(scope: scope)
-        let stale = await cache.save(places, scope: scope, filter: TimelineFilter(), epoch: before)
+        let stale = await cache.save(places, scope: scope, query: .library, epoch: before)
         XCTAssertFalse(stale, "Places counted before the clear are refused.")
-        let refused = await cache.load(scope: scope, filter: TimelineFilter())
+        let refused = await cache.load(scope: scope, query: .library)
         XCTAssertNil(refused)
 
-        let current = await cache.save(places, scope: scope, filter: TimelineFilter(), epoch: cache.epoch(scope: scope))
+        let current = await cache.save(places, scope: scope, query: .library, epoch: cache.epoch(scope: scope))
         XCTAssertTrue(current)
-        let kept = await cache.load(scope: scope, filter: TimelineFilter())
+        let kept = await cache.load(scope: scope, query: .library)
         XCTAssertEqual(kept, places, "Places counted after it are kept.")
-        let untouched = await cache.save(places, scope: other, filter: TimelineFilter(), epoch: otherBefore)
+        let untouched = await cache.save(places, scope: other, query: .library, epoch: otherBefore)
         XCTAssertTrue(untouched, "Another account's clear changes nothing here.")
     }
 
     // MARK: - Support
 
     /// An empty offline library and a media pipeline of its own, removed when the test ends.
-    private func library() throws -> (EntityStore, MediaPipeline) {
+    private func library() throws -> (LibraryIndex, MediaPipeline) {
         let userID = "fencing-" + UUID().uuidString
         let api = try APIClient(baseURL: XCTUnwrap(URL(string: "https://fencing.example")), accessToken: "session-token", userID: userID)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FencingTests-" + UUID().uuidString, isDirectory: true)
-        let entities = try EntityStore(scope: api.cacheScope, userID: userID, directory: directory)
+        let entities = try LibraryIndex(scope: api.cacheScope, userID: userID, directory: directory)
         let pipeline = MediaPipeline(client: api)
         addTeardownBlock {
             await pipeline.removeAll()

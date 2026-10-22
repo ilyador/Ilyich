@@ -4,7 +4,7 @@ struct MoreCollectionsView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
-    let onFilter: (TimelineFilter, String) -> Void
+    let onFilter: (LibraryQuery, String) -> Void
     /// Plays memories over More.
     let onPlayMemory: (MemoryPlayback) -> Void
     let onMetadataFilter: (SearchFilter, String) -> Void
@@ -16,15 +16,9 @@ struct MoreCollectionsView: View {
                 NavigationLink { FreeUpSpaceView() } label: { Label("Free up space", systemImage: "internaldrive") }
             }
             Section {
-                Button {
-                    var filter = TimelineFilter(); filter.userID = api.userID; filter.isTrashed = false; filter.orderBy = "takenAt"
-                    onFilter(filter, "Recently taken")
-                } label: { Label("Recently taken", systemImage: "camera") }
-                Button {
-                    var filter = TimelineFilter(); filter.userID = api.userID; filter.visibility = nil; filter.isTrashed = false; filter.orderBy = "createdAt"
-                    onFilter(filter, "Recently added")
-                } label: { Label("Recently added", systemImage: "clock.badge.checkmark") }
-                Button { var filter = TimelineFilter(); filter.isFavorite = true; onFilter(filter, "Favorites") } label: { Label("Favorites", systemImage: "heart") }
+                Button { onFilter(.recentlyTaken, "Recently taken") } label: { Label("Recently taken", systemImage: "camera") }
+                Button { onFilter(.recentlyAdded, "Recently added") } label: { Label("Recently added", systemImage: "clock.badge.checkmark") }
+                Button { onFilter(.favorites, "Favorites") } label: { Label("Favorites", systemImage: "heart") }
                 Button { onMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO"), visibility: StringFilter(eq: "timeline")), "Videos") } label: { Label("Videos", systemImage: "video") }
                 Button { onMetadataFilter(SearchFilter(isMotion: BoolFilter(eq: true), visibility: StringFilter(eq: "timeline")), "Motion") } label: { Label("Motion", systemImage: "livephoto") }
                 Button { onDeveloped("Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
@@ -37,7 +31,7 @@ struct MoreCollectionsView: View {
             Section("Library") {
                 NavigationLink { FoldersView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset) } label: { Label("Folders", systemImage: "folder") }
                 NavigationLink { DuplicatesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset) } label: { Label("Duplicates", systemImage: "square.on.square") }
-                Button { var filter = TimelineFilter(); filter.visibility = .archive; onFilter(filter, "Archive") } label: { Label("Archive", systemImage: "archivebox") }
+                Button { onFilter(.archive, "Archive") } label: { Label("Archive", systemImage: "archivebox") }
                 NavigationLink { LockedFolderView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset) } label: { Label("Locked folder", systemImage: "lock") }
                 NavigationLink { TrashView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset) } label: { Label("Trash", systemImage: "trash") }
             }
@@ -106,7 +100,7 @@ struct MemoriesView: View {
 
 struct PartnersView: View {
     let api: APIClient
-    let onFilter: (TimelineFilter, String) -> Void
+    let onFilter: (LibraryQuery, String) -> Void
     @State private var incoming: [Partner] = []
     @State private var outgoing: [Partner] = []
     @State private var candidates: [User] = []
@@ -120,7 +114,7 @@ struct PartnersView: View {
             Section("Shared with you") {
                 ForEach(incoming) { partner in
                     VStack(alignment: .leading, spacing: 10) {
-                        Button(partner.name) { var filter = TimelineFilter(); filter.userID = partner.id; filter.visibility = nil; onFilter(filter, partner.name) }
+                        Button(partner.name) { onFilter(.partner(partner.id), partner.name) }
                         Toggle("Show in your timeline", isOn: Binding(get: { partner.inTimeline == true }, set: { value in Task { await setTimeline(partner, value: value) } })).font(.subheadline).requiresWriteAccess()
                     }.padding(.vertical, 4)
                 }

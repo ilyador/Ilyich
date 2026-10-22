@@ -27,7 +27,7 @@ import XCTest
             june: [Asset(id: "early", localDateTime: early), Asset(id: "late", localDateTime: late)],
         ])
         removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(api: api)
+        let store = LibraryStore(source: api)
         defer { store.stop() }
         await store.reload()
         store.visibleSection(2)
@@ -56,7 +56,7 @@ import XCTest
         let day = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
         let api = LedgerLibrary(months: [january: [Asset(id: "server-photo", localDateTime: day)]])
         removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(api: api, includesDevicePhotos: true)
+        let store = LibraryStore(source: api, includesDevicePhotos: true)
         defer { store.stop() }
         await store.reload()
         try await until("The server's month did not load.") { store.loaded[january] != nil }
@@ -64,7 +64,7 @@ import XCTest
         store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone-only", date: taken)]))
         XCTAssertEqual(store.sections.first?.id, "2026-02-01", "The phone's newer month leads the library.")
 
-        store.setTimeline(TimelineFilter(isFavorite: true), title: "Favorites")
+        store.setFeed(.favorites, title: "Favorites")
         try await until("Favorites did not replace the library.") { !store.isReplacingFeed }
         await store.refreshAfterMutation()
         store.clearFilters()
@@ -89,14 +89,14 @@ import XCTest
         // The second month is slow, so it is still loading when the reload checks for it.
         let api = LedgerLibrary(months: months, delay: .milliseconds(50), slow: ["2026-05-01T00:00:00Z": .seconds(1)])
         removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(api: api)
+        let store = LibraryStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The newest month did not load.") { store.loaded["2026-06-01T00:00:00Z"] != nil }
         store.position = GridPosition(section: store.buckets[4].id, item: 0, offset: 0)
 
         await api.holdSummaries()
-        store.setTimeline(TimelineFilter(isFavorite: true), title: "Favorites")
+        store.setFeed(.favorites, title: "Favorites")
         try await until("The new scope never asked for its months.") { await api.summaryCalls == 2 }
         let sync = Task { await store.reload(preservingPosition: true) }
         try await until("The sync's reload never asked for its months.") { await api.summaryCalls == 3 }
@@ -119,7 +119,7 @@ import XCTest
         })
         let api = LedgerLibrary(months: months, delay: .milliseconds(200))
         removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(api: api, includesDevicePhotos: true)
+        let store = LibraryStore(source: api, includesDevicePhotos: true)
         defer { store.stop() }
         await store.reload()
         let asked = store.buckets[8].id
@@ -139,7 +139,7 @@ import XCTest
         let month = "2026-01-01T00:00:00Z"
         let api = LedgerLibrary(months: [month: [Asset(id: "first"), Asset(id: "second")]], counts: [month: 3])
         removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(api: api)
+        let store = LibraryStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The month did not load.") { store.loaded[month] != nil }
@@ -166,7 +166,7 @@ import XCTest
         let api = LedgerLibrary(months: [month: [Asset(id: "photo")]], holdPlaces: true,
                                 places: [MonthPlaceCount(bucket: "2026-02-01", city: "Kyoto", country: "Japan", count: 4)])
         removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(api: api, placesDelay: .zero)
+        let store = LibraryStore(source: api, placesDelay: .zero)
         defer { store.stop() }
         await store.reload()
         try await until("The places were never counted.") { await api.placesCalls == 1 }
@@ -177,7 +177,7 @@ import XCTest
         await api.releasePlaces()
         try await until("The count never finished.") { await api.placesAnswered == 1 }
         let saved = await eventually(within: .seconds(1)) {
-            await TimelinePlacesCache.shared.load(scope: api.cacheScope, filter: TimelineFilter()) != nil
+            await TimelinePlacesCache.shared.load(scope: api.cacheScope, query: .library) != nil
         }
 
         XCTAssertFalse(saved, "A count from before the access change is not kept on the phone.")
@@ -351,12 +351,12 @@ import XCTest
         server.route("GET", "timeline/buckets", .json("[]"))
         let api = try stubClient(server, token: "ledger-session", userID: "alice")
         removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(api: api)
+        let store = LibraryStore(source: LibraryRepository(client: api, index: nil, sync: nil))
         defer { store.stop() }
 
         store.search("beach")
         let library = try await searchFilter(server, "search/smart", request: 1, store: store)
-        store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash")
+        store.setFeed(.trash, title: "Trash")
         store.search("beach")
         let trash = try await searchFilter(server, "search/smart", request: 2, store: store)
         // Search options after Reset, which clears every filter.
@@ -379,7 +379,7 @@ import XCTest
         server.route("GET", "timeline/buckets", .json("[]"))
         let api = try stubClient(server, token: "ledger-session", userID: "alice")
         removeCachesAfterwards(api.cacheScope)
-        let store = LibraryStore(api: api)
+        let store = LibraryStore(source: LibraryRepository(client: api, index: nil, sync: nil))
         defer { store.stop() }
 
         store.search("beach")
@@ -390,7 +390,7 @@ import XCTest
                              startDate: nil, endDate: nil, updatedAt: nil, order: "desc"))
         store.search("beach")
         let album = try await searchFilter(server, "search/smart", request: 3, store: store)
-        store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash"); store.search("beach")
+        store.setFeed(.trash, title: "Trash"); store.search("beach")
         let trash = try await searchFilter(server, "search/smart", request: 4, store: store)
         store.findSimilar(to: Asset(id: "reference"))
         let similar = try await searchFilter(server, "search/smart", request: 5, store: store)
@@ -406,13 +406,15 @@ import XCTest
     }
 
     /// QUERY-1. The library leaves out the partners whose photos are shown in the timeline:
-    /// TimelineFilter.withPartners is false by default and nothing sets it, so the "Show in your
-    /// timeline" switch has no effect on the native library, offline or from the server.
+    /// LibraryRepository.includesPartners is off, so the "Show in your timeline" switch has no
+    /// effect on the native library, offline or from the server. Q5 built the switch through the
+    /// index and the server timeline, but adopting it changes what the library shows, which waits
+    /// for the owner's answer (and T5's coverage scope); the wrapper goes when it is turned on.
     func testLibraryIncludesPartnersShownInTimeline() async throws {
         let server = makeStubServer()
         let api = try stubClient(server, token: "ledger-session", userID: "alice")
         removeCachesAfterwards(api.cacheScope)
-        let entities = try EntityStore(scope: api.cacheScope, userID: "alice", directory: temporaryDirectory())
+        let entities = try LibraryIndex(scope: api.cacheScope, userID: "alice", directory: temporaryDirectory())
         let epoch = await entities.epoch()
         _ = try await entities.apply([
             event("PartnerV1", #"{"sharedById":"bob","sharedWithId":"alice","inTimeline":true}"#, ack: "PartnerV1|bob"),
@@ -420,7 +422,7 @@ import XCTest
             asset("mine"), asset("bob-photo", owner: "bob", type: "PartnerAssetV2"), asset("carol-photo", owner: "carol", type: "PartnerAssetV2"),
             complete(),
         ], epoch: epoch)
-        let offline = LibraryStore(api: NativeLibraryAPI(client: api, entities: entities, sync: nil))
+        let offline = LibraryStore(source: LibraryRepository(client: api, index: entities, sync: nil))
         defer { offline.stop() }
         await offline.reload()
         try await until("The offline library's month did not load.") { offline.loaded["2026-02-01"] != nil }
@@ -432,12 +434,12 @@ import XCTest
         remote.route("GET", "timeline/buckets", .json("[]"))
         let remoteAPI = try stubClient(remote, token: "ledger-session", userID: "alice")
         removeCachesAfterwards(remoteAPI.cacheScope)
-        let online = LibraryStore(api: remoteAPI)
+        let online = LibraryStore(source: LibraryRepository(client: remoteAPI, index: nil, sync: nil))
         defer { online.stop() }
         await online.reload()
         let query = try XCTUnwrap(remote.requests("GET", "timeline/buckets").first?.query)
 
-        XCTExpectFailure("QUERY-1: partners shown in the timeline are missing from the library. Q5 removes this wrapper.", strict: true) {
+        XCTExpectFailure("QUERY-1: partners shown in the timeline are missing from the library until the owner turns LibraryRepository.includesPartners on.", strict: true) {
             XCTAssertTrue(shown.contains("bob-photo"), "A partner shown in the timeline is part of the offline library.")
             XCTAssertTrue(query.contains(URLQueryItem(name: "withPartners", value: "true")), "The server is asked for those partners too.")
         }
@@ -510,11 +512,11 @@ import XCTest
     }
 
     /// A NativeSync over a stub server and a fresh offline index.
-    private func makeSyncedIndex() throws -> (sync: NativeSync, index: EntityStore, server: StubServer) {
+    private func makeSyncedIndex() throws -> (sync: NativeSync, index: LibraryIndex, server: StubServer) {
         let server = makeStubServer()
         server.route("POST", "sync/ack", .empty(204))
         let api = try stubClient(server, token: "ledger-session", userID: "alice")
-        let index = try EntityStore(scope: api.cacheScope, userID: "alice", directory: temporaryDirectory())
+        let index = try LibraryIndex(scope: api.cacheScope, userID: "alice", directory: temporaryDirectory())
         return (NativeSync(api: api, store: index), index, server)
     }
 
@@ -541,7 +543,7 @@ import XCTest
 
 /// A library of months for the feed tests. Months load after a delay, the summary can be held
 /// while a test arranges a race, and month places can be held until the test lets them finish.
-private actor LedgerLibrary: LibraryAPI {
+private actor LedgerLibrary: FakeFeedSource {
     nonisolated let cacheScope = "test-ledger-" + UUID().uuidString
     private let months: [String: [Asset]]
     private let counts: [String: Int]
@@ -566,19 +568,19 @@ private actor LedgerLibrary: LibraryAPI {
     func releaseSummaries() { summaryGate?.open() }
     func releasePlaces() { placesGate?.open() }
 
-    func timeBuckets(filter: TimelineFilter) async throws -> [TimeBucket] {
+    func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] {
         summaryCalls += 1
         if let summaryGate { await summaryGate.wait() }
         return months.keys.sorted(by: >).map { TimeBucket(timeBucket: $0, count: counts[$0] ?? months[$0]?.count ?? 0) }
     }
-    func timeBucket(_ bucket: String, filter: TimelineFilter) async throws -> [Asset] {
+    func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] {
         let wait = slow[bucket] ?? delay
         if wait > .zero { try await Task.sleep(for: wait) }
         return months[bucket] ?? []
     }
     func search(_ query: SearchQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
-    func monthPlaces(filter: TimelineFilter) async throws -> [MonthPlaceCount] {
+    func placeCounts(_ query: LibraryQuery) async throws -> [MonthPlaceCount] {
         placesCalls += 1
         if let placesGate { await placesGate.wait() }
         placesAnswered += 1

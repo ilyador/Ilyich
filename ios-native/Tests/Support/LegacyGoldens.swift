@@ -223,12 +223,13 @@ enum LegacyGoldens {
     ]
 
     static let person = "7c6b5a49-3827-4165-9f8e-7d6c5b4a3928"
-    /// The places of the library feed and of one person's, by their feed keys.
-    static let places: [(filter: TimelineFilter, places: TimelinePlaces)] = [
-        (TimelineFilter(), TimelinePlaces(months: ["2025-10-01": [PlaceTally(name: "Lisbon", count: 42), PlaceTally(name: "Sintra", count: 7)],
+    /// The places of the library feed and of one person's, by their feed keys (written by
+    /// TimelineFilter.cacheKey before Q5, and by LibraryQuery.stableKey since, byte for byte).
+    static let places: [(query: LibraryQuery, places: TimelinePlaces)] = [
+        (.library, TimelinePlaces(months: ["2025-10-01": [PlaceTally(name: "Lisbon", count: 42), PlaceTally(name: "Sintra", count: 7)],
                                                    "2025-09-01": [PlaceTally(name: "London", count: 12)]],
                                           trips: ["2025-10-01": "Lisbon"])),
-        (TimelineFilter(personID: person), TimelinePlaces(months: ["2025-10-01": [PlaceTally(name: "Lisbon", count: 5)]], trips: [:])),
+        (.person(person), TimelinePlaces(months: ["2025-10-01": [PlaceTally(name: "Lisbon", count: 5)]], trips: [:])),
     ]
 
     /// Thumbnails by asset and revision: a media revision, a thumbhash, none at all, and an ID

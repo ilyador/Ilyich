@@ -275,10 +275,10 @@ import XCTest
 
     // MARK: - Support
 
-    private func makeStore(scope: String = "server|alice") throws -> EntityStore {
+    private func makeStore(scope: String = "server|alice") throws -> LibraryIndex {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("SyncPassTests-" + UUID().uuidString, isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        return try EntityStore(scope: scope, userID: "alice", directory: root)
+        return try LibraryIndex(scope: scope, userID: "alice", directory: root)
     }
 
     private func client(_ server: StubServer, token: String) throws -> APIClient {
@@ -289,7 +289,7 @@ import XCTest
     }
 
     /// A pass over a stub server and a fresh index.
-    private func makePass(acks: AckPolicy = AckPolicy()) throws -> (sync: PassUnderTest, store: EntityStore, server: StubServer) {
+    private func makePass(acks: AckPolicy = AckPolicy()) throws -> (sync: PassUnderTest, store: LibraryIndex, server: StubServer) {
         let server = makeStubServer()
         server.route("POST", "sync/ack", .empty(204))
         let api = try client(server, token: "pass-session")

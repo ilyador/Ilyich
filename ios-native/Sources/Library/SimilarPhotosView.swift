@@ -9,7 +9,7 @@ struct SimilarPhotosView: View {
     @Environment(\.dismiss) private var dismiss
     init(api: APIClient, pipeline: MediaPipeline, reference: Asset) {
         self.api = api; self.pipeline = pipeline; self.reference = reference
-        _store = State(initialValue: LibraryStore(api: api))
+        _store = State(initialValue: LibraryStore(source: LibraryRepository(client: api, index: nil, sync: nil)))
     }
     var body: some View {
         NavigationStack {

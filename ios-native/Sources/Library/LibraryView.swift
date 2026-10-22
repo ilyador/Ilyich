@@ -64,7 +64,7 @@ struct LibraryView: View {
 
     init(api: APIClient, pipeline: MediaPipeline, session: AccountSession) {
         self.api = api; self.pipeline = pipeline; self.session = session
-        _store = State(initialValue: LibraryStore(api: session.libraryAPI ?? api, includesDevicePhotos: session.environment.usesDevicePhotos))
+        _store = State(initialValue: LibraryStore(source: session.libraryRepository ?? LibraryRepository(client: api, index: nil, sync: nil), includesDevicePhotos: session.environment.usesDevicePhotos))
         _model = State(initialValue: LibraryScreenModel(lookup: api, inbox: ShareInboxStore.shared))
     }
 
@@ -287,7 +287,7 @@ struct LibraryView: View {
         // Exploring the photo's place closes the viewer, then raises the Earth turned to it.
         AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
                     onUpdated: store.update, onDeleted: { store.removeLocally([transition.currentID]); Task { await store.refreshAfterMutation() } },
-                    albumID: navigator.viewerRoute?.albumContext ?? store.timelineFilter.albumID,
+                    albumID: navigator.viewerRoute?.albumContext ?? store.feedQuery.predicates.albums.first,
                     matchedLocalPhotos: store.matchingDevicePhotos, onExploreLocation: { navigator.send(.exploreLocation($0)) },
                     transition: transition, onClose: close)
     }
@@ -361,7 +361,7 @@ struct LibraryView: View {
                 .opacity(shelves ? 0 : 1)
                 .allowsHitTesting(!shelves)
             }
-            if let albumID = store.timelineFilter.albumID {
+            if let albumID = store.feedQuery.predicates.albums.first {
                 AlbumUploadStatusView(albumID: albumID) { Task { await store.refreshAfterMutation() } }
             }
             if !store.query.isEmpty, let verification = store.verification {
@@ -431,7 +431,7 @@ struct LibraryView: View {
     }
 
     private var filteredAlbum: Album? {
-        store.timelineFilter.albumID.flatMap { id in albums.first { $0.id == id } }
+        store.feedQuery.predicates.albums.first.flatMap { id in albums.first { $0.id == id } }
     }
 
     /// An album in the feed keeps its sharing at hand, across from its title.
@@ -449,13 +449,13 @@ struct LibraryView: View {
     }
 
     @ViewBuilder private var filterTabIcon: some View {
-        if let id = store.timelineFilter.personID, let person = people.first(where: { $0.id == id }) {
+        if let id = store.feedQuery.predicates.people.first, let person = people.first(where: { $0.id == id }) {
             PersonThumbnail(pipeline: pipeline, person: person, pixelSize: PersonThumbnail.small)
-        } else if let id = store.timelineFilter.albumID, let assetID = albums.first(where: { $0.id == id })?.albumThumbnailAssetId {
+        } else if let id = store.feedQuery.predicates.albums.first, let assetID = albums.first(where: { $0.id == id })?.albumThumbnailAssetId {
             FeatureThumbnail(api: api, pipeline: pipeline, assetID: assetID).clipShape(.circle)
         } else {
-            let symbol = store.timelineFilter.personID != nil ? "person.crop.circle"
-                : store.timelineFilter.albumID != nil ? "rectangle.stack"
+            let symbol = store.feedQuery.predicates.people.first != nil ? "person.crop.circle"
+                : store.feedQuery.predicates.albums.first != nil ? "rectangle.stack"
                 : !store.query.isEmpty ? "magnifyingglass"
                 : shelfItems(for: .more).first(where: \.isSelected)?.symbol ?? "line.3.horizontal.decrease"
             Image(systemName: symbol).font(.body.weight(.semibold))
@@ -463,8 +463,8 @@ struct LibraryView: View {
     }
 
     private var filterShelf: Shelf {
-        if store.timelineFilter.personID != nil { return .people }
-        if store.timelineFilter.albumID != nil { return .albums }
+        if store.feedQuery.predicates.people.first != nil { return .people }
+        if store.feedQuery.predicates.albums.first != nil { return .albums }
         return shelfItems(for: .more).contains(where: \.isSelected) ? .more : .root
     }
 
@@ -582,24 +582,22 @@ struct LibraryView: View {
             add("settings", "Settings", "gearshape", opens: .settings)
         case .people:
             for person in orderedPeople {
-                add("person-" + person.id, person.name.isEmpty ? "Unnamed person" : person.name, "person.crop.circle", person: person, selected: store.timelineFilter.personID == person.id, filters: true) {
-                    if store.timelineFilter.personID != person.id { store.setPerson(person) }; searchText = ""
+                add("person-" + person.id, person.name.isEmpty ? "Unnamed person" : person.name, "person.crop.circle", person: person, selected: store.feedQuery.predicates.people.first == person.id, filters: true) {
+                    if store.feedQuery.predicates.people.first != person.id { store.setPerson(person) }; searchText = ""
                 }
             }
             add("all-people", "Manage people", "person.2") { navigator.present(.people) }
         case .albums:
             for album in orderedAlbums {
-                add("album-" + album.id, album.albumName, "rectangle.stack", detail: album.assetCount.formatted(), assetID: album.albumThumbnailAssetId, selected: store.timelineFilter.albumID == album.id, filters: true) {
-                    if store.timelineFilter.albumID != album.id { store.setAlbum(album) }; searchText = ""
+                add("album-" + album.id, album.albumName, "rectangle.stack", detail: album.assetCount.formatted(), assetID: album.albumThumbnailAssetId, selected: store.feedQuery.predicates.albums.first == album.id, filters: true) {
+                    if store.feedQuery.predicates.albums.first != album.id { store.setAlbum(album) }; searchText = ""
                 }
             }
             add("new-album", "New album", "plus") { navigator.present(.newAlbum) }
             add("all-albums", "Manage albums", "square.grid.2x2") { navigator.present(.albums) }
         case .more:
-            var recentTaken = TimelineFilter(); recentTaken.userID = api.userID; recentTaken.isTrashed = false; recentTaken.orderBy = "takenAt"
-            add("recent-taken", "Recently taken", "camera", selected: store.filterTitle == "Recently taken", filters: true) { store.setTimeline(recentTaken, title: "Recently taken"); searchText = "" }
-            var recentAdded = TimelineFilter(); recentAdded.userID = api.userID; recentAdded.visibility = nil; recentAdded.isTrashed = false; recentAdded.orderBy = "createdAt"
-            add("recent-added", "Recently added", "clock.badge.checkmark", selected: store.filterTitle == "Recently added", filters: true) { store.setTimeline(recentAdded, title: "Recently added"); searchText = "" }
+            add("recent-taken", "Recently taken", "camera", selected: store.filterTitle == "Recently taken", filters: true) { store.setFeed(.recentlyTaken, title: "Recently taken"); searchText = "" }
+            add("recent-added", "Recently added", "clock.badge.checkmark", selected: store.filterTitle == "Recently added", filters: true) { store.setFeed(.recentlyAdded, title: "Recently added"); searchText = "" }
             add("videos", "Videos", "video", selected: store.filterTitle == "Videos" && store.searchFilter.type?.eq == "VIDEO", filters: true) {
                 store.setMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO"), visibility: StringFilter(eq: "timeline")), title: "Videos"); searchText = ""
             }
@@ -609,10 +607,10 @@ struct LibraryView: View {
             add("lightroom", "Lightroom", "slider.horizontal.3", selected: store.filterTitle == "Lightroom", filters: true) {
                 store.setDeveloped(title: "Lightroom"); searchText = ""
             }
-            add("favorites", "Favorites", "heart", selected: store.timelineFilter.isFavorite == true, filters: true) { store.setTimeline(TimelineFilter(isFavorite: true), title: "Favorites"); searchText = "" }
-            add("archive", "Archive", "archivebox", selected: store.timelineFilter.visibility == .archive, filters: true) { store.setTimeline(TimelineFilter(visibility: .archive), title: "Archive"); searchText = "" }
+            add("favorites", "Favorites", "heart", selected: store.feedQuery.predicates.favorite == true, filters: true) { store.setFeed(.favorites, title: "Favorites"); searchText = "" }
+            add("archive", "Archive", "archivebox", selected: store.feedQuery.visibility == .archive, filters: true) { store.setFeed(.archive, title: "Archive"); searchText = "" }
             if features?.trash != false {
-                add("trash", "Trash", "trash", selected: store.timelineFilter.isTrashed == true, filters: true) { store.setTimeline(TimelineFilter(visibility: nil, isTrashed: true), title: "Trash"); searchText = "" }
+                add("trash", "Trash", "trash", selected: store.feedQuery.trash == .trashed, filters: true) { store.setFeed(.trash, title: "Trash"); searchText = "" }
             }
             add("browse-more", "Browse more", "square.grid.2x2") { navigator.present(.more) }
             if !shareInbox.batches.isEmpty {
@@ -886,8 +884,8 @@ struct LibraryView: View {
             }
         case .more:
             // A photo opened from More closes it first, then opens in the viewer.
-            MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { navigator.send(.openAsset($0)) }, onFilter: { filter, title in
-                store.setTimeline(filter, title: title); navigator.dismiss(level: level)
+            MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { navigator.send(.openAsset($0)) }, onFilter: { query, title in
+                store.setFeed(query, title: title); navigator.dismiss(level: level)
             }, onPlayMemory: { navigator.present(.memoryPlayer($0), from: level + 1) }, onMetadataFilter: { filter, title in
                 store.setMetadataFilter(filter, title: title); searchText = ""; navigator.dismiss(level: level)
             }, onDeveloped: { title in

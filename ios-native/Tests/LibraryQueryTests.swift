@@ -14,23 +14,18 @@ final class LibraryQueryTests: XCTestCase {
 
     func testTodaysTimelineFeedsKeepTheirCacheKeys() {
         XCTAssertEqual(LibraryQuery.library.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline")
-        XCTAssertEqual(LibraryQuery.library.stableKey, TimelineFilter().cacheKey)
-        XCTAssertEqual(LibraryQuery.favorites.stableKey, TimelineFilter(isFavorite: true).cacheKey)
-        XCTAssertEqual(LibraryQuery.archive.stableKey, TimelineFilter(visibility: .archive).cacheKey)
-        XCTAssertEqual(LibraryQuery.trash.stableKey, TimelineFilter(visibility: nil, isTrashed: true).cacheKey)
-        XCTAssertEqual(LibraryQuery.lightroom.stableKey, TimelineFilter(isDeveloped: true).cacheKey)
-        var partnerFeed = TimelineFilter(); partnerFeed.userID = partner; partnerFeed.visibility = nil
-        XCTAssertEqual(LibraryQuery.partner(partner).stableKey, partnerFeed.cacheKey)
-        XCTAssertEqual(LibraryQuery.album(album).stableKey, TimelineFilter(albumID: album).cacheKey)
-        var oldestFirst = TimelineFilter(albumID: album); oldestFirst.order = "asc"
-        XCTAssertEqual(LibraryQuery.album(album, ascending: true).stableKey, oldestFirst.cacheKey)
-        XCTAssertEqual(LibraryQuery.person(person).stableKey, TimelineFilter(personID: person).cacheKey)
-        // Own-photo feeds name the user "me"; otherwise they are written as TimelineFilter wrote them.
-        var recentlyTaken = TimelineFilter(); recentlyTaken.userID = "me"; recentlyTaken.isTrashed = false
-        XCTAssertEqual(LibraryQuery.recentlyTaken.stableKey, recentlyTaken.cacheKey)
-        var recentlyAdded = TimelineFilter(); recentlyAdded.userID = "me"; recentlyAdded.visibility = nil; recentlyAdded.isTrashed = false
-        recentlyAdded.orderBy = "createdAt"
-        XCTAssertEqual(LibraryQuery.recentlyAdded.stableKey, recentlyAdded.cacheKey)
+        // The keys TimelineFilter.cacheKey wrote before Q5, pinned.
+        XCTAssertEqual(LibraryQuery.favorites.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isFavorite=true")
+        XCTAssertEqual(LibraryQuery.archive.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=archive")
+        XCTAssertEqual(LibraryQuery.trash.stableKey, "order=desc&orderBy=takenAt&withStacked=true&isTrashed=true")
+        XCTAssertEqual(LibraryQuery.lightroom.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isDeveloped=true")
+        XCTAssertEqual(LibraryQuery.partner(partner).stableKey, "order=desc&orderBy=takenAt&withStacked=true&userId=\(partner)")
+        XCTAssertEqual(LibraryQuery.album(album).stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&albumId=\(album)")
+        XCTAssertEqual(LibraryQuery.album(album, ascending: true).stableKey, "order=asc&orderBy=takenAt&withStacked=true&visibility=timeline&albumId=\(album)")
+        XCTAssertEqual(LibraryQuery.person(person).stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&personId=\(person)")
+        // Own-photo feeds name the user "me"; otherwise they are written as the old keys were.
+        XCTAssertEqual(LibraryQuery.recentlyTaken.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&userId=me&isTrashed=false")
+        XCTAssertEqual(LibraryQuery.recentlyAdded.stableKey, "order=desc&orderBy=createdAt&withStacked=true&userId=me&isTrashed=false")
         // Every preset names its own feed.
         XCTAssertEqual(Set(presets.map(\.stableKey)).count, presets.count)
     }
@@ -111,7 +106,7 @@ final class LibraryQueryTests: XCTestCase {
         XCTAssertNotEqual(lisbon, sameCount)
         XCTAssertNotEqual(lisbon, otherMarkers)
         XCTAssertNotEqual(LibraryQuery.place(lisbon).stableKey, LibraryQuery.place(sameCount).stableKey)
-        XCTAssertEqual(LibraryQuery.place(lisbon).stableKey, TimelineFilter().cacheKey + "&place=Lisbon#" + lisbon.revision)
+        XCTAssertEqual(LibraryQuery.place(lisbon).stableKey, LibraryQuery.library.stableKey + "&place=Lisbon#" + lisbon.revision)
         // Free text can't pose as another item.
         let tricky = PlaceMembership(placeID: "São Paulo&isFavorite=true", assetIDs: ["a"], markerQuery: "")
         XCTAssertTrue(LibraryQuery.place(tricky).stableKey.contains("&place=S%C3%A3o%20Paulo%26isFavorite%3Dtrue#"))

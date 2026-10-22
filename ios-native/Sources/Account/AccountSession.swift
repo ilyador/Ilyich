@@ -51,8 +51,9 @@ import IlyichPlatform
     var requiresPasswordChange: Bool { phase == .passwordChangeRequired }
     var api: APIClient? { runtime?.api }
     var pipeline: MediaPipeline? { runtime?.pipeline }
-    var libraryAPI: (any LibraryAPI)? { runtime?.library?.libraryAPI }
-    var entities: EntityStore? { runtime?.library?.entities }
+    /// The account's library reads, which the feeds plan and read through.
+    var libraryRepository: LibraryRepository? { runtime?.library?.repository }
+    var entities: LibraryIndex? { runtime?.library?.entities }
     /// Fills the thumbnail store with the whole library while the app is open.
     var thumbnailWarmer: ThumbnailWarmer? { runtime?.library?.warmer }
     var isSyncing: Bool { runtime?.library?.status.status.isSyncing ?? false }

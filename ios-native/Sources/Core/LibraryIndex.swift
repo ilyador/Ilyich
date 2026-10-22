@@ -3,9 +3,6 @@ import Foundation
 import os
 import Synchronization
 
-/// Until Q5 the library index keeps the offline library's old name and method surface.
-typealias EntityStore = LibraryIndex
-
 /// The offline library (architecture section 1, LibraryIndex): durable server entities, their
 /// checkpoint journal, and the tables derived from them, in one file per account scope.
 ///
@@ -167,17 +164,30 @@ final class LibraryIndex: Sendable {
 
     func entityData(kind: String, id: String) async throws -> Data? { try await mapped { try await viewport.entityData(kind: kind, id: id) } }
     func asset(id: String) async throws -> Asset? { try await mapped { try await viewport.asset(id: id) } }
-    func timelineAssets(filter: TimelineFilter = .init(), offset: Int = 0, limit: Int = 200) async throws -> [Asset] {
-        try await mapped { try await viewport.timelineAssets(filter: filter, offset: offset, limit: limit) }
+    /// A feed's photos across months, newest first by the time taken unless it asks otherwise.
+    /// `includesPartners` adds the partners shown in the timeline where the library allows them.
+    func timelineAssets(_ query: LibraryQuery = .library, includesPartners: Bool = false, offset: Int = 0, limit: Int = 200) async throws -> [Asset] {
+        let feed = try feed(query, includesPartners)
+        return try await mapped { try await viewport.timelineAssets(feed, offset: offset, limit: limit) }
     }
-    func timeBuckets(filter: TimelineFilter = .init()) async throws -> [TimeBucket] { try await mapped { try await viewport.timeBuckets(filter: filter) } }
+    /// A feed's months, newest first unless it asks otherwise, with their counts.
+    func timeBuckets(_ query: LibraryQuery = .library, includesPartners: Bool = false) async throws -> [TimeBucket] {
+        let feed = try feed(query, includesPartners)
+        return try await mapped { try await viewport.timeBuckets(feed) }
+    }
     /// One month of a feed, by the time taken (or added), then ID.
-    func timeBucket(_ bucket: String, filter: TimelineFilter = .init()) async throws -> [Asset] {
-        try await mapped { try await viewport.timeBucket(bucket, filter: filter) }
+    func timeBucket(_ bucket: String, of query: LibraryQuery = .library, includesPartners: Bool = false) async throws -> [Asset] {
+        let feed = try feed(query, includesPartners)
+        return try await mapped { try await viewport.timeBucket(bucket, of: feed) }
     }
     /// What SQLite plans for a month's query, for tests and diagnostics.
-    func timeBucketPlan(_ bucket: String, filter: TimelineFilter = .init()) async throws -> [String] {
-        try await mapped { try await viewport.timeBucketPlan(bucket, filter: filter) }
+    func timeBucketPlan(_ bucket: String, of query: LibraryQuery = .library, includesPartners: Bool = false) async throws -> [String] {
+        let feed = try feed(query, includesPartners)
+        return try await mapped { try await viewport.timeBucketPlan(bucket, of: feed) }
+    }
+    /// A query the index can't lay out by month throws Unsupported, as the planner would say.
+    private func feed(_ query: LibraryQuery, _ includesPartners: Bool) throws(Unsupported) -> IndexFeedRequest {
+        try IndexFeedRequest(query, userID: userID, includesPartners: includesPartners)
     }
     func album(id: String) async throws -> Album? { try await mapped { try await viewport.album(id: id) } }
     func person(id: String) async throws -> Person? { try await mapped { try await viewport.person(id: id) } }
@@ -191,7 +201,10 @@ final class LibraryIndex: Sendable {
     }
     func memories(onCivilDate day: String) async throws -> [Memory] { try await mapped { try await aggregate.memories(onCivilDate: day) } }
     /// Located photos per month and place, for naming months and marking trips on the time rail.
-    func monthPlaces(filter: TimelineFilter = .init()) async throws -> [MonthPlaceCount] { try await mapped { try await aggregate.monthPlaces(filter: filter) } }
+    func monthPlaces(_ query: LibraryQuery = .library, includesPartners: Bool = false) async throws -> [MonthPlaceCount] {
+        let feed = try feed(query, includesPartners)
+        return try await mapped { try await aggregate.monthPlaces(feed) }
+    }
     func localAssetMatches(offset: Int = 0, limit: Int = 1_000) async throws -> [LocalAssetMatch] {
         try await mapped { try await aggregate.localAssetMatches(offset: offset, limit: limit) }
     }

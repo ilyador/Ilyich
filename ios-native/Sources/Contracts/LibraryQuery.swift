@@ -150,8 +150,8 @@ extension LibraryQuery {
 
 extension LibraryQuery {
     /// Names the feed for what the phone keeps per feed. For the library, favorites, archive,
-    /// trash, Lightroom, partner, album and person feeds it is byte-equal to today's
-    /// TimelineFilter.cacheKey, which never says withPartners. A query on the account's own
+    /// trash, Lightroom, partner, album and person feeds it is byte-equal to the key these feeds
+    /// were cached under before Q5, which never said withPartners. A query on the account's own
     /// photos says userId=me rather than the user's ID, and a place is named by its membership
     /// revision rather than its photo count.
     var stableKey: String {
@@ -161,7 +161,7 @@ extension LibraryQuery {
         case .relevance: items.append(("order", "relevance"))
         }
         items.append(("withStacked", stacks == .primaryOnly ? "true" : "false"))
-        // Both visibilities, as TimelineFilter's nil, are left unsaid.
+        // Both visibilities, as the old filter's nil, are left unsaid.
         if visibility == .timeline { items.append(("visibility", "timeline")) }
         else if visibility == .archive { items.append(("visibility", "archive")) }
         else if visibility.isEmpty { items.append(("visibility", "none")) }
@@ -204,7 +204,7 @@ extension LibraryQuery {
         return key + "&place=" + Self.escaped(membership.placeID) + "#" + membership.revision
     }
 
-    /// IDs, flags and orders pass unchanged, as they did in TimelineFilter keys; free text is
+    /// IDs, flags and orders pass unchanged, as they did in the keys before Q5; free text is
     /// escaped so it can't imitate another item.
     private static func escaped(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value

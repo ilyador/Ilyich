@@ -33,9 +33,9 @@ final class AccountRuntime: Sendable {
     private let backupStateCopyDelay: Duration
 
     struct LibraryServices: Sendable {
-        let entities: EntityStore
+        let entities: LibraryIndex
         let native: NativeSync
-        let libraryAPI: NativeLibraryAPI
+        let repository: LibraryRepository
         let sync: SyncEngine
         /// The sync's status, where the screens read it.
         let status: SyncStatusBoard
@@ -97,7 +97,7 @@ final class AccountRuntime: Sendable {
         var libraryError: String?
         if environment.syncsLibrary, credential.requiresPasswordChange != true {
             do {
-                let entities = try EntityStore(scope: api.cacheScope, userID: credential.userID, directory: environment.libraryDirectory)
+                let entities = try LibraryIndex(scope: api.cacheScope, userID: credential.userID, directory: environment.libraryDirectory)
                 let native = NativeSync(api: api, store: entities)
                 let device = dependencies.device
                 library = await MainActor.run {
@@ -105,7 +105,7 @@ final class AccountRuntime: Sendable {
                     let status = SyncStatusBoard()
                     let sync = SyncEngine(client: api, entities: entities, native: native, pipeline: pipeline, warmer: warmer,
                                           presence: presence, check: check, authorization: authorization, device: device, status: status)
-                    return LibraryServices(entities: entities, native: native, libraryAPI: NativeLibraryAPI(client: api, entities: entities, sync: sync),
+                    return LibraryServices(entities: entities, native: native, repository: LibraryRepository(client: api, index: entities, sync: sync),
                                            sync: sync, status: status, warmer: warmer)
                 }
             } catch { libraryError = error.localizedDescription }
