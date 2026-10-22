@@ -240,8 +240,9 @@ import XCTest
         XCTAssertEqual(MonthProjector.dayGroups([]), [])
     }
 
-    /// Each month loaded redoes only its own rows and days; a month let go for room loses them, and
-    /// a full redo agrees.
+    /// Each month is projected once, alone, as it loads; a month let go for room loses its rows
+    /// and days; an edit projects only its photo's month again; and every month agrees with one
+    /// projected from scratch.
     func testLoadingAMonthRedoesOnlyThatMonthAndForgetsTrimmedOnes() async throws {
         let months = (0..<14).map { String(format: "%04d-%02d-01T00:00:00Z", 2024 + $0 / 12, $0 % 12 + 1) }
         var library: [String: [Asset]] = [:]
@@ -254,13 +255,20 @@ import XCTest
         let api = MonthLibrary(months: library)
         let store = LibraryStore(source: api)
         defer { store.stop() }
+        MonthProjector.Probe.start()
+        defer { MonthProjector.Probe.stop() }
         await store.reload()
         for section in store.buckets.indices {
             store.requestBucket(section)
             let id = store.buckets[section].id
             try await until("\(id) did not load.") { store.loaded[id] != nil }
         }
+        await store.settleProjections()
         XCTAssertEqual(store.loaded.count, 12, "Twelve months stay loaded.")
+        // The probe hears every store in the process, the test host's own library included.
+        let own = Set(months)
+        XCTAssertEqual(MonthProjector.Probe.runs.flatMap(\.buckets).filter(own.contains).sorted(), months.sorted(),
+                       "Each month is projected once, as it loads.")
         for section in store.buckets.indices {
             let groups = store.dayGroups(section: section)
             if store.loaded[store.buckets[section].id] == nil {
@@ -269,11 +277,23 @@ import XCTest
                 XCTAssertEqual(groups.map(\.startItem), [0, 2]); XCTAssertEqual(groups.map(\.count), [2, 1])
             }
         }
-        let incremental = store.buckets.indices.map { store.dayGroups(section: $0) }
-        // update(_:) redoes every month.
-        let some = try XCTUnwrap(store.buckets.indices.lazy.compactMap { store.asset(section: $0, item: 0) }.first)
-        store.update(some)
-        XCTAssertEqual(store.buckets.indices.map { store.dayGroups(section: $0) }, incremental)
+
+        // An edit moves a photo to the month's other day: that month alone is projected again.
+        let section = try XCTUnwrap(store.buckets.indices.first { store.loaded[store.buckets[$0].id] != nil })
+        let bucket = store.buckets[section].id
+        var moved = try XCTUnwrap(store.asset(section: section, item: 1))
+        moved.localDateTime = try XCTUnwrap(APIDate.parse(String(bucket.prefix(8)) + "03T18:00:00Z"))
+        let runs = MonthProjector.Probe.runs.count
+        store.update(moved)
+        await store.settleProjections()
+        XCTAssertEqual(MonthProjector.Probe.runs.dropFirst(runs).flatMap(\.buckets).filter(own.contains), [bucket],
+                       "Only the edited photo's month is projected again.")
+        XCTAssertEqual(store.dayGroups(section: section).map(\.startItem), [0, 1])
+        XCTAssertEqual(store.dayGroups(section: section).map(\.count), [1, 2], "The photo shows on its new day.")
+        for section in store.buckets.indices {
+            let entries = store.loaded[store.buckets[section].id]?.map { LibraryEntry.remote($0) } ?? []
+            XCTAssertEqual(store.dayGroups(section: section), MonthProjector.dayGroups(entries), "Projected from scratch, the same days.")
+        }
     }
 
     // MARK: - The month queue

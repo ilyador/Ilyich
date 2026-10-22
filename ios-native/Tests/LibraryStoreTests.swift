@@ -643,6 +643,93 @@ import XCTest
         store.stop()
     }
 
+    /// F3: a month the feed lets go while a run that projects it is on its way stays gone. The run
+    /// used to bring its rows back, past the twelve resident months and out of reach of removals,
+    /// edits and later evictions.
+    func testAMonthLetGoDuringAProjectionRunStaysGone() async throws {
+        let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
+        let api = try datedFixture()
+        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        await store.reload()
+        try await until("The first months did not load.") { store.loaded[march] != nil && store.loaded[february] != nil }
+        await store.settleProjections()
+        let ticket = try XCTUnwrap(store.feedTicket)
+        let juneMonth = try XCTUnwrap(MonthKey(bucketID: Self.june)), februaryMonth = try XCTUnwrap(MonthKey(bucketID: february))
+        MonthProjector.Probe.start()
+        defer { MonthProjector.Probe.stop() }
+        // A photo is matched, as fingerprinting publishes: every loaded month is projected again.
+        let taken = try XCTUnwrap(APIDate.parse("2026-02-10T12:00:00Z"))
+        store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "copy", date: taken)], associations: ["copy": "february"]))
+        // While that run is on its way, the feed delivers June and lets February go to make room.
+        store.monthLoaded(ticket, month: juneMonth, assets: [Asset(id: "early"), Asset(id: "late")], fresh: true, evicting: [februaryMonth])
+        await store.settleProjections()
+        XCTAssertTrue(MonthProjector.Probe.runs.contains { Set($0.buckets) == [march, february] }, "The run took February.")
+        XCTAssertNil(store.loaded[february])
+        XCTAssertNil(store.entry(section: 1, item: 0), "February shows no rows until it is read again.")
+        XCTAssertEqual(store.dayGroups(section: 1), [])
+        XCTAssertEqual(store.entry(section: 0, item: 0)?.remote?.id, "march")
+        XCTAssertEqual(store.loaded[Self.june]?.map(\.id), ["early", "late"])
+        store.stop()
+    }
+
+    /// F3: when the feed delivers a month again while the phone's photos are being merged into it,
+    /// the run that lands both keeps the grid on the photo it shows, as the phone's change alone does.
+    func testAMonthDeliveredAgainDuringAPhoneRunKeepsTheAnchor() async throws {
+        let february = "2026-02-01T00:00:00Z"
+        let late = try XCTUnwrap(APIDate.parse("2026-02-20T12:00:00Z")), early = try XCTUnwrap(APIDate.parse("2026-02-05T12:00:00Z"))
+        let server = [Asset(id: "late", localDateTime: late), Asset(id: "early", localDateTime: early)]
+        let api = LibraryAPIFixture([], bucketAssets: [february: server])
+        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        await store.reload()
+        try await until("February did not load.") { store.loaded[february] != nil }
+        let before = try XCTUnwrap(APIDate.parse("2026-02-03T12:00:00Z")), after = try XCTUnwrap(APIDate.parse("2026-02-25T12:00:00Z"))
+        store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone", date: before, modified: before)]))
+        await store.settleProjections()
+        XCTAssertEqual((0..<3).compactMap { store.entry(section: 0, item: $0)?.id }, ["late", "early", "local:phone"])
+        let anchor = GridPosition(section: february, item: 1, offset: 17, assetID: "early")
+        store.position = anchor
+        XCTAssertNil(store.restorePosition)
+        let reset = store.resetID, ticket = try XCTUnwrap(store.feedTicket), month = try XCTUnwrap(MonthKey(bucketID: february))
+
+        // The phone's photo now dates after both server photos, above the one shown. While that is
+        // merged in, a sync's read delivers February again.
+        store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone", date: after, modified: after)]))
+        store.monthLoaded(ticket, month: month, assets: server, fresh: true, evicting: [])
+        await store.settleProjections()
+        XCTAssertEqual((0..<3).compactMap { store.entry(section: 0, item: $0)?.id }, ["local:phone", "late", "early"])
+        XCTAssertEqual(store.restorePosition, anchor, "The grid stays on the photo it shows.")
+        XCTAssertNotEqual(store.resetID, reset)
+        XCTAssertEqual(store.restoredIndex(for: anchor)?.item, 2)
+        store.stop()
+    }
+
+    /// F3: the library a filter clears back to has the phone's photos as they are now: a photo
+    /// taken while the filter showed leads it, and one deleted meanwhile is gone.
+    func testClearingAFilterMergesThePhonesPhotosThatChangedMeanwhile() async throws {
+        let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
+        let api = try datedFixture()
+        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        await store.reload()
+        try await until("The first months did not load.") { store.loaded[march] != nil && store.loaded[february] != nil }
+        let deleted = try XCTUnwrap(APIDate.parse("2026-02-10T12:00:00Z"))
+        store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "deleted", date: deleted)]))
+        await store.settleProjections()
+        XCTAssertEqual(store.sections.map(\.count), [1, 2, 2])
+
+        store.setFeed(.favorites, title: "Favorites")
+        try await until("Favorites did not replace the library.") { !store.isReplacingFeed }
+        let taken = try XCTUnwrap(APIDate.parse("2026-04-02T12:00:00Z"))
+        store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "taken", date: taken)]))
+        await store.settleProjections()
+
+        store.clearFilters()
+        await store.settleProjections()
+        XCTAssertEqual(store.sections.map(\.id), ["2026-04-01", march, february, Self.june])
+        XCTAssertEqual(store.sections.map(\.count), [1, 1, 1, 2], "The phone photo deleted meanwhile is gone.")
+        XCTAssertEqual(store.entry(section: 0, item: 0)?.local?.id, "taken")
+        store.stop()
+    }
+
     /// A sync's reload keeps the rows shown until their months are read again (F2: the
     /// whole-snapshot cache is gone, so nothing older can be replayed over them either).
     func testBackgroundRefreshKeepsLiveRowsUntilTheirMonthsAreReadAgain() async throws {
