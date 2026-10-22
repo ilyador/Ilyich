@@ -314,12 +314,14 @@ final class ThumbnailDiskStore: Sendable {
 
     /// After the server reset the library: keeps the files of the photos the index now holds, at
     /// the revision it holds, and removes every other, which may belong to a photo the account
-    /// can no longer see. Returns how many went.
+    /// can no longer see. Returns how many went. It lists every folder first, even under a complete
+    /// index: files whose rows were never saved (a crash before the batched save) or that an older
+    /// build wrote are on disk but not listed, and this sweep must not miss them.
     @discardableResult
     func sweep(keeping valid: [String: String]) async -> Int {
         let kept = Set(valid.map { Self.name(assetID: $0.key, revision: $0.value) })
         return await onQueue { [self] in
-            ensureComplete()
+            ensureComplete(listingEveryFolder: true)
             let gone = state.withLock { state in state.rows.keys.filter { !kept.contains($0) && state.pending[$0] == nil } }
             remove(gone)
             flush()
@@ -575,11 +577,12 @@ final class ThumbnailDiskStore: Sendable {
         }
     }
 
-    /// Adopts every folder the index doesn't know yet, at once.
-    private func ensureComplete() {
-        guard !state.withLock({ $0.complete }) else { return }
+    /// Adopts every folder the index doesn't know yet, at once; with `listingEveryFolder`, every
+    /// folder, so the index matches the disk even where it thought it already did.
+    private func ensureComplete(listingEveryFolder: Bool = false) {
+        guard listingEveryFolder || !state.withLock({ $0.complete }) else { return }
         let folders = listRoot()
-        for folder in folders where !state.withLock({ $0.knows(folder) }) { adopt(folder) }
+        for folder in folders where listingEveryFolder || !state.withLock({ $0.knows(folder) }) { adopt(folder) }
         state.withLock { state in
             state.complete = true
             state.cursor = nil
