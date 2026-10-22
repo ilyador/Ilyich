@@ -9,8 +9,14 @@ import UIKit
         // Share folders a killed app left behind; no share can be open this early.
         Task.detached(priority: .utility) { DeviceShareExporter.sweep() }
         // Upload progress reaches the backup and Shared files screens as the sessions report it.
-        BackgroundUploads.shared.observeProgress { value in Task { @MainActor in BackupCoordinator.shared.applyProgress(value) } }
-        BackgroundUploads.sharing.observeProgress { value in Task { @MainActor in ShareInboxStore.shared.applyProgress(value) } }
+        // Neither session is made here: one relaunched for its events is made once its completion
+        // is in hand, or when backup or sharing first needs it.
+        BackgroundUploads.observeProgress(of: BackgroundUploads.identifier) { value in
+            Task { @MainActor in BackupCoordinator.shared.applyProgress(value) }
+        }
+        BackgroundUploads.observeProgress(of: BackgroundUploads.shareIdentifier) { value in
+            Task { @MainActor in ShareInboxStore.shared.applyProgress(value) }
+        }
         // The backup screens' store follows backup from launch, so it is current when one opens.
         _ = BackupStore.shared
         // UI tests run without the phone's photos and backup.

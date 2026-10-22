@@ -22,11 +22,12 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     private var responses: [Int: Data] = [:]
     private var waiting: [Int: CheckedContinuation<UploadReceipt, any Error>] = [:]
     private var eventsCompletion: (@Sendable () -> Void)?
-    private var progressObserver: (@Sendable (UploadProgressSnapshot) -> Void)?
+    private let identifier: String
     private var progressReported: (taskID: Int, time: ContinuousClock.Instant)?
     private var session: URLSession!
 
     private init(identifier: String) {
+        self.identifier = identifier
         super.init()
         let configuration = TransferSessionConfiguration.make(identifier: identifier)
         let queue = OperationQueue()
@@ -90,23 +91,29 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
         for task in tasks { task.cancel() }
     }
 
-    /// Hands each upload's progress to `observer` as the session reports it, at most four times
-    /// a second per upload and always at its last byte, so no screen has to poll for it.
-    func observeProgress(_ observer: @escaping @Sendable (UploadProgressSnapshot) -> Void) {
-        lock.withLock { progressObserver = observer }
+    /// Hands each upload's progress in the session `identifier` to `observer` as the session
+    /// reports it, at most four times a second per upload and always at its last byte, so no
+    /// screen has to poll for it. It is kept apart from the session, so that registering it at
+    /// launch doesn't make the session: one relaunched for its events must not deliver them
+    /// before handleEventsForBackgroundURLSession has handed over its completion.
+    static func observeProgress(of identifier: String, _ observer: @escaping @Sendable (UploadProgressSnapshot) -> Void) {
+        progressObservers.set(observer, for: identifier)
     }
+
+    private static let progressObservers = ProgressObservers()
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
                     totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
         let now = ContinuousClock.now
-        let observer = lock.withLock { () -> (@Sendable (UploadProgressSnapshot) -> Void)? in
-            guard let observer = progressObserver else { return nil }
+        guard let observer = Self.progressObservers.observer(for: identifier) else { return }
+        let report = lock.withLock { () -> Bool in
             if let last = progressReported, last.taskID == task.taskIdentifier, last.time.duration(to: now) < .milliseconds(250),
-               totalBytesSent < totalBytesExpectedToSend { return nil }
+               totalBytesSent < totalBytesExpectedToSend { return false }
             progressReported = (task.taskIdentifier, now)
-            return observer
+            return true
         }
-        observer?(UploadProgressSnapshot(taskID: task.taskIdentifier, sent: totalBytesSent, expected: totalBytesExpectedToSend))
+        guard report else { return }
+        observer(UploadProgressSnapshot(taskID: task.taskIdentifier, sent: totalBytesSent, expected: totalBytesExpectedToSend))
     }
 
     func hasActiveTransfer() async -> Bool { await session.allTasks.contains { $0.state == .running } }
@@ -181,5 +188,19 @@ final class BackgroundUploads: NSObject, URLSessionDataDelegate, @unchecked Send
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         let completion = lock.withLock { let value = eventsCompletion; eventsCompletion = nil; return value }
         if let completion { DispatchQueue.main.async(execute: completion) }
+    }
+}
+
+/// The progress observers of each background session, by its identifier.
+private final class ProgressObservers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observers: [String: @Sendable (UploadProgressSnapshot) -> Void] = [:]
+
+    func set(_ observer: @escaping @Sendable (UploadProgressSnapshot) -> Void, for identifier: String) {
+        lock.withLock { observers[identifier] = observer }
+    }
+
+    func observer(for identifier: String) -> (@Sendable (UploadProgressSnapshot) -> Void)? {
+        lock.withLock { observers[identifier] }
     }
 }

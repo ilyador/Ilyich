@@ -108,6 +108,8 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     private(set) var totalTransferBytes: Int64 = 0
     private(set) var transferRate: Int64?
     var failures: [BackupFailure] { (state.failures ?? [:]).values.sorted { $0.date > $1.date } }
+    /// How many photos failed, without sorting them.
+    var failureCount: Int { state.failures?.count ?? 0 }
     /// Display associations for the active server/user. These are historical
     /// receipts; local deletion must use verifiedLocalDeletionCandidates().
     var associations: [String: BackupReceipt] { state.receipts ?? [:] }
@@ -137,7 +139,10 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     var isDiscovering: Bool { discovery != nil }
     private(set) var activity = "Choose albums to back up"
     private(set) var error: String?
-    private var state = BackupState()
+    private var state = BackupState() { didSet { stateRevision &+= 1 } }
+    /// Changes whenever the backup state does, so a reader can keep what it derived from it
+    /// until then. Progress ticks leave it alone.
+    @ObservationIgnored private(set) var stateRevision = 0
     private var saved: StoredCredential?
     private var directory: URL?
     private var worker: Task<Void, Never>?
