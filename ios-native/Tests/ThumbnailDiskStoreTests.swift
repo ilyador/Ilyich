@@ -202,6 +202,27 @@ final class ThumbnailDiskStoreTests: XCTestCase {
         XCTAssertEqual(usage, measuredUsage())
     }
 
+    /// A sync reset's sweep removes files a complete index doesn't list, such as ones whose rows a
+    /// crash kept from being saved, before the launch comparison has adopted them.
+    func testSweepAfterResetRemovesFilesTheCompleteIndexDoesNotList() async throws {
+        let store = ThumbnailDiskStore(directory: directory(), indexDelay: nil)
+        for id in ["kept", "gone"] { await store.store(Data(id.utf8), assetID: id, revision: "1") }
+        await store.waitUntilIndexed()
+        let unlisted = store.url(assetID: "unlisted", revision: "1")
+        try FileManager.default.createDirectory(at: unlisted.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("unsaved row".utf8).write(to: unlisted)
+
+        let relaunched = ThumbnailDiskStore(directory: directory(), indexDelay: nil)
+        try await waitUntil { relaunched.isIndexComplete }
+        let removed = await relaunched.sweep(keeping: ["kept": "1"])
+        XCTAssertEqual(removed, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unlisted.path), "A file the index didn't list survived the sweep.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: relaunched.url(assetID: "gone", revision: "1").path))
+        XCTAssertNotNil(relaunched.data(assetID: "kept", revision: "1"))
+        let usage = await relaunched.currentUsage()
+        XCTAssertEqual(usage, measuredUsage())
+    }
+
     /// Without its index, the store rebuilds it from the folders and keeps every file.
     func testAMissingIndexIsRebuilt() async throws {
         let store = ThumbnailDiskStore(directory: directory(), indexDelay: nil)

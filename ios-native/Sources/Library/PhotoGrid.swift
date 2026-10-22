@@ -937,12 +937,12 @@ struct PhotoGrid: UIViewRepresentable {
         if view.image !== next { view.image = next }
         attach(view)
     }
-    /// The photo's sketch: decoded already, or decoded here while the grid moves slowly and few
-    /// cells bind a frame. While it moves fast, as a scrub does, the sketch decodes off the main
-    /// thread and the cell shows its average colour meanwhile. Returns the hash still to decode.
-    private func showSketch(of asset: Asset, decodeNow: Bool) -> String? {
+    /// The photo's sketch, if prefetch or an earlier cell decoded it already. Otherwise the sketch
+    /// decodes off the main thread and the cell shows its average colour meanwhile, however the
+    /// grid moves. Returns the hash still to decode.
+    private func showSketch(of asset: Asset) -> String? {
         guard let hash = asset.thumbhash, !hash.isEmpty else { show(nil, thumbnail: false, animated: false); return nil }
-        if let sketch = ThumbHashSketches.shared.cached(hash) ?? (decodeNow ? ThumbHashSketches.shared.decodeNow(hash) : nil) {
+        if let sketch = ThumbHashSketches.shared.cached(hash) {
             show(sketch, thumbnail: false, animated: false)
             return nil
         }
@@ -1046,8 +1046,7 @@ struct PhotoGrid: UIViewRepresentable {
             if let latest = pipeline.latestImage(assetID: asset.id, size: .thumbnail, revision: asset.cacheRevision) {
                 show(latest.cgImage, thumbnail: true, animated: false)
             } else {
-                // The grid is slow enough to download exactly when it is slow enough to decode here.
-                sketch = showSketch(of: asset, decodeNow: network)
+                sketch = showSketch(of: asset)
             }
         }
         if showsThumbnail { displayProbe.displayed(.memoryOther) }

@@ -167,6 +167,8 @@ final class ThumbHashSketches: Sendable {
     /// NSCache is thread-safe.
     private nonisolated(unsafe) let cache = NSCache<NSString, CGImage>()
     private let queue = DispatchQueue(label: "ilyich.thumbhash-sketches", qos: .userInitiated)
+    /// Sketches decoded on the main thread, for tests that check there are none.
+    let mainThreadDecodes = Atomic<Int>(0)
     /// Callers waiting for a sketch that is being decoded, by hash.
     private let waiting = Mutex<[String: [CheckedContinuation<CGImage?, Never>]]>([:])
 
@@ -191,10 +193,6 @@ final class ThumbHashSketches: Sendable {
         }
     }
 
-    /// The sketch decoded on the calling thread, for a grid moving slowly enough that few cells
-    /// bind a frame; nil for a damaged hash.
-    func decodeNow(_ hash: String) -> CGImage? { decode(hash) }
-
     /// Decodes the sketches of photos about to scroll in, so their cells have them at once.
     func prefetch(_ hashes: [String]) {
         let missing = hashes.filter { !$0.isEmpty && cached($0) == nil }
@@ -206,6 +204,7 @@ final class ThumbHashSketches: Sendable {
 
     private func decode(_ hash: String) -> CGImage? {
         if let image = cached(hash) { return image }
+        if Thread.isMainThread { mainThreadDecodes.add(1, ordering: .relaxed) }
         guard let image = autoreleasepool(invoking: { ThumbHash.image(hash) }) else { return nil }
         cache.setObject(image, forKey: hash as NSString)
         return image

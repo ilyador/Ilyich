@@ -92,15 +92,15 @@ import XCTest
         XCTAssertEqual(image.width, 32)
         let damaged = await sketches.sketch("not base64")
         XCTAssertNil(damaged)
-        // A grid moving slowly decodes in place.
-        let now = try XCTUnwrap(sketches.decodeNow(Self.hashes[2]))
-        XCTAssertTrue(sketches.cached(Self.hashes[2]) === now)
-        XCTAssertNil(sketches.decodeNow("not base64"))
+        // Asked from the main thread, as a grid cell asks, the decode still runs off it.
+        let fromMain = await MainActor.run { Task { await sketches.sketch(Self.hashes[2]) } }.value
+        XCTAssertTrue(sketches.cached(Self.hashes[2]) === fromMain)
 
         sketches.prefetch([Self.hashes[1], "", Self.hashes[1]])
         let deadline = ContinuousClock.now + .seconds(5)
         while sketches.cached(Self.hashes[1]) == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNotNil(sketches.cached(Self.hashes[1]), "A photo about to scroll in has its sketch ready.")
+        XCTAssertEqual(sketches.mainThreadDecodes.load(ordering: .relaxed), 0, "A sketch decoded on the main thread.")
     }
 
     /// A cell's stored thumbnail is read while its sketch decodes: with sketches of photos about to
