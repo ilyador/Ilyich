@@ -16,6 +16,12 @@ protocol PartUploading: Sendable {
     /// Deletes the attempt's outcome file, and its body unless `keepingBody`, once what it says is
     /// committed.
     func acknowledge(_ key: AttemptKey, keepingBody: Bool) throws
+    /// Whether iOS still holds a live task for the attempt, sent by this build or an earlier one.
+    func holdsTask(for attempt: AttemptID) async -> Bool
+}
+
+extension PartUploading {
+    func holdsTask(for attempt: AttemptID) async -> Bool { false }
 }
 
 /// A part's upload ended without a receipt.
@@ -64,6 +70,10 @@ final class TransportPartUploader: PartUploading {
 
     func acknowledge(_ key: AttemptKey, keepingBody: Bool) throws {
         try transport.acknowledge(key, keepingBody: keepingBody)
+    }
+
+    func holdsTask(for attempt: AttemptID) async -> Bool {
+        await transport.inventory().task(for: attempt) != nil
     }
 }
 

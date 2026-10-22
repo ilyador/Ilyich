@@ -238,6 +238,9 @@ final class FakeUploads: PartUploading {
         var nextAsset = 0
         var gate: TransferGate?
         var waiting = 0
+        /// Tasks iOS holds for attempts, which a submit adopts rather than sending.
+        var held: Set<AttemptID> = []
+        var adopted: [AttemptKey] = []
     }
 
     private let state = Mutex(State())
@@ -255,8 +258,20 @@ final class FakeUploads: PartUploading {
     func hold(at gate: TransferGate) { state.withLock { $0.gate = gate } }
     /// An answer already on disk for the attempt, which nobody applied.
     func record(_ outcome: OutcomeRecord, for attempt: AttemptID) { state.withLock { $0.onDisk[attempt] = outcome } }
+    /// iOS holds a live task for the attempt, sent by an earlier build or launch.
+    func holdTask(for attempt: AttemptID) { state.withLock { _ = $0.held.insert(attempt) } }
+    var adopted: [AttemptKey] { state.withLock { $0.adopted } }
+
+    func holdsTask(for attempt: AttemptID) async -> Bool { state.withLock { $0.held.contains(attempt) } }
 
     func submit(_ request: URLRequest, key: AttemptKey) async throws -> Int {
+        let adopted = state.withLock { state -> Int? in
+            guard state.held.contains(key.attempt) else { return nil }
+            state.adopted.append(key)
+            state.nextTask += 1
+            return state.nextTask
+        }
+        if let adopted { return adopted }
         let body = String(decoding: try Data(contentsOf: group.url(key.bodyPath)), as: UTF8.self)
         let type = request.value(forHTTPHeaderField: "Content-Type") ?? ""
         let boundary = type.components(separatedBy: "boundary=").last ?? ""

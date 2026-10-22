@@ -132,6 +132,11 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private let now: @Sendable () -> Date
     private let random: @Sendable () -> Double
     private let scheduler: (any WindowScheduling)?
+    /// The post-upload work (B4): told after each commit, when the library lane drains, and when
+    /// the user asks for a run. Never awaited.
+    private let followUp: (@Sendable (FollowUpTrigger) -> Void)?
+    /// Library jobs ran since the lane last had nothing runnable.
+    private var ranSinceDrain = false
 
     // Persisted engine state, loaded at start.
     private var intent: RunIntent = .paused
@@ -197,10 +202,11 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var submissions = 0
 
     init(store: TransferStore, executor: any JobExecuting, authorization: any TransferAuthorizing, clock: C, concurrency: Int = 1,
-         scheduler: (any WindowScheduling)? = nil,
+         scheduler: (any WindowScheduling)? = nil, followUp: (@Sendable (FollowUpTrigger) -> Void)? = nil,
          now: @escaping @Sendable () -> Date = { Date() }, random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }) {
         self.store = store
         self.scheduler = scheduler
+        self.followUp = followUp
         self.concurrency = max(concurrency, 1)
         self.executor = executor
         self.authorization = authorization
@@ -255,6 +261,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             if !Task.isCancelled { await self?.authorizationChanged(nil) }
         }
         loop = Task { [weak self] in await self?.run() }
+        followUp?(.started)
     }
 
     /// Stops the loop and the running job, gives the job's lease back and ends the snapshot
@@ -293,8 +300,10 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     func setIntent(_ intent: RunIntent) async throws {
         self.intent = intent
         if intent == .manual {
-            // A manual run retries every failed photo once; a second start changes nothing else.
+            // A manual run retries every failed photo once, and the albums and stacks that failed
+            // after an upload; a second start changes nothing else.
             try await store.requeueFailed(lane: .library)
+            followUp?(.manualRun)
         }
         if intent != .paused {
             // The user asked: lift a block whose cause has gone, and try again now.
@@ -347,6 +356,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         } else {
             try await store.requeueFailed(lane: .library)
             try await store.requeueFailed(lane: .share)
+            try await store.requeueFailedFollowUps()
+            followUp?(.retried)
         }
         liftBlock()
         try await saveEngineState()
@@ -493,7 +504,13 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             }
             await publish()
             // Full, or nothing runnable: a finished job, a command or the next retry wakes it.
-            if active.isEmpty { resolveHandoffs(.nothingRunnable) }
+            if active.isEmpty {
+                resolveHandoffs(.nothingRunnable)
+                if ranSinceDrain {
+                    ranSinceDrain = false
+                    followUp?(.drained)
+                }
+            }
             let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
             await sleep(until: active.count < concurrency ? try? await store.nextRetry(lanes: lanes) : nil)
         }
@@ -501,6 +518,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     /// Waits for the job's result, and commits it, beside the loop.
     private func launch(_ job: LeasedJob) {
+        if job.lane == .library { ranSinceDrain = true }
         let token = job.lease.token
         finishing[token] = Task { [weak self] in
             await self?.perform(job)
@@ -563,6 +581,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             do {
                 if try await commit(outcome, of: job) {
                     consecutiveServerErrors = 0
+                    followUp?(.committed(job.lane))
                     await executor.committed(job, result: outcome)
                 }
             } catch {

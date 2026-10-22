@@ -69,6 +69,17 @@ public actor ShareInboxRepository {
         return ready.map(ShareBatchState.ready) + damaged
     }
 
+    /// One batch, read on its own and validated as `load` reads it: nil when its folder or manifest
+    /// is gone.
+    public func batch(_ id: UUID) -> ShareBatchState? {
+        let folder = folder(for: id)
+        guard FileManager.default.fileExists(atPath: folder.appendingPathComponent(ShareManifest.fileName, isDirectory: false).path) else {
+            return nil
+        }
+        do throws(ShareBatchDamage) { return .ready(try read(id: id, folder: folder)) }
+        catch { return .damaged(id: id, reason: error) }
+    }
+
     /// Creates the empty folder of a batch about to be staged, excluded from device backups.
     public func createFolder(for id: UUID) throws -> URL {
         var folder = folder(for: id)

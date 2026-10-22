@@ -92,7 +92,10 @@ struct Recovery: Sendable {
             if let attempt = task.attempt { references.attempts.insert(attempt.rawValue) }
             if let folder = task.descriptor.outcomePath.flatMap(Self.folder(of:)) { references.folders.insert(folder) }
         }
-        if let share { await reconcileShares(share, report: &report) }
+        if let share {
+            report.resumedShares = try await store.resumeShareJobs()
+            await reconcileShares(share, references: references, report: &report)
+        }
 
         // R5.
         let imported = try await store.meta().legacyImportMode == .authoritative
@@ -316,12 +319,23 @@ struct Recovery: Sendable {
 
     // MARK: Shares
 
-    /// Legacy share tasks name no account: one is kept while its batch still has files to send,
-    /// and cancelled once the batch is gone. Version 2 share tasks are B4's.
-    private func reconcileShares(_ share: any TransferTransport, report: inout RecoveryReport) async {
+    /// Legacy share tasks name no account: one is kept while a share job's try is bound to it or
+    /// its batch still has files to send, and cancelled once the batch is gone. A version 2 share
+    /// task of this account is kept while a share job's unanswered try is its (B4), and cancelled
+    /// otherwise; one of another account is left alone.
+    private func reconcileShares(_ share: any TransferTransport, references: StagingReferences, report: inout RecoveryReport) async {
         var stale: [Int] = []
         for task in await share.inventory().tasks where task.isLive {
+            if case .v2(let attempt, let owner, _) = task.descriptor {
+                guard owner == scope else { continue }
+                if references.attempts.contains(attempt.rawValue) { report.adoptedShares += 1 } else { stale.append(task.taskID) }
+                continue
+            }
             guard case .legacy(let identity, _) = task.descriptor, let path = task.descriptor.outcomePath else { continue }
+            if references.attempts.contains(identity) {
+                report.adoptedShares += 1
+                continue
+            }
             let parts = path.split(separator: "/")
             guard parts.count == 3, parts[0] == "ShareInbox", let batch = UUID(uuidString: String(parts[1])) else { continue }
             if shares.lists(batch: batch, identity: identity) { report.adoptedShares += 1 } else { stale.append(task.taskID) }
@@ -370,9 +384,11 @@ struct RecoveryReport: Hashable, Sendable {
     var pending = 0
     /// Live tasks of the account no attempt waits for, cancelled.
     var cancelled = 0
-    /// Legacy share tasks kept, and cancelled.
+    /// Share tasks kept, and cancelled.
     var adoptedShares = 0
     var cancelledShares = 0
+    /// Share jobs the transport had, which resume from their stage (B4).
+    var resumedShares = 0
     /// Interrupted attempts whose body is kept, to be checked and sent again.
     var resumable = 0
     /// Attempts whose body was missing or cut short: a new one is written.
