@@ -81,17 +81,19 @@ final class DecodedThumbnailCache: Sendable {
     // MARK: Writes
 
     /// Keeps `image`, decoded for cells of `shortSide` pixels, unless `admits` refuses it. `admits`
-    /// runs under the cache's lock, so a photo forgotten meanwhile is never kept.
-    func insert(_ image: PreparedImage, assetID: String, revision: String, shortSide: Int, admits: () -> Bool = { true }) {
+    /// runs under the cache's lock, so a photo forgotten meanwhile is never kept. Returns whether
+    /// `admits` let it in.
+    @discardableResult
+    func insert(_ image: PreparedImage, assetID: String, revision: String, shortSide: Int, admits: () -> Bool = { true }) -> Bool {
         let imageShort = min(image.cgImage.width, image.cgImage.height)
         // Smaller than asked for means the file itself is that small: no decode gets sharper.
         let serves = imageShort + 1 < shortSide ? Int.max : max(shortSide, imageShort)
-        state.withLock { state in
-            guard admits() else { return }
+        return state.withLock { state in
+            guard admits() else { return false }
             for id in state.byAsset[assetID] ?? [] {
                 guard let node = state.nodes[id] else { continue }
                 if node.revision == revision && node.serves >= serves {
-                    Self.moveToFront(id, &state); return
+                    Self.moveToFront(id, &state); return true
                 }
             }
             // Older revisions and smaller copies are useless now.
@@ -105,6 +107,7 @@ final class DecodedThumbnailCache: Sendable {
             state.cost += image.byteCost
             Self.link(id, &state)
             evict(&state)
+            return true
         }
     }
 

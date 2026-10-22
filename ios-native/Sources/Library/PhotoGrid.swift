@@ -65,6 +65,7 @@ struct PhotoGrid: UIViewRepresentable {
     func updateUIView(_ view: UICollectionView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
+        if coordinator.binder.pipeline !== pipeline { coordinator.binder = ThumbnailBinder(pipeline: pipeline) }
         view.isScrollEnabled = !store.isReplacingFeed
         view.isUserInteractionEnabled = !store.isReplacingFeed
         coordinator.rangeDrag?.isEnabled = store.isSelecting && !store.isReplacingFeed
@@ -102,6 +103,7 @@ struct PhotoGrid: UIViewRepresentable {
                 && sections[0].count >= coordinator.sections[0].count
             if !appended { coordinator.dragSelector.end() }
             coordinator.sections = sections; coordinator.resetID = store.resetID
+            coordinator.prefetched.removeAll()
             view.reloadData()
             if reset {
                 view.layoutIfNeeded()
@@ -169,14 +171,22 @@ struct PhotoGrid: UIViewRepresentable {
         var selecting = false
         var showsDayHeaders = false
         var lastScrollRequest: UUID?
+        /// Binds server photos to cells and sends the grid's thumbnail demand.
+        var binder: ThumbnailBinder
+        /// Photos UIKit says are about to scroll in.
+        var prefetched = Set<IndexPath>()
+        private var demandScheduled = false
         /// Downloads wait while photos fly past faster than they could arrive, or while the rail
         /// scrubs. Memory and disk still fill cells; the visible ones download when the grid slows.
+        /// Until the viewport motion policy (T3) this gate is the scheduler's motion.
         private(set) var allowsNetwork = true
+        private var resting = true
         private var lastScroll: (offset: CGFloat, time: CFTimeInterval)?
         /// Any stop counts as rest, however the grid moved: a drag, a fling, the rail or a jump.
         private var rest: DispatchWorkItem?
         init(_ parent: PhotoGrid) {
             self.parent = parent
+            binder = ThumbnailBinder(pipeline: parent.pipeline)
             super.init()
             dragSelector.counts = { [weak self] in self?.sectionCounts ?? [] }
             dragSelector.isSelected = { [weak self] index in
@@ -202,16 +212,38 @@ struct PhotoGrid: UIViewRepresentable {
         func setAllowsNetwork(_ allowed: Bool) {
             guard allowed != allowsNetwork else { return }
             allowsNetwork = allowed
-            if allowed { loadVisibleFromNetwork() }
+            setNeedsDemand()
         }
 
-        /// The middle of the screen first, where the eye is.
-        func loadVisibleFromNetwork() {
-            guard let collection else { return }
-            let middle = collection.contentOffset.y + collection.bounds.height / 2
-            collection.visibleCells.compactMap { $0 as? PhotoCell }.filter(\.waitsForNetwork)
-                .sorted { abs($0.center.y - middle) < abs($1.center.y - middle) }
-                .forEach { $0.loadFromNetworkIfWaiting() }
+        /// Sends the grid's thumbnail demand once the current layout pass is over, however many
+        /// cells changed in it.
+        func setNeedsDemand() {
+            guard !demandScheduled else { return }
+            demandScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.demandScheduled = false
+                    self.submitDemand()
+                }
+            }
+        }
+
+        /// The cells on screen that lack their thumbnail, the middle first, then the photos about
+        /// to scroll in. The scheduler leaves the network alone while the gate is closed.
+        private func submitDemand() {
+            guard let collection, let layout = collection.collectionViewLayout as? VirtualPhotoLayout else { return }
+            collection.layoutIfNeeded()
+            let viewport = collection.bounds
+            let middle = CGPoint(x: viewport.midX, y: viewport.midY)
+            let store = parent.store
+            let ahead: [(asset: Asset, distance: CGFloat)] = store.isReplacingFeed ? [] : prefetched.compactMap { path in
+                guard let asset = store.entry(section: path.section, item: path.item)?.remote,
+                      let frame = layout.layoutAttributesForItem(at: path)?.frame else { return nil }
+                return (asset, hypot(frame.midX - middle.x, frame.midY - middle.y))
+            }
+            let motion: Motion = !allowsNetwork ? .scrubbing : resting ? .idle(since: CACurrentMediaTime()) : .tracking(speed: 0)
+            binder.submit(viewport: viewport, ahead: ahead, shortSide: thumbnailPixels(collection) ?? 128, motion: motion)
         }
         func numberOfSections(in collectionView: UICollectionView) -> Int { sections.count }
         func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { sections[section].count }
@@ -232,13 +264,13 @@ struct PhotoGrid: UIViewRepresentable {
         }
         func configure(_ cell: PhotoCell, at index: IndexPath) {
             let entry = parent.store.entry(section: index.section, item: index.item)
-            cell.configure(entry: entry, pipeline: parent.pipeline,
+            let changed = cell.configure(entry: entry, binder: binder,
                            selected: entry.map { parent.store.selected.contains($0.id) } ?? false,
                            selecting: parent.store.isSelecting,
                            month: index.item == 0 && sections.indices.contains(index.section)
                                 && !(dayGroups.indices.contains(index.section) && dayGroups[index.section].contains(where: { $0.startItem == 0 }))
-                                ? monthBadge(for: sections[index.section].id) : nil,
-                           network: allowsNetwork)
+                                ? monthBadge(for: sections[index.section].id) : nil)
+            if changed { setNeedsDemand() }
             if entry == nil && !parent.store.isReplacingFeed { parent.store.requestBucket(index.section) }
             if sections.indices.contains(index.section), sections[index.section].id == "results",
                index.item >= max(0, sections[index.section].count - 12) {
@@ -359,6 +391,7 @@ struct PhotoGrid: UIViewRepresentable {
                 collection.layoutIfNeeded()
             }
             // Cells grew or shrank; ask for thumbnails at their new size, keeping the old ones meanwhile.
+            prefetched.removeAll()
             for cell in collection.visibleCells {
                 guard let cell = cell as? PhotoCell, let index = collection.indexPath(for: cell) else { continue }
                 configure(cell, at: index)
@@ -398,29 +431,31 @@ struct PhotoGrid: UIViewRepresentable {
             CATransaction.commit()
         }
         func collectionView(_ view: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-            // A cell shown again after leaving the screen restarts the thumbnail it gave up.
+            // A cell on screen joins the demand; it left the photos about to scroll in.
             guard let cell = cell as? PhotoCell else { return }
             cell.setOnScreen(true)
-            if cell.needsImage { configure(cell, at: indexPath) }
+            prefetched.remove(indexPath)
+            if cell.binding.map({ $0.stage != .exact }) ?? false { setNeedsDemand() }
         }
         func collectionView(_ view: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
             // Cells that scrolled or scrubbed away give their place in the thumbnail queue to what is on screen.
-            (cell as? PhotoCell)?.cancelImage()
-            (cell as? PhotoCell)?.setOnScreen(false)
+            guard let cell = cell as? PhotoCell else { return }
+            cell.abandonDisplay()
+            cell.setOnScreen(false)
+            if cell.binding.map({ $0.stage != .exact }) ?? false { setNeedsDemand() }
         }
         func collectionView(_ view: UICollectionView, prefetchItemsAt paths: [IndexPath]) {
             guard !parent.store.isReplacingFeed else { return }
             for section in Set(paths.map(\.section)) { parent.store.requestBucket(section) }
-            let assets = remoteAssets(at: paths)
             // Sketches of photos about to scroll in decode now, off the main thread, so their cells have them at once.
-            ThumbHashSketches.shared.prefetch(assets.compactMap(\.thumbhash))
+            ThumbHashSketches.shared.prefetch(remoteAssets(at: paths).compactMap(\.thumbhash))
             // Photos about to scroll in move from disk to memory, so they draw in their first frame.
-            guard let pixels = thumbnailPixels(view) else { return }
-            parent.pipeline.prefetchThumbnails(assets, pixelSize: pixels)
+            prefetched.formUnion(paths)
+            setNeedsDemand()
         }
         func collectionView(_ view: UICollectionView, cancelPrefetchingForItemsAt paths: [IndexPath]) {
-            guard let pixels = thumbnailPixels(view) else { return }
-            parent.pipeline.cancelThumbnailPrefetch(remoteAssets(at: paths), pixelSize: pixels)
+            prefetched.subtract(paths)
+            setNeedsDemand()
         }
         /// The pixel size cells decode their thumbnails at.
         private func thumbnailPixels(_ view: UICollectionView) -> Int? {
@@ -441,6 +476,7 @@ struct PhotoGrid: UIViewRepresentable {
                 else if speed < screen * 1.2 { setAllowsNetwork(true) }
             }
             lastScroll = (scrollView.contentOffset.y, now)
+            if resting { resting = false; setNeedsDemand() }
             rest?.cancel()
             let work = DispatchWorkItem { [weak self] in self?.settle() }
             rest = work
@@ -497,8 +533,9 @@ struct PhotoGrid: UIViewRepresentable {
         func settle() {
             rest?.cancel(); rest = nil
             lastScroll = nil
+            resting = true
             setAllowsNetwork(true)
-            loadVisibleFromNetwork()
+            setNeedsDemand()
         }
         @objc func refresh(_ sender: UIRefreshControl) {
             Task { await parent.store.refreshAfterMutation(); sender.endRefreshing() }
@@ -746,16 +783,17 @@ struct PhotoGrid: UIViewRepresentable {
     private var check: UIImageView?
     private static let checked = UIImage(systemName: "checkmark.circle.fill")
     private static let unchecked = UIImage(systemName: "circle")
+    /// Streams a photo only on this phone; server photos are bound by the grid's ThumbnailBinder
+    /// and never load anything here.
     private var task: Task<Void, Never>?
-    private var identity: String?
-    private var mediaID: String?
+    /// The phone photo shown, so binding it again changes nothing.
+    private var localIdentity: String?
+    /// The server photo shown and how far it has arrived. Set by the binder.
+    var binding: ThumbnailBinder.Binding?
     /// The cell shows a real thumbnail, not the thumbhash sketch or nothing.
     private(set) var showsThumbnail = false
-    /// The thumbnail is neither in memory nor on disk; it downloads once scrolling settles.
-    private(set) var waitsForNetwork = false
-    private var pending: (asset: Asset, pixels: Int, pipeline: MediaPipeline)?
     /// Times the bind to the first real thumbnail while a perf scenario runs.
-    private var displayProbe = ThumbDisplayProbe()
+    var displayProbe = ThumbDisplayProbe()
     /// The server photo this cell shows, and whether the cell is on screen. While both hold, its
     /// decoded thumbnail is pinned: memory pressure and the budget evict around it.
     private var pinTarget: (pipeline: MediaPipeline, assetID: String)?
@@ -806,11 +844,13 @@ struct PhotoGrid: UIViewRepresentable {
         // still running is dropped, so the next photo shows at once.
         super.prepareForReuse(); photo.layer.removeAllAnimations()
         task?.cancel(); task = nil
-        identity = nil; mediaID = nil; showsThumbnail = false; waitsForNetwork = false; pending = nil
+        localIdentity = nil; binding = nil; showsThumbnail = false
         displayProbe.reset()
         setPinTarget(nil)
     }
     deinit { if let pin { pin.pipeline.unpinThumbnail(pin.assetID) } }
+    /// Whether UIKit shows the cell now: only these join the grid's demand.
+    var isOnScreen: Bool { onScreen }
     /// The cell came on screen again, or left it.
     func setOnScreen(_ visible: Bool) {
         onScreen = visible
@@ -896,21 +936,16 @@ struct PhotoGrid: UIViewRepresentable {
         check = view
         return view
     }
-    var needsImage: Bool { identity == nil }
-    /// Drops a thumbnail that has not arrived yet; one already shown stays.
-    func cancelImage() {
-        displayProbe.abandon()
-        if task != nil { task?.cancel(); task = nil; identity = nil }
-        if waitsForNetwork { waitsForNetwork = false; identity = nil }
-    }
-    /// Swaps in the next stage of a server photo: nothing, its sketch's average colour, its sketch,
-    /// a stored or downloaded thumbnail.
-    private func show(_ next: CGImage?, thumbnail: Bool, animated: Bool, color: UIColor? = nil) {
+    /// The cell left the screen before its thumbnail came.
+    func abandonDisplay() { displayProbe.abandon() }
+    /// Draws a server photo's next stage: nothing, its sketch's average colour, its sketch, or a
+    /// thumbnail. The binder decides whether it crossfades.
+    func draw(_ next: CGImage?, thumbnail: Bool, crossfade: Bool, color: UIColor? = nil) {
         showsThumbnail = thumbnail && next != nil
         detach(image)
         let fill = next == nil ? color?.cgColor : nil
         guard drawn !== next || photo.layer.backgroundColor != fill else { return }
-        if animated && !UIAccessibility.isReduceMotionEnabled {
+        if crossfade {
             // The cross-dissolve UIView.transition made, added straight to the layer: UIKit's
             // animation setup for each thumbnail cost more than the fade itself.
             let fade = CATransition()
@@ -921,6 +956,11 @@ struct PhotoGrid: UIViewRepresentable {
         }
         photo.layer.backgroundColor = fill
         if drawn !== next { photo.layer.contents = next; drawn = next }
+    }
+    /// The server photo could not be loaded.
+    func showUnavailable(name: String) {
+        show(UIImage(systemName: "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
+        accessibilityLabel = "Preview unavailable, \(name)"
     }
     /// A photo only on this phone, or a status symbol in the given tint, in the image view.
     private func show(_ next: UIImage?, thumbnail: Bool, tint: UIColor? = nil) {
@@ -937,52 +977,9 @@ struct PhotoGrid: UIViewRepresentable {
         if view.image !== next { view.image = next }
         attach(view)
     }
-    /// The photo's sketch, if prefetch or an earlier cell decoded it already. Otherwise the sketch
-    /// decodes off the main thread and the cell shows its average colour meanwhile, however the
-    /// grid moves. Returns the hash still to decode.
-    private func showSketch(of asset: Asset) -> String? {
-        guard let hash = asset.thumbhash, !hash.isEmpty else { show(nil, thumbnail: false, animated: false); return nil }
-        if let sketch = ThumbHashSketches.shared.cached(hash) {
-            show(sketch, thumbnail: false, animated: false)
-            return nil
-        }
-        show(nil, thumbnail: false, animated: false, color: ThumbHash.averageColor(hash))
-        return hash
-    }
-    /// A sketch decoding off the main thread is drawn when it arrives, unless the cell has moved on
-    /// or a thumbnail came first: the stored thumbnail is read meanwhile, not after it.
-    private func showSketchOnceDecoded(_ hash: String, key: String) {
-        Task { [weak self] in
-            guard let sketch = await ThumbHashSketches.shared.sketch(hash),
-                  let self, self.identity == key, !self.showsThumbnail else { return }
-            self.show(sketch, thumbnail: false, animated: false)
-        }
-    }
-    /// Starts the download the cell has been waiting for, once the grid has slowed down.
-    func loadFromNetworkIfWaiting() {
-        guard waitsForNetwork, let key = identity, let (asset, pixels, pipeline) = pending else { return }
-        waitsForNetwork = false
-        task = Task { [weak self] in
-            do {
-                let prepared = try await pipeline.image(for: asset, size: .thumbnail, pixelSize: pixels)
-                guard !Task.isCancelled, let self, self.identity == key else { return }
-                self.show(prepared.cgImage, thumbnail: true, animated: true)
-                self.displayProbe.displayed(.network)
-                self.task = nil
-            } catch is CancellationError {
-                // A shared download can be dropped independently of this cell. Wait for the next chance.
-                if let self, self.identity == key { self.waitsForNetwork = true; self.task = nil }
-            } catch {
-                guard let self, self.identity == key else { return }
-                self.displayProbe.failed()
-                self.show(UIImage(systemName: "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
-                self.accessibilityLabel = "Preview unavailable, \(asset.displayName)"
-                // Permit retry when the row is next configured after connectivity returns.
-                self.identity = nil
-            }
-        }
-    }
-    func configure(entry: LibraryEntry?, pipeline: MediaPipeline, selected: Bool, selecting: Bool, month: String?, network: Bool = true) {
+    /// Shows `entry`. Returns whether the grid's thumbnail demand changed.
+    @discardableResult
+    func configure(entry: LibraryEntry?, binder: ThumbnailBinder, selected: Bool, selecting: Bool, month: String?) -> Bool {
         showCheck(selected: selected, selecting: selecting)
         showMonth(month)
         let traits: UIAccessibilityTraits = selected ? [.button, .selected] : [.button]
@@ -992,15 +989,18 @@ struct PhotoGrid: UIViewRepresentable {
             accessibilityLabel = photo.title + ", on this phone"
             showBadge(photo.video ? Self.duration(Int(photo.duration * 1000)) : photo.live ? "LIVE" : nil)
             let key = "local:\(photo.id)|\(photo.modified?.timeIntervalSince1970 ?? 0)"
-            guard key != identity else { return }
+            guard key != localIdentity else { return false }
+            let wasBound = binding != nil
+            binder.unbind(self)
             displayProbe.reset()
-            task?.cancel(); identity = key; mediaID = key
-            show(nil as UIImage?, thumbnail: false); waitsForNetwork = false; pending = nil
+            task?.cancel(); localIdentity = key
+            show(nil as UIImage?, thumbnail: false)
+            // Phone photos stream from PhotoKit until they move into the thumbnail service (T6).
             let stream = PhotoKitAdapter.shared.media(photo.id, .thumbnail(pixels: 420))
             task = Task { [weak self] in
                 var shown = false
                 for await event in stream {
-                    guard let self, !Task.isCancelled, self.identity == key else { return }
+                    guard let self, !Task.isCancelled, self.localIdentity == key else { return }
                     switch event {
                     case .image(let image, _): self.show(image, thumbnail: true); shown = true
                     case .unavailable(let inCloud, _) where !shown:
@@ -1008,64 +1008,29 @@ struct PhotoGrid: UIViewRepresentable {
                     default: break
                     }
                 }
-                guard let self, !Task.isCancelled, self.identity == key else { return }
+                guard let self, !Task.isCancelled, self.localIdentity == key else { return }
                 self.task = nil
             }
-            return
+            return wasBound
         }
+        if localIdentity != nil { task?.cancel(); task = nil; localIdentity = nil }
         let asset = entry?.remote
-        setPinTarget(asset.map { (pipeline, $0.id) })
+        setPinTarget(asset.map { (binder.pipeline, $0.id) })
         guard let asset else {
-            task?.cancel(); identity = nil; mediaID = nil; showBadge(nil)
-            show(nil, thumbnail: false, animated: false); waitsForNetwork = false; pending = nil
+            let wasBound = binding != nil
+            binder.unbind(self); showBadge(nil)
+            draw(nil, thumbnail: false, crossfade: false)
             displayProbe.awaitMonth()
-            accessibilityLabel = "Loading photo"; return
+            accessibilityLabel = "Loading photo"
+            return wasBound
         }
-        accessibilityLabel = asset.displayName + (asset.isVideo ? ", video" : "")
+        if binding?.stage != .failed { accessibilityLabel = asset.displayName + (asset.isVideo ? ", video" : "") }
         showBadge(asset.isVideo ? Self.duration(asset.duration ?? 0) : asset.livePhotoVideoId != nil ? "LIVE" : nil)
         let pixels = max(128, Int(bounds.width * traitCollection.displayScale))
-        let source = "\(asset.id)|\(asset.cacheRevision)"
-        let key = "\(source)|\(pixels)"
-        guard identity != key else {
-            if network { loadFromNetworkIfWaiting() }
-            return
-        }
-        task?.cancel(); identity = key; waitsForNetwork = false
-        pending = (asset, pixels, pipeline)
-        displayProbe.bind()
-        // A thumbnail still in memory draws in this frame instead of after an empty one.
-        if let cached = pipeline.cachedImage(for: asset, size: .thumbnail, pixelSize: pixels) {
-            show(cached.cgImage, thumbnail: true, animated: false); mediaID = source; task = nil
-            displayProbe.displayed(.memory); return
-        }
-        // Never an empty brick: a density change keeps the current thumbnail, a recycled cell
-        // shows this photo at another size if memory has one, and otherwise its thumbhash sketch,
-        // or for a frame or two the sketch's average colour while the sketch decodes.
-        var sketch: String?
-        if mediaID != source || (drawn == nil && image?.superview == nil) {
-            if let latest = pipeline.latestImage(assetID: asset.id, size: .thumbnail, revision: asset.cacheRevision) {
-                show(latest.cgImage, thumbnail: true, animated: false)
-            } else {
-                sketch = showSketch(of: asset)
-            }
-        }
-        if showsThumbnail { displayProbe.displayed(.memoryOther) }
-        else { displayProbe.placeholder(drawn != nil ? .sketch : sketch != nil ? .color : .empty) }
-        mediaID = source
-        if let sketch { showSketchOnceDecoded(sketch, key: key) }
-        task = Task { [weak self] in
-            if let stored = await pipeline.storedThumbnail(for: asset, pixelSize: pixels) {
-                guard !Task.isCancelled, let self, self.identity == key else { return }
-                self.show(stored.cgImage, thumbnail: true, animated: true)
-                self.displayProbe.displayed(.disk)
-                self.task = nil
-                return
-            }
-            guard !Task.isCancelled, let self, self.identity == key else { return }
-            self.task = nil
-            self.waitsForNetwork = true
-            if network { self.loadFromNetworkIfWaiting() }
-        }
+        let before = binding
+        let needs = binder.bind(self, to: asset, shortSide: pixels)
+        if binding?.stage == .failed { accessibilityLabel = "Preview unavailable, \(asset.displayName)" }
+        return needs || before?.key != binding?.key || before?.shortSide != binding?.shortSide
     }
     private static func duration(_ milliseconds: Int) -> String {
         let seconds = milliseconds / 1000

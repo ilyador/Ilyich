@@ -127,9 +127,12 @@ import XCTest
         ThumbHashSketches.shared.prefetch(ahead)
 
         let cell = PhotoCell(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let binder = ThumbnailBinder(pipeline: pipeline)
         // As in a scrub: the grid moves too fast to decode sketches or download here.
-        cell.configure(entry: .remote(asset), pipeline: pipeline, selected: false, selecting: false, month: nil, network: false)
+        cell.configure(entry: .remote(asset), binder: binder, selected: false, selecting: false, month: nil)
+        binder.submit(viewport: cell.frame, ahead: [], shortSide: 100, motion: .scrubbing)
         try await until("The stored thumbnail never drew.", within: .seconds(30)) { cell.showsThumbnail }
+        withExtendedLifetime(binder) {}
         XCTAssertNil(ThumbHashSketches.shared.cached(ahead[ahead.count - 1]), "It drew while the sketches ahead of its own were still decoding.")
     }
 

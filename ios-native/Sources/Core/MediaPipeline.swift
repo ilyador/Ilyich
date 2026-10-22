@@ -136,21 +136,14 @@ actor MediaPipeline {
     private let byteCache: URLCache
     private let limiter = ImageWorkLimiter()
     /// Few at a time: the server keeps working on a request even after the app gives it up, so a
-    /// flood of thumbnails while scrolling slows down the photo that is actually opened.
+    /// flood of thumbnails slows down the photo that is actually opened. Grid thumbnails go through
+    /// the scheduler; this bounds the other thumbnail-sized images (locked, unedited).
     private let thumbnailLimiter = ImageWorkLimiter(limit: 6)
-    /// Thumbnail bytes live in their own store, so they skip the URL cache.
-    private let thumbnailSession: URLSession
     private let thumbnails: ThumbnailDiskStore
     /// Grid thumbnails decoded in memory, readable from any thread.
     private nonisolated let thumbs: DecodedThumbnailCache
-    private let decoder: ThumbnailDecoder
-    private struct ThumbnailFlight {
-        let task: Task<Data, Error>
-        var waiters: Set<UUID>
-        /// A download that has started finishes and is kept, even if every cell gave up on it.
-        var started = false
-    }
-    private var thumbnailFlights: [String: ThumbnailFlight] = [:]
+    /// Loads every grid thumbnail: from disk, from the server, for the grid and everyone else.
+    nonisolated let scheduler: ThumbnailScheduler
     /// The caches are thread-safe, so views can read them synchronously and draw a cached image
     /// in their first frame instead of flashing empty while an actor hop completes.
     private nonisolated let memory: MediaMemory
@@ -198,26 +191,14 @@ actor MediaPipeline {
         ephemeral.requestCachePolicy = .reloadIgnoringLocalCacheData
         if let protocolClasses { ephemeral.protocolClasses = protocolClasses }
         privateSession = URLSession(configuration: ephemeral, delegate: SameOriginRedirectDelegate(origin: client.baseURL), delegateQueue: nil)
-        let thumbnailConfiguration = URLSessionConfiguration.default
-        thumbnailConfiguration.urlCache = nil; thumbnailConfiguration.httpCookieStorage = nil
-        thumbnailConfiguration.httpShouldSetCookies = false
-        thumbnailConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        thumbnailConfiguration.httpMaximumConnectionsPerHost = 6
-        thumbnailConfiguration.timeoutIntervalForRequest = 30
-        if let protocolClasses { thumbnailConfiguration.protocolClasses = protocolClasses }
-        thumbnailSession = URLSession(configuration: thumbnailConfiguration, delegate: SameOriginRedirectDelegate(origin: client.baseURL), delegateQueue: nil)
         let thumbnails = ThumbnailDiskStore.shared(scope: client.cacheScope)
         self.thumbnails = thumbnails
         let memory = MediaMemory(fence: thumbnails.fence)
         self.memory = memory
         let thumbs = DecodedThumbnailCache()
         self.thumbs = thumbs
-        let fence = thumbnails.fence
-        decoder = ThumbnailDecoder(store: thumbnails) { image, request in
-            thumbs.insert(image, assetID: request.assetID, revision: request.revision, shortSide: request.identity.pixelSize) {
-                fence.admits(request.assetID, since: request.token)
-            }
-        }
+        scheduler = ThumbnailScheduler(store: thumbnails, memory: thumbs,
+                                       fetcher: ThumbnailFetcher(client: client, protocolClasses: protocolClasses))
         let decoded = memory.decoded, latest = memory.latest
         decoded.totalCostLimit = memoryLimit
         decoded.countLimit = 2_000
@@ -242,6 +223,11 @@ actor MediaPipeline {
         if size == .thumbnail, edited { return thumbs.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) }
         let identity = MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: size, pixelSize: pixelSize, edited: edited)
         return decoded.object(forKey: identity.stableKey as NSString)?.image
+    }
+
+    /// The grid thumbnail in memory that covers a cell of `shortSide` pixels, or nil.
+    nonisolated func cachedThumbnail(assetID: String, revision: String, shortSide: Int) -> PreparedImage? {
+        thumbs.image(assetID: assetID, revision: revision, shortSide: shortSide)
     }
 
     /// The newest thumbnail or preview of an asset at any size. Without a revision any version
@@ -281,7 +267,8 @@ actor MediaPipeline {
     func image(for asset: Asset, size: MediaSize = .thumbnail, pixelSize: Int, edited: Bool = true, token: UInt64) async throws -> PreparedImage {
         guard fence.admits(asset.id, since: token) else { throw CancellationError() }
         if size == .thumbnail, edited, asset.visibility != .locked {
-            guard let image = try await thumbnail(asset, pixelSize: pixelSize, network: true, token: token) else { throw CancellationError() }
+            guard let image = try await scheduler.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize,
+                                                        band: .explicit, network: true, token: token) else { throw CancellationError() }
             return image
         }
         let privacyToken = privateGeneration
@@ -301,30 +288,11 @@ actor MediaPipeline {
         ])
     }
 
-    /// A grid thumbnail from memory or disk, or nil if only the network has it. Fast scrolling
-    /// and scrubbing use this, so the server is asked only for what the user stops to look at.
+    /// A grid thumbnail from memory or disk, or nil if only the network has it.
     nonisolated func storedThumbnail(for asset: Asset, pixelSize: Int) async -> PreparedImage? {
         guard asset.visibility != .locked else { return nil }
-        if let image = thumbs.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) { return image }
-        return await decoder.image(thumbnailRequest(asset, pixelSize: pixelSize))
-    }
-
-    /// Photos about to scroll in move from disk to memory, behind the ones on screen.
-    nonisolated func prefetchThumbnails(_ assets: [Asset], pixelSize: Int) {
-        decoder.prefetch(assets.compactMap { asset in
-            guard asset.visibility != .locked,
-                  thumbs.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) == nil else { return nil }
-            return thumbnailRequest(asset, pixelSize: pixelSize)
-        })
-    }
-
-    nonisolated func cancelThumbnailPrefetch(_ assets: [Asset], pixelSize: Int) {
-        decoder.cancelPrefetch(assets.map { thumbnailRequest($0, pixelSize: pixelSize).identity })
-    }
-
-    private nonisolated func thumbnailRequest(_ asset: Asset, pixelSize: Int, token: UInt64? = nil) -> ThumbnailDecoder.Request {
-        ThumbnailDecoder.Request(identity: MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: .thumbnail, pixelSize: pixelSize),
-                                 assetID: asset.id, revision: asset.cacheRevision, token: token ?? fence.token())
+        return try? await scheduler.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize,
+                                          band: .explicit, network: false, token: fence.token())
     }
 
     /// The grid shows this photo: memory pressure and the budget keep its thumbnail. Every pin is
@@ -339,96 +307,10 @@ actor MediaPipeline {
     /// Downloads a thumbnail into the store without decoding it, for keeping the library offline.
     /// `token` is the media fence's from when `asset` was read, so a photo locked or deleted since
     /// is not downloaded or stored.
-    func storeThumbnail(_ asset: Asset, token: UInt64) async throws {
-        guard asset.visibility != .locked, !hasStoredThumbnail(asset) else { return }
-        _ = try await thumbnailData(asset, token: token)
+    nonisolated func storeThumbnail(_ asset: Asset, token: UInt64) async throws {
+        guard asset.visibility != .locked else { return }
+        try await scheduler.store(assetID: asset.id, revision: asset.cacheRevision, band: .coverage, token: token)
     }
-
-    private func thumbnail(_ asset: Asset, pixelSize: Int, network: Bool, token: UInt64) async throws -> PreparedImage? {
-        let request = thumbnailRequest(asset, pixelSize: pixelSize, token: token)
-        if let image = thumbs.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) { return image }
-        let epoch = generation
-        // The decoder remembers what it decodes, and a reset drops it.
-        if let stored = await decoder.image(request) { return stored }
-        try Task.checkCancellation()
-        guard network else { return nil }
-        let data = try await thumbnailData(asset, token: token)
-        let image = try await Task.detached(priority: .userInitiated) { try Self.downsampleThumbnail(data, shortSide: pixelSize) }.value
-        try Task.checkCancellation()
-        guard epoch == generation, fence.admits(asset.id, since: token) else { throw CancellationError() }
-        let gate = fence
-        thumbs.insert(image, assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize) { gate.admits(asset.id, since: token) }
-        return image
-    }
-
-    /// One download per photo revision, shared by every cell size that wants it. A download that
-    /// has not started is dropped when nobody waits for it; one that has started completes into
-    /// the store, because the server does the work either way. `token` is the fence's from when the
-    /// caller began; a joined download keeps the token of whoever started it.
-    private func thumbnailData(_ asset: Asset, token: UInt64) async throws -> Data {
-        let key = asset.id + "|" + asset.cacheRevision
-        let waiter = UUID()
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            guard fence.admits(asset.id, since: token) else { throw CancellationError() }
-            if thumbnailFlights[key] == nil {
-                let request = try await client.authorizedRequest(path: "assets/\(asset.id)/thumbnail", query: [
-                    .init(name: "size", value: MediaSize.thumbnail.rawValue), .init(name: "edited", value: "true"),
-                    .init(name: "c", value: asset.cacheRevision)
-                ])
-                try Task.checkCancellation()
-                // Another caller may have started the same download while the request was built.
-                if thumbnailFlights[key] == nil {
-                    guard fence.admits(asset.id, since: token) else { throw CancellationError() }
-                    let limiter = thumbnailLimiter, session = thumbnailSession, store = thumbnails, revision = asset.cacheRevision
-                    let task = Task.detached(priority: .userInitiated) { [weak self] () -> Data in
-                        try await limiter.acquire()
-                        guard let self, await self.beginThumbnail(key), !Task.isCancelled else {
-                            await limiter.release(); throw CancellationError()
-                        }
-                        do {
-                            let (data, response) = try await session.data(for: request)
-                            try ServerFailure.check(response, body: data)
-                            await limiter.release()
-                            // The store can read the bytes at once, so the flight can end now.
-                            store.enqueueWrite(data, assetID: asset.id, revision: revision, token: token)
-                            await self.endThumbnail(key)
-                            return data
-                        } catch {
-                            await limiter.release(); await self.endThumbnail(key)
-                            throw error
-                        }
-                    }
-                    thumbnailFlights[key] = ThumbnailFlight(task: task, waiters: [])
-                }
-            }
-            guard var flight = thumbnailFlights[key] else { throw CancellationError() }
-            flight.waiters.insert(waiter); thumbnailFlights[key] = flight
-            defer { releaseThumbnail(key, waiter: waiter) }
-            return try await flight.task.value
-        } onCancel: {
-            Task { await self.releaseThumbnail(key, waiter: waiter) }
-        }
-    }
-
-    private func beginThumbnail(_ key: String) -> Bool {
-        guard var flight = thumbnailFlights[key] else { return false }
-        flight.started = true; thumbnailFlights[key] = flight
-        return true
-    }
-
-    /// Waiters hold the task itself, so a finished download leaves the table at once.
-    private func endThumbnail(_ key: String) { thumbnailFlights.removeValue(forKey: key) }
-
-    private func releaseThumbnail(_ key: String, waiter: UUID) {
-        guard var flight = thumbnailFlights[key], flight.waiters.remove(waiter) != nil else { return }
-        if flight.waiters.isEmpty && !flight.started {
-            flight.task.cancel(); thumbnailFlights.removeValue(forKey: key)
-        } else {
-            thumbnailFlights[key] = flight
-        }
-    }
-
 
     func animation(for asset: Asset, pixelSize: Int) async throws -> AnimatedImageSource {
         guard asset.hasKnownEditState, asset.isAnimatedImage, !asset.isDeveloped, !asset.isEdited else { throw APIError.invalidResponse("Use this photo’s processed preview until its edit information is available.") }
@@ -579,11 +461,9 @@ actor MediaPipeline {
         removePrivate()
         generation = UUID()
         fence.forgetAll()
-        decoder.reset()
+        scheduler.reset()
         for flight in flights.values { flight.task.cancel() }
         flights.removeAll()
-        for flight in thumbnailFlights.values { flight.task.cancel() }
-        thumbnailFlights.removeAll()
         for flight in faceFlights.values { flight.cancel() }
         faceFlights.removeAll()
         faces.removeAllObjects()
@@ -625,12 +505,7 @@ actor MediaPipeline {
                 for request in requests { byteCache.removeCachedResponse(for: request) }
             }
         }
-        for (key, flight) in thumbnailFlights where !flight.started {
-            let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
-            if parts.count == 2, let revision = revisions[parts[0]], revision != parts[1] {
-                flight.task.cancel(); thumbnailFlights.removeValue(forKey: key)
-            }
-        }
+        scheduler.refresh(revisions)
     }
 
     /// Photos that left the library drop out of memory and disk, every revision and size of them;
@@ -643,9 +518,7 @@ actor MediaPipeline {
         fence.forget(assetIDs)
         memory.forget(assetIDs, scope: client.cacheScope)
         thumbs.forget(assetIDs)
-        for (key, flight) in thumbnailFlights where assetIDs.contains(String(key.prefix { $0 != "|" })) {
-            flight.task.cancel(); thumbnailFlights.removeValue(forKey: key)
-        }
+        scheduler.forget(assetIDs)
         if revoked {
             for (key, flight) in flights where key.resource.hasPrefix("assets/") && assetIDs.contains(String(key.resource.dropFirst(7))) {
                 flight.task.cancel(); flights.removeValue(forKey: key)
@@ -678,7 +551,7 @@ actor MediaPipeline {
 
     func cacheUsage() async -> MediaCacheUsage {
         MediaCacheUsage(memoryBytes: byteCache.currentMemoryUsage, diskBytes: byteCache.currentDiskUsage + (await thumbnails.currentUsage()),
-                        pendingLoads: flights.count + thumbnailFlights.count + decoder.pendingCount,
+                        pendingLoads: flights.count + scheduler.pendingCount + scheduler.downloadsRunning,
                         decodedMemoryLimit: decoded.totalCostLimit + thumbs.budget)
     }
     /// A memory warning: previews go, and every grid thumbnail not on screen.
