@@ -13,6 +13,17 @@ import XCTest
 @MainActor final class ScrubbingTests: XCTestCase {
     private static let hashes = ["HIcNXIyGh4d/eHh5eIWHcEf3dQ==", "nMcJLBRyB4iHeId4eHhycNgIhw==", "W1eGHQYmgIqAeqinh4R/B4iIB3iHiICJeA=="]
 
+    /// Sketches no test has decoded: the first hash with other AC bytes, `tag` keeping one test's
+    /// apart from another's in the shared cache.
+    private static func freshHashes(count: Int, tag: UInt8) -> [String] {
+        let base = [UInt8](Data(base64Encoded: hashes[0])!)
+        return (0..<count).map { index in
+            var bytes = base
+            bytes[5] = UInt8(index & 0xff); bytes[6] = UInt8(index >> 8 & 0xff); bytes[7] = tag
+            return Data(bytes).base64EncodedString()
+        }
+    }
+
     // MARK: - Sketches
 
     func testSketchesArePremultipliedInCoreAnimationsOrderAndDrawTheSamePixels() throws {
@@ -134,6 +145,58 @@ import XCTest
         try await until("The stored thumbnail never drew.", within: .seconds(30)) { cell.showsThumbnail }
         withExtendedLifetime(binder) {}
         XCTAssertNil(ThumbHashSketches.shared.cached(ahead[ahead.count - 1]), "It drew while the sketches ahead of its own were still decoding.")
+    }
+
+    /// A sketch named by demand after demand before it decodes, as a fling's landing screen is by
+    /// every frame of the fling, queues once; and a cell's own sketch never waits behind the
+    /// sketches decoding ahead of the grid.
+    func testAPrefetchedSketchQueuesOnceAndACellsOwnDoesNotWaitBehindIt() async throws {
+        let sketches = ThumbHashSketches(countLimit: 10_000)
+        let ahead = Self.freshHashes(count: 1_000, tag: 0x11)
+        let own = Self.freshHashes(count: 1, tag: 0x22)[0]
+        sketches.prefetch(ahead)
+        sketches.prefetch(ahead)
+        sketches.prefetch(Array(ahead.reversed()))
+        // A cell binds and asks for its own: it comes while the sketches ahead still decode.
+        let image = await sketches.sketch(own)
+        XCTAssertNotNil(image)
+        XCTAssertNil(sketches.cached(ahead[ahead.count - 1]), "The cell's own sketch waited behind the sketches ahead of it.")
+        try await until("The sketches ahead never all decoded.", within: .seconds(30)) { ahead.allSatisfy { sketches.cached($0) != nil } }
+        XCTAssertEqual(sketches.decodes.load(ordering: .relaxed), ahead.count + 1, "A sketch named three times decoded more than once.")
+        XCTAssertEqual(sketches.mainThreadDecodes.load(ordering: .relaxed), 0)
+    }
+
+    /// The sketches decoded ahead of the grid are those it will show: where a fling lands, and the
+    /// photos ahead of a grid at rest or slow. A fast grid's are not: they pass before they could
+    /// be shown, and a rail sweep would queue a whole new window of them every frame.
+    func testSketchesDecodeAheadOnlyWhereTheGridWillShowThem() async throws {
+        let api = try APIClient(baseURL: XCTUnwrap(URL(string: "https://media.example")), accessToken: "sketch-session",
+                                userID: "sketch-" + UUID().uuidString)
+        // Offline, so nothing the demand names downloads here.
+        let pipeline = MediaPipeline(client: api, protocolClasses: [OfflineMediaProtocol.self])
+        addTeardownBlock { await pipeline.removeAll() }
+        let binder = ThumbnailBinder(pipeline: pipeline)
+        let sketches = ThumbHashSketches.shared
+        let fresh = Self.freshHashes(count: 3, tag: 0x3c)
+        let passing = try XCTUnwrap(ThumbnailBinder.Ahead(.remote(Asset(id: "passing", thumbhash: fresh[0])), distance: 1))
+        let landing = try XCTUnwrap(ThumbnailBinder.Ahead(.remote(Asset(id: "landing", thumbhash: fresh[1])), distance: 1))
+        let coming = try XCTUnwrap(ThumbnailBinder.Ahead(.remote(Asset(id: "coming", thumbhash: fresh[2])), distance: 2))
+        func submit(ahead: [ThumbnailBinder.Ahead], target: [ThumbnailBinder.Ahead] = [], motion: Motion) {
+            binder.submit(GridViewport.Windows(visible: CGRect(x: 0, y: 0, width: 390, height: 844), visibleBand: .visible,
+                                               ahead: ahead, behind: [], target: target, shortSide: 128, motion: motion))
+        }
+
+        // The rail sweeps: where a fling would land is prepared; the photos ahead pass.
+        submit(ahead: [passing], target: [landing], motion: .scrubbing)
+        try await until("The landing screen's sketch was not decoded.") { sketches.cached(fresh[1]) != nil }
+        submit(ahead: [passing], motion: .flinging(speed: 4))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(sketches.cached(fresh[0]), "A fast grid's photos ahead pass before their sketches could be shown.")
+
+        // The grid slows: the photos ahead are prepared.
+        submit(ahead: [passing, coming], motion: .tracking(speed: 1))
+        try await until("A slow grid's photos ahead have no sketches ready.") { sketches.cached(fresh[0]) != nil && sketches.cached(fresh[2]) != nil }
+        withExtendedLifetime(binder) {}
     }
 
     /// When UIKit animates a cell's size, as when the app turns back upright after the viewer, the

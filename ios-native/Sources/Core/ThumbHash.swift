@@ -159,18 +159,25 @@ enum ThumbHash {
 }
 
 /// Decoded sketches are tiny (about 2 KB), so thousands stay in memory for scrolling back. They
-/// decode on a queue of their own, never on the main thread: a scrub binds hundreds of cells a
-/// second, and decoding each sketch as its cell was bound took a large share of every frame.
+/// decode off the main thread, never on it: a scrub binds hundreds of cells a second, and decoding
+/// each sketch as its cell was bound took a large share of every frame. A cell's own sketch
+/// decodes on a queue of its own; the sketches of photos about to scroll in decode on another, at
+/// a lower priority, so a cell never waits behind them.
 final class ThumbHashSketches: Sendable {
     static let shared = ThumbHashSketches()
 
     /// NSCache is thread-safe.
     private nonisolated(unsafe) let cache = NSCache<NSString, CGImage>()
     private let queue = DispatchQueue(label: "ilyich.thumbhash-sketches", qos: .userInitiated)
+    private let prefetchQueue = DispatchQueue(label: "ilyich.thumbhash-sketches.prefetch", qos: .utility)
     /// Sketches decoded on the main thread, for tests that check there are none.
     let mainThreadDecodes = Atomic<Int>(0)
+    /// Sketches decoded, for tests that check none decodes twice.
+    let decodes = Atomic<Int>(0)
     /// Callers waiting for a sketch that is being decoded, by hash.
     private let waiting = Mutex<[String: [CheckedContinuation<CGImage?, Never>]]>([:])
+    /// Sketches a prefetch has queued and not decoded yet: asked for again, they queue nothing.
+    private let queued = Mutex<Set<String>>([])
 
     init(countLimit: Int = 6_000) { cache.countLimit = countLimit }
 
@@ -193,18 +200,26 @@ final class ThumbHashSketches: Sendable {
         }
     }
 
-    /// Decodes the sketches of photos about to scroll in, so their cells have them at once.
+    /// Decodes the sketches of photos about to scroll in, so their cells have them at once. A
+    /// sketch already queued is not queued again, however many demands name it before it decodes,
+    /// as a fling's landing screen is named by every frame of the fling.
     func prefetch(_ hashes: [String]) {
-        let missing = hashes.filter { !$0.isEmpty && cached($0) == nil }
-        guard !missing.isEmpty else { return }
-        queue.async { [self] in
-            for hash in missing { _ = decode(hash) }
+        let fresh = queued.withLock { queued in
+            hashes.filter { !$0.isEmpty && cached($0) == nil && queued.insert($0).inserted }
+        }
+        guard !fresh.isEmpty else { return }
+        prefetchQueue.async { [self] in
+            for hash in fresh {
+                _ = decode(hash)
+                _ = queued.withLock { $0.remove(hash) }
+            }
         }
     }
 
     private func decode(_ hash: String) -> CGImage? {
         if let image = cached(hash) { return image }
         if Thread.isMainThread { mainThreadDecodes.add(1, ordering: .relaxed) }
+        decodes.add(1, ordering: .relaxed)
         guard let image = autoreleasepool(invoking: { ThumbHash.image(hash) }) else { return nil }
         cache.setObject(image, forKey: hash as NSString)
         return image

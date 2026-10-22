@@ -37,6 +37,13 @@ enum ViewportPolicy {
     /// Whether a photo wanted on `band` may download now.
     static func allowsNetwork(_ band: DemandBand, fast: Bool) -> Bool { !fast || band == .target }
 
+    /// Whether the sketches of the photos ahead are worth decoding before their cells bind: not
+    /// while the rail scrubs or the grid is fast, when they pass before they could be shown and a
+    /// rail sweep would queue a whole new window of them every frame. The decision before does
+    /// not count here: a wrong call near the threshold costs a few decodes, or a few cells their
+    /// sketch for a frame.
+    static func prefetchesSketchesAhead(_ motion: Motion) -> Bool { !isFast(motion, wasFast: false) }
+
     /// How many screens ahead the grid asks for at `speed`.
     static func aheadScreens(at speed: Double) -> Double {
         min(aheadScreens.upperBound, max(aheadScreens.lowerBound, speed))
