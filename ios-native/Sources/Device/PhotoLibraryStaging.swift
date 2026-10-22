@@ -130,10 +130,16 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         stagingReader.candidates([localID]).first.flatMap(\.modified)
     }
 
-    /// Phone photos for the merged timeline: each one, its cloud identifier, and whether Photos
-    /// holds no edit of it.
-    nonisolated func timelineItems(included: Set<String>, excluded: Set<String>) async throws -> [DeviceTimelineItem] {
-        let ids = try await candidateIDs(included: included, excluded: excluded)
+    /// The photos and videos in `included` and in none of `excluded`, for the merged library:
+    /// identifiers only, read off the adapter's queue.
+    nonisolated func timelineMembers(included: Set<String>, excluded: Set<String>) async throws -> Set<String> {
+        let reader = stagingReader
+        return try await Self.offQueue { reader.members(of: included).subtracting(reader.members(of: excluded)) }
+    }
+
+    /// Phone photos for the merged library, read a batch at a time: each one, its cloud
+    /// identifier, and how it is made. The assets Photos no longer has are left out.
+    nonisolated func timelineItems(_ ids: [String]) async throws -> [DeviceTimelineItem] {
         var result: [DeviceTimelineItem] = []
         for start in stride(from: 0, to: ids.count, by: Self.batchSize) {
             let batch = Array(ids[start..<min(start + Self.batchSize, ids.count)])
@@ -149,7 +155,9 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
             let asset = assets.object(at: index)
             let types = PHAssetResource.assetResources(for: asset).map(\.type)
             return DeviceTimelineItem(photo: LocalPhoto(asset), cloudID: (try? clouds[asset.localIdentifier]?.get())?.stringValue,
-                                      unadjusted: StagingRules.isUnadjusted(types))
+                                      unadjusted: StagingRules.isUnadjusted(types),
+                                      shape: ResourceShape.classify(types, isVideo: asset.mediaType == .video),
+                                      canDelete: asset.canPerform(.delete), canEditProperties: asset.canPerform(.properties))
         }
     }
 
@@ -269,10 +277,22 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
 }
 
 /// A phone photo for the merged timeline.
-struct DeviceTimelineItem: Sendable {
+struct DeviceTimelineItem: Hashable, Sendable {
     let photo: LocalPhoto
     let cloudID: String?
+    /// Photos holds no edit of it, so its cloud identity can match an upload.
     let unadjusted: Bool
+    var shape: ResourceShape = .other
+    var canDelete = false
+    var canEditProperties = false
+
+    /// As the device index publishes it.
+    var asset: DeviceAsset {
+        DeviceAsset(id: DeviceAssetID(rawValue: photo.id), revision: photo.modified.map(AssetRevision.init), created: photo.date,
+                    isVideo: photo.video, isLive: photo.live, isFavorite: photo.isFavorite,
+                    location: photo.latitude.flatMap { latitude in photo.longitude.map { DeviceAsset.Coordinate(latitude: latitude, longitude: $0) } },
+                    shape: shape, canDelete: canDelete, canEditProperties: canEditProperties)
+    }
 }
 
 extension SystemPhotoKit: PhotoStagingReading {

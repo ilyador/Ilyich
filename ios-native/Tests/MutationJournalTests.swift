@@ -155,7 +155,8 @@ import XCTest
         let database = try DeviceSQLite(url: url)
         let columns = try database.query("PRAGMA table_info(device_mutation)").compactMap { $0[1].text }
         XCTAssertEqual(columns, ["id", "account_digest", "kind", "origin", "asset_ids", "expected_revisions", "created_at", "finished_at", "outcome", "detail"])
-        XCTAssertEqual(try database.query("PRAGMA user_version").first?.first, .real(1))
+        XCTAssertEqual(try database.query("PRAGMA user_version").first?.first, .real(2), "Version 2 adds device_fingerprint (P5).")
+        XCTAssertEqual(try database.query("PRAGMA table_info(device_fingerprint)").compactMap { $0[1].text }, ["local_id", "revision", "checksum"])
         let row = try XCTUnwrap(try database.query("""
             SELECT id,account_digest,kind,origin,asset_ids,expected_revisions,typeof(created_at),created_at,typeof(finished_at),outcome,detail
             FROM device_mutation

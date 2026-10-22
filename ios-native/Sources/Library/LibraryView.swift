@@ -29,9 +29,6 @@ struct LibraryView: View {
     @State private var people: [Person] = []
     @State private var albums: [Album] = []
     @State private var features: ServerFeatures?
-    @State private var deviceIndex = DeviceTimelineIndex()
-    /// Today's backup state, whose preferences and receipts place phone photos in the timeline.
-    @State private var backup = BackupCoordinator.shared
     @State private var backupStore = BackupStore.shared
     @State private var placesDrag: CGFloat = 0
     /// The name typed for an album made from the selection.
@@ -232,8 +229,6 @@ struct LibraryView: View {
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
         .task {
             model.refreshSharedFiles()
-            // The account's backup is taken up as it signs in; the index follows it below.
-            if session.environment.usesDevicePhotos { refreshDeviceIndex() }
             guard !store.started else { return }; store.started = true
             await store.reload(); await loadShelfData()
         }
@@ -256,21 +251,21 @@ struct LibraryView: View {
                 if notification.userInfo?["collections"] as? Bool == true {
                     await loadShelfData()
                 }
-                refreshDeviceIndex()
             }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
-                model.refreshSharedFiles(); refreshDeviceIndex()
+                model.refreshSharedFiles()
                 if store.started, people.isEmpty || albums.isEmpty { Task { await loadShelfData() } }
-            } else if phase == .background { deviceIndex.stop() }
+            }
         }
-        .onChange(of: deviceIndex.revision) { _, _ in store.updateDeviceTimeline(deviceIndex.snapshot) }
+        // The account's device index places the phone's photos; it follows Photos, backup and
+        // the offline library itself, and works only while the app is in front.
+        .task(id: session.runtime?.id) {
+            guard let index = session.deviceIndex else { return }
+            for await snapshot in await index.snapshots() { store.updateDeviceTimeline(snapshot.timeline) }
+        }
         .onChange(of: showPlaces) { _, shown in Haptics.earth(rising: shown) }
-        .onChange(of: backup.preferences) { _, _ in refreshDeviceIndex() }
-        .onChange(of: backup.isRunning) { _, running in if !running { refreshDeviceIndex() } }
-        .onChange(of: backup.activeScope) { _, _ in refreshDeviceIndex() }
-        .onDisappear { deviceIndex.stop() }
         .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session) }
         // Everything presented has closed, so shared files that arrived meanwhile can show.
         .onChange(of: navigator.layers.isEmpty) { _, empty in if empty { model.refreshSharedFiles() } }
@@ -931,11 +926,6 @@ struct LibraryView: View {
             case .present, .openAsset, .alert: break
             }
         }
-    }
-    private func refreshDeviceIndex() {
-        guard session.environment.usesDevicePhotos else { return }
-        deviceIndex.configure(scope: api.cacheScope, entities: session.entities,
-                              preferences: backup.preferences, receipts: backup.associations)
     }
     private func errorBanner(_ message: String, retry: @escaping () -> Void) -> some View {
         HStack { Text(message).font(.caption); Spacer(); Button("Retry", action: retry) }

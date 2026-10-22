@@ -30,6 +30,9 @@ final class AccountRuntime: Sendable {
     let castGrants: CastGrantStore
     /// Free up space's checks and removals (REBUILD_ROADMAP.md P4). Shut down first at teardown.
     let cleanup: CleanupService
+    /// The phone's side of the merged library (REBUILD_ROADMAP.md P5). Nil when the environment
+    /// runs without the phone's photos. It starts once the library subscribes.
+    let deviceIndex: DeviceIndexService?
     private let device: any AccountDevice
     private let presence: AppPresence
     private let backupStateCopyDelay: Duration
@@ -60,7 +63,8 @@ final class AccountRuntime: Sendable {
 
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
-                 cleanup: CleanupService, device: any AccountDevice, presence: AppPresence, backupStateCopyDelay: Duration) {
+                 cleanup: CleanupService, deviceIndex: DeviceIndexService?, device: any AccountDevice, presence: AppPresence,
+                 backupStateCopyDelay: Duration) {
         self.id = id
         self.credential = credential
         self.authorization = authorization
@@ -73,6 +77,7 @@ final class AccountRuntime: Sendable {
         self.work = work
         self.castGrants = CastGrantStore(server: api)
         self.cleanup = cleanup
+        self.deviceIndex = deviceIndex
         self.device = device
         self.presence = presence
         self.backupStateCopyDelay = backupStateCopyDelay
@@ -124,9 +129,18 @@ final class AccountRuntime: Sendable {
         }
         let cleanup = makeCleanup(credential, authorization: authorization, api: api, library: library,
                                   credentials: environment.credentialStore())
+        var deviceIndex: DeviceIndexService?
+        if environment.usesDevicePhotos {
+            let server = library.map { library in
+                LibraryIndexIdentities(entities: library.entities, libraryChanges: { await library.sync.changes() })
+            }
+            deviceIndex = DeviceIndexService(account: credential.account.digest, reader: PhotoKitIndexReader(adapter: .shared), server: server,
+                                             backup: LegacyBackupIndexInputs(), database: PhotoKitAdapter.shared.database, presence: presence)
+        }
         return AccountRuntime(id: id, credential: credential, authorization: authorization, api: api, pipeline: pipeline,
                               library: library, libraryError: libraryError, transfers: transfers, check: check, work: work,
-                              cleanup: cleanup, device: dependencies.device, presence: presence, backupStateCopyDelay: dependencies.backupStateCopyDelay)
+                              cleanup: cleanup, deviceIndex: deviceIndex, device: dependencies.device, presence: presence,
+                              backupStateCopyDelay: dependencies.backupStateCopyDelay)
     }
 
     /// Starts the account's work once the screens show it: the warmer once the offline library is
@@ -152,6 +166,7 @@ final class AccountRuntime: Sendable {
     /// back. Then the transfers database closes. It stays on disk, whatever the reason for ending.
     func cancelAndJoin() async {
         await cleanup.shutdown()
+        await deviceIndex?.shutdown()
         if let library {
             await library.warmer.stop()
             await library.sync.shutdown()

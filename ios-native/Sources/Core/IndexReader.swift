@@ -188,16 +188,25 @@ actor IndexReader {
         return stacks
     }
 
-    /// Small identity rows for old Flutter uploads and native uploads alike. The
-    /// current server no longer syncs obsolete deviceId/deviceAssetId columns.
-    func localAssetMatches(offset: Int = 0, limit: Int = 1_000) throws -> [LocalAssetMatch] {
+    /// The identity rows of the owner's photos the timeline shows, those a phone photo may be
+    /// matched to (REBUILD_ROADMAP.md P5): not in the trash, and with timeline visibility, so a
+    /// phone copy of an archived, hidden, locked or trashed photo stays a phone photo. In ID
+    /// order, the page after `cursor`, so each page is read from the primary key. Small rows, for
+    /// old Flutter uploads and native uploads alike: the current server no longer syncs the
+    /// obsolete deviceId/deviceAssetId columns.
+    func visibleIdentities(after cursor: String?, limit: Int = 2_000) throws -> [LocalAssetMatch] {
         let rows = try database.query("""
         SELECT a.id,json_extract(a.payload,'$.checksum'),json_extract(m.payload,'$.value')
         FROM entities a LEFT JOIN entities m ON m.kind='assetMetadata' AND json_extract(m.payload,'$.assetId')=a.id AND json_extract(m.payload,'$.key')='mobile-app'
-        WHERE a.kind='asset' AND json_extract(a.payload,'$.ownerId')=?
-        ORDER BY a.id LIMIT ? OFFSET ?
-        """, [userID, String(min(max(limit, 1), 5_000)), String(max(offset, 0))])
-        return try rows.compactMap { row in
+        WHERE a.kind='asset' AND a.id>? AND json_extract(a.payload,'$.ownerId')=?
+          AND json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL
+        ORDER BY a.id LIMIT ?
+        """, [cursor ?? "", userID, String(min(max(limit, 1), 5_000))])
+        return try Self.identities(rows)
+    }
+
+    private static func identities(_ rows: [[String?]]) throws -> [LocalAssetMatch] {
+        try rows.compactMap { row in
             guard let id = row[0], let checksum = row[1] else { return nil }
             let metadata = try row[2].map { try JSONDecoder().decode([String: EntityJSON].self, from: Data($0.utf8)) } ?? [:]
             func string(_ key: String) -> String? { metadata[key]?.string }

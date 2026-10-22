@@ -332,7 +332,7 @@ import XCTest
         _ = try await store.albums()
         _ = try await store.people()
         _ = try await store.monthPlaces()
-        _ = try await store.localAssetMatches()
+        _ = try await store.visibleIdentities(after: nil)
         _ = try await store.isComplete()
         try await Self.runBackfill(store)
         XCTAssertEqual(SQLiteConnection.statementsOnMainThread.load(ordering: .relaxed), before)

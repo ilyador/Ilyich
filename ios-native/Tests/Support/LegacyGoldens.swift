@@ -216,7 +216,7 @@ enum LegacyGoldens {
 
     // MARK: Caches
 
-    static let fingerprints: [String: LocalFingerprintCache.Fingerprint] = [
+    static let fingerprints: [String: Legacy.Fingerprint] = [
         l4: .init(modified: Dates.l4, checksum: "fRFG0SH6nfZJt5SsRtJWzkOvsmk="),
         l5: .init(modified: Dates.l5, checksum: "L9ThxnotKPzthJ7hu3bnORuT6xI="),
         "7B6A5948-3726-4150-8F6E-5D4C3B2A1908/L0/001": .init(modified: nil, checksum: "qUqP5cyxm6YcTAhz05Hph5gvu9M="),
