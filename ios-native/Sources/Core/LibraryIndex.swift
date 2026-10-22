@@ -205,9 +205,10 @@ final class LibraryIndex: Sendable {
         let feed = try feed(query, includesPartners)
         return try await mapped { try await aggregate.monthPlaces(feed) }
     }
-    /// The identity rows a phone photo may be matched to, a page at a time in ID order.
-    func visibleIdentities(after cursor: String?, limit: Int = 2_000) async throws -> [LocalAssetMatch] {
-        try await mapped { try await aggregate.visibleIdentities(after: cursor, limit: limit) }
+    /// The owner's identity rows, each saying whether a phone photo may be matched to it, a page
+    /// at a time in ID order.
+    func identities(after cursor: String?, limit: Int = 2_000) async throws -> [LocalAssetMatch] {
+        try await mapped { try await aggregate.identities(after: cursor, limit: limit) }
     }
     func albums() async throws -> [Album] { try await mapped { try await aggregate.albums() } }
     func people() async throws -> [Person] { try await mapped { try await aggregate.people() } }

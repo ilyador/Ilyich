@@ -141,6 +141,56 @@ final class DeviceIndexServiceTests: XCTestCase {
         await service.shutdown()
     }
 
+    /// A favorite moves a photo in or out of the Favorites smart album, which Photos reports only
+    /// as a change to the photo.
+    func testAFavoriteMovesAPhotoInAndOutOfAFavoritesBackupAlbum() async throws {
+        let photos = FakeIndexReader()
+        photos.add(item("a", offset: 0), in: album)
+        photos.add(item("x", offset: 1), in: "elsewhere")
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(included: [album, "favorites"]))
+        let service = makeService(photos: photos, server: FakeIndexServer(rows: []), backup: backup)
+        let snapshots = listen(await service.snapshots())
+        try await until("The phone photos did not show.") { snapshots.last?.items.count == 1 }
+
+        photos.add(item("x", offset: 1, favorite: true), in: "favorites")
+        photos.emit(changed: ["x"])
+        try await until("The new favorite did not join the library.") { snapshots.last?.items["x"]?.photo.isFavorite == true }
+
+        photos.add(item("x", offset: 1), in: "elsewhere")
+        photos.leave("x", album: "favorites")
+        photos.emit(changed: ["x"])
+        try await until("The photo no longer a favorite stayed.") { snapshots.last?.items["x"] == nil }
+        XCTAssertNotNil(snapshots.last?.items["a"])
+        await service.shutdown()
+    }
+
+    /// A phone photo uploaded as a server photo the timeline doesn't show stays a phone photo and
+    /// is never hashed: the server keeps one checksum per owner, so no fingerprint could match.
+    func testPhonePhotoUploadedAsAHiddenServerPhotoIsNotHashed() async throws {
+        let photos = FakeIndexReader()
+        let uploaded = item("uploaded", offset: 0), other = item("other", offset: 2)
+        let cloud = DeviceTimelineItem(photo: LocalPhoto(id: "cloud", date: taken, modified: taken, latitude: 1, longitude: 2),
+                                       cloudID: "cloud-1", unadjusted: true)
+        for value in [uploaded, cloud, other] { photos.add(value, in: album) }
+        photos.checksums = ["uploaded": "a", "cloud": "c", "other": "k"]
+        let server = FakeIndexServer(rows: [
+            match("server-archived", checksum: "a", visible: false),
+            match("server-cloud", checksum: "c", cloudID: "cloud-1", createdAt: taken, latitude: 1, longitude: 2, visible: false),
+            match("server-kept", checksum: "k"),
+        ])
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(included: [album], receipts: [
+            "uploaded": CleanupReceipt(localID: "uploaded", revision: AssetRevision(referenceSeconds: uploaded.photo.modified!.timeIntervalSinceReferenceDate),
+                                       original: .init(id: "server-archived", checksum: "a"), motion: nil),
+        ]))
+        let service = makeService(photos: photos, server: server, backup: backup)
+        let snapshots = listen(await service.snapshots())
+        try await until("The other photo was not matched.") { snapshots.last?.associations == ["other": "server-kept"] }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(photos.hashed, ["other"], "Photos uploaded as hidden server photos are not hashed.")
+        XCTAssertEqual(Set(snapshots.last?.timeline.localOnly.values.joined().map(\.id) ?? []), ["uploaded", "cloud"])
+        await service.shutdown()
+    }
+
     func testNothingIsReadInTheBackground() async throws {
         let photos = FakeIndexReader()
         photos.add(item("a", offset: 0), in: album)
@@ -193,9 +243,9 @@ final class DeviceIndexServiceTests: XCTestCase {
     }
 
     private func match(_ id: String, checksum: String, cloudID: String? = nil, createdAt: Date? = nil,
-                       latitude: Double? = nil, longitude: Double? = nil) -> LocalAssetMatch {
+                       latitude: Double? = nil, longitude: Double? = nil, visible: Bool = true) -> LocalAssetMatch {
         LocalAssetMatch(assetID: id, checksum: checksum, cloudID: cloudID, createdAt: createdAt, adjustmentTime: nil,
-                        latitude: latitude, longitude: longitude)
+                        latitude: latitude, longitude: longitude, visible: visible)
     }
 
     private func serverAsset(_ id: String, checksum: String, visibility: String = "timeline", deleted: Bool = false) -> EntitySyncEvent {
@@ -259,6 +309,7 @@ private final class FakeIndexReader: DeviceIndexReading {
             for key in state.albums.keys { state.albums[key]?.remove(id) }
         }
     }
+    func leave(_ id: String, album: String) { state.withLock { _ = $0.albums[album]?.remove(id) } }
     var reads: [String] {
         get { state.withLock { $0.reads } }
         set { state.withLock { $0.reads = newValue } }

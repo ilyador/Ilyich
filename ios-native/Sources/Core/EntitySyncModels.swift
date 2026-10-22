@@ -143,6 +143,8 @@ struct LocalAssetMatch: Sendable {
     let adjustmentTime: Date?
     let latitude: Double?
     let longitude: Double?
+    /// The timeline shows it: not in the trash, with timeline visibility.
+    var visible = true
 }
 
 /// The server checkpoints belong to the login session, not merely to the account.
