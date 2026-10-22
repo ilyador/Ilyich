@@ -187,7 +187,6 @@ struct TrashView: View {
 /// The timeline reloads after a change made here. Trashed and restored photos keep their media;
 /// photos deleted for good lose theirs.
 @MainActor private func invalidateBrowsingCache(api: APIClient, pipeline: MediaPipeline, deleted: Set<String> = []) async {
-    await TimelineCache.shared.removeAll(scope: api.cacheScope)
     await pipeline.forget(assetIDs: deleted)
     LegacyNotificationBridge.cachesReset(scope: api.cacheScope)
 }

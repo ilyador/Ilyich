@@ -91,7 +91,6 @@ extension XCTestCase {
             await engine.shutdown()
             await pipeline.removeAll()
             await api.shutdown()
-            await TimelineCache.shared.removeAll(scope: scope)
             await TimelinePlacesCache.shared.removeAll(scope: scope)
             try? FileManager.default.removeItem(at: directory)
         }

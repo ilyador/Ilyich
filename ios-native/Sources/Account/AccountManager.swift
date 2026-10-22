@@ -392,13 +392,12 @@ actor AccountManager {
         }
     }
 
-    /// Clears the account's downloaded previews and visited timeline snapshots.
+    /// Clears the account's downloaded previews; the library reloads from the index.
     func clearBrowsingCache() async {
         await transition { manager in
             guard let runtime = manager.runtime else { return }
             let scope = runtime.api.cacheScope
             await runtime.pipeline.removeAll()
-            await TimelineCache.shared.removeAll(scope: scope)
             await LegacyNotificationBridge.cachesReset(scope: scope)
         }
     }

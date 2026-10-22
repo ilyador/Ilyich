@@ -159,7 +159,6 @@ import XCTest
         XCTAssertEqual(store.results.map(\.id), ["a", "b"])
         XCTAssertEqual(store.resetID, resetID, "Unchanged rows keep the grid where it is.")
         XCTAssertTrue(store.hasMore)
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testLibraryChangePrunesResultsWhileSearching() async throws {
@@ -183,7 +182,6 @@ import XCTest
         store.loadMore()
         try await until("The next page did not show.") { store.results.count == 3 && !store.isSearching }
         XCTAssertEqual(store.results.map(\.id), ["a", "c", "d"], "A later page can't bring the deleted photo back.")
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testARestoredPhotoComesBackWithTheNextRefresh() async throws {
@@ -203,7 +201,6 @@ import XCTest
         store.prune(change)
         await store.reload(preservingPosition: true)
         XCTAssertEqual(store.results.map(\.id), ["a", "b"], "A photo restored from Trash shows again.")
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     // MARK: - Helpers

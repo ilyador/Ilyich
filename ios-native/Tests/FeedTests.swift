@@ -14,7 +14,6 @@ import XCTest
         let store = LibraryStore(source: source, placesDelay: .zero)
         addTeardownBlock { @MainActor in
             store.stop()
-            await TimelineCache.shared.removeAll(scope: source.cacheScope)
             await TimelinePlacesCache.shared.removeAll(scope: source.cacheScope)
         }
 

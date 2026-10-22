@@ -295,7 +295,6 @@ import XCTest
 
     private func removeCachesAfterwards(_ scope: String) {
         addTeardownBlock {
-            await TimelineCache.shared.removeAll(scope: scope)
             await TimelinePlacesCache.shared.removeAll(scope: scope)
         }
     }

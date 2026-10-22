@@ -187,7 +187,6 @@ actor SyncEngine {
             try await entities.clear()
             guard isOpen else { resetting = false; return }
             moveAccessEpoch()
-            await TimelineCache.shared.removeAll(scope: scope)
             await TimelinePlacesCache.shared.removeAll(scope: scope)
             var change = LibraryChange(account: authorization.account, authorization: authorization.snapshot.epoch,
                                        indexRevision: await entities.revision, origin: .sync)
@@ -391,8 +390,6 @@ actor SyncEngine {
     /// Tells media, the screens and every observer, unless nothing changed.
     private func publish(_ change: LibraryChange, accessChanged: Bool) async {
         guard isOpen, !change.isEmpty else { return }
-        await TimelineCache.shared.removeAll(scope: scope)
-        guard isOpen else { return }
         await hub.publish(change, accessChanged: accessChanged)
         if change.configurationChanged { check.validate() }
     }
