@@ -69,9 +69,13 @@ struct WindowRequest: Hashable, Sendable {
     /// Kinds whose last request iOS turned down. They are asked for again when the app comes
     /// forward or goes to the background, or Photos changes, as BackupLifecycle asks again today.
     private var refused: Set<BackgroundWindowKind> = []
-    /// Today's message while iOS turns a window down, for the cutover to show as BackupLifecycle
-    /// does; nil once iOS takes a request again.
-    private(set) var schedulingError: String?
+    /// Today's message while iOS turns a window down, which the backup screen shows as it showed
+    /// BackupLifecycle's; nil once iOS takes a request again.
+    private(set) var schedulingError: String? {
+        didSet { if schedulingError != oldValue { schedulingErrorChanged?(schedulingError) } }
+    }
+    /// Told each time `schedulingError` changes (TransferHost, for the backup screen).
+    var schedulingErrorChanged: (@MainActor (String?) -> Void)?
     /// Reads what iOS held at launch, once.
     private var seeding: Task<[WindowRequest], Never>?
     private var seeded = false

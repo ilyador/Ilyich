@@ -33,8 +33,15 @@ final class TransferEngineFenceTests: XCTestCase {
         await h.tearDown()
     }
 
+    /// Read-only mode stops uploads at once and does what the toggle always did: backup pauses,
+    /// switching automatic backup off. Turning it off lifts the block and resumes nothing, so
+    /// backup stays paused until it is started again (the owner's decision), while the user's own
+    /// uploads are taken again.
     func testReadOnlyStopsSubmission() async throws {
         let h = try await TransferEngineHarness()
+        var automatic = TransferPreferences(Legacy.BackupPreferences())
+        automatic.automatic = true
+        try await h.store.savePreferences(automatic)
         let gate = TransferGate()
         h.executor.script("a", .hold(gate), .succeed)
         _ = try await h.engine.enqueue([h.photo("a")])
@@ -49,25 +56,55 @@ final class TransferEngineFenceTests: XCTestCase {
         XCTAssertTrue(h.executor.submitted.isEmpty, "The job checks its lease before it submits, and stops.")
         let saved = try await h.store.engineState()
         XCTAssertEqual(saved?.blocker, "readOnly", "The block is kept across launches.")
+        XCTAssertEqual(saved?.intent, .paused, "Backup pauses with it, as the toggle always paused it.")
+        let preferences = try await h.store.preferences()
+        XCTAssertEqual(preferences?.automatic, false, "Automatic backup goes off, as the toggle always switched it off.")
         let refused = try await h.engine.enqueue([h.photo("b")])
         XCTAssertEqual(refused, .refused(.readOnly))
-
-        // Read-only off is an automatic trigger: the block stays until the user acts, as
-        // BackupCoordinator's pause does today.
-        h.authorization.setReadOnly(false)
-        try await Task.sleep(for: .milliseconds(100))
-        let stillBlocked = await h.engine.currentSnapshot.phase
-        XCTAssertEqual(stillBlocked, .blocked(.readOnly))
         await h.engine.conditionsChanged()
         let afterConditions = await h.engine.currentSnapshot.phase
         XCTAssertEqual(afterConditions, .blocked(.readOnly), "A condition event never lifts an account block.")
-        XCTAssertEqual(h.executor.calls("a"), 1)
 
-        try await h.engine.setIntent(.automatic)
-        try await untilTransfers("The user's command resumes the job.") { try await h.confirmed("a") }
-        XCTAssertEqual(h.executor.submitted, ["a"])
+        h.authorization.setReadOnly(false)
+        await untilTransfers("Turning read-only mode off lifts its block.") { await h.engine.currentSnapshot.phase != .blocked(.readOnly) }
+        try await Task.sleep(for: .milliseconds(100))
+        let resting = await h.engine.currentSnapshot
+        XCTAssertEqual(resting.intent, .paused, "Backup stays paused until it is started again.")
+        XCTAssertEqual(h.executor.calls("a"), 1, "Nothing resumes by itself.")
         let cleared = try await h.store.engineState()
         XCTAssertNil(cleared?.blocker)
+        let accepted = try await h.engine.enqueue([h.photo("b")])
+        XCTAssertEqual(accepted, .queued(1), "The user's own uploads are taken again.")
+
+        try await h.engine.setIntent(.automatic)
+        try await untilTransfers("The user's command resumes the jobs.") { try await h.allConfirmed("a", "b") }
+        XCTAssertEqual(Set(h.executor.submitted), ["a", "b"])
+        await h.tearDown()
+    }
+
+    /// Read-only mode stops shared uploads too, as the toggle always stopped them: their jobs go and
+    /// their files stay in the inbox, so turning it off uploads nothing until the user asks again.
+    func testReadOnlyStopsSharedUploads() async throws {
+        let h = try await TransferEngineHarness()
+        let gate = TransferGate()
+        let batch = UUID()
+        let held = TransferSource.shared(batch: batch, attachment: "held"), next = TransferSource.shared(batch: batch, attachment: "next")
+        h.executor.script(held.key, .hold(gate))
+        _ = try await h.engine.enqueue([held, next].map { TransferRequest(source: $0, origin: .shareApproval, batch: batch) })
+        try await h.engine.start()
+        await untilTransfers("The first file is about to submit.") { gate.waiting == 1 }
+
+        h.authorization.setReadOnly(true)
+        await untilTransfers("Read-only blocks the engine.") { await h.engine.currentSnapshot.phase == .blocked(.readOnly) }
+        try await untilTransfers("The shared uploads stop.") { try await h.store.queuePage(lane: .share, after: nil, limit: 10).isEmpty }
+        gate.open()
+        h.authorization.setReadOnly(false)
+        await untilTransfers("Turning read-only mode off lifts its block.") { await h.engine.currentSnapshot.phase != .blocked(.readOnly) }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(h.executor.submitted.isEmpty, "Nothing resumes.")
+        let again = try await h.engine.enqueue([TransferRequest(source: next, origin: .shareApproval, batch: batch)])
+        XCTAssertEqual(again, .queued(1))
+        await untilTransfers("The file the user uploads again goes.") { h.executor.submitted == [next.key] }
         await h.tearDown()
     }
 
@@ -83,9 +120,12 @@ final class TransferEngineFenceTests: XCTestCase {
         XCTAssertEqual(job.retryCount, 0, "The refusal is not counted against the photo.")
         XCTAssertNil(job.errorClass)
         XCTAssertNotEqual(job.state, .failed)
+        // Read-only mode is off by now: the block it left doesn't refuse the user's own upload.
+        let accepted = try await h.engine.enqueue([h.photo("b")])
+        XCTAssertEqual(accepted, .queued(1))
 
         try await h.engine.setIntent(.automatic)
-        try await untilTransfers("The user's command resumes the job.") { try await h.confirmed("a") }
+        try await untilTransfers("The user's command resumes the jobs.") { try await h.allConfirmed("a", "b") }
         await h.tearDown()
     }
 

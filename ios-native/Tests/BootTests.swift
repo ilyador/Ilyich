@@ -216,6 +216,32 @@ import XCTest
         XCTAssertEqual(again.outcome, .unchanged, "It merges once.")
     }
 
+    /// BM8, after a rollback and re-upgrade: the older build's state.json lists every photo
+    /// backed up before the cutover too. A photo the engine queued again since (an edit, Back up
+    /// selected) keeps its job, since that build confirmed nothing newer of it; an album add for a
+    /// photo with a job waits for that upload's copy rather than the one its receipt names.
+    func testAMergeKeepsWhatTheEngineQueuedSinceTheCutover() async throws {
+        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()))
+        addTeardownBlock { await h.tearDown() }
+        let imported = try await h.imported()
+        XCTAssertEqual(imported.outcome, .imported)
+        // l2 was backed up before the cutover; edited since, it is queued again.
+        _ = try await h.store.enqueue([TransferRequest(source: .photo(DeviceAssetID(rawValue: G.l2)), origin: .selection)])
+
+        // The older build didn't upload l2; it added it to an album.
+        var older = Self.pausedGolden()
+        older.pendingAlbumAdds?[G.l2] = [G.otherServerAlbum]
+        try h.writeState(JSONEncoder().encode(older))
+        let merge = try await h.imported()
+        XCTAssertEqual(merge.outcome, .merged)
+        let job = try await h.store.job(lane: .library, sourceKey: G.l2)
+        XCTAssertEqual(job?.state, .queued, "The edit queued since the cutover is still backed up.")
+        let destinations = try await h.store.albumDestinations()
+        let add = destinations.first { $0.localID == G.l2 && $0.albumID == G.otherServerAlbum }
+        XCTAssertNotNil(add)
+        XCTAssertNil(add?.remoteID, "The album gets the copy l2's upload makes, not the one from before the edit.")
+    }
+
     /// Cleanup removals Photos committed before the cutover were kept only in the device journal:
     /// each marks its receipt when the receipt is still of the revision removed.
     func testCleanupRemovalsBeforeTheCutoverMarkTheirReceipts() async throws {
@@ -269,6 +295,96 @@ import XCTest
         await untilTransfers("The run ends with nothing left.") { await h.engine.currentSnapshot.intent == .paused }
         await untilTransfers("Its windows go.") { scheduler.plans.last == SchedulePlan.none }
         await h.tearDown()
+    }
+
+    /// A manual run whose last photo iOS finished while the app was gone ends once recovery
+    /// commits it after the relaunch, as one this process ran does: with automatic backup off it
+    /// pauses, and its windows go.
+    func testAManualRunEndsWhenRecoveryCommitsItsLastPhoto() async throws {
+        let scheduler = RecordingWindowScheduler()
+        let h = try await TransferEngineHarness(scheduler: scheduler)
+        try await h.store.savePreferences(TransferPreferences(Legacy.BackupPreferences()))
+        _ = try await h.store.enqueue([h.photo("a")])
+        // The photo's upload is with iOS, from the process before.
+        let job = try await h.requireJob("a")
+        let token = UUID()
+        _ = try await h.store.lease(job: job.id, token: token)
+        _ = try await h.store.advance(job: job.id, token: token, to: .submitted, phase: "original")
+        try await h.store.release(job: job.id, token: token)
+        try await h.store.saveEngineState(intent: .manual, blocker: nil, lastMessage: nil)
+        try await h.engine.start()
+        await untilTransfers("The run asks for windows while it waits.") { scheduler.plans.last == .automatic(requireCharging: false, triggerDelay: 30) }
+        let waiting = await h.engine.currentSnapshot.intent
+        XCTAssertEqual(waiting, .manual, "The run waits for its last photo.")
+
+        // Recovery applies the outcome iOS kept, then tells the engine.
+        let revision = AssetRevision(referenceSeconds: 700_000_000.25)
+        let committed = try await h.store.complete(TransferCompletion(job: job.id, lease: nil, localID: "a", revision: revision, assetID: "asset-a",
+                                                                      receipt: nil, confirmedAt: Date()))
+        XCTAssertTrue(committed)
+        await h.engine.refresh()
+        await untilTransfers("The run ends with nothing left.") { await h.engine.currentSnapshot.intent == .paused }
+        let saved = try await h.store.engineState()
+        XCTAssertEqual(saved?.intent, .paused)
+        await untilTransfers("Its windows go.") { scheduler.plans.last == SchedulePlan.none }
+        await h.tearDown()
+    }
+
+    /// Back up selected and a share's Upload, for a file whose upload failed, retry it, as they
+    /// always did; a discovery pass leaves a failed photo for the user.
+    func testAskingAgainForAFailedFileRetriesIt() async throws {
+        let h = try await TransferEngineHarness()
+        h.executor.script("a", .fail { TransferItemFailure.rejected("Unsupported file type") })
+        let selected = TransferRequest(source: .photo(DeviceAssetID(rawValue: "a")), origin: .selection)
+        _ = try await h.engine.enqueue([selected])
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        try await untilTransfers("The photo fails.") { try await h.job("a")?.state == .failed }
+        let found = try await h.store.enqueue([h.photo("a")])
+        XCTAssertEqual(found.queued, 0, "Discovery leaves a failed photo for the user.")
+        let failed = try await h.requireJob("a")
+        XCTAssertEqual(failed.state, .failed)
+        let again = try await h.engine.enqueue([selected])
+        XCTAssertEqual(again, .queued(1))
+        try await untilTransfers("Back up selected retries it.") { try await h.confirmed("a") }
+
+        // The same for a shared file, with the engine stopped so that only the store acts.
+        await h.engine.stop()
+        let share = TransferRequest(source: .shared(batch: UUID(), attachment: "IMG_0001.JPG"), origin: .shareApproval)
+        _ = try await h.store.enqueue([share])
+        let shared = try await h.store.job(lane: .share, sourceKey: share.source.key)
+        let shareJob = try XCTUnwrap(shared)
+        let token = UUID()
+        _ = try await h.store.lease(job: shareJob.id, token: token)
+        _ = try await h.store.markFailed(job: shareJob.id, token: token, message: "The server rejected it.", at: Date())
+        let retried = try await h.store.enqueue([share])
+        XCTAssertEqual(retried.queued, 1, "Upload in Shared files retries a file that failed.")
+        let requeued = try await h.store.job(lane: .share, sourceKey: share.source.key)
+        XCTAssertEqual(requeued?.state, .queued)
+        XCTAssertNil(requeued?.errorMessage)
+        await h.tearDown()
+    }
+
+    /// The backup screen lists the phone's failed photos only, as it always did, beside its
+    /// Remaining count; a shared file's failure shows in Shared files, from the share lane's queue.
+    func testTheScreensListEachLanesFailuresWhereTheyAlwaysDid() async throws {
+        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()))
+        addTeardownBlock { await h.tearDown() }
+        _ = try await h.imported()
+        let share = TransferRequest(source: .shared(batch: UUID(), attachment: "IMG_0002.JPG"), origin: .shareApproval)
+        _ = try await h.store.enqueue([share])
+        let shared = try await h.store.job(lane: .share, sourceKey: share.source.key)
+        let shareJob = try XCTUnwrap(shared)
+        let token = UUID()
+        _ = try await h.store.lease(job: shareJob.id, token: token)
+        _ = try await h.store.markFailed(job: shareJob.id, token: token, message: "The server rejected it.", at: Date())
+        try await h.start()
+
+        let failures = try await h.runtime.backend.failures(limit: 100)
+        XCTAssertEqual(failures.map(\.source), [.photo(DeviceAssetID(rawValue: G.l3))], "The backup screen lists failed photos only.")
+        let sharePage = try await h.runtime.backend.queuePage(lane: .share, after: nil, limit: 10)
+        XCTAssertEqual(sharePage.map(\.state), [.failed])
+        XCTAssertEqual(sharePage.first?.message, "The server rejected it.", "Shared files shows the file's error.")
     }
 
     /// Signing out switches automatic backup off and pauses (as every build did), cancels the

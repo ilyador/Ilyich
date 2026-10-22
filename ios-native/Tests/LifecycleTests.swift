@@ -296,7 +296,11 @@ import XCTest
         _ = try await h.engine.enqueue([h.photo("a"), h.photo("b")])
         try await untilTransfers("Both commit.") { try await h.allConfirmed("a", "b") }
         await h.engine.conditionsChanged()
-        // Back up now, with automatic backup on: today's windows stay.
+        // Back up now, with automatic backup on and a photo still uploading: today's windows stay.
+        let gate = TransferGate()
+        h.executor.script("c", .hold(gate))
+        _ = try await h.engine.enqueue([h.photo("c")])
+        await untilTransfers("The photo uploads.") { gate.waiting == 1 }
         try await h.engine.setIntent(.manual)
         try await h.engine.setPreferences(preferences)
         try await Task.sleep(for: .milliseconds(50))
@@ -308,7 +312,11 @@ import XCTest
         // A manual run keeps asking for windows with automatic backup off (the owner's decision).
         preferences.automatic = false
         try await h.engine.setPreferences(preferences)
+        try await Task.sleep(for: .milliseconds(50))
+        let during = await h.engine.currentSnapshot.intent
+        XCTAssertEqual(during, .manual, "The run goes on while its photo uploads.")
         try await h.engine.setIntent(.paused)
+        gate.open()
         preferences.automatic = true
         try await h.engine.setPreferences(preferences)
         try await h.engine.setIntent(.automatic)
@@ -323,6 +331,9 @@ import XCTest
     func testARefusedRequestIsAskedForAgainAndReported() async {
         let scheduler = FakeTaskScheduler()
         let source = LifecycleEventSource(initial: .launch(active: false), scheduler: scheduler)
+        // The backup screen hears of each change (TransferHost passes it on).
+        var shown: [String?] = []
+        source.schedulingErrorChanged = { shown.append($0) }
         XCTAssertTrue(source.register())
         await source.schedule(.automatic(requireCharging: false, triggerDelay: 30))
         XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing, .refresh])
@@ -330,6 +341,7 @@ import XCTest
         scheduler.answer(.refresh, "Background App Refresh is off")
         XCTAssertEqual(source.schedulingError,
                        "iOS could not schedule automatic backup: Background App Refresh is off. You can still use Back up now.")
+        XCTAssertEqual(shown, [source.schedulingError])
 
         source.photoLibraryChanged()
         XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing, .refresh, .refresh], "Only the refused request is asked for again.")
@@ -338,6 +350,8 @@ import XCTest
         XCTAssertEqual(scheduler.submitted.count, 3, "A request iOS has not answered is not replaced.")
         scheduler.answer(.refresh, nil)
         XCTAssertNil(source.schedulingError, "iOS took the request.")
+        XCTAssertEqual(shown.count, 2)
+        XCTAssertNil(shown.last ?? "not told", "The screen hears it was taken.")
         source.applicationEnteredBackground()
         source.photoLibraryChanged()
         XCTAssertEqual(scheduler.submitted.count, 3, "Nothing more is asked for.")

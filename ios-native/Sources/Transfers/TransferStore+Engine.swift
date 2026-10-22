@@ -57,7 +57,9 @@ extension TransferStore {
     /// A request with an album adds the album to the photo's destinations (B4): one already
     /// backed up joins it with the server ID of its receipt for that revision, the rest once their
     /// upload commits. A job
-    /// with a notification batch counts in the batch's total.
+    /// with a notification batch counts in the batch's total. A request the user made (Back up
+    /// selected, Upload to album, a share's Upload) for a file whose job failed queues that job
+    /// again, and counts as queued.
     func enqueue(_ requests: [TransferRequest]) throws -> (queued: Int, alreadyBackedUp: Int) {
         let db = try database()
         return try db.transaction {
@@ -114,6 +116,18 @@ extension TransferStore {
                             failed=CASE WHEN terminal_posted=1 THEN NULL ELSE failed END,terminal_posted=0
                             """, [.text(batch.uuidString), .text(NotificationBatchKind(lane).rawValue)])
                     }
+                } else if Self.userOrigins.contains(request.origin) {
+                    // The user asked for a file whose job failed: it is retried, as uploading it
+                    // again always did (requeueFailed). A job still queued or running stays as it is.
+                    let match = "SELECT id FROM jobs WHERE lane=? AND source_key=? AND state='failed' AND lease_token IS NULL"
+                    let arguments: [TransferSQLite.Value] = [.text(lane.rawValue), .text(request.source.key)]
+                    if lane == .library { try Self.dropStages(db, ofJobsIn: match, arguments) }
+                    try Self.reopenNotificationBatches(db, ofJobsIn: match, arguments)
+                    try db.run("""
+                        UPDATE jobs SET state='queued',retry_count=0,not_before=NULL,error_class=NULL,error_message=NULL,error_at=NULL \
+                        WHERE id IN (\(match))
+                        """, arguments)
+                    if db.changes > 0 { queued += 1 }
                 }
                 if let album, case .photo(let id) = request.source {
                     try Self.addDestination(db, localID: id.rawValue, album: album, remoteID: nil)
@@ -122,6 +136,9 @@ extension TransferStore {
             return (queued, backedUp)
         }
     }
+
+    /// The origins of the requests the user makes, which retry a failed job.
+    static let userOrigins: Set<JobOrigin> = [.selection, .albumUpload, .shareApproval]
 
     /// The photo is to join the album: pending, with the server ID when it is known. A destination
     /// that failed is tried again; a pending one keeps the server ID it has.
@@ -265,6 +282,20 @@ extension TransferStore {
         }
     }
 
+    /// Removes the lane's jobs that haven't failed, as stopping its uploads does (removeJobs); a
+    /// failed one stays, with its message, for the user.
+    @discardableResult
+    func removeUnfailedJobs(lane: TransferLane) throws -> Int {
+        let db = try database()
+        return try db.transaction {
+            let match = "SELECT id FROM jobs WHERE lane=? AND state<>'failed'"
+            try db.run("DELETE FROM attempts WHERE job_id IN (\(match))", [.text(lane.rawValue)])
+            try db.run("DELETE FROM stages WHERE job_id IN (\(match))", [.text(lane.rawValue)])
+            try db.run("DELETE FROM jobs WHERE lane=? AND state<>'failed'", [.text(lane.rawValue)])
+            return db.changes
+        }
+    }
+
     /// Commits a finished share job while its lease holds: the job goes, its attachment is
     /// recorded as consumed and its notification batch counts it, in one transaction. The
     /// manifest is rewritten after the commit (ShareJobExecutor.committed), and again from
@@ -330,11 +361,14 @@ extension TransferStore {
         return page
     }
 
-    /// Failed jobs of both lanes, the latest failure first.
-    func failures(limit: Int) throws -> [TransferQueueItem] {
+    /// Failed jobs of `lane`, or of both lanes for nil, the latest failure first.
+    func failures(lane: TransferLane? = nil, limit: Int) throws -> [TransferQueueItem] {
         var page: [TransferQueueItem] = []
-        try database().run("SELECT \(Self.jobColumns) FROM jobs WHERE state='failed' ORDER BY error_at DESC,id LIMIT ?",
-                           [.integer(Int64(max(limit, 1)))]) { row in
+        // A lane's reads its index (jobs_order) rather than every job.
+        let (filter, arguments): (String, [TransferSQLite.Value]) = if let lane { ("lane=? AND state='failed'", [.text(lane.rawValue)]) }
+            else { ("state='failed'", []) }
+        try database().run("SELECT \(Self.jobColumns) FROM jobs WHERE \(filter) ORDER BY error_at DESC,id LIMIT ?",
+                           arguments + [.integer(Int64(max(limit, 1)))]) { row in
             if let job = Self.storedJob(row) { page.append(job.item) }
         }
         return page

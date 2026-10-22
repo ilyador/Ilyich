@@ -58,15 +58,16 @@ extension TransferStore {
         return try meta().engine == .transfer
     }
 
-    // MARK: The backup screen's queue
+    // MARK: The screens' queues
 
-    /// The library lane's jobs in queue order, failed ones included with their message, as the
-    /// upload queue always listed them, after the job whose seq is `after`.
-    func backupQueuePage(after seq: Int64?, limit: Int) throws -> [TransferQueueItem] {
+    /// A lane's jobs in queue order, failed ones included with their message, after the job
+    /// whose seq is `after`: the upload queue always listed failed photos, and the Shared files
+    /// sheet shows each file's error beside it.
+    func listedQueuePage(lane: TransferLane, after seq: Int64?, limit: Int) throws -> [TransferQueueItem] {
         var page: [TransferQueueItem] = []
         try database().run("""
-            SELECT \(Self.jobColumns) FROM jobs WHERE lane='library' AND seq>? ORDER BY seq,id LIMIT ?
-            """, [.integer(seq ?? -1), .integer(Int64(max(limit, 1)))]) { row in
+            SELECT \(Self.jobColumns) FROM jobs WHERE lane=? AND seq>? ORDER BY seq,id LIMIT ?
+            """, [.text(lane.rawValue), .integer(seq ?? -1), .integer(Int64(max(limit, 1)))]) { row in
             if let job = Self.storedJob(row) { page.append(job.item) }
         }
         return page
@@ -80,11 +81,18 @@ extension TransferStore {
     /// did is either:
     /// - confirmations and receipts it has that the database doesn't are added; one both have is
     ///   replaced only when its receipt is newer (confirmed later);
+    /// - a job of a photo it confirmed after the cutover, a revision newer than the database's
+    ///   confirmation, is done; a confirmation the database already had, or an older one, is the
+    ///   file the cutover imported, so a job queued since (an edit, Back up selected) stays;
     /// - photos still in its queue that the database neither confirmed nor has a job for join the
     ///   end of the queue;
-    /// - album adds and linked albums it has that the database doesn't are added;
-    /// - preferences, the run intent, stages and the notification batch stay the database's: the
-    ///   engine's are newer, and that build's stages are swept once no task holds them.
+    /// - album adds and linked albums it has that the database doesn't are added; an add whose
+    ///   photo has a job waits for that upload's server ID, as the import's do;
+    /// - preferences, the run intent, stages and the notification batch stay the database's.
+    ///   That build rewrites the preferences it read from the file the cutover left, so a
+    ///   difference may be a change made on either side, and nothing says which came later:
+    ///   keeping the database's never undoes one made since the cutover. That build's stages are
+    ///   swept once no task holds them.
     /// Then the digest is recorded, so the same file merges once.
     func mergeLegacy(_ plan: LegacyBackupPlan, digest: String, at date: Date) throws -> LegacyMerge {
         let db = try database()
@@ -98,6 +106,8 @@ extension TransferStore {
             try db.run("SELECT local_id,modification_date FROM confirmations") { row in
                 if let id = row.text(0) { confirmed[id] = row.real(1) }
             }
+            // What the database had confirmed before this merge.
+            let confirmedBefore = confirmed
             for (index, (localID, receipt)) in plan.receipts.enumerated() {
                 if index % 4_096 == 0 { try Task.checkCancellation() }
                 let theirs = receipt.confirmedAt?.timeIntervalSinceReferenceDate
@@ -124,11 +134,17 @@ extension TransferStore {
                 confirmed[localID] = modified.timeIntervalSinceReferenceDate
                 merge.confirmations += db.changes
             }
-            // A photo it confirmed that the database still queues is done: its job goes, unless a
-            // lease holds it or its upload is with the transport.
+            // A photo it confirmed after the cutover that the database still queues is done: its
+            // job goes, unless a lease holds it or its upload is with the transport. The job was
+            // queued before that build ran, so what it uploaded is at least as new.
             var queuedKeys = Set<String>()
             try db.run("SELECT source_key FROM jobs WHERE lane='library'") { row in if let key = row.text(0) { queuedKeys.insert(key) } }
-            for localID in plan.confirmations.map(\.0) where queuedKeys.contains(localID) {
+            for (localID, modified) in plan.confirmations where queuedKeys.contains(localID) {
+                switch confirmedBefore[localID] {
+                case nil: break
+                case .some(let mine?) where modified.timeIntervalSinceReferenceDate > mine: break
+                default: continue
+                }
                 try db.run("""
                     DELETE FROM attempts WHERE job_id IN (SELECT id FROM jobs WHERE lane='library' AND source_key=? AND lease_token IS NULL \
                     AND state NOT IN ('submitting','submitted','finalizing'))
@@ -150,9 +166,15 @@ extension TransferStore {
                            [.text(job.localID), .text(JobOrigin.legacy.rawValue), .integer(last + 1)])
                 if db.changes > 0 { last += 1; merge.queued += 1 }
             }
+            var withJobs = Set<String>()
+            try db.run("SELECT source_key FROM jobs WHERE lane='library'") { row in if let key = row.text(0) { withJobs.insert(key) } }
             for destination in plan.destinations {
+                // A photo with a job joins the album with the copy that upload makes; its
+                // receipt names the copy from before.
                 var remote: String?
-                try db.run("SELECT original_id FROM receipts WHERE local_id=?", [.text(destination.localID)]) { remote = $0.text(0) }
+                if !withJobs.contains(destination.localID) {
+                    try db.run("SELECT original_id FROM receipts WHERE local_id=?", [.text(destination.localID)]) { remote = $0.text(0) }
+                }
                 try db.run("INSERT OR IGNORE INTO album_destinations(local_id,album_id,remote_id,state,attempts,error) VALUES(?,?,?,'pending',0,NULL)",
                            [.text(destination.localID), .text(destination.albumID), .optionalText(remote)])
                 merge.albumAdds += db.changes
