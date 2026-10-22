@@ -6,9 +6,11 @@ import XCTest
 
 /// Phone photos and feature tiles through the thumbnail service (REBUILD_ROADMAP.md T6): Photos'
 /// caching manager follows the grid's window by diff and at the cell's size, stops on a density
-/// change, a memory warning and the background, phone photos reach the grid like server photos,
-/// one Photos cannot render waits before Photos is asked again, and a tile that knows only an ID
-/// names its photo from the library instead of the server.
+/// change, a memory warning and the background (a window asked for after the stop survives it),
+/// phone photos reach the grid like server photos, one Photos cannot render waits before Photos
+/// is asked again and keeps its symbol through a density change, a tile that knows only an ID
+/// names its photo from the library instead of the server, asks for its size in a few rising
+/// steps and shows only the photo it names.
 final class DeviceThumbnailTests: XCTestCase {
     /// Photos' caching image manager, recording every call. A photo it was given renders at the
     /// size asked, as Photos' aspect-fill does; one marked in iCloud is unavailable with that
@@ -225,10 +227,11 @@ final class DeviceThumbnailTests: XCTestCase {
         XCTAssertEqual(imaging.stopped, [], "Stopping everything at once stops nothing one by one.")
     }
 
-    /// A memory warning while a window waits its turn on the source's queue: the window started
-    /// after the warning was posted is stopped with everything else, and the source knows it, so
-    /// the next window starts from nothing instead of only its newcomers.
-    func testAWindowStartedBeforeAClearIsWorkedInIsKnownToBeStopped() async throws {
+    /// A memory warning while windows wait their turn on the source's queue: the stop is worked
+    /// in where it was asked for, so the window the grid asks for after the warning is started
+    /// after the stop, from nothing, instead of being started by work queued before the warning
+    /// and then wiped by the stop, with nothing to start it again until the grid scrolls.
+    func testAWindowAskedForAfterAClearIsStartedAfterIt() async throws {
         let imaging = FakeImaging(photos: ["a", "b", "c", "d"], holdsFirstStart: true)
         let notifications = NotificationCenter()
         let source = DeviceThumbnailSource(imaging: imaging, notifications: notifications)
@@ -237,19 +240,21 @@ final class DeviceThumbnailTests: XCTestCase {
         try await until("The first window was not started.") { imaging.started.count == 1 }
 
         // Photos holds the first start, so these line up behind it on the queue in this order:
-        // the second window, the warning's stop, and a third window that only replaces the second.
+        // the second window, the warning's stop, and the third window the grid asks for after it.
         source.preheat(ids("a", "b"), pixels: 128)
         notifications.post(name: DeviceThumbnailSource.memoryWarning, object: nil)
         source.preheat(ids("a", "b", "c"), pixels: 128)
         imaging.release()
-        try await until("The memory warning did not stop Photos.") { imaging.stoppedAll == 1 }
-        XCTAssertEqual(imaging.started.count, 2, "The window queued before the warning was started…")
-        XCTAssertTrue(source.cachedWindow.isEmpty, "…and is known to be stopped with the rest.")
+        try await until("The window asked for after the warning was not started.") { imaging.started.count == 2 }
+        XCTAssertEqual(imaging.stoppedAll, 1, "The warning stopped Photos once, before the window asked for after it…")
+        XCTAssertEqual(imaging.started.last, .init(ids: ["a", "b", "c"], pixels: 128),
+                       "…which starts from nothing; the window queued before the warning went with the stop.")
+        XCTAssertEqual(source.cachedWindow, ids("a", "b", "c"), "Photos caches what the grid asked for after the warning.")
 
         source.preheat(ids("a", "b", "c", "d"), pixels: 128)
         try await until("The next window was not started.") { imaging.started.count == 3 }
-        XCTAssertEqual(imaging.started.last, .init(ids: ["a", "b", "c", "d"], pixels: 128), "The next window starts from nothing.")
-        XCTAssertEqual(source.cachedWindow, ids("a", "b", "c", "d"))
+        XCTAssertEqual(imaging.started.last, .init(ids: ["d"], pixels: 128), "The next window adds only what came in.")
+        XCTAssertEqual(imaging.stopped, [], "Stopping everything at once stops nothing one by one.")
     }
 
     // MARK: - Deliveries
@@ -332,6 +337,46 @@ final class DeviceThumbnailTests: XCTestCase {
         scheduler.withdraw(grid)
     }
 
+    /// A phone photo Photos cannot render shows the iCloud symbol in its cell. Pinching to another
+    /// density binds the cell to the same photo at the new size; the cell keeps the symbol until
+    /// Photos is asked again once the wait is over, instead of going dark with no symbol for the
+    /// length of the wait.
+    @MainActor func testADensityChangeKeepsTheFailureACellShows() async throws {
+        let imaging = FakeImaging(photos: [], inCloud: ["cloud"])
+        let api = try APIClient(baseURL: XCTUnwrap(URL(string: "https://media.example")), accessToken: "density-session",
+                                userID: "density-" + UUID().uuidString)
+        let pipeline = MediaPipeline(client: api, device: DeviceThumbnailSource(imaging: imaging, notifications: NotificationCenter()))
+        addTeardownBlock { await pipeline.removeAll() }
+        let binder = ThumbnailBinder(pipeline: pipeline)
+        let cell = PhotoCell(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let photo = LocalPhoto(id: "cloud", date: Date(timeIntervalSinceReferenceDate: 700_000_000),
+                               modified: Date(timeIntervalSinceReferenceDate: 700_000_000))
+        /// The status symbol's image view; the photo itself draws into a plain view's layer.
+        func symbol() -> UIImage? { cell.contentView.subviews.lazy.compactMap { ($0 as? UIImageView)?.image }.first }
+        XCTAssertTrue(binder.bind(cell, toDevice: photo, shortSide: 128))
+        binder.submit(viewport: cell.frame, ahead: [], shortSide: 128, motion: .idle(since: 0))
+        try await untilOnMain("The failure was not shown.") { cell.binding?.stage == .failed }
+        XCTAssertNotNil(symbol(), "The cell says Photos holds the photo only in iCloud.")
+        XCTAssertEqual(cell.accessibilityLabel, "Preview unavailable, \(photo.title)")
+
+        // Fewer, larger cells: the same photo at a larger size.
+        XCTAssertTrue(binder.bind(cell, toDevice: photo, shortSide: 200), "The cell still needs its thumbnail.")
+        XCTAssertEqual(cell.binding?.stage, .failed, "A density change keeps the failure the cell shows.")
+        XCTAssertEqual(cell.binding?.shortSide, 200)
+        XCTAssertNotNil(symbol(), "The symbol stays until Photos is asked again.")
+        XCTAssertEqual(cell.accessibilityLabel, "Preview unavailable, \(photo.title)")
+        XCTAssertFalse(cell.showsThumbnail)
+        withExtendedLifetime(binder) {}
+    }
+
+    @MainActor private func untilOnMain(_ message: String, _ condition: @MainActor () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail(message) }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     /// Without a device source, as in a build that leaves the phone's photos out, phone photos in
     /// a demand are left alone and server photos are served as before.
     func testWithoutADeviceSourcePhonePhotosAreLeftAlone() async throws {
@@ -392,5 +437,58 @@ final class DeviceThumbnailTests: XCTestCase {
         XCTAssertEqual(tilePixels(CGSize(width: 244, height: 56), scale: 3), 732, "The shelf row's cover covers its width.")
         XCTAssertEqual(tilePixels(CGSize(width: 56, height: 56), scale: 3), 168)
         XCTAssertEqual(tilePixels(CGSize(width: 38, height: 38), scale: 3), 128, "No less than the grid's smallest cell.")
+    }
+
+    /// A tile whose frame follows the finger, as a shelf row's does from 64 to 244 points and
+    /// back, asks for its thumbnail a few times on the way up and never on the way back, instead
+    /// of on every frame of the wave: the size asked for doubles and never falls.
+    @MainActor func testATileThatFollowsTheFingerAsksAFewTimesAndNeverOnTheWayBack() {
+        var tile = FeatureTileImage(assetID: "cover", cached: nil)
+        var asked: [Int] = []
+        let widths = Array(stride(from: CGFloat(64), through: 244, by: 0.5))
+        for width in widths + widths.reversed() {
+            // The row grows wider and a little lower as the finger nears it.
+            let size = CGSize(width: width, height: 56 - 6 * (width - 64) / 180)
+            let pixels = tileRequest(size, scale: 3, atLeast: tile.requested)
+            if pixels != asked.last { asked.append(pixels) }
+            tile.begin(assetID: "cover", pixels: pixels, cached: nil)
+        }
+        XCTAssertEqual(asked, [256, 512, 1024], "Three asks for a wave over the row, none on the way back.")
+        XCTAssertEqual(tile.requested, 1024)
+        XCTAssertEqual(tileRequest(CGSize(width: 38, height: 38), scale: 3, atLeast: 0), 128, "No less than the grid's smallest cell.")
+        XCTAssertEqual(tileRequest(CGSize(width: 56, height: 56), scale: 3, atLeast: 0), 256)
+    }
+
+    /// The image a tile shows is of the photo it names: a new cover replaces the old one at once,
+    /// with its copy in memory or nothing, and a failure to load it shows as such instead of the
+    /// old cover staying on; a sharper copy of the same photo that fails to load leaves the one on
+    /// screen, with nothing to report.
+    @MainActor func testATilesImageIsOfThePhotoItNames() {
+        let first = UIImage(), second = UIImage()
+        var tile = FeatureTileImage(assetID: "a", cached: nil)
+        tile.begin(assetID: "a", pixels: 256, cached: nil)
+        tile.loaded(first, of: "a")
+        XCTAssertTrue(tile.image === first)
+
+        // The same photo at a larger size: what shows stays while the sharper copy comes, and after it fails.
+        tile.begin(assetID: "a", pixels: 512, cached: nil)
+        XCTAssertTrue(tile.image === first)
+        tile.failedToLoad()
+        XCTAssertTrue(tile.image === first)
+        XCTAssertFalse(tile.failed, "The photo shows; there is nothing to report.")
+
+        // The tile's photo changes: the old image goes at once, and a late arrival of it is dropped.
+        tile.begin(assetID: "b", pixels: 512, cached: nil)
+        XCTAssertNil(tile.image)
+        tile.loaded(first, of: "a")
+        XCTAssertNil(tile.image, "A late arrival for the photo before is dropped.")
+        tile.failedToLoad()
+        XCTAssertTrue(tile.failed, "Nothing of the new photo shows: the tile says so.")
+
+        // A photo with a copy in memory shows it at once.
+        tile.begin(assetID: "c", pixels: 512, cached: second)
+        XCTAssertTrue(tile.image === second)
+        XCTAssertFalse(tile.failed)
+        XCTAssertEqual(tile.requested, 512, "The size asked for never falls.")
     }
 }

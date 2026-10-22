@@ -41,15 +41,27 @@ protocol DeviceThumbnailProviding: Sendable {
 /// started and only those that left are stopped, so a scroll costs Photos the new row, not the
 /// screen. A new cell size, a memory warning or the app going to the background stop everything;
 /// the next window after that starts again from nothing. The diff and the calls into Photos run
-/// on a serial queue of the source's own, the latest window replacing one not yet worked in.
+/// on a serial queue of the source's own, the latest window replacing one not yet worked in, and
+/// a stop is a step of that same work, ahead of the window asked for after it.
 final class DeviceThumbnailSource: DeviceThumbnailProviding, Sendable {
     private struct State {
         /// What Photos is caching now, and at what size.
         var window: Set<DeviceAssetID> = []
         var pixels = 0
         var next: (ids: Set<DeviceAssetID>, pixels: Int)?
+        /// Photos is to stop caching everything, before the next window if there is one.
+        var clearPending = false
         var scheduled = false
         var inBackground = false
+    }
+
+    /// One step of work: what Photos stops, then what it starts.
+    private struct Plan {
+        var stopAll = false
+        var stop: [DeviceAssetID] = []
+        var stopPixels = 0
+        var start: [DeviceAssetID] = []
+        var pixels = 0
     }
 
     private let imaging: any DeviceThumbnailImaging
@@ -85,13 +97,7 @@ final class DeviceThumbnailSource: DeviceThumbnailProviding, Sendable {
     }
 
     func preheat(_ ids: Set<DeviceAssetID>, pixels: Int) {
-        let schedule = state.withLock { state -> Bool in
-            state.next = (ids, pixels)
-            guard !state.scheduled else { return false }
-            state.scheduled = true
-            return true
-        }
-        if schedule { queue.async { [self] in work() } }
+        schedule { $0.next = (ids, pixels) }
     }
 
     func stop() { clear(background: nil) }
@@ -104,42 +110,56 @@ final class DeviceThumbnailSource: DeviceThumbnailProviding, Sendable {
     var cachedWindow: Set<DeviceAssetID> { state.withLock { $0.window } }
 
     /// Photos stops caching everything. While `background` holds, windows are not started until
-    /// the app comes forward again. The window is forgotten on the queue, in the same step that
-    /// stops Photos: a window that work already queued starts in between is stopped with the rest,
-    /// and the diff after knows it, so the next window starts from nothing.
+    /// the app comes forward again. The stop is worked in on the queue like a window: a window
+    /// already queued is started before it and stopped with the rest, and a window asked for after
+    /// it is started after it, from nothing, instead of being wiped by it and lost until the grid
+    /// scrolls again.
     private func clear(background: Bool?) {
-        state.withLock { state in
+        schedule { state in
+            state.clearPending = true
             state.next = nil
             if let background { state.inBackground = background }
         }
-        queue.async { [self] in
-            state.withLock { state in
-                state.window = []
-                state.pixels = 0
-            }
-            imaging.stopCachingAll()
+    }
+
+    /// Changes the state and queues the work once; work already queued picks the change up.
+    private func schedule(_ change: (inout State) -> Void) {
+        let schedule = state.withLock { state -> Bool in
+            change(&state)
+            guard !state.scheduled else { return false }
+            state.scheduled = true
+            return true
         }
+        if schedule { queue.async { [self] in work() } }
     }
 
     private func work() {
-        let plan = state.withLock { state -> (start: [DeviceAssetID], stop: [DeviceAssetID], all: Bool, pixels: Int, before: Int)? in
+        let plan = state.withLock { state -> Plan in
             state.scheduled = false
-            guard let next = state.next else { return nil }
+            var plan = Plan()
+            if state.clearPending {
+                state.clearPending = false
+                state.window = []
+                state.pixels = 0
+                plan.stopAll = true
+            }
+            guard let next = state.next else { return plan }
             state.next = nil
-            guard !state.inBackground else { return nil }
-            let before = state.pixels
+            guard !state.inBackground else { return plan }
             // An empty window stops what is left; its size means nothing.
             let pixels = next.ids.isEmpty ? state.pixels : next.pixels
             let sizeChanged = pixels != state.pixels && !state.window.isEmpty
-            let start = sizeChanged ? next.ids : next.ids.subtracting(state.window)
-            let stop = sizeChanged ? [] : state.window.subtracting(next.ids)
+            if sizeChanged { plan.stopAll = true }
+            plan.start = (sizeChanged ? next.ids : next.ids.subtracting(state.window)).sorted { $0.rawValue < $1.rawValue }
+            plan.stop = (sizeChanged ? [] : state.window.subtracting(next.ids)).sorted { $0.rawValue < $1.rawValue }
+            plan.stopPixels = state.pixels
+            plan.pixels = pixels
             state.window = next.ids
             state.pixels = pixels
-            return (start.sorted { $0.rawValue < $1.rawValue }, stop.sorted { $0.rawValue < $1.rawValue }, sizeChanged, pixels, before)
+            return plan
         }
-        guard let plan else { return }
-        if plan.all { imaging.stopCachingAll() }
-        if !plan.stop.isEmpty { imaging.stopCaching(plan.stop, pixels: plan.before) }
+        if plan.stopAll { imaging.stopCachingAll() }
+        if !plan.stop.isEmpty { imaging.stopCaching(plan.stop, pixels: plan.stopPixels) }
         if !plan.start.isEmpty { imaging.startCaching(plan.start, pixels: plan.pixels) }
     }
 }
