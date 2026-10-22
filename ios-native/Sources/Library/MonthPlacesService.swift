@@ -77,22 +77,25 @@ protocol MonthPlacesStore: Sendable {
         }
         try? await Task.sleep(for: delay)
         guard !Task.isCancelled else { return }
-        let epoch = authorization?.snapshot.epoch
+        let current = fence()
         guard let counts = try? await source.monthPlaces(query, plan: plan), !Task.isCancelled else { return }
         let places = await Task.detached(priority: .utility) { FeedPlaces(counts: counts) }.value
         guard !Task.isCancelled else { return }
-        if let epoch, let authorization, !authorization.isCurrent(epoch) {
+        if !current() {
             // Counted under access the account no longer has: dropped, and counted again.
             recount = true
             return
         }
         keep(places, for: query)
-        guard let store else { return }
-        let fence: @Sendable () -> Bool = { [authorization] in
-            guard let epoch, let authorization else { return true }
-            return authorization.isCurrent(epoch)
-        }
-        try? await store.keepMonthPlaces(counts, forKey: query.stableKey, ifCurrent: fence)
+        try? await store?.keepMonthPlaces(counts, forKey: query.stableKey, ifCurrent: current)
+    }
+
+    /// Whether the account's access is still what it is now, for what is counted or read from now
+    /// on: false once the access epoch moves or the session ends.
+    private func fence() -> @Sendable () -> Bool {
+        guard let authorization else { return { true } }
+        let epoch = authorization.snapshot.epoch
+        return { authorization.isCurrent(epoch) }
     }
 
     private func finish(_ id: UUID) {
@@ -113,7 +116,12 @@ protocol MonthPlacesStore: Sendable {
 
     private func importOnce() async {
         guard let legacy else { return }
-        if importing == nil { importing = Task.detached(priority: .utility) { await legacy.run() } }
+        if importing == nil {
+            // The files hold places counted under the access the account had before; an access
+            // change or sign-out from here on keeps none of them.
+            let current = fence()
+            importing = Task.detached(priority: .utility) { await legacy.run(ifCurrent: current) }
+        }
         await importing?.value
     }
 }
@@ -124,16 +132,27 @@ protocol MonthPlacesStore: Sendable {
 /// library's and each shelf preset's, and every person's, album's and partner's the index knows.
 /// A place's key carries its membership revision and can't be enumerated; its places are counted
 /// again when it opens. A file's trips are left out, since the rows hold places, not trips; they
-/// come back with the first count, three seconds after the feed shows.
+/// come back with the first count, three seconds after the feed shows. Wherever the earlier build
+/// deleted the files, they are still deleted unread: when access changes, before the epoch moves,
+/// and at sign-out.
 struct LegacyPlacesImport: Sendable {
     let scope: String
     /// The cache folder, Caches/IlyichTimelinePlaces, with one folder per account under it.
     let root: URL
     let index: LibraryIndex
 
+    static var liveRoot: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("IlyichTimelinePlaces", isDirectory: true)
+    }
+
     static func live(scope: String, index: LibraryIndex) -> LegacyPlacesImport {
-        let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("IlyichTimelinePlaces", isDirectory: true)
-        return LegacyPlacesImport(scope: scope, root: root, index: index)
+        LegacyPlacesImport(scope: scope, root: liveRoot, index: index)
+    }
+
+    /// Deletes the account's folder unread, and the cache folder with the last account's.
+    static func discard(scope: String, root: URL = liveRoot) {
+        try? FileManager.default.removeItem(at: root.appendingPathComponent(Legacy.sha256(scope), isDirectory: true))
+        if let rest = try? FileManager.default.contentsOfDirectory(atPath: root.path), rest.isEmpty { try? FileManager.default.removeItem(at: root) }
     }
 
     /// The feeds a file may belong to, by the hash of their keys.
@@ -156,7 +175,10 @@ struct LegacyPlacesImport: Sendable {
         }
     }
 
-    func run() async {
+    /// Imports the account's files, each kept only while `ifCurrent` says yes as it is written:
+    /// the files hold places counted under the access the account had before, so once that
+    /// changes, or the session ends, nothing more of them is kept. The folder goes either way.
+    func run(ifCurrent: @escaping @Sendable () -> Bool) async {
         let folder = root.appendingPathComponent(Legacy.sha256(scope), isDirectory: true)
         guard let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return }
         if !files.isEmpty {
@@ -164,11 +186,9 @@ struct LegacyPlacesImport: Sendable {
             for file in files where file.pathExtension == "json" {
                 guard let query = byHash[file.deletingPathExtension().lastPathComponent], let data = try? Data(contentsOf: file),
                       let places = try? Legacy.decoder().decode(Legacy.TimelinePlaces.self, from: data) else { continue }
-                try? await index.keepMonthPlaces(Self.rows(places), forKey: query.stableKey, ifCurrent: { true })
+                try? await index.keepMonthPlaces(Self.rows(places), forKey: query.stableKey, ifCurrent: ifCurrent)
             }
         }
-        try? FileManager.default.removeItem(at: folder)
-        // The folder itself goes with the last account's.
-        if let rest = try? FileManager.default.contentsOfDirectory(atPath: root.path), rest.isEmpty { try? FileManager.default.removeItem(at: root) }
+        Self.discard(scope: scope, root: root)
     }
 }

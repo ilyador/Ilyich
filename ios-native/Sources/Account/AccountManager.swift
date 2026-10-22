@@ -41,7 +41,8 @@ struct AccountState: Sendable {
 struct SignOutPolicy: Equatable, Sendable {
     /// The offline library's entities, acknowledgements and metadata.
     var clearsLibraryIndex = true
-    /// Thumbnails on disk, the URL cache and decoded images. The month places live in the index (F5).
+    /// Thumbnails on disk, the URL cache and decoded images, and the month places an earlier build
+    /// kept in Caches; the index's month places go with the library index (F5).
     var clearsMedia = true
     /// The server's custom headers, other addresses and client certificate.
     var removesNetworkSettings = true
@@ -70,6 +71,8 @@ protocol AccountDevice: Sendable {
     /// Forgets the Locked Folder PIN kept for biometric unlock.
     func removeLockedPIN(scope: String) async
     func removeNetworkSettings(server: URL) async throws
+    /// The month places an earlier build kept in Caches that the index has not imported yet (F5).
+    func clearTimelineCaches(scope: String) async
     func clearDiagnostics() async
     /// Uploads follow a read-only change.
     func readOnlyChanged(_ enabled: Bool) async
@@ -346,7 +349,10 @@ actor AccountManager {
         await device.removeLockedPIN(scope: scope)
         // 5. What the account kept on the phone, as the policy for the reason says.
         if policy.clearsLibraryIndex { await runtime.clearLibrary() }
-        if policy.clearsMedia { await runtime.pipeline.removeAll() }
+        if policy.clearsMedia {
+            await runtime.pipeline.removeAll()
+            await device.clearTimelineCaches(scope: scope)
+        }
         if policy.removesNetworkSettings, environment.usesDeviceStorage {
             do { try await device.removeNetworkSettings(server: runtime.api.baseURL) }
             catch { problem = problem ?? error.localizedDescription }

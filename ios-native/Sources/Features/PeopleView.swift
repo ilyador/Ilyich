@@ -42,8 +42,10 @@ struct PeopleView: View {
             }
         }
         .navigationTitle("People").searchable(text: $query, prompt: "Find a person")
-        .task(id: query) { await pager.start(query: query, debounce: query.isEmpty ? .zero : .milliseconds(250)) }
-        .refreshable { await pager.start(query: query) }
+        // The people shown stay, filtered here, until the server's answer replaces them, and stay
+        // when it fails.
+        .task(id: query) { await pager.start(query: query, debounce: query.isEmpty ? .zero : .milliseconds(250), keepingPeople: true) }
+        .refreshable { await pager.start(query: query, keepingPeople: true) }
         .sheet(item: $editing) { person in
             NavigationStack { PersonEditor(api: api, person: person) { updated in pager.replace(updated) } }
         }
