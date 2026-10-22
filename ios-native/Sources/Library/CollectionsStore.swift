@@ -3,9 +3,11 @@ import Foundation
 /// What the shelves show of the account's collections (REBUILD_ROADMAP.md F5): its people, its
 /// albums, the server's features and the order the owner gave people and albums. The three loads
 /// run together and each applies as it lands. The newest load wins: a slower, older load can't
-/// put back what a newer one changed, such as an album made meanwhile. A load that fails keeps
-/// what the shelves show, and is tried again when the app comes forward or the shelves open; a
-/// collection change loads again.
+/// put back what a newer one changed. An album made or left here while a load is on its way is
+/// made or left again over that load's albums when they land, since the server may have answered
+/// before it: no load drops an album made meanwhile or brings back one left. A load that fails
+/// keeps what the shelves show, and is tried again when the app comes forward or the shelves
+/// open; a collection change loads again.
 @MainActor @Observable final class CollectionsStore {
     private(set) var people: [Person] = []
     private(set) var albums: [Album] = []
@@ -20,6 +22,14 @@ import Foundation
     @ObservationIgnored private let pipeline: MediaPipeline?
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var retry: Task<Void, Never>?
+    /// The albums made or left here since the newest load began, in order, which its answer may
+    /// not know of.
+    @ObservationIgnored private var albumChanges: [AlbumChange] = []
+
+    private enum AlbumChange {
+        case created(Album)
+        case removed(String)
+    }
 
     var orderedPeople: [Person] { ShelfOrder.apply(peopleOrder, to: people, id: \.id) }
     var orderedAlbums: [Album] { ShelfOrder.apply(albumOrder, to: albums, id: \.id) }
@@ -34,6 +44,9 @@ import Foundation
     func load() async {
         let token = UUID()
         generation = token
+        // Only the albums made or left here while this load is on its way are applied again over
+        // its albums; the server held the earlier ones before it asked.
+        albumChanges = []
         peopleOrder = order.ids(.people); albumOrder = order.ids(.albums)
         async let featuresResult = try? api.serverFeatures()
         async let albumResult = try? api.albums()
@@ -41,7 +54,7 @@ import Foundation
         let loadedFeatures = await featuresResult
         if let loadedFeatures, token == generation { features = loadedFeatures }
         let loadedAlbums = await albumResult
-        if let loadedAlbums, token == generation { albums = loadedAlbums }
+        if let loadedAlbums, token == generation { albums = Self.applying(albumChanges, to: loadedAlbums) }
         let loadedPeople = await peopleResult
         guard token == generation else { return }
         if let loadedPeople { people = loadedPeople }
@@ -82,11 +95,27 @@ import Foundation
 
     /// An album made here leads the shelf, as it leads the server's list and the owner's order.
     func albumCreated(_ album: Album) {
-        albums.removeAll { $0.id == album.id }
-        albums.insert(album, at: 0)
+        albumChanges.append(.created(album))
+        albums = Self.applying([.created(album)], to: albums)
         if !albumOrder.isEmpty { saveOrder([album.id] + albumOrder.filter { $0 != album.id }, for: .albums) }
     }
 
     /// An album left or deleted goes from the shelf at once.
-    func albumRemoved(_ id: String) { albums.removeAll { $0.id == id } }
+    func albumRemoved(_ id: String) {
+        albumChanges.append(.removed(id))
+        albums = Self.applying([.removed(id)], to: albums)
+    }
+
+    private static func applying(_ changes: [AlbumChange], to albums: [Album]) -> [Album] {
+        var albums = albums
+        for change in changes {
+            switch change {
+            case .created(let album):
+                albums.removeAll { $0.id == album.id }
+                albums.insert(album, at: 0)
+            case .removed(let id): albums.removeAll { $0.id == id }
+            }
+        }
+        return albums
+    }
 }

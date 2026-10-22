@@ -23,35 +23,57 @@ import XCTest
         }
     }
 
-    /// An album made while an older load is still on its way stays on the shelf: the newer load
-    /// wins, and the older one's albums are dropped when they land.
+    /// An album made while a load is on its way stays on the shelf when that load's list, which
+    /// the server gave before the album existed, lands; an album left meanwhile does not come back;
+    /// and an older load landing after a newer one is dropped.
     func testAStaleShelfLoadCannotDropANewAlbum() async throws {
-        let held = StubServer.Gate()
         server.route("GET", "server/features", features(map: true))
         server.route("GET", "people", noPeople)
-        server.route("GET", "albums", albums(["coast"]).waiting(for: held), albums(["harbor", "coast"]))
         let store = makeStore()
-        let stale = Task { await store.load() }
-        try await until("The first load did not ask for the albums.") { held.waiting == 1 }
 
+        // Made while the only load is on its way.
+        let first = StubServer.Gate()
+        server.route("GET", "albums", albums(["coast"]).waiting(for: first))
+        let made = Task { await store.load() }
+        try await until("The load did not ask for the albums.") { first.waiting == 1 }
         store.albumCreated(album("harbor"))
         XCTAssertEqual(store.albums.map(\.id), ["harbor"])
+        first.open()
+        await made.value
+        XCTAssertEqual(store.albums.map(\.id), ["harbor", "coast"], "The load on its way cannot drop the album made meanwhile.")
+
+        // Made while an older load is on its way, with a newer load landing first.
+        let older = StubServer.Gate()
+        server.route("GET", "albums", albums(["harbor", "coast"]).waiting(for: older), albums(["reef", "harbor", "coast"]))
+        let stale = Task { await store.load() }
+        try await until("The older load did not ask for the albums.") { older.waiting == 1 }
+        store.albumCreated(album("reef"))
         await store.load()
-        XCTAssertEqual(store.albums.map(\.id), ["harbor", "coast"])
-        held.open()
+        XCTAssertEqual(store.albums.map(\.id), ["reef", "harbor", "coast"])
+        older.open()
         await stale.value
-        XCTAssertEqual(store.albums.map(\.id), ["harbor", "coast"], "The older load cannot put back the list without the new album.")
+        XCTAssertEqual(store.albums.map(\.id), ["reef", "harbor", "coast"], "The older load cannot put back the list without the new album.")
+
+        // Left while a load is on its way.
+        let leaving = StubServer.Gate()
+        server.route("GET", "albums", albums(["reef", "harbor", "coast"]).waiting(for: leaving), albums(["harbor", "coast"]))
+        let left = Task { await store.load() }
+        try await until("The load did not ask for the albums.") { leaving.waiting == 1 }
+        store.albumRemoved("reef")
+        leaving.open()
+        await left.value
+        XCTAssertEqual(store.albums.map(\.id), ["harbor", "coast"], "The load on its way cannot bring back the album left meanwhile.")
         XCTAssertFalse(store.lastLoadFailed)
 
         // The owner's order leads with an album made here, and a row moved keeps its place.
         store.saveOrder(["coast", "harbor"], for: .albums)
-        store.albumCreated(album("reef"))
-        XCTAssertEqual(store.orderedAlbums.map(\.id), ["reef", "coast", "harbor"])
+        store.albumCreated(album("lagoon"))
+        XCTAssertEqual(store.orderedAlbums.map(\.id), ["lagoon", "coast", "harbor"])
         XCTAssertTrue(store.moveRow(from: 2, to: 0, of: .albums))
-        XCTAssertEqual(store.orderedAlbums.map(\.id), ["harbor", "reef", "coast"])
-        XCTAssertEqual(defaults.stringArray(forKey: "shelfOrder.albums.\(api.cacheScope)"), ["harbor", "reef", "coast"])
+        XCTAssertEqual(store.orderedAlbums.map(\.id), ["harbor", "lagoon", "coast"])
+        XCTAssertEqual(defaults.stringArray(forKey: "shelfOrder.albums.\(api.cacheScope)"), ["harbor", "lagoon", "coast"])
         XCTAssertFalse(store.moveRow(from: 0, to: 0, of: .albums))
-        store.albumRemoved("reef")
+        store.albumRemoved("lagoon")
         XCTAssertEqual(store.orderedAlbums.map(\.id), ["harbor", "coast"])
     }
 

@@ -659,7 +659,7 @@ import XCTest
 
     /// What an ordinary sign-out records, in order.
     private static let signOutSteps = ["stopUploads", "endCasting", "removeCredential", "reloadWidgets", "clearNotifications",
-                                       "removeLockedPIN", "removeNetworkSettings", "clearDiagnostics"]
+                                       "removeLockedPIN", "clearTimelineCaches", "removeNetworkSettings", "clearDiagnostics"]
 
     private static let completeStream = #"{"type":"SyncCompleteV1","data":{},"ack":"SyncCompleteV1|done"}"# + "\n"
 
@@ -876,6 +876,7 @@ final class FakeAccountDevice: AccountDevice {
     func clearNotifications() async { log.append("clearNotifications") }
     func removeLockedPIN(scope: String) async { log.append("removeLockedPIN") }
     func removeNetworkSettings(server: URL) async throws { log.append("removeNetworkSettings") }
+    func clearTimelineCaches(scope: String) async { log.append("clearTimelineCaches") }
     func clearDiagnostics() async { log.append("clearDiagnostics") }
     func readOnlyChanged(_ enabled: Bool) async { log.append("readOnly(\(enabled))") }
 

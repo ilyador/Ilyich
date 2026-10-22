@@ -109,6 +109,60 @@ import XCTest
         XCTAssertEqual(pager.people.map(\.id), ["ann", "ben"])
     }
 
+    /// The People screen keeps the people it shows, filtering them itself, until a new query's
+    /// first page replaces them, and keeps them when that page fails, so typing, coming back and
+    /// pulling to refresh never empty it. The search filter's picker empties at once, as before.
+    func testPeoplePagerKeepsThePeopleShownUntilTheirReplacementArrives() async throws {
+        let held = StubServer.Gate()
+        server.route("GET", "people", page(["ann", "ben"], total: 3, more: true), page(["ann"], total: 1, more: false).waiting(for: held),
+                     .immichError(502, message: "Bad gateway"), page(["anya"], total: 1, more: false))
+        let pager = PeoplePager(source: api)
+        await pager.start(query: "", keepingPeople: true)
+        XCTAssertEqual(pager.people.map(\.id), ["ann", "ben"])
+
+        // A query typed over is never asked for, and changes nothing while it waits.
+        let typedOver = Task { await pager.start(query: "zz", debounce: .seconds(30), keepingPeople: true) }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(pager.isLoading)
+        typedOver.cancel(); await typedOver.value
+        XCTAssertEqual(pager.people.map(\.id), ["ann", "ben"])
+        XCTAssertEqual(pager.query, "")
+        XCTAssertEqual(server.requests("GET", "people").count, 1)
+
+        // The people stay while the new query's first page is on its way, which replaces them.
+        let typed = Task { await pager.start(query: "an", debounce: .milliseconds(20), keepingPeople: true) }
+        try await until("The new query's first page was not asked for.") { held.waiting == 1 }
+        XCTAssertEqual(pager.people.map(\.id), ["ann", "ben"], "The people shown stay while their replacement is on its way.")
+        XCTAssertTrue(pager.isLoading)
+        XCTAssertTrue(pager.hasMore)
+        held.open()
+        await typed.value
+        XCTAssertEqual(pager.people.map(\.id), ["ann"])
+        XCTAssertFalse(pager.hasMore)
+
+        // A refresh the server refuses keeps them and says why; trying again asks for the first
+        // page, which replaces them rather than joining them.
+        await pager.start(query: "an", keepingPeople: true)
+        XCTAssertEqual(pager.people.map(\.id), ["ann"], "A failed refresh keeps the people shown.")
+        XCTAssertNotNil(pager.failure)
+        XCTAssertFalse(pager.isLoading)
+        XCTAssertEqual(pager.nextPage, 1)
+        await pager.loadMore()
+        XCTAssertNil(pager.failure)
+        XCTAssertEqual(pager.people.map(\.id), ["anya"])
+        XCTAssertEqual(server.requests("GET", "people").map { $0.query.first { $0.name == "page" }?.value }, ["1", "1", "1", "1"])
+
+        // The picker's way: a new query empties the list at once.
+        let picked = StubServer.Gate()
+        server.route("GET", "people", page(["cal"], total: 1, more: false).waiting(for: picked))
+        let picking = Task { await pager.start(query: "cal") }
+        try await until("The picker's query was not asked for.") { picked.waiting == 1 }
+        XCTAssertEqual(pager.people, [], "Without keeping them, the people shown go at once.")
+        picked.open()
+        await picking.value
+        XCTAssertEqual(pager.people.map(\.id), ["cal"])
+    }
+
     // MARK: - Support
 
     /// A complete offline library with a visible person and a hidden one.

@@ -333,7 +333,7 @@ final class LegacyFormatsTests: XCTestCase {
         let importer = LegacyPlacesImport(scope: scope, root: root, index: index)
         let candidates = await importer.candidates()
         XCTAssertEqual(candidates[Legacy.sha256(LibraryQuery.person(G.person).stableKey)], LibraryQuery.person(G.person), "A person's file is found through the index's people.")
-        await importer.run()
+        await importer.run(ifCurrent: { true })
         for (query, places) in G.places {
             let rows = try await index.monthPlaces(forKey: query.stableKey)
             XCTAssertEqual(rows, LegacyPlacesImport.rows(places), "\(query.stableKey)")
@@ -352,6 +352,66 @@ final class LegacyFormatsTests: XCTestCase {
         XCTAssertTrue(shown, "The kept places show straight after launch.")
         XCTAssertEqual(service.places(of: .library)?.years[2025], "Lisbon · London")
         await counter.release()
+    }
+
+    /// The files hold places counted under the access the account had before. An import that an
+    /// access change or sign-out overtakes keeps none of them, and the account's folder goes all
+    /// the same; an access change or sign-out deletes it unread, leaving other accounts' alone.
+    @MainActor func testPlacesFilesAreKeptOnlyUnderTheAccessTheyWereCountedUnder() async throws {
+        let scope = G.account.cacheScope
+        let caches = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyFormatsTests-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: caches) }
+        let root = caches.appendingPathComponent("IlyichTimelinePlaces", isDirectory: true)
+        let folder = root.appendingPathComponent(G.digest, isDirectory: true)
+        func plant() throws {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: FixtureLoader.url("caches/IlyichTimelinePlaces/\(G.digest)"), to: folder)
+        }
+        let index = try LibraryIndex(scope: scope, userID: G.account.userID, directory: caches.appendingPathComponent("index", isDirectory: true))
+        _ = try await index.apply([SyncEvents.event("PersonV1", #"{"id":"\#(G.person)","name":"Pat","isHidden":false}"#, ack: "PersonV1|pat")],
+                                  epoch: await index.epoch())
+        func keptFeeds() async throws -> [String] {
+            var keys: [String] = []
+            for (query, _) in G.places {
+                if try await index.monthPlaces(forKey: query.stableKey) != nil { keys.append(query.stableKey) }
+            }
+            return keys
+        }
+        let authorization = AuthorizationState(account: G.account, token: "session", readOnly: false, requiresPasswordChange: false, mirror: nil)
+
+        // Access changes while the import runs.
+        try plant()
+        let before = authorization.snapshot.epoch
+        authorization.accessChanged()
+        await LegacyPlacesImport(scope: scope, root: root, index: index).run(ifCurrent: { authorization.isCurrent(before) })
+        let afterAccessChange = try await keptFeeds()
+        XCTAssertEqual(afterAccessChange, [], "Places counted under access the account no longer has are not kept.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path), "The files go all the same.")
+
+        // The service imports under the access it starts with: an import running on past sign-out keeps nothing.
+        try plant()
+        authorization.end()
+        let counter = PlacesCounter(holding: true)
+        let service = MonthPlacesService(source: counter, store: index, authorization: authorization, delay: .zero,
+                                         legacy: LegacyPlacesImport(scope: scope, root: root, index: index))
+        service.show(.library, plan: try QueryPlanner.plan(.library, context: PlannerContext(indexReadable: true)))
+        let imported = await becomesTrue { !FileManager.default.fileExists(atPath: root.path) }
+        XCTAssertTrue(imported, "The import did not run.")
+        let afterSignOut = try await keptFeeds()
+        XCTAssertEqual(afterSignOut, [], "Nothing is kept past sign-out.")
+        service.cancel()
+        await counter.release()
+
+        // Deleted unread: an account's folder goes, another account's stays, and the cache folder
+        // goes with the last account's.
+        try plant()
+        let other = root.appendingPathComponent(Legacy.sha256("https://other.example.test/api|bob"), isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        LegacyPlacesImport.discard(scope: scope, root: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: other.path), "Another account's places stay.")
+        LegacyPlacesImport.discard(scope: "https://other.example.test/api|bob", root: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
 
     /// The fingerprint file LocalFingerprintCache wrote under its hashed name moves into
