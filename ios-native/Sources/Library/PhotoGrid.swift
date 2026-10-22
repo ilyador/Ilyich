@@ -399,11 +399,14 @@ struct PhotoGrid: UIViewRepresentable {
         }
         func collectionView(_ view: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
             // A cell shown again after leaving the screen restarts the thumbnail it gave up.
-            if let cell = cell as? PhotoCell, cell.needsImage { configure(cell, at: indexPath) }
+            guard let cell = cell as? PhotoCell else { return }
+            cell.setOnScreen(true)
+            if cell.needsImage { configure(cell, at: indexPath) }
         }
         func collectionView(_ view: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
             // Cells that scrolled or scrubbed away give their place in the thumbnail queue to what is on screen.
             (cell as? PhotoCell)?.cancelImage()
+            (cell as? PhotoCell)?.setOnScreen(false)
         }
         func collectionView(_ view: UICollectionView, prefetchItemsAt paths: [IndexPath]) {
             guard !parent.store.isReplacingFeed else { return }
@@ -753,6 +756,12 @@ struct PhotoGrid: UIViewRepresentable {
     private var pending: (asset: Asset, pixels: Int, pipeline: MediaPipeline)?
     /// Times the bind to the first real thumbnail while a perf scenario runs.
     private var displayProbe = ThumbDisplayProbe()
+    /// The server photo this cell shows, and whether the cell is on screen. While both hold, its
+    /// decoded thumbnail is pinned: memory pressure and the budget evict around it.
+    private var pinTarget: (pipeline: MediaPipeline, assetID: String)?
+    private var onScreen = true
+    /// The pin held now. Read by deinit, which runs off the main actor once nothing else holds the cell.
+    private nonisolated(unsafe) var pin: (pipeline: MediaPipeline, assetID: String)?
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.backgroundColor = UIColor(white: 0.08, alpha: 1)
@@ -799,6 +808,24 @@ struct PhotoGrid: UIViewRepresentable {
         task?.cancel(); task = nil
         identity = nil; mediaID = nil; showsThumbnail = false; waitsForNetwork = false; pending = nil
         displayProbe.reset()
+        setPinTarget(nil)
+    }
+    deinit { if let pin { pin.pipeline.unpinThumbnail(pin.assetID) } }
+    /// The cell came on screen again, or left it.
+    func setOnScreen(_ visible: Bool) {
+        onScreen = visible
+        updatePin()
+    }
+    private func setPinTarget(_ target: (pipeline: MediaPipeline, assetID: String)?) {
+        pinTarget = target
+        updatePin()
+    }
+    private func updatePin() {
+        let wanted = onScreen ? pinTarget : nil
+        guard wanted?.assetID != pin?.assetID || wanted?.pipeline !== pin?.pipeline else { return }
+        if let pin { pin.pipeline.unpinThumbnail(pin.assetID) }
+        if let wanted { wanted.pipeline.pinThumbnail(wanted.assetID) }
+        pin = wanted
     }
     /// Puts a view into the cell, under any that stack above it: image, length, month, check.
     private func attach(_ view: UIView) {
@@ -961,6 +988,7 @@ struct PhotoGrid: UIViewRepresentable {
         let traits: UIAccessibilityTraits = selected ? [.button, .selected] : [.button]
         if accessibilityTraits != traits { accessibilityTraits = traits }
         if case .local(let photo) = entry {
+            setPinTarget(nil)
             accessibilityLabel = photo.title + ", on this phone"
             showBadge(photo.video ? Self.duration(Int(photo.duration * 1000)) : photo.live ? "LIVE" : nil)
             let key = "local:\(photo.id)|\(photo.modified?.timeIntervalSince1970 ?? 0)"
@@ -986,6 +1014,7 @@ struct PhotoGrid: UIViewRepresentable {
             return
         }
         let asset = entry?.remote
+        setPinTarget(asset.map { (pipeline, $0.id) })
         guard let asset else {
             task?.cancel(); identity = nil; mediaID = nil; showBadge(nil)
             show(nil, thumbnail: false, animated: false); waitsForNetwork = false; pending = nil

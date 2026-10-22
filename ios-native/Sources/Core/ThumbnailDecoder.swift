@@ -34,7 +34,7 @@ final class ThumbnailDecoder: Sendable {
     private enum Arrival { case cancelled, joined, queued, startLane }
 
     private let state = Mutex(State())
-    private let store: ThumbnailStore
+    private let store: ThumbnailDiskStore
     private let lanes: Int
     private let queue = DispatchQueue(label: "ilyich.thumbnail-decoder", qos: .userInitiated, attributes: .concurrent)
     private let decoded: @Sendable (PreparedImage, Request) -> Void
@@ -44,7 +44,7 @@ final class ThumbnailDecoder: Sendable {
 
     /// `decoded` receives every image decoded for the current generation, so prefetched photos
     /// reach memory with nobody waiting. `willDecode` lets tests watch the order.
-    init(store: ThumbnailStore, lanes: Int = 3, decoded: @escaping @Sendable (PreparedImage, Request) -> Void,
+    init(store: ThumbnailDiskStore, lanes: Int = 3, decoded: @escaping @Sendable (PreparedImage, Request) -> Void,
          willDecode: (@Sendable (MediaCacheIdentity) -> Void)? = nil) {
         self.store = store
         self.lanes = max(1, lanes)
@@ -147,7 +147,7 @@ final class ThumbnailDecoder: Sendable {
                 willDecode?(job.request.identity)
                 let image = autoreleasepool { () -> PreparedImage? in
                     guard let data = store.data(assetID: job.request.assetID, revision: job.request.revision) else { return nil }
-                    return try? MediaPipeline.downsample(data, pixelSize: job.request.identity.pixelSize)
+                    return try? MediaPipeline.downsampleThumbnail(data, shortSide: job.request.identity.pixelSize)
                 }
                 finish(job, image)
             }

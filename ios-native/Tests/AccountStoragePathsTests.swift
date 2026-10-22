@@ -30,7 +30,7 @@ final class AccountStoragePathsTests: XCTestCase {
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("AccountStoragePathsTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        XCTAssertEqual(ThumbnailStore(scope: client.cacheScope, root: root).directory.path, root.appendingPathComponent(paths.thumbnails).path)
+        XCTAssertEqual(ThumbnailDiskStore.shared(scope: client.cacheScope, root: root).directory.path, root.appendingPathComponent(paths.thumbnails).path)
         _ = try EntityStore(scope: client.cacheScope, userID: "alice", directory: root.appendingPathComponent("IlyichEntities", isDirectory: true))
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(paths.entitiesDatabase).path))
 

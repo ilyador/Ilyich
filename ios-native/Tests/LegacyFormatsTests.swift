@@ -350,7 +350,7 @@ final class LegacyFormatsTests: XCTestCase {
         let scope = G.account.cacheScope
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyFormatsTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = ThumbnailStore(scope: scope, root: root)
+        let store = ThumbnailDiskStore.shared(scope: scope, root: root)
         let fixture = try FixtureLoader.files(in: "caches/IlyichThumbnails")
         XCTAssertEqual(Set(fixture.map { $0.split(separator: "/")[0] }), [Substring(G.digest.prefix(32))])
         XCTAssertEqual(AccountStoragePaths(G.account).thumbnails, "IlyichThumbnails/" + G.digest.prefix(32))
@@ -366,6 +366,8 @@ final class LegacyFormatsTests: XCTestCase {
         XCTAssertEqual(fixture, expected.sorted())
         let written = FileManager.default.enumerator(at: root.appendingPathComponent("IlyichThumbnails"), includingPropertiesForKeys: [.isRegularFileKey])?
             .compactMap { $0 as? URL }.filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true }
+            // T1's index sits beside the folders; the thumbnails themselves keep the v1 layout.
+            .filter { !$0.lastPathComponent.hasPrefix(ThumbnailDiskStore.indexName) }
         XCTAssertEqual(written?.count, fixture.count, "The store wrote nothing else.")
         // An ID with characters other than letters, digits and hyphens is hashed; others are lowercased.
         XCTAssertTrue(expected.contains { $0.contains("/6f1c2a40-0000-4000-8000-000000000001.") })

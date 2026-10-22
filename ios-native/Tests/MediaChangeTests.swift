@@ -26,7 +26,7 @@ import XCTest
 
     /// Stores each photo's thumbnail and decodes it at two cell sizes.
     private func cache(_ assets: [Asset], in pipeline: MediaPipeline, scope: String) async {
-        let disk = ThumbnailStore(scope: scope)
+        let disk = ThumbnailDiskStore.shared(scope: scope)
         for asset in assets { await disk.store(png, assetID: asset.id, revision: asset.cacheRevision) }
         for asset in assets {
             for size in [8, 6] {
@@ -126,7 +126,7 @@ import XCTest
     func testThumbnailFinishingAfterRevocationIsNotStored() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("MediaChangeTests-" + UUID().uuidString, isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let store = ThumbnailStore(scope: "scope", root: root)
+        let store = ThumbnailDiskStore.shared(scope: "scope", root: root)
         let token = store.fence.token()
         store.fence.forget(["photo"])
         await store.store(png, assetID: "photo", revision: "r1", token: token)
@@ -214,7 +214,7 @@ import XCTest
         // Spread over the store's folders, as server IDs are.
         let ids = (0..<2_100).map { String(format: "%02x-gone-%d", $0 % 256, $0) }
         try await harness.primeIndex(ids.map { SyncEvents.asset($0) } + [SyncEvents.asset("kept")])
-        let disk = ThumbnailStore(scope: harness.api.cacheScope)
+        let disk = ThumbnailDiskStore.shared(scope: harness.api.cacheScope)
         for id in ids + ["kept"] { await disk.store(png, assetID: id, revision: "r1") }
         harness.server.route("POST", "sync/stream", SyncEvents.stream(ids.map {
             SyncEvents.event("AssetDeleteV1", #"{"assetId":"\#($0)"}"#, ack: "AssetDeleteV1|\($0)")
@@ -236,7 +236,7 @@ import XCTest
     func testSyncResetKeepsRevisionValidThumbnails() async throws {
         let harness = try makeSyncHarness()
         try await harness.primeIndex([SyncEvents.asset("same"), SyncEvents.asset("edited"), SyncEvents.asset("gone")])
-        let disk = ThumbnailStore(scope: harness.api.cacheScope)
+        let disk = ThumbnailDiskStore.shared(scope: harness.api.cacheScope)
         for id in ["same", "edited", "gone"] { await disk.store(png, assetID: id, revision: "r1") }
         harness.server.route("POST", "sync/stream",
                              SyncEvents.stream([SyncEvents.event("SyncResetV1", "{}", ack: "SyncResetV1|reset")]),

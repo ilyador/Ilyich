@@ -30,7 +30,7 @@ final class ThumbnailDecoderTests: XCTestCase {
     }
 
     private func makeDecoder(storing ids: [String]) async -> (ThumbnailDecoder, Recorder) {
-        let store = ThumbnailStore(scope: "scope", root: root)
+        let store = ThumbnailDiskStore.shared(scope: "scope", root: root)
         for id in ids { await store.store(png, assetID: id, revision: "1") }
         let recorder = Recorder()
         let decoder = ThumbnailDecoder(store: store, lanes: 1, decoded: { _, request in recorder.decoded(request.identity) },
@@ -108,7 +108,7 @@ final class ThumbnailDecoderTests: XCTestCase {
 
     /// A photo missing from the store comes back empty, so the cell can download it.
     func testAPhotoMissingFromTheStoreReturnsNothing() async {
-        let store = ThumbnailStore(scope: "scope", root: root)
+        let store = ThumbnailDiskStore.shared(scope: "scope", root: root)
         let decoder = ThumbnailDecoder(store: store, decoded: { _, _ in })
         let image = await decoder.image(ThumbnailDecoderTests.request("missing"))
         XCTAssertNil(image)
