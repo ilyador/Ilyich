@@ -10,6 +10,14 @@ final class ThumbnailSchedulerTests: XCTestCase {
     private static let png = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).pngData { context in
         UIColor.systemOrange.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
     }
+    /// A photo large enough to decode at several sizes.
+    private static let largePNG: Data = {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64), format: format).pngData { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+        }
+    }()
 
     /// A disk in memory whose writes finish only when the test says so, and whose reads the test
     /// can count.
@@ -18,8 +26,8 @@ final class ThumbnailSchedulerTests: XCTestCase {
         let files = Mutex<[String: Data]>([:])
         let pendingWrites = Mutex<[String: Data]>([:])
 
-        init(storing ids: [String] = []) {
-            files.withLock { files in for id in ids { files[id + "|1"] = ThumbnailSchedulerTests.png } }
+        init(storing ids: [String] = [], data: Data = ThumbnailSchedulerTests.png) {
+            files.withLock { files in for id in ids { files[id + "|1"] = data } }
         }
         func contains(assetID: String, revision: String) -> Bool {
             files.withLock { $0[assetID + "|" + revision] != nil }
@@ -71,6 +79,10 @@ final class ThumbnailSchedulerTests: XCTestCase {
         func advance(_ seconds: TimeInterval) { now.withLock { $0 += seconds } }
     }
 
+    private final class Count: Sendable {
+        let value = Atomic<Int>(0)
+    }
+
     private final class Deliveries: Sendable {
         let received = Mutex<[ThumbnailDelivery]>([])
         var all: [ThumbnailDelivery] { received.withLock { $0 } }
@@ -82,9 +94,10 @@ final class ThumbnailSchedulerTests: XCTestCase {
         return deliveries
     }
 
-    private static func demand(_ items: [(String, DemandBand)], motion: Motion = .idle(since: 0), token: UInt64 = 0) -> ViewportDemand {
+    private static func demand(_ items: [(String, DemandBand)], motion: Motion = .idle(since: 0), token: UInt64 = 0,
+                               shortSide: Int = 8) -> ViewportDemand {
         ViewportDemand(generation: token, items: items.enumerated().map { rank, item in
-            ViewportDemand.Item(request: ThumbnailRequest(key: .server(assetID: item.0, revision: "1"), thumbhash: nil, shortSide: 8),
+            ViewportDemand.Item(request: ThumbnailRequest(key: .server(assetID: item.0, revision: "1"), thumbhash: nil, shortSide: shortSide),
                                 band: item.1, rank: rank)
         }, motion: motion)
     }
@@ -118,7 +131,8 @@ final class ThumbnailSchedulerTests: XCTestCase {
 
         server.released.store(true, ordering: .relaxed)
         for task in coverage { try await task.value }
-        XCTAssertEqual(store.pendingWrites.withLock { $0.count }, 5, "Every download reaches the disk.")
+        // Nothing waits on the photo on screen, so its write may land just after coverage's.
+        try await until("Every download reaches the disk.") { store.pendingWrites.withLock { $0.count } == 5 }
         scheduler.withdraw(source)
     }
 
@@ -173,6 +187,48 @@ final class ThumbnailSchedulerTests: XCTestCase {
         clock.advance(2)
         scheduler.pump()
         try await until("The photo was not tried a third time.") { server.requested.count == 3 }
+        scheduler.withdraw(source)
+    }
+
+    /// The viewer, a feature tile or the info view asking for a photo the grid failed to load
+    /// tries at once instead of waiting out the grid's backoff.
+    func testASinglePhotoRequestDoesNotWaitOutTheBackoff() async throws {
+        let clock = Clock()
+        let server = FakeServer(holds: false, fails: true)
+        let fetcher = ThumbnailFetcher(load: { id, _, _ in try await server.load(id) }, baseDelay: 60,
+                                       now: { clock.now.withLock { $0 } })
+        let store = FakeStore()
+        let scheduler = ThumbnailScheduler(store: store, memory: DecodedThumbnailCache(), fetcher: fetcher)
+        let deliveries = listen(scheduler)
+        let source = UUID()
+        scheduler.submit(Self.demand([("broken", .visible)]), from: source)
+        try await until("The failure was not shown.") { deliveries.all.contains { $0.assetID == "broken" && $0.image == nil } }
+        try await until("The failure was not recorded.") { fetcher.retryTime(assetID: "broken", revision: "1") != nil }
+
+        let asked = Task { try await scheduler.image(assetID: "broken", revision: "1", shortSide: 8, network: true, token: store.fence.token()) }
+        try await until("The single photo waited out the backoff.") { server.requested.count == 2 }
+        do { _ = try await asked.value; XCTFail("The server still fails.") } catch {}
+        scheduler.withdraw(source)
+    }
+
+    /// Photos that failed while the network was gone are tried again as soon as it is back.
+    func testTheNetworkComingBackRetriesFailedPhotosAtOnce() async throws {
+        let clock = Clock()
+        let server = FakeServer(holds: false, fails: true)
+        let fetcher = ThumbnailFetcher(load: { id, _, _ in try await server.load(id) }, baseDelay: 60,
+                                       now: { clock.now.withLock { $0 } })
+        let scheduler = ThumbnailScheduler(store: FakeStore(), memory: DecodedThumbnailCache(), fetcher: fetcher)
+        let deliveries = listen(scheduler)
+        let source = UUID()
+        scheduler.submit(Self.demand([("offline", .visible)]), from: source)
+        try await until("The failure was not shown.") { deliveries.all.contains { $0.assetID == "offline" && $0.image == nil } }
+        try await until("The failure was not recorded.") { fetcher.retryTime(assetID: "offline", revision: "1") != nil }
+        scheduler.pump()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(server.requested.count, 1, "The photo waits while nothing has changed.")
+
+        scheduler.networkReturned()
+        try await until("The photo was not tried again when the network came back.") { server.requested.count == 2 }
         scheduler.withdraw(source)
     }
 
@@ -254,6 +310,40 @@ final class ThumbnailSchedulerTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(recorder.decoded, ["running"], "The queued photo never decodes.")
         XCTAssertEqual(scheduler.pendingCount, 0)
+    }
+
+    /// Someone asking for a larger copy while the grid's smaller one decodes gets the size asked for.
+    func testALargerRequestDuringAGridDecodeGetsItsOwnSize() async throws {
+        let recorder = Recorder()
+        let store = FakeStore(storing: ["photo"], data: Self.largePNG)
+        let scheduler = ThumbnailScheduler(store: store, memory: DecodedThumbnailCache(),
+                                           fetcher: ThumbnailFetcher(load: { _, _, _ in throw URLError(.notConnectedToInternet) }),
+                                           lanes: 1, willDecode: { recorder.willDecode($0) })
+        let deliveries = listen(scheduler)
+        let source = UUID()
+        scheduler.submit(Self.demand([("photo", .visible)], shortSide: 16), from: source)
+        try await until("The grid's decode did not start.") { recorder.decoded == ["photo"] }
+        let large = Task { try await scheduler.image(assetID: "photo", revision: "1", shortSide: 48, network: false, token: store.fence.token()) }
+        try await Task.sleep(for: .milliseconds(50))
+        recorder.gate.signal()
+        let result = try await large.value
+        let image = try XCTUnwrap(result)
+        XCTAssertGreaterThanOrEqual(min(image.cgImage.width, image.cgImage.height), 48, "The larger request got the grid's smaller copy.")
+        try await until("The grid's copy was not delivered.") { deliveries.all.contains { $0.assetID == "photo" } }
+        let grid = try XCTUnwrap(deliveries.all.first { $0.assetID == "photo" }?.image)
+        XCTAssertLessThan(min(grid.cgImage.width, grid.cgImage.height), 48, "The grid's own copy came first, at its size.")
+        scheduler.withdraw(source)
+    }
+
+    /// After everything is dropped, as by a sync reset, the grids are asked to say again what they want.
+    func testResetAsksTheGridsAgain() async throws {
+        let scheduler = ThumbnailScheduler(store: FakeStore(), memory: DecodedThumbnailCache(),
+                                           fetcher: ThumbnailFetcher(load: { _, _, _ in throw URLError(.notConnectedToInternet) }))
+        let asked = Count()
+        let listener = scheduler.addListener({ _ in }, reset: { asked.value.add(1, ordering: .relaxed) })
+        scheduler.reset()
+        try await until("The grid was not asked again.") { asked.value.load(ordering: .relaxed) == 1 }
+        scheduler.removeListener(listener)
     }
 
     func testAPhotoMissingFromTheStoreReturnsNothingWithoutTheNetwork() async throws {

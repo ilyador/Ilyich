@@ -39,11 +39,14 @@ import UIKit
     private let cells = NSHashTable<PhotoCell>.weakObjects()
     /// For tests; UIKit's setting otherwise.
     var reduceMotion: () -> Bool = { UIAccessibility.isReduceMotionEnabled }
+    /// Sends the grid's demand again, as after the scheduler dropped everything it was asked for.
+    var needsDemand: (() -> Void)?
 
     init(pipeline: MediaPipeline) {
         self.pipeline = pipeline
         scheduler = pipeline.scheduler
-        listener = scheduler.addListener { [weak self] batch in self?.deliver(batch) }
+        listener = scheduler.addListener({ [weak self] batch in self?.deliver(batch) },
+                                         reset: { [weak self] in self?.needsDemand?() })
     }
 
     deinit {

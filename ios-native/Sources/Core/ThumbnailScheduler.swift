@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Synchronization
 
 /// The disk side of grid thumbnails the scheduler needs: ThumbnailDiskStore, or a fake in tests.
@@ -140,20 +141,49 @@ final class ThumbnailScheduler: Sendable {
     private let lanes: Int
     private let queue = DispatchQueue(label: "ilyich.thumbnail-scheduler", qos: .userInitiated)
     private let decodeQueue = DispatchQueue(label: "ilyich.thumbnail-decode", qos: .userInitiated, attributes: .concurrent)
-    private let listeners = Mutex<[UUID: @MainActor @Sendable ([ThumbnailDelivery]) -> Void]>([:])
+    private struct Listener {
+        let deliveries: @MainActor @Sendable ([ThumbnailDelivery]) -> Void
+        let reset: (@MainActor @Sendable () -> Void)?
+    }
+    private let listeners = Mutex<[UUID: Listener]>([:])
     private let outbox = Mutex<(deliveries: [ThumbnailDelivery], scheduled: Bool)>(([], false))
     /// Lets tests watch which photos decode, in order.
     private let willDecode: (@Sendable (String) -> Void)?
 
+    /// Watches for the network coming back, when asked to.
+    private let monitor: NWPathMonitor?
+    private let online = Atomic<Bool>(true)
+
     private var fence: MediaFence { store.fence }
 
+    /// With `watchesNetwork`, photos waiting after a failure are tried again as soon as the
+    /// network comes back.
     init(store: any ThumbnailStoring, memory: DecodedThumbnailCache, fetcher: ThumbnailFetcher, lanes: Int = 3,
-         willDecode: (@Sendable (String) -> Void)? = nil) {
+         watchesNetwork: Bool = false, willDecode: (@Sendable (String) -> Void)? = nil) {
         self.store = store
         self.memory = memory
         self.fetcher = fetcher
         self.lanes = max(1, lanes)
         self.willDecode = willDecode
+        monitor = watchesNetwork ? NWPathMonitor() : nil
+        if let monitor {
+            // Readings arrive one at a time on the scheduler's queue.
+            monitor.pathUpdateHandler = { [weak self] path in
+                guard let self else { return }
+                let online = path.status == .satisfied
+                if !self.online.exchange(online, ordering: .relaxed) && online { networkReturned() }
+            }
+            monitor.start(queue: queue)
+        }
+    }
+
+    deinit { monitor?.cancel() }
+
+    /// The network is back: photos that failed while it was gone are tried again now instead of
+    /// when their wait ends.
+    func networkReturned() {
+        fetcher.clearBackoff()
+        queue.async { [self] in pump() }
     }
 
     // MARK: Grids
@@ -176,10 +206,13 @@ final class ThumbnailScheduler: Sendable {
         submit(ViewportDemand(generation: fence.token(), items: [], motion: .idle(since: 0)), from: source)
     }
 
-    /// Grid deliveries reach `listener` on the main thread, in batches. Returns the ID to remove it with.
-    func addListener(_ listener: @escaping @MainActor @Sendable ([ThumbnailDelivery]) -> Void) -> UUID {
+    /// Grid deliveries reach `listener` on the main thread, in batches. `reset` is told, on the
+    /// main thread, when everything the grids wanted was dropped, so they say again what they
+    /// want. Returns the ID to remove it with.
+    func addListener(_ listener: @escaping @MainActor @Sendable ([ThumbnailDelivery]) -> Void,
+                     reset: (@MainActor @Sendable () -> Void)? = nil) -> UUID {
         let id = UUID()
-        listeners.withLock { $0[id] = listener }
+        listeners.withLock { $0[id] = Listener(deliveries: listener, reset: reset) }
         return id
     }
 
@@ -320,7 +353,10 @@ final class ThumbnailScheduler: Sendable {
                 guard let want = job.want else { continue }
                 if want.decode && (job.fetched != nil || job.onDisk) { decodable += 1; continue }
                 guard want.network else { continue }
-                if let wait = fetcher.retryTime(assetID: job.key.assetID, revision: job.key.revision), wait > now {
+                // Something asking for this one photo, such as the viewer, tries at once; the
+                // grid and coverage wait out the photo's failures.
+                let asked = job.waiters.values.contains { $0.want.network && $0.want.band <= .explicit }
+                if !asked, let wait = fetcher.retryTime(assetID: job.key.assetID, revision: job.key.revision), wait > now {
                     retry = min(retry ?? wait, wait); continue
                 }
                 candidates.append((job.key, want))
@@ -456,19 +492,24 @@ final class ThumbnailScheduler: Sendable {
             } else if let image {
                 let fromNetwork = work.bytes != nil
                 job.fetched = nil
+                let fileLimited = min(image.cgImage.width, image.cgImage.height) + 1 < work.side
                 if admitted {
                     if !job.grid.isEmpty {
                         delivery = ThumbnailDelivery(assetID: key.assetID, revision: key.revision, image: image, fromNetwork: fromNetwork)
                     }
-                    for waiter in job.waiters.values { resumes.append((waiter.continuation, .success(image))) }
+                    // Someone who asked for a larger size while this decoded has it decoded
+                    // again at that size, unless the file is no larger.
+                    for (id, waiter) in job.waiters where fileLimited || waiter.want.shortSide <= work.side {
+                        resumes.append((waiter.continuation, .success(image)))
+                        job.waiters[id] = nil
+                    }
                 } else {
                     for waiter in job.waiters.values { resumes.append((waiter.continuation, .failure(CancellationError()))) }
+                    job.waiters = [:]
                     job.grid = [:]
                 }
-                job.waiters = [:]
                 // A cell that grew while this decoded has it decoded again at its size, unless the
                 // file is no larger.
-                let fileLimited = min(image.cgImage.width, image.cgImage.height) + 1 < work.side
                 let grew = job.grid.values.contains { $0.shortSide > work.side }
                 if !admitted || fileLimited || !grew { job.grid = [:] }
             } else if work.bytes != nil {
@@ -515,7 +556,7 @@ final class ThumbnailScheduler: Sendable {
                     return outbox.deliveries
                 }
                 guard !batch.isEmpty else { return }
-                for listener in listeners.withLock({ Array($0.values) }) { listener(batch) }
+                for listener in listeners.withLock({ Array($0.values) }) { listener.deliveries(batch) }
             }
         }
     }
@@ -573,6 +614,12 @@ final class ThumbnailScheduler: Sendable {
         outbox.withLock { $0.deliveries = [] }
         fetcher.clearBackoff()
         for waiter in waiters { waiter.resume(throwing: CancellationError()) }
+        // The grids' cells still waiting for thumbnails ask again.
+        DispatchQueue.main.async { [self] in
+            MainActor.assumeIsolated {
+                for listener in listeners.withLock({ Array($0.values) }) { listener.reset?() }
+            }
+        }
     }
 
     /// Jobs waiting for a lane or a download slot.

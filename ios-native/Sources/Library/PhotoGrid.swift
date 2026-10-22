@@ -172,7 +172,7 @@ struct PhotoGrid: UIViewRepresentable {
         var showsDayHeaders = false
         var lastScrollRequest: UUID?
         /// Binds server photos to cells and sends the grid's thumbnail demand.
-        var binder: ThumbnailBinder
+        var binder: ThumbnailBinder { didSet { binder.needsDemand = { [weak self] in self?.setNeedsDemand() } } }
         /// Photos UIKit says are about to scroll in.
         var prefetched = Set<IndexPath>()
         private var demandScheduled = false
@@ -188,6 +188,7 @@ struct PhotoGrid: UIViewRepresentable {
             self.parent = parent
             binder = ThumbnailBinder(pipeline: parent.pipeline)
             super.init()
+            binder.needsDemand = { [weak self] in self?.setNeedsDemand() }
             dragSelector.counts = { [weak self] in self?.sectionCounts ?? [] }
             dragSelector.isSelected = { [weak self] index in
                 guard let store = self?.parent.store, let entry = store.entry(section: index.section, item: index.item) else { return nil }

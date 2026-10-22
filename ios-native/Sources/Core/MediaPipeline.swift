@@ -198,7 +198,7 @@ actor MediaPipeline {
         let thumbs = DecodedThumbnailCache()
         self.thumbs = thumbs
         scheduler = ThumbnailScheduler(store: thumbnails, memory: thumbs,
-                                       fetcher: ThumbnailFetcher(client: client, protocolClasses: protocolClasses))
+                                       fetcher: ThumbnailFetcher(client: client, protocolClasses: protocolClasses), watchesNetwork: true)
         let decoded = memory.decoded, latest = memory.latest
         decoded.totalCostLimit = memoryLimit
         decoded.countLimit = 2_000
