@@ -103,6 +103,7 @@ struct SplitMix64 {
     private struct BackgroundTally {
         let backupAtStart: Bool
         let queuedAtStart: Int
+        /// `warmer` counts samples with coverage at work; the summary keeps the field's old name.
         var samples = 0, backup = 0, syncing = 0, warmer = 0
     }
 
@@ -257,7 +258,7 @@ struct SplitMix64 {
         try? await Task.sleep(for: Self.dwell)
     }
 
-    /// What the rail does for a finger: it holds the thumbnail warmer, drops pending navigation
+    /// What the rail does for a finger: it holds coverage, drops pending navigation
     /// and moves the grid.
     private func jump(_ store: LibraryStore, to fraction: Double) async {
         beginScrub(store)
@@ -318,7 +319,7 @@ struct SplitMix64 {
         tally.samples += 1
         if backup.isRunning { tally.backup += 1 }
         if session?.isSyncing == true { tally.syncing += 1 }
-        if session?.thumbnailWarmer?.isRunning == true { tally.warmer += 1 }
+        if session?.coverage?.isRunning == true { tally.warmer += 1 }
         background = tally
     }
 

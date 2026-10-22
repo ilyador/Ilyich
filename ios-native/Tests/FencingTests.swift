@@ -3,55 +3,10 @@ import IlyichPlatform
 import XCTest
 @testable import Ilyich
 
-/// Work begun under one authorization never lands under another: the warmer after sign-out,
-/// writes queued across a read-only toggle, places counted across an access change.
+/// Work begun under one authorization never lands under another: writes queued across a
+/// read-only toggle, places counted across an access change. Coverage after sign-out is pinned
+/// in CoverageWorkerTests.
 @MainActor final class FencingTests: XCTestCase {
-    // MARK: - Warmer
-
-    /// Sign-out stops the warmer while it is still checking that the offline library is
-    /// complete. The check finishing afterwards, or a sync finishing after sign-out, must not
-    /// start it: it would download the signed-out account's thumbnails.
-    func testWarmerCannotStartAfterSignOut() async throws {
-        let (entities, pipeline) = try library()
-        let session = AuthorizationState(account: LegacyGoldens.account, token: "session-token", readOnly: false,
-                                         requiresPasswordChange: false, mirror: nil)
-        let warmer = ThumbnailWarmer(session: session)
-        let checking = StubServer.Gate(), answer = StubServer.Gate()
-        warmer.start(when: { checking.open(); await answer.wait(); return true }, entities: entities, pipeline: pipeline)
-        await checking.wait()
-
-        // Sign-out ends the session and stops the warmer, as AccountManager's sign-out does.
-        session.end()
-        warmer.stop()
-        answer.open()
-        try await Task.sleep(for: .milliseconds(200))
-        XCTAssertFalse(warmer.isRunning, "A check that finishes after sign-out does not start the warmer.")
-        warmer.start(entities: entities, pipeline: pipeline)
-        XCTAssertFalse(warmer.isRunning, "Nor does a sync that finishes after sign-out.")
-
-        // The session alone fences it, should anything forget to stop the warmer.
-        let ended = ThumbnailWarmer(session: session)
-        ended.start(entities: entities, pipeline: pipeline)
-        XCTAssertFalse(ended.isRunning, "A warmer of an ended session never starts.")
-        ended.stop()
-    }
-
-    /// Without sign-out, the same check starts the warmer once the library is complete.
-    func testWarmerStartsOnceTheLibraryIsComplete() async throws {
-        let (entities, pipeline) = try library()
-        let session = AuthorizationState(account: LegacyGoldens.account, token: "session-token", readOnly: false,
-                                         requiresPasswordChange: false, mirror: nil)
-        let warmer = ThumbnailWarmer(session: session)
-        defer { warmer.stop() }
-        let incomplete = ThumbnailWarmer(session: session)
-        defer { incomplete.stop() }
-        incomplete.start(when: { false }, entities: entities, pipeline: pipeline)
-        warmer.start(when: { true }, entities: entities, pipeline: pipeline)
-        try await until("The warmer did not start.") { warmer.isRunning }
-        try await Task.sleep(for: .milliseconds(100))
-        XCTAssertFalse(incomplete.isRunning, "An incomplete library is not warmed.")
-    }
-
     // MARK: - Writes
 
     /// Writes wait while the address is chosen. Read-only mode coming on meanwhile refuses them,
@@ -126,21 +81,6 @@ import XCTest
     }
 
     // MARK: - Support
-
-    /// An empty offline library and a media pipeline of its own, removed when the test ends.
-    private func library() throws -> (LibraryIndex, MediaPipeline) {
-        let userID = "fencing-" + UUID().uuidString
-        let api = try APIClient(baseURL: XCTUnwrap(URL(string: "https://fencing.example")), accessToken: "session-token", userID: userID)
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FencingTests-" + UUID().uuidString, isDirectory: true)
-        let entities = try LibraryIndex(scope: api.cacheScope, userID: userID, directory: directory)
-        let pipeline = MediaPipeline(client: api)
-        addTeardownBlock {
-            await pipeline.removeAll()
-            await api.shutdown()
-            try? FileManager.default.removeItem(at: directory)
-        }
-        return (entities, pipeline)
-    }
 
     private func until(_ message: String, _ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)

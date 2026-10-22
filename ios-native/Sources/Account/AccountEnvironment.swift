@@ -15,7 +15,7 @@ struct AccountEnvironment: Sendable {
     var fixtureAccount: AccountID?
     /// The network settings every client uses instead of the saved ones.
     var networkConfiguration: NetworkConfiguration?
-    /// The offline library, its sync and the thumbnail warmer run.
+    /// The offline library, its sync and the coverage worker run.
     var syncsLibrary = true
     /// The phone's photos join the library, and backup runs.
     var usesDevicePhotos = true

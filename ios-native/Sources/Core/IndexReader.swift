@@ -222,6 +222,61 @@ actor IndexReader {
             return LocalAssetMatch(assetID: id, checksum: checksum, cloudID: string("iCloudId"), createdAt: date("createdAt"), adjustmentTime: date("adjustmentTime"), latitude: number("latitude"), longitude: number("longitude"), visible: row[3] == "1")
         }
     }
+    // MARK: Coverage
+
+    /// The photos coverage keeps offline (REBUILD_ROADMAP.md T5): the account's own, in the
+    /// timeline, not in the trash. Partners and shared albums wait for the owner's answer.
+    private static let coverageScope = "i.owner_id=? AND i.visibility='timeline' AND i.trashed=0 AND i.local_month IS NOT NULL AND i.local_date_time IS NOT NULL"
+    /// The thumbnail's revision as Asset.cacheRevision names it.
+    private static let coverageRevision = "coalesce(json_extract(a.payload,'$.mediaRevision'),json_extract(a.payload,'$.thumbhash'),'unversioned')"
+
+    func coverageCount() throws -> Int {
+        try database.query("SELECT count(*) FROM asset_index i WHERE \(Self.coverageScope)", [userID]).first?[0].flatMap(Int.init) ?? 0
+    }
+
+    /// One page of the covered photos in the library's order (month and time taken, newest first,
+    /// then ID), after `cursor`, read from asset_index_taken in its order without sorting. Each row
+    /// carries its own position, so a page's last row is the next page's cursor. The rows of the
+    /// cursor's month already walked are skipped as a residual filter on the index range rather
+    /// than with an OR, which SQLite would answer by collecting every older row and sorting it.
+    func coveragePage(after cursor: CoverageCursor?, limit: Int) throws -> [CoverageRow] {
+        var sql = "SELECT i.id,\(Self.coverageRevision),i.local_month,i.local_date_time FROM asset_index i "
+            + "JOIN entities a ON a.kind='asset' AND a.id=i.id WHERE \(Self.coverageScope)"
+        var values: [SQLiteValue] = [.text(userID)]
+        if let cursor {
+            sql += " AND i.local_month<=? AND NOT (i.local_month=? AND (i.local_date_time>? OR (i.local_date_time=? AND i.id<=?)))"
+            values += [.text(cursor.month), .text(cursor.month), .real(cursor.taken), .real(cursor.taken), .text(cursor.id)]
+        }
+        sql += " ORDER BY i.local_month DESC,i.local_date_time DESC,i.id ASC LIMIT ?"
+        values.append(.integer(Int64(min(max(limit, 1), 5_000))))
+        var rows: [CoverageRow] = []
+        try database.run(sql, values) { row in
+            guard let id = row.text(0), let revision = row.text(1), let month = row.text(2), let taken = row.real(3) else { return }
+            rows.append(CoverageRow(id: id, revision: revision, cursor: CoverageCursor(month: month, taken: taken, id: id)))
+        }
+        return rows
+    }
+
+    /// The thumbnail revision of each of these photos that coverage keeps; the others are left out.
+    func coverageRevisions(of ids: [String]) throws -> [String: String] {
+        guard !ids.isEmpty else { return [:] }
+        let list = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
+        var revisions: [String: String] = [:]
+        try database.run("SELECT i.id,\(Self.coverageRevision) FROM asset_index i JOIN entities a ON a.kind='asset' AND a.id=i.id "
+                         + "WHERE i.id IN (SELECT value FROM json_each(?)) AND \(Self.coverageScope)", [.text(list), .text(userID)]) { row in
+            if let id = row.text(0), let revision = row.text(1) { revisions[id] = revision }
+        }
+        return revisions
+    }
+
+    /// The derived tables' persisted revision, which moves with every batch that changed them
+    /// (index_state.revision), unlike the writer's in-memory count.
+    func derivedRevision() throws -> Int64 {
+        var revision: Int64 = 0
+        try database.run("SELECT revision FROM index_state WHERE id=1") { row in revision = row.integer(0) ?? 0 }
+        return revision
+    }
+
     /// Every album with its photo count and its users, in three queries however many albums.
     func albums() throws -> [Album] {
         var counts: [String: Int] = [:]

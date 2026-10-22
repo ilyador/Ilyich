@@ -215,6 +215,21 @@ final class LibraryIndex: Sendable {
     func mapMarkers(_ query: MapMarkerQuery) async throws -> [MapMarker] { try await mapped { try await aggregate.mapMarkers(query) } }
     func partners(direction: String) async throws -> [Partner] { try await mapped { try await aggregate.partners(direction: direction) } }
 
+    // MARK: Coverage reads (REBUILD_ROADMAP.md T5), on the aggregate connection
+
+    /// How many photos coverage keeps offline: the account's own timeline.
+    func coverageCount() async throws -> Int { try await mapped { try await aggregate.coverageCount() } }
+    /// One page of them in the library's order, newest first, after `cursor`.
+    func coveragePage(after cursor: CoverageCursor?, limit: Int = 500) async throws -> [CoverageRow] {
+        try await mapped { try await aggregate.coveragePage(after: cursor, limit: limit) }
+    }
+    /// The thumbnail revision of each of these photos coverage keeps; the others are left out.
+    func coverageRevisions(of ids: [String]) async throws -> [String: String] {
+        try await mapped { try await aggregate.coverageRevisions(of: ids) }
+    }
+    /// The derived tables' persisted revision, which moves with every batch that changed them.
+    func derivedRevision() async throws -> Int64 { try await mapped { try await aggregate.derivedRevision() } }
+
     /// SQLite failures read as they did before Q2: the offline library could not be saved.
     private func mapped<T: Sendable>(_ body: () async throws -> T) async throws -> T {
         do { return try await body() } catch { throw IndexWriter.failure(error) }

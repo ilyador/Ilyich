@@ -271,11 +271,12 @@ struct LibraryView: View {
         .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session) }
         // Everything presented has closed, so shared files that arrived meanwhile can show.
         .onChange(of: navigator.layers.isEmpty) { _, empty in if empty { model.refreshSharedFiles() } }
-        .onChange(of: navigator.isViewing) { _, viewing in session.thumbnailWarmer?.isHeld = viewing }
+        .onChange(of: navigator.isViewing) { _, viewing in session.coverage?.conditions.setViewing(viewing) }
         .onAppear {
-            // Keeping the library's thumbnails offline waits whenever the user scrolls or scrubs.
-            let position = store.navigation
-            session.thumbnailWarmer?.isScrolling = { [weak position] in position.map { $0.isScrolling || $0.isScrubbing } ?? false }
+            // Keeping the library's thumbnails offline waits whenever the user scrolls or scrubs,
+            // and for a moment after.
+            let session = session
+            store.navigation.onMotionChange = { moving in session.coverage?.conditions.setMoving(moving) }
         }
     }
 

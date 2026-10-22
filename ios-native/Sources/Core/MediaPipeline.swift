@@ -139,7 +139,8 @@ actor MediaPipeline {
     /// flood of thumbnails slows down the photo that is actually opened. Grid thumbnails go through
     /// the scheduler; this bounds the other thumbnail-sized images (locked, unedited).
     private let thumbnailLimiter = ImageWorkLimiter(limit: 6)
-    private let thumbnails: ThumbnailDiskStore
+    /// Grid thumbnails on disk, which the coverage worker checks and resumes from.
+    nonisolated let thumbnails: ThumbnailDiskStore
     /// Grid thumbnails decoded in memory, readable from any thread.
     private nonisolated let thumbs: DecodedThumbnailCache
     /// Loads every grid thumbnail: from disk, from the server, for the grid and everyone else.
@@ -302,14 +303,6 @@ actor MediaPipeline {
 
     nonisolated func hasStoredThumbnail(_ asset: Asset) -> Bool {
         thumbnails.contains(assetID: asset.id, revision: asset.cacheRevision)
-    }
-
-    /// Downloads a thumbnail into the store without decoding it, for keeping the library offline.
-    /// `token` is the media fence's from when `asset` was read, so a photo locked or deleted since
-    /// is not downloaded or stored.
-    nonisolated func storeThumbnail(_ asset: Asset, token: UInt64) async throws {
-        guard asset.visibility != .locked else { return }
-        try await scheduler.store(assetID: asset.id, revision: asset.cacheRevision, band: .coverage, token: token)
     }
 
     func animation(for asset: Asset, pixelSize: Int) async throws -> AnimatedImageSource {
