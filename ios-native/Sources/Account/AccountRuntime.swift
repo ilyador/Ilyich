@@ -3,7 +3,7 @@ import IlyichPlatform
 import Synchronization
 
 /// One signed-in account's services. It is opened off the main actor, owns everything that
-/// belongs to the account (its authorization, transport, media, offline library, sync, warmer
+/// belongs to the account (its authorization, transport, media, offline library, sync, coverage
 /// and owned work), and AccountManager tears it down in a fixed order.
 final class AccountRuntime: Sendable {
     let id: UUID
@@ -13,7 +13,7 @@ final class AccountRuntime: Sendable {
     /// The account's requests: its transport and the endpoint catalogue over it.
     let api: APIClient
     let pipeline: MediaPipeline
-    /// The offline library, its sync and the thumbnail warmer. Nil while a password change is
+    /// The offline library, its sync and the coverage worker. Nil while a password change is
     /// required, when the environment runs without them, and when the database couldn't open.
     let library: LibraryServices?
     /// Why the offline library couldn't open.
@@ -53,7 +53,8 @@ final class AccountRuntime: Sendable {
         let sync: SyncEngine
         /// The sync's status, where the screens read it.
         let status: SyncStatusBoard
-        let warmer: ThumbnailWarmer
+        /// Keeps the library's thumbnails on the phone (REBUILD_ROADMAP.md T5).
+        let coverage: CoverageWorker
     }
 
     struct TransferServices: Sendable {
@@ -121,14 +122,15 @@ final class AccountRuntime: Sendable {
                 let entities = try LibraryIndex(scope: api.cacheScope, userID: credential.userID, directory: environment.libraryDirectory)
                 let native = NativeSync(api: api, store: entities)
                 let device = dependencies.device
-                library = await MainActor.run {
-                    let warmer = ThumbnailWarmer(session: authorization)
-                    let status = SyncStatusBoard()
-                    let sync = SyncEngine(client: api, entities: entities, native: native, pipeline: pipeline, warmer: warmer,
-                                          presence: presence, check: check, authorization: authorization, device: device, status: status)
-                    return LibraryServices(entities: entities, native: native, repository: LibraryRepository(client: api, index: entities, sync: sync),
-                                           sync: sync, status: status, warmer: warmer)
-                }
+                // Only the boards the screens observe are made on the main actor.
+                let (status, board) = await MainActor.run { (SyncStatusBoard(), CoverageBoard()) }
+                let sync = SyncEngine(client: api, entities: entities, native: native, pipeline: pipeline,
+                                      presence: presence, check: check, authorization: authorization, device: device, status: status)
+                let coverage = CoverageWorker(index: entities, store: pipeline.thumbnails, scheduler: pipeline.scheduler,
+                                              conditions: CoverageConditions(followingSystemWithAppActive: presence.isForeground), board: board,
+                                              changes: { await sync.changes() }, authorization: authorization)
+                library = LibraryServices(entities: entities, native: native, repository: LibraryRepository(client: api, index: entities, sync: sync),
+                                          sync: sync, status: status, coverage: coverage)
             } catch { libraryError = error.localizedDescription }
         }
         var transfers: TransferServices?
@@ -158,13 +160,13 @@ final class AccountRuntime: Sendable {
                               cutover: cutover, backupContainer: environment.backupContainer, usesDevicePhotos: environment.usesDevicePhotos)
     }
 
-    /// Starts the account's work once the screens show it: the warmer once the offline library is
-    /// complete, sync while the app is in front, and the session check. Backup starts when the
-    /// account becomes active (TransferHost.activate).
+    /// Starts the account's work once the screens show it: coverage, which waits for the offline
+    /// library to be complete, sync while the app is in front, and the session check. Backup
+    /// starts when the account becomes active (TransferHost.activate).
     @MainActor func start() async {
         if let library {
             let entities = library.entities
-            library.warmer.start(when: { (try? await entities.isReadable()) == true }, entities: entities, pipeline: pipeline)
+            library.coverage.start()
             await library.sync.start()
             // Fills the index's derived tables for a library synced before they existed, off the
             // main thread and a batch at a time; the feeds read the server until it is done.
@@ -173,7 +175,7 @@ final class AccountRuntime: Sendable {
         check.validate()
     }
 
-    /// Cancels the account's work and waits for it to end: the warmer, sync and its live stream,
+    /// Cancels the account's work and waits for it to end: coverage, sync and its live stream,
     /// the session check, read-only changes still on their way, the import, which rolls back, and
     /// the transfer engine with everything beside it, which gives its leases back. Then the
     /// transfers database closes. It stays on disk, whatever the reason for ending, and so do the
@@ -182,7 +184,7 @@ final class AccountRuntime: Sendable {
         await cleanup.shutdown()
         await deviceIndex?.shutdown()
         if let library {
-            await library.warmer.stop()
+            await library.coverage.stop()
             await library.sync.shutdown()
             await library.entities.stopBackfill()
         }

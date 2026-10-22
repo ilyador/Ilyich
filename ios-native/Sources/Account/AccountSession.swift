@@ -56,8 +56,8 @@ import IlyichPlatform
     /// The account's library reads, which the feeds plan and read through.
     var libraryRepository: LibraryRepository? { runtime?.library?.repository }
     var entities: LibraryIndex? { runtime?.library?.entities }
-    /// Fills the thumbnail store with the whole library while the app is open.
-    var thumbnailWarmer: ThumbnailWarmer? { runtime?.library?.warmer }
+    /// Keeps the library's thumbnails on the phone while the app is open (REBUILD_ROADMAP.md T5).
+    var coverage: CoverageWorker? { runtime?.library?.coverage }
     /// The phone's side of the merged library.
     var deviceIndex: DeviceIndexService? { runtime?.deviceIndex }
     var isSyncing: Bool { runtime?.library?.status.status.isSyncing ?? false }
@@ -129,12 +129,14 @@ import IlyichPlatform
                 if let sync = runtime.library?.sync { Task { await sync.presenceChanged() } }
                 // Only out of the background: Control Center and alerts only make the app inactive.
                 if cameForward, let index = runtime.deviceIndex { Task { await index.presenceChanged() } }
+                runtime.library?.coverage.conditions.setAppActive(true)
             }
             if phase == .waitingForUnlock { Task { await manager.retryRestoreIfWaiting() } }
         } else if scene == .background {
             presence.isForeground = false
             if let sync = runtime?.library?.sync { Task { await sync.presenceChanged() } }
             if let index = runtime?.deviceIndex { Task { await index.presenceChanged() } }
+            runtime?.library?.coverage.conditions.setAppActive(false)
         }
     }
 

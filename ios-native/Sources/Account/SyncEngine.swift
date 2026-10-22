@@ -45,7 +45,6 @@ actor SyncEngine {
     private let entities: LibraryIndex
     private let native: NativeSync
     private let pipeline: MediaPipeline
-    private let warmer: ThumbnailWarmer
     private let repairer: DependentRepairer
     /// Fetching the dependents the index queued for repair, while the app is in front.
     private var repairs: Task<Void, Never>?
@@ -88,7 +87,7 @@ actor SyncEngine {
     let hub: LibraryChangeHub
 
     /// `connect` opens the live connection, the client's own by default.
-    init(client: APIClient, entities: LibraryIndex, native: NativeSync, pipeline: MediaPipeline, warmer: ThumbnailWarmer,
+    init(client: APIClient, entities: LibraryIndex, native: NativeSync, pipeline: MediaPipeline,
          presence: AppPresence, check: SessionCheck, authorization: AuthorizationState, device: any AccountDevice,
          status: SyncStatusBoard, connect: (@Sendable () async throws -> ServerEventConnection)? = nil,
          debounce: Duration = .milliseconds(350), dependents: (any DependentFetching)? = nil, hub: LibraryChangeHub? = nil) {
@@ -96,7 +95,6 @@ actor SyncEngine {
         self.entities = entities
         self.native = native
         self.pipeline = pipeline
-        self.warmer = warmer
         repairer = DependentRepairer(index: entities, fetcher: dependents ?? ServerDependentFetcher(client: client))
         self.presence = presence
         self.check = check
@@ -297,7 +295,7 @@ actor SyncEngine {
             if let date { status.lastSyncDate = date }
         }
         await client.persistCachedServerFeatures()
-        if index.completed { await warmer.start(entities: entities, pipeline: pipeline) }
+        // Coverage learns of a completed first sync from the change published below.
         await publish(settled.change, accessChanged: settled.accessChanged)
         // The widgets pick their photos again after every pass that succeeds, as they always have.
         if isOpen { await device.reloadWidgets() }

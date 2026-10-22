@@ -74,8 +74,9 @@ struct DiagnosticsView: View {
                 Text("Keeps library metadata on this phone for browsing and applies server changes. Counts exclude the locked folder. Downloaded photo previews have a separate cache; an indexed photo is not necessarily available offline.")
             }
             Section {
-                if let warmer = session?.thumbnailWarmer, warmer.total > 0 {
-                    LabeledContent("Thumbnails kept offline", value: "\(warmer.stored.formatted()) of \(warmer.total.formatted())")
+                if let coverage = session?.coverage, coverage.board.progress.total > 0 {
+                    let progress = coverage.board.progress
+                    LabeledContent("Thumbnails kept offline", value: "\(progress.stored.formatted()) of \(progress.total.formatted())")
                 }
                 if let media {
                     LabeledContent("Photo download cache", value: bytes(media.diskBytes))

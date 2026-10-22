@@ -52,6 +52,8 @@ final class ThumbnailDiskStore: Sendable {
         var lastActivity: Int64 = 0
         var flushScheduled = false
         var maintenanceScheduled = false
+        /// The index's meta rows as last read or written, for coverage's position.
+        var meta: [String: String] = [:]
 
         func knows(_ folder: String) -> Bool { complete || cursor.map { folder <= $0 } ?? false }
 
@@ -443,6 +445,7 @@ final class ThumbnailDiskStore: Sendable {
             }
             state.complete = meta["complete"] == "1"
             state.cursor = state.complete ? nil : meta["cursor"]
+            state.meta = meta
         }
     }
 
@@ -472,11 +475,46 @@ final class ThumbnailDiskStore: Sendable {
     }
 
     private func setMeta(_ key: String, _ value: String?) {
+        state.withLock { $0.meta[key] = value }
         guard let database = openDatabase() else { return }
         if let value {
             try? database.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", [.text(key), .text(value)])
         } else {
             try? database.execute("DELETE FROM meta WHERE key = ?", [.text(key)])
+        }
+    }
+
+    // MARK: Coverage
+
+    private enum CoverageKey {
+        static let cursor = "coverage_cursor", mark = "coverage_mark", policy = "policy_hash", total = "coverage_total", stored = "coverage_stored"
+    }
+
+    /// Where coverage is (REBUILD_ROADMAP.md T5), from the index's meta rows. Read on the store's
+    /// queue, so it comes after the index was loaded; a store that was cleared, or an index another
+    /// build wrote, has none, and coverage verifies the library again without fetching present files.
+    func coverageState() async -> CoverageState {
+        await onQueue { [self] in
+            state.withLock { state in
+                CoverageState(cursor: state.meta[CoverageKey.cursor], mark: state.meta[CoverageKey.mark].flatMap { Int64($0) },
+                              policyHash: state.meta[CoverageKey.policy], total: state.meta[CoverageKey.total].flatMap(Int.init) ?? 0,
+                              stored: state.meta[CoverageKey.stored].flatMap(Int.init) ?? 0)
+            }
+        }
+    }
+
+    /// Saves coverage's position and counts in one transaction.
+    func saveCoverageState(_ coverage: CoverageState) async {
+        await onQueue { [self] in
+            let rows: [(String, String?)] = [
+                (CoverageKey.cursor, coverage.cursor), (CoverageKey.mark, coverage.mark.map { String($0) }), (CoverageKey.policy, coverage.policyHash),
+                (CoverageKey.total, String(coverage.total)), (CoverageKey.stored, String(coverage.stored)),
+            ]
+            guard let database = openDatabase() else {
+                for (key, value) in rows { state.withLock { $0.meta[key] = value } }
+                return
+            }
+            try? database.transaction { for (key, value) in rows { setMeta(key, value) } }
         }
     }
 

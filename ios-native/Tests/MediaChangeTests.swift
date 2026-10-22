@@ -154,7 +154,7 @@ import XCTest
     }
 
     /// Work asked for before a photo was locked, still waiting for its request when the lock
-    /// lands, neither downloads nor keeps anything: not a grid thumbnail, not the warmer's, not a
+    /// lands, neither downloads nor keeps anything: not a grid thumbnail, not coverage's, not a
     /// preview. A request made after the lock is served as before.
     func testMediaAskedForBeforeALockIsNotKept() async throws {
         let server = makeStubServer()
@@ -165,7 +165,7 @@ import XCTest
 
         await pipeline.forget(assetIDs: ["locked"], revoked: true)
         _ = try? await pipeline.image(for: locked, pixelSize: 8, token: token)
-        try? await pipeline.storeThumbnail(locked, token: token)
+        try? await pipeline.scheduler.store(assetID: locked.id, revision: locked.cacheRevision, token: token)
         _ = try? await pipeline.image(for: locked, size: .preview, pixelSize: 8, token: token)
         try await Task.sleep(for: .milliseconds(100))
 
@@ -176,7 +176,7 @@ import XCTest
         let held = try await pipeline.urlCacheHolds(locked, size: .preview)
         XCTAssertFalse(held, "No preview is in the URL cache.")
 
-        try await pipeline.storeThumbnail(locked, token: pipeline.mediaToken())
+        try await pipeline.scheduler.store(assetID: locked.id, revision: locked.cacheRevision, token: pipeline.mediaToken())
         // The file is written just after the bytes are handed back.
         let stored = Date().addingTimeInterval(5)
         while !pipeline.hasStoredThumbnail(locked) && Date() < stored { try await Task.sleep(for: .milliseconds(5)) }

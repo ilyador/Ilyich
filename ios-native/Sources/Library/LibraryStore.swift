@@ -86,9 +86,18 @@ private struct SavedTimeline {
 @MainActor @Observable final class TimelinePosition {
     var section = 0
     var item = 0
-    var isScrolling = false
+    var isScrolling = false { didSet { motionChanged(wasMoving: oldValue || isScrubbing) } }
     /// The finger is on the time rail.
-    var isScrubbing = false
+    var isScrubbing = false { didSet { motionChanged(wasMoving: isScrolling || oldValue) } }
+    /// Told when the grid starts or stops moving, by a scroll or a scrub, for work that waits
+    /// for it to rest (coverage).
+    @ObservationIgnored var onMotionChange: ((Bool) -> Void)?
+
+    var isMoving: Bool { isScrolling || isScrubbing }
+
+    private func motionChanged(wasMoving: Bool) {
+        if wasMoving != isMoving { onMotionChange?(isMoving) }
+    }
 }
 
 @MainActor @Observable final class LibraryStore {

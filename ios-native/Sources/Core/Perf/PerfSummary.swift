@@ -139,6 +139,7 @@ struct PerfSummary: Codable, Equatable, Sendable {
         var queuedAtStart: Int
         var backupRunningShare: Double
         var syncingShare: Double
+        /// Coverage (T5) at work; the name stays so the summaries keep their format.
         var warmerRunningShare: Double
     }
 
