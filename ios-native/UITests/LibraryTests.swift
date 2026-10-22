@@ -496,15 +496,73 @@ final class LibraryTests: XCTestCase {
     @MainActor func testSearchContinuesAnEmptyVerifiedPageAndCanClear() {
         let app = launch()
         let search = app.textFields["library.search"]
-        search.tap(); search.typeText("me wearing a red hat in Amsterdam\n")
+        search.tap()
+        // The AI check starts off; this search is the verified one.
+        let check = app.switches["search.aiCheck"]
+        requireHittable(check, in: app); check.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        search.typeText("me wearing a red hat in Amsterdam\n")
         XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.staticTexts["Visually checked"].exists)
+        XCTAssertTrue(app.staticTexts["Visually checked"].waitForExistence(timeout: 5))
         let firstMatch = app.collectionViews["library.grid"].cells.element(boundBy: 0)
         XCTAssertGreaterThanOrEqual(firstMatch.frame.minY, app.buttons["Clear filters"].frame.maxY,
                                     "The first result must start below the header, not under its blur.")
         capture(app, "Search — verified continuation")
         app.buttons["Clear filters"].tap()
         XCTAssertTrue(app.staticTexts["December 2026"].waitForExistence(timeout: 10))
+    }
+    /// F7: under the bar, the AI check and More; More's mode and filters show as chips that
+    /// clear one by one, and the mode survives a new search.
+    @MainActor func testSearchSwitchMoreAndChipsWorkAsInImmich() {
+        let app = launch(appearance: "dark")
+        let search = app.textFields["library.search"]
+        requireHittable(search, in: app)
+        XCTAssertFalse(app.buttons["search.more"].exists, "At rest the library shows only the bar.")
+        search.tap()
+        let check = app.switches["search.aiCheck"]
+        requireHittable(check, in: app)
+        XCTAssertEqual(check.value as? String, "0", "The AI check starts off.")
+        XCTAssertTrue(app.buttons["search.more"].exists)
+        capture(app, "Search — typing, AI check off and More")
+        search.typeText("red hat\n")
+        XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.staticTexts["Visually checked"].exists, "With the AI check off, nothing is checked.")
+        requireHittable(check, in: app); check.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        XCTAssertTrue(app.staticTexts["Visually checked"].waitForExistence(timeout: 20), "Turning it on runs the checked search.")
+        capture(app, "Search — AI check on")
+
+        app.buttons["search.more"].tap()
+        XCTAssertTrue(app.navigationBars["Search options"].waitForExistence(timeout: 5))
+        let mode = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Search mode")).firstMatch
+        XCTAssertTrue(mode.waitForExistence(timeout: 10)); mode.tap()
+        let filename = app.buttons["Filename"]
+        XCTAssertTrue(filename.waitForExistence(timeout: 5)); filename.tap()
+        let favorites = app.switches["Favorites only"]
+        for _ in 0..<6 where !favorites.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        requireHittable(favorites, in: app)
+        favorites.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+        capture(app, "Search options — Filename, favorites")
+        app.navigationBars["Search options"].buttons["Apply"].tap()
+
+        let modeChip = app.buttons["search.chip.mode"], favoritesChip = app.buttons["search.chip.favorites"]
+        XCTAssertTrue(modeChip.waitForExistence(timeout: 10), "The mode shows as a chip.")
+        XCTAssertTrue(favoritesChip.exists, "So does the filter.")
+        XCTAssertFalse(check.exists, "The AI check belongs to Photo content.")
+        XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20))
+        capture(app, "Search — Filename and Favorites chips")
+
+        // A new search keeps the mode.
+        app.buttons["Clear search"].tap()
+        search.tap(); search.typeText("beach\n")
+        XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20))
+        XCTAssertTrue(modeChip.exists, "The mode survives a new search.")
+
+        requireHittable(favoritesChip, in: app); favoritesChip.tap()
+        XCTAssertTrue(favoritesChip.waitForNonExistence(timeout: 5), "A chip clears on its own.")
+        XCTAssertTrue(modeChip.exists)
+        requireHittable(modeChip, in: app); modeChip.tap()
+        XCTAssertTrue(modeChip.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(check.waitForExistence(timeout: 5), "Photo content brings the AI check back.")
+        XCTAssertEqual(check.value as? String, "1", "Still on, as it was left.")
     }
     @MainActor func testGlobeOpensAndReturnsToLibrary() {
         let app = launch()
@@ -625,7 +683,9 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(coast.waitForExistence(timeout: 5)); coast.tap()
         let filter = app.otherElements["library.filterShelf"]
         XCTAssertTrue(filter.staticTexts["Coast"].waitForExistence(timeout: 10))
-        let options = app.buttons["Search options"]
+        // More sits under the search bar while typing.
+        app.textFields["library.search"].tap()
+        let options = app.buttons["search.more"]
         requireHittable(options, in: app); options.tap()
         XCTAssertTrue(app.navigationBars["Search options"].waitForExistence(timeout: 5))
         let id = "00000000-0000-4000-8000-00000000a5e7"

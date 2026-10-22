@@ -510,6 +510,12 @@ Routine removeAll calls become precise: viewer lock, bulk lock, Duplicates, Tras
 - **Acceptance:**
   - On the phone, with the switch off a photo-content search returns without the "Checking photo content" pass, and with it on the check runs; More reaches every Immich mode and filter; filters narrow results in every mode
 - **Owner default, assumed:** the switch starts off, so plain smart search, since the owner asked that search stop always using the LLM.
+- **As built:**
+  - SearchChoices (AI check, mode, More's filters) lives in LibraryStore and persists per server and account in UserDefaults (`searchChoices.<scope>`, a new key; UI-test launches clear it). The mode is stored by a fixed name, and only More's own filters are kept.
+  - With the switch off a Photo content search sends `verify: false`; on, it leaves verify unsaid, which is today's behaviour (the server verifies when configured). Sending `verify: true` would have made a server without verification answer every page "unavailable". Similar photos never send verify.
+  - More's filters are merged into the feed's query (LibraryQuery.narrowed(by:)): people and tags join the feed's, other filters replace the feed's own, and a chosen visibility keeps to the feed's. They apply to every typed search and, with no text, open the feed narrowed as one list (the old "Filtered library"); removing the last chip returns to the feed. A mode alone opens nothing; it changes the prompt and the next search. Plain browsing never applies them.
+  - The row under the bar (AI check, More, chips) shows while the bar is focused and while the choices apply, so the timeline at rest is unchanged. The magnifying glass in the bar is now decoration only. Another mode's chip replaces the AI check, which belongs to Photo content. The progress line says "Checking photo content…" only for a checked search ("Searching…" otherwise), and the verification card shows only for one.
+  - Search options now groups the filters as Immich does: Search in, People and tags, Place, Camera, Date taken, Media type, Display options (favorites, not in an album, archived, rating).
 
 ### F2 — TimelineFeed keyed by month
 

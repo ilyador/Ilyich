@@ -211,7 +211,7 @@ actor AccountManager {
     /// for the fixture account.
     private func resetInterfaceState() {
         UserDefaults.standard.removeObject(forKey: "gridColumns")
-        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("shelfOrder.") {
+        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("shelfOrder.") || key.hasPrefix("searchChoices.") {
             UserDefaults.standard.removeObject(forKey: key)
         }
         if let account = environment.fixtureAccount { ReadOnlyPolicy.setEnabled(false, server: account.server, userID: account.userID) }

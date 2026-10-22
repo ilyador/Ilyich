@@ -63,7 +63,8 @@ struct LibraryView: View {
 
     init(api: APIClient, pipeline: MediaPipeline, session: AccountSession) {
         self.api = api; self.pipeline = pipeline; self.session = session
-        _store = State(initialValue: LibraryStore(source: session.libraryRepository ?? LibraryRepository(client: api, index: nil, sync: nil), includesDevicePhotos: session.environment.usesDevicePhotos))
+        _store = State(initialValue: LibraryStore(source: session.libraryRepository ?? LibraryRepository(client: api, index: nil, sync: nil), includesDevicePhotos: session.environment.usesDevicePhotos,
+                                                     choices: SearchChoicesStorage(scope: api.cacheScope)))
         _model = State(initialValue: LibraryScreenModel(lookup: api, inbox: ShareInboxStore.shared))
     }
 
@@ -86,7 +87,7 @@ struct LibraryView: View {
                           // so a short result list is never hidden.
                           topInset: chromeHeight > 0 ? geometry.safeAreaInsets.top + chromeHeight + 14
                                                      : photoSide(width: geometry.size.width) / 2,
-                          bottomInset: geometry.safeAreaInsets.bottom + 90,
+                          bottomInset: geometry.safeAreaInsets.bottom + 90 + (showsSearchChoices ? Self.choicesRowHeight : 0),
                           onDensityChange: { columns = $0 }, onOpenLocal: { photo in
                     // While typing, a tap on the grid only puts the keyboard away.
                     if searchFocused { searchFocused = false } else { navigator.present(.phoneViewer(photo)) }
@@ -190,7 +191,8 @@ struct LibraryView: View {
             .background(.black)
             .coordinateSpace(name: "library")
             .gesture(LibraryEdgePanGesture(size: geometry.size,
-                activeY: (chromeHeight + 16)...max(chromeHeight + 16, geometry.size.height - (showPlaces ? geometry.size.height * 0.4 : 90)),
+                activeY: (chromeHeight + 16)...max(chromeHeight + 16, geometry.size.height - (showPlaces ? geometry.size.height * 0.4
+                                                                                                  : 90 + (showsSearchChoices ? Self.choicesRowHeight : 0))),
                 leadingEnabled: !shelves,
                 // The rail scrubs above the Earth too; its band ends where the Earth begins.
                 trailingEnabled: !shelves && store.canScrubTimeline && store.query.isEmpty,
@@ -365,7 +367,8 @@ struct LibraryView: View {
             if let albumID = store.feedQuery.predicates.albums.first {
                 AlbumUploadStatusView(albumID: albumID) { Task { await store.refreshAfterMutation() } }
             }
-            if !store.query.isEmpty, let verification = store.verification {
+            // Only a search with the AI check on is checked; another has no check to report.
+            if store.checksPhotoContent, let verification = store.verification {
                 verificationView(verification)
             }
         }
@@ -472,16 +475,16 @@ struct LibraryView: View {
     private var searchBar: some View {
         VStack(spacing: 10) {
             if store.isSearching {
-                HStack(spacing: 12) { ProgressView(); Text("Checking photo content…").font(.subheadline); Spacer() }
+                // Only a Photo content search with the AI check on is checked by the server.
+                HStack(spacing: 12) { ProgressView(); Text(store.checksPhotoContent ? "Checking photo content…" : "Searching…").font(.subheadline); Spacer() }
                     .padding(16).glassEffect(in: .rect(cornerRadius: 20))
                     .accessibilityIdentifier("search.checking")
             }
             HStack(spacing: 12) {
-                Button { searchFocused = false; navigator.present(.searchOptions) } label: {
-                    Image(systemName: "magnifyingglass").frame(width: 44, height: 44)
-                }.buttonStyle(.plain).accessibilityLabel("Search options")
+                // The search options are under the bar, behind More; the glass only marks the field.
+                Image(systemName: "magnifyingglass").frame(width: 24, height: 44).accessibilityHidden(true)
                 TextField("Search photos", text: $searchText,
-                          prompt: Text(store.filterTitle.map { "Search \($0)" } ?? "Describe a moment").foregroundStyle(.white.opacity(0.65)))
+                          prompt: Text(searchPrompt).foregroundStyle(.white.opacity(0.65)))
                     .focused($searchFocused).submitLabel(.search).onSubmit { store.search(searchText); searchFocused = false }
                     .frame(minHeight: 44)
                     .accessibilityIdentifier("library.search")
@@ -493,7 +496,75 @@ struct LibraryView: View {
                 // The whole capsule is the field: a tap on its padding still starts typing.
                 .contentShape(.capsule).onTapGesture { searchFocused = true }
                 .glassEffect(.clear.tint(.black.opacity(0.28)).interactive(), in: .capsule)
+            if showsSearchChoices { searchChoicesRow.transition(.opacity) }
         }
+    }
+
+    /// The row under the bar shows while typing, and while the choices apply to what is shown.
+    private var showsSearchChoices: Bool { searchFocused || store.choicesApply }
+    /// The row and the spacing above it.
+    private static let choicesRowHeight: CGFloat = 54
+
+    /// The prompt names the mode, and the feed searched in.
+    private var searchPrompt: String {
+        let place = store.searchPlaceTitle
+        let within = place.map { " in \($0)" } ?? ""
+        switch store.searchMode {
+        case .context: return place.map { "Search \($0)" } ?? "Describe a moment"
+        case .filename: return "Search filenames" + within
+        case .description: return "Search descriptions" + within
+        case .ocr: return "Search text in photos" + within
+        }
+    }
+
+    /// The AI check, More, and a chip for each mode and filter chosen there. A chip's tap
+    /// removes it. The AI check belongs to Photo content, so another mode's chip takes its place.
+    private var searchChoicesRow: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                if store.searchMode == .context { aiCheckSwitch }
+                Button { searchFocused = false; navigator.present(.searchOptions) } label: {
+                    Label("More", systemImage: "slider.horizontal.3").font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 16).frame(minHeight: 44)
+                        .contentShape(.capsule)
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.clear.tint(.black.opacity(0.28)).interactive(), in: .capsule)
+                .accessibilityHint("Search mode and filters")
+                .accessibilityIdentifier("search.more")
+                ForEach(store.searchChoices.chips(personName: { id in people.first { $0.id == id }?.name })) { chip in
+                    Button { Haptics.itemChosen(); store.removeChoice(chip.kind) } label: {
+                        HStack(spacing: 7) {
+                            Text(chip.title).lineLimit(1)
+                            Image(systemName: "xmark").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.7))
+                        }
+                        .font(.subheadline.weight(.semibold)).padding(.leading, 16).padding(.trailing, 14).frame(minHeight: 44)
+                        .contentShape(.capsule)
+                    }
+                    .buttonStyle(.plain)
+                    // A choice in force reads cyan, as the filter tag and the AI check do.
+                    .glassEffect(.clear.tint(.cyan.opacity(0.2)).interactive(), in: .capsule)
+                    .overlay(Capsule().strokeBorder(.cyan.opacity(0.85), lineWidth: 0.75))
+                    .accessibilityLabel("Remove \(chip.title)")
+                    .accessibilityIdentifier("search.chip.\(chip.kind.rawValue)")
+                }
+            }.padding(.horizontal, 2)
+        }
+        .scrollIndicators(.hidden).scrollClipDisabled()
+        .frame(height: 44)
+    }
+
+    private var aiCheckSwitch: some View {
+        let on = store.searchChoices.checksContent
+        return Toggle(isOn: Binding(get: { store.searchChoices.checksContent }, set: { Haptics.itemChosen(); store.setChecksContent($0) })) {
+            Label { Text("AI check") } icon: { Image(systemName: "sparkles").foregroundStyle(on ? .cyan : .white.opacity(0.7)) }
+                .font(.subheadline.weight(.semibold))
+        }
+        .toggleStyle(.switch).tint(.cyan).fixedSize()
+        .padding(.leading, 16).padding(.trailing, 8).frame(minHeight: 44)
+        .glassEffect(.clear.tint(.black.opacity(0.28)).interactive(), in: .capsule)
+        .accessibilityHint("Checks photo content results with AI")
+        .accessibilityIdentifier("search.aiCheck")
     }
 
     private func verificationView(_ verification: Verification) -> some View {
@@ -872,7 +943,7 @@ struct LibraryView: View {
         case .activity(let album, let asset):
             AlbumActivityView(api: api, albumID: album, assetID: asset)
         case .searchOptions:
-            SearchOptionsView(api: api, mode: store.searchMode, filter: store.searchFilter) { mode, filter in
+            SearchOptionsView(api: api, mode: store.searchMode, filter: store.searchChoices.filter) { mode, filter in
                 store.applySearchOptions(mode: mode, filter: filter)
             }
         case .people: PeopleView(api: api, pipeline: pipeline) { store.setPerson($0); navigator.dismiss(level: level); searchText = "" }
