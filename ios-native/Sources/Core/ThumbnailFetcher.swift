@@ -91,12 +91,16 @@ final class ThumbnailFetcher: Sendable {
         error is CancellationError || (error as? URLError)?.code == .cancelled
     }
 
-    private func succeeded(assetID: String, revision: String) {
+    /// The photo loaded, from here or from Photos: it no longer waits.
+    func succeeded(assetID: String, revision: String) {
         let key = Self.key(assetID: assetID, revision: revision)
         backoff.withLock { _ = $0.removeValue(forKey: key) }
     }
 
-    private func failed(assetID: String, revision: String) {
+    /// The photo could not be loaded, from here or from Photos (T6): the grid waits before asking
+    /// for it again, twice as long after each failure. The one table serves both; a phone photo's
+    /// key carries a prefix no server photo has.
+    func failed(assetID: String, revision: String) {
         let key = Self.key(assetID: assetID, revision: revision), now = now()
         backoff.withLock { backoff in
             let failures = (backoff[key]?.failures ?? 0) + 1

@@ -84,11 +84,12 @@ struct ViewerPhoto: View {
                     try? await Task.sleep(for: .seconds(0.8))
                     slowPreview = !Task.isCancelled
                 }
-                .task(id: mediaKey) {
+                .task(id: mediaKey + String(settled)) {
                     // Opened from somewhere other than the grid, with nothing in memory: the grid
                     // thumbnail on disk stands in while the preview loads (DESIGN 13), through
-                    // the thumbnail service, so the grid finds it in memory too.
-                    guard image == nil, placeholder == nil else { return }
+                    // the thumbnail service, so the grid finds it in memory too. Not while the
+                    // strip is scrubbed: a page passing by shows what memory has and loads nothing.
+                    guard settled, image == nil, placeholder == nil else { return }
                     guard let stored = await pipeline.storedThumbnail(for: asset, pixelSize: 1_024), !Task.isCancelled,
                           image == nil, placeholder == nil else { return }
                     placeholder = stored.uiImage

@@ -104,15 +104,21 @@ final class DeviceThumbnailSource: DeviceThumbnailProviding, Sendable {
     var cachedWindow: Set<DeviceAssetID> { state.withLock { $0.window } }
 
     /// Photos stops caching everything. While `background` holds, windows are not started until
-    /// the app comes forward again.
+    /// the app comes forward again. The window is forgotten on the queue, in the same step that
+    /// stops Photos: a window that work already queued starts in between is stopped with the rest,
+    /// and the diff after knows it, so the next window starts from nothing.
     private func clear(background: Bool?) {
         state.withLock { state in
-            state.window = []
-            state.pixels = 0
             state.next = nil
             if let background { state.inBackground = background }
         }
-        queue.async { [imaging] in imaging.stopCachingAll() }
+        queue.async { [self] in
+            state.withLock { state in
+                state.window = []
+                state.pixels = 0
+            }
+            imaging.stopCachingAll()
+        }
     }
 
     private func work() {

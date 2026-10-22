@@ -35,6 +35,8 @@ struct ThumbnailDelivery: Sendable {
 ///   away is never decoded.
 /// - Photos renders phone photos' thumbnails on the same lanes, through the device source, which
 ///   also keeps Photos' caching manager one window ahead of the grid (T6). They never download.
+///   One Photos could not render (gone, or only in iCloud) waits like a failing download, twice
+///   as long after each failure, instead of being asked of Photos on every demand.
 /// - Downloads start most urgent band first, each band only while fewer downloads than its
 ///   ceiling are running, so coverage never takes the slots the screen needs. A download that has
 ///   started finishes and is stored even if nobody wants it any more: the server does the work
@@ -262,7 +264,6 @@ final class ThumbnailScheduler: Sendable {
         let scrubbing = demand.motion == .scrubbing
         var wants: [Key: Want] = [:]
         var devices: [Key: DeviceAssetID] = [:]
-        var window = DeviceWindow(ids: [], pixels: 0)
         for item in demand.items {
             let request = item.request
             let key = Key(assetID: request.key.assetID, revision: request.key.revision)
@@ -270,14 +271,22 @@ final class ThumbnailScheduler: Sendable {
             if request.key.deviceID != nil && device == nil { continue }
             // What memory has already needs nothing.
             if memory.image(assetID: key.assetID, revision: key.revision, shortSide: request.shortSide) != nil { continue }
-            if let id = request.key.deviceID {
-                devices[key] = id
-                window.ids.insert(id)
-                window.pixels = max(window.pixels, request.shortSide)
-            }
+            if let id = request.key.deviceID { devices[key] = id }
             let want = Want(band: item.band, rank: item.rank, shortSide: request.shortSide,
                             network: !scrubbing || item.band == .target)
             wants[key] = wants[key].map { $0.merged(want) } ?? want
+        }
+        // Photos renders ahead the phone photos wanted, at the largest cell, except those it
+        // could not render lately: they wait their turn to be asked for again.
+        var window = DeviceWindow(ids: [], pixels: 0)
+        if !devices.isEmpty {
+            let now = fetcher.currentTime()
+            for (key, id) in devices {
+                guard let want = wants[key] else { continue }
+                if let wait = fetcher.retryTime(assetID: key.assetID, revision: key.revision), wait > now { continue }
+                window.ids.insert(id)
+                window.pixels = max(window.pixels, want.shortSide)
+            }
         }
         // The disk is asked about new photos only, outside the lock. Photos always has its own.
         let known = state.withLock { state in Set(wants.keys.filter { state.jobs[$0] != nil }) }
@@ -308,6 +317,15 @@ final class ThumbnailScheduler: Sendable {
             state.wanted[source] = wants.isEmpty ? nil : Set(wants.keys)
             state.deviceWindows[source] = window.ids.isEmpty ? nil : window
         }
+    }
+
+    /// When the photo may be asked for again, from the server or from Photos, if it is waiting out
+    /// a failure; nil when it may be asked for now. Something asking for this one photo, such as
+    /// the viewer, tries at once; the grid and coverage wait.
+    private static func retryWait(_ job: Job, fetcher: ThumbnailFetcher, now: TimeInterval) -> TimeInterval? {
+        let asked = job.waiters.values.contains { ($0.want.network || job.device != nil) && $0.want.band <= .explicit }
+        guard !asked, let wait = fetcher.retryTime(assetID: job.key.assetID, revision: job.key.revision), wait > now else { return nil }
+        return wait
     }
 
     /// Puts a changed job back, or lets it go once nobody wants it: at once if it is waiting, when
@@ -391,14 +409,15 @@ final class ThumbnailScheduler: Sendable {
             var retry: TimeInterval?
             for job in state.jobs.values where job.phase == .idle {
                 guard let want = job.want else { continue }
-                if want.decode && (job.fetched != nil || job.onDisk) { decodable += 1; continue }
-                guard want.network else { continue }
-                // Something asking for this one photo, such as the viewer, tries at once; the
-                // grid and coverage wait out the photo's failures.
-                let asked = job.waiters.values.contains { $0.want.network && $0.want.band <= .explicit }
-                if !asked, let wait = fetcher.retryTime(assetID: job.key.assetID, revision: job.key.revision), wait > now {
-                    retry = min(retry ?? wait, wait); continue
+                if want.decode && (job.fetched != nil || job.onDisk) {
+                    // A phone photo Photos could not render waits out its failures too.
+                    if job.device != nil, let wait = Self.retryWait(job, fetcher: fetcher, now: now) {
+                        retry = min(retry ?? wait, wait); continue
+                    }
+                    decodable += 1; continue
                 }
+                guard want.network else { continue }
+                if let wait = Self.retryWait(job, fetcher: fetcher, now: now) { retry = min(retry ?? wait, wait); continue }
                 candidates.append((job.key, want))
             }
             let newLanes = max(0, min(decodable, lanes - state.decoding))
@@ -505,10 +524,13 @@ final class ThumbnailScheduler: Sendable {
 
     /// The most urgent decode waiting, or nil, giving the lane back.
     private func nextDecode() -> DecodeWork? {
-        state.withLock { state in
+        let now = fetcher.currentTime()
+        return state.withLock { state in
             var best: (key: Key, order: (DemandBand, Int, Int))?
             for job in state.jobs.values where job.phase == .idle && (job.fetched != nil || job.onDisk) {
                 guard let want = job.want, want.decode else { continue }
+                // A phone photo waiting out a failure is not Photos' to render yet.
+                if job.device != nil, Self.retryWait(job, fetcher: fetcher, now: now) != nil { continue }
                 let order = (want.band, want.lifo, want.rank)
                 if best.map({ order < $0.order }) ?? true { best = (job.key, order) }
             }
@@ -542,6 +564,7 @@ final class ThumbnailScheduler: Sendable {
             } else if let image {
                 let fromNetwork = work.bytes != nil
                 job.fetched = nil
+                if work.device != nil { fetcher.succeeded(assetID: key.assetID, revision: key.revision) }
                 let fileLimited = min(image.cgImage.width, image.cgImage.height) + 1 < work.side
                 if admitted {
                     if !job.grid.isEmpty {
@@ -573,7 +596,9 @@ final class ThumbnailScheduler: Sendable {
                 }
                 job.grid = [:]
             } else if work.device != nil {
-                // Photos has nothing to give for it: gone, or only in iCloud. Nobody else can help.
+                // Photos has nothing to give for it: gone, or only in iCloud. Nobody else can help,
+                // and the grid waits before asking Photos again.
+                fetcher.failed(assetID: key.assetID, revision: key.revision)
                 for waiter in job.waiters.values { resumes.append((waiter.continuation, .success(nil))) }
                 job.waiters = [:]
                 if !job.grid.isEmpty {

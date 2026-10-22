@@ -7,7 +7,8 @@ import XCTest
 /// Phone photos and feature tiles through the thumbnail service (REBUILD_ROADMAP.md T6): Photos'
 /// caching manager follows the grid's window by diff and at the cell's size, stops on a density
 /// change, a memory warning and the background, phone photos reach the grid like server photos,
-/// and a tile that knows only an ID names its photo from the library instead of the server.
+/// one Photos cannot render waits before Photos is asked again, and a tile that knows only an ID
+/// names its photo from the library instead of the server.
 final class DeviceThumbnailTests: XCTestCase {
     /// Photos' caching image manager, recording every call. A photo it was given renders at the
     /// size asked, as Photos' aspect-fill does; one marked in iCloud is unavailable with that
@@ -23,14 +24,23 @@ final class DeviceThumbnailTests: XCTestCase {
         private let state = Mutex(State())
         private let photos: Set<String>
         private let inCloud: Set<String>
+        /// With `holdsFirstStart`, the first start blocks the source's queue until `release()`.
+        private let holdsFirstStart: Bool
+        private let gate = DispatchSemaphore(value: 0)
 
-        init(photos: [String], inCloud: [String] = []) {
+        init(photos: [String], inCloud: [String] = [], holdsFirstStart: Bool = false) {
             self.photos = Set(photos)
             self.inCloud = Set(inCloud)
+            self.holdsFirstStart = holdsFirstStart
         }
         func startCaching(_ ids: [DeviceAssetID], pixels: Int) {
-            state.withLock { $0.started.append(Call(ids: ids.map(\.rawValue).sorted(), pixels: pixels)) }
+            let first = state.withLock { state in
+                state.started.append(Call(ids: ids.map(\.rawValue).sorted(), pixels: pixels))
+                return state.started.count == 1
+            }
+            if first && holdsFirstStart { gate.wait() }
         }
+        func release() { gate.signal() }
         func stopCaching(_ ids: [DeviceAssetID], pixels: Int) {
             state.withLock { $0.stopped.append(Call(ids: ids.map(\.rawValue).sorted(), pixels: pixels)) }
         }
@@ -64,6 +74,12 @@ final class DeviceThumbnailTests: XCTestCase {
         let value = Atomic<Int>(0)
     }
 
+    private final class Clock: Sendable {
+        let now = Mutex<TimeInterval>(1_000)
+        func advance(_ seconds: TimeInterval) { now.withLock { $0 += seconds } }
+        var time: TimeInterval { now.withLock { $0 } }
+    }
+
     /// A square bitmap of `side` pixels, as Photos renders an aspect-filled thumbnail.
     nonisolated static func image(side: Int) -> PreparedImage {
         let format = UIGraphicsImageRendererFormat()
@@ -93,11 +109,11 @@ final class DeviceThumbnailTests: XCTestCase {
     }
 
     private func makeScheduler(_ imaging: FakeImaging, memory: DecodedThumbnailCache = DecodedThumbnailCache(),
-                               notifications: NotificationCenter = NotificationCenter()) -> (ThumbnailScheduler, DeviceThumbnailSource, Deliveries) {
+                               notifications: NotificationCenter = NotificationCenter(),
+                               fetcher: ThumbnailFetcher = ThumbnailFetcher(load: { _, _, _ in throw URLError(.notConnectedToInternet) }))
+        -> (ThumbnailScheduler, DeviceThumbnailSource, Deliveries) {
         let source = DeviceThumbnailSource(imaging: imaging, notifications: notifications)
-        let scheduler = ThumbnailScheduler(store: EmptyStore(), memory: memory,
-                                           fetcher: ThumbnailFetcher(load: { _, _, _ in throw URLError(.notConnectedToInternet) }),
-                                           device: source, lanes: 1)
+        let scheduler = ThumbnailScheduler(store: EmptyStore(), memory: memory, fetcher: fetcher, device: source, lanes: 1)
         let deliveries = Deliveries()
         _ = scheduler.addListener { batch in deliveries.received.withLock { $0 += batch } }
         return (scheduler, source, deliveries)
@@ -209,6 +225,33 @@ final class DeviceThumbnailTests: XCTestCase {
         XCTAssertEqual(imaging.stopped, [], "Stopping everything at once stops nothing one by one.")
     }
 
+    /// A memory warning while a window waits its turn on the source's queue: the window started
+    /// after the warning was posted is stopped with everything else, and the source knows it, so
+    /// the next window starts from nothing instead of only its newcomers.
+    func testAWindowStartedBeforeAClearIsWorkedInIsKnownToBeStopped() async throws {
+        let imaging = FakeImaging(photos: ["a", "b", "c", "d"], holdsFirstStart: true)
+        let notifications = NotificationCenter()
+        let source = DeviceThumbnailSource(imaging: imaging, notifications: notifications)
+        func ids(_ names: String...) -> Set<DeviceAssetID> { Set(names.map { DeviceAssetID(rawValue: $0) }) }
+        source.preheat(ids("a"), pixels: 128)
+        try await until("The first window was not started.") { imaging.started.count == 1 }
+
+        // Photos holds the first start, so these line up behind it on the queue in this order:
+        // the second window, the warning's stop, and a third window that only replaces the second.
+        source.preheat(ids("a", "b"), pixels: 128)
+        notifications.post(name: DeviceThumbnailSource.memoryWarning, object: nil)
+        source.preheat(ids("a", "b", "c"), pixels: 128)
+        imaging.release()
+        try await until("The memory warning did not stop Photos.") { imaging.stoppedAll == 1 }
+        XCTAssertEqual(imaging.started.count, 2, "The window queued before the warning was started…")
+        XCTAssertTrue(source.cachedWindow.isEmpty, "…and is known to be stopped with the rest.")
+
+        source.preheat(ids("a", "b", "c", "d"), pixels: 128)
+        try await until("The next window was not started.") { imaging.started.count == 3 }
+        XCTAssertEqual(imaging.started.last, .init(ids: ["a", "b", "c", "d"], pixels: 128), "The next window starts from nothing.")
+        XCTAssertEqual(source.cachedWindow, ids("a", "b", "c", "d"))
+    }
+
     // MARK: - Deliveries
 
     /// A phone photo reaches the grid as a server photo does, by the key it was bound with, from
@@ -239,6 +282,53 @@ final class DeviceThumbnailTests: XCTestCase {
         XCTAssertFalse(missing.inCloud)
         XCTAssertEqual(gone.revision, "-", "A photo without a modification date has a revision all the same.")
         XCTAssertEqual(scheduler.pendingCount, 0, "Nothing waits on the server for a phone photo.")
+        scheduler.withdraw(grid)
+    }
+
+    /// A phone photo Photos cannot render is in every demand the grid sends while it scrolls, as
+    /// its cell shows the failure; Photos is not asked for it again on each one. Like a failing
+    /// download it waits, twice as long after each failure, and leaves the preheat window.
+    func testAPhonePhotoPhotosCannotRenderWaitsBeforeItIsAskedAgain() async throws {
+        let imaging = FakeImaging(photos: ["here"], inCloud: ["cloud"])
+        let clock = Clock()
+        let fetcher = ThumbnailFetcher(load: { _, _, _ in throw URLError(.notConnectedToInternet) }, baseDelay: 2,
+                                       now: { clock.time })
+        let (scheduler, source, deliveries) = makeScheduler(imaging, fetcher: fetcher)
+        let grid = UUID()
+        let cloud = Self.device("cloud"), here = Self.device("here")
+        func asked() -> Int { imaging.requested.count { $0.id == "cloud" } }
+        scheduler.submit(Self.demand([(cloud, .visible), (here, .visible)], shortSide: 128), from: grid)
+        try await until("The photos were not answered.") { deliveries.all.count == 2 }
+        XCTAssertEqual(asked(), 1)
+        try await until("The window was not cached.") { imaging.started.count == 1 }
+        XCTAssertEqual(imaging.started, [.init(ids: ["cloud", "here"], pixels: 128)], "Nothing is known against the photo yet.")
+
+        // Asked again at once, as the grid does on every scroll with the failed cell on screen.
+        for _ in 0..<3 {
+            scheduler.submit(Self.demand([(cloud, .visible), (here, .visible)], shortSide: 128), from: grid)
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        XCTAssertEqual(asked(), 1, "Photos is not asked again straight away for a photo it could not render.")
+        try await until("The photo Photos could not render stayed in the window.") { source.cachedWindow.isEmpty }
+        XCTAssertEqual(imaging.started.count, 1)
+
+        clock.advance(2.5)
+        scheduler.pump()
+        try await until("Photos was not asked again after the wait.") { asked() == 2 }
+        try await until("The second failure was not recorded.") {
+            fetcher.retryTime(assetID: cloud.assetID, revision: cloud.revision).map { $0 > clock.time } ?? false
+        }
+
+        // The second failure waits twice as long.
+        scheduler.submit(Self.demand([(cloud, .visible)], shortSide: 128), from: grid)
+        clock.advance(2.5)
+        scheduler.pump()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(asked(), 2, "The wait doubles after another failure.")
+        clock.advance(2)
+        scheduler.pump()
+        try await until("Photos was not asked a third time.") { asked() == 3 }
+        XCTAssertEqual(imaging.requested.count { $0.id == "here" }, 1, "A photo Photos rendered is in memory and never asked again.")
         scheduler.withdraw(grid)
     }
 
@@ -294,5 +384,13 @@ final class DeviceThumbnailTests: XCTestCase {
         }
         XCTAssertEqual(fetches.value.load(ordering: .relaxed), 1, "A photo the library lacks is fetched once.")
         XCTAssertEqual(server.requests("GET", "assets/unknown/thumbnail").first?.query.first { $0.name == "c" }?.value, "from-server")
+    }
+
+    /// A tile decodes to cover its long side: a photo of unknown shape aspect-fills the shelf's
+    /// wide, low row without being stretched, and a square tile still shares the grid's copy.
+    @MainActor func testTilesDecodeToCoverTheirLongSide() {
+        XCTAssertEqual(tilePixels(CGSize(width: 244, height: 56), scale: 3), 732, "The shelf row's cover covers its width.")
+        XCTAssertEqual(tilePixels(CGSize(width: 56, height: 56), scale: 3), 168)
+        XCTAssertEqual(tilePixels(CGSize(width: 38, height: 38), scale: 3), 128, "No less than the grid's smallest cell.")
     }
 }
