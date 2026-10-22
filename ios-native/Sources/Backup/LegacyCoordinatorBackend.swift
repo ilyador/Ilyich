@@ -14,6 +14,11 @@ import Observation
     /// The client shared files upload with; nil where nothing enqueues them.
     private let shareClient: APIClient?
     private var history: (key: HistoryKey, ids: [String])?
+    /// The failures and album counts last read, until the backup state changes. A snapshot is
+    /// sent for every progress tick, and each rereads both; kept, they cost nothing then, and the
+    /// store's comparison with what it shows meets the same storage and returns at once.
+    private var failureCache: (revision: Int, limit: Int, items: [TransferQueueItem])?
+    private var countsCache: (revision: Int, counts: [String: AlbumUploadCount])?
 
     private struct HistoryKey: Equatable {
         let scope: String?
@@ -141,13 +146,23 @@ import Observation
 
     /// Failed photos, the latest failure first.
     func failures(limit: Int) async throws -> [TransferQueueItem] {
-        coordinator.failures.prefix(max(limit, 0)).enumerated().map { index, failure in
+        let revision = coordinator.stateRevision, limit = max(limit, 0)
+        if let failureCache, failureCache.revision == revision, failureCache.limit == limit { return failureCache.items }
+        let items = coordinator.failures.prefix(limit).enumerated().map { index, failure in
             TransferQueueItem(source: .photo(DeviceAssetID(rawValue: failure.id)), state: .failed, seq: Int64(index),
                               displayName: failure.filename, message: failure.message, failedAt: failure.date)
         }
+        failureCache = (revision, limit, items)
+        return items
     }
 
-    func albumUploadCounts() async throws -> [String: AlbumUploadCount] { coordinator.albumUploadCounts }
+    func albumUploadCounts() async throws -> [String: AlbumUploadCount] {
+        let revision = coordinator.stateRevision
+        if let countsCache, countsCache.revision == revision { return countsCache.counts }
+        let counts = coordinator.albumUploadCounts
+        countsCache = (revision, counts)
+        return counts
+    }
 }
 
 /// Follows one subscriber's coordinator through Observation and sends its snapshot.
@@ -204,12 +219,12 @@ import Observation
         let running = coordinator.isRunning
         var snapshot = TransferSnapshot(intent: !running ? .paused : coordinator.preferences.automatic ? .automatic : .manual,
                                         phase: phase(coordinator), remaining: coordinator.remaining, confirmed: coordinator.confirmed,
-                                        failed: coordinator.failures.count, fileProgress: coordinator.progress,
+                                        failed: coordinator.failureCount, fileProgress: coordinator.progress,
                                         bytesSent: coordinator.bytesTransferred, bytesExpected: coordinator.totalTransferBytes,
                                         bytesPerSecond: coordinator.transferRate, lastMessage: coordinator.error)
         snapshot.activity = coordinator.activity
         // Read so that a change to either is sent too: the preferences, and the account. The
-        // failures above read the whole backup state.
+        // failure count above reads the whole backup state.
         _ = coordinator.preferences
         _ = coordinator.activeScope
         return snapshot

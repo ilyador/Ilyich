@@ -156,7 +156,38 @@ import XCTest
         XCTAssertEqual(saved.preferences.triggerDelay, 300)
     }
 
+    /// A snapshot is sent for every progress tick, and the store rereads the failures and album
+    /// counts with each: until the backup state changes, the backend hands back what it built,
+    /// without sorting the failures again, and the store's comparison meets the same storage.
+    func testLegacyBackendKeepsFailuresUntilTheStateChanges() async throws {
+        let folder = temporaryDirectory()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FixtureLoader.data("backup/state-current.json").write(to: folder.appendingPathComponent("state.json"))
+        let coordinator = BackupCoordinator()
+        try coordinator.load(G.credential, folder: folder)
+        let backend = LegacyCoordinatorBackend(coordinator: coordinator)
+        XCTAssertEqual(coordinator.failureCount, coordinator.failures.count)
+
+        let revision = coordinator.stateRevision
+        let first = try await backend.failures(limit: 10_000)
+        coordinator.applyProgress(UploadProgressSnapshot(taskID: 7, sent: 512, expected: 1_024))
+        let second = try await backend.failures(limit: 10_000)
+        XCTAssertEqual(coordinator.stateRevision, revision, "A progress tick leaves the backup state alone.")
+        XCTAssertEqual(first.map(\.displayName), ["IMG_0003.HEIC"])
+        XCTAssertEqual(Self.storage(first), Self.storage(second), "The failures were built again with nothing changed.")
+
+        coordinator.savePreferences()
+        XCTAssertNotEqual(coordinator.stateRevision, revision)
+        let third = try await backend.failures(limit: 10_000)
+        XCTAssertEqual(third, first)
+        XCTAssertNotEqual(Self.storage(third), Self.storage(first), "A changed state reads the failures again.")
+    }
+
     // MARK: Support
+
+    private static func storage(_ items: [TransferQueueItem]) -> UnsafeRawPointer? {
+        items.withUnsafeBufferPointer { $0.baseAddress.map(UnsafeRawPointer.init) }
+    }
 
     private static func snapshot(lastMessage: String? = nil) -> TransferSnapshot {
         TransferSnapshot(intent: .paused, phase: .idle, remaining: 0, confirmed: 0, failed: 0, fileProgress: nil, bytesSent: 0,
