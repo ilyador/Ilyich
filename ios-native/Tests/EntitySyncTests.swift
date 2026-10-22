@@ -259,9 +259,10 @@ final class EntitySyncTests: XCTestCase {
         filter.visibility = [.timeline, .archive]
         let defaultVisibility = try await store.timelineAssets(filter)
         XCTAssertFalse(defaultVisibility.contains { $0.id == "hidden" })
-        let matches = try await store.visibleIdentities(after: nil)
-        XCTAssertEqual(matches.map(\.assetID), ["primary", "secondary"], "Trashed and hidden photos match no phone photo.")
-        let next = try await store.visibleIdentities(after: "primary", limit: 1)
+        let matches = try await store.identities(after: nil)
+        XCTAssertEqual(matches.map(\.assetID), ["hidden", "primary", "secondary", "trash"])
+        XCTAssertEqual(matches.filter(\.visible).map(\.assetID), ["primary", "secondary"], "Trashed and hidden photos match no phone photo.")
+        let next = try await store.identities(after: "primary", limit: 1)
         XCTAssertEqual(next.map(\.assetID), ["secondary"])
         let paired = try XCTUnwrap(matches.first { $0.assetID == "primary" })
         XCTAssertEqual(paired.cloudID, "cloud-photo")

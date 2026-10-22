@@ -18,10 +18,11 @@ protocol DeviceIndexReading: Sendable {
     func revision(of id: String) async -> Date?
 }
 
-/// The server's side of matching: the identity rows of the photos the timeline shows.
+/// The server's side of matching: the identity rows of the owner's photos.
 protocol DeviceIndexServer: Sendable {
-    /// Every visible identity row in ID order, or nil while the offline library isn't complete,
-    /// when it can't prove a phone photo is absent from the server.
+    /// Every identity row in ID order, each saying whether the timeline shows it, or nil while
+    /// the offline library isn't complete, when it can't prove a phone photo is absent from the
+    /// server.
     func identities() async throws -> [LocalAssetMatch]?
     /// The library's changes from now on.
     func changes() async -> AsyncStream<LibraryChange>
@@ -141,18 +142,25 @@ actor DeviceIndexService {
     private var published: Published?
     private var latest: DeviceIndexSnapshot?
 
-    /// The server's identity rows, indexed as matching reads them.
+    /// The server's identity rows, indexed as matching reads them. Only those the timeline shows
+    /// can be matched; the hidden ones (archived, hidden, locked, trashed) only spare a phone photo
+    /// uploaded as one of them a fingerprint that could never match.
     private struct Remotes {
         var rows: [LocalAssetMatch] = []
         var byID: [String: LocalAssetMatch] = [:]
         var byHash: [String: String] = [:]
         var byCloud: [String: [LocalAssetMatch]] = [:]
+        var hiddenByID: [String: LocalAssetMatch] = [:]
+        var hiddenByCloud: [String: [LocalAssetMatch]] = [:]
 
-        init(_ rows: [LocalAssetMatch] = []) {
+        init(_ all: [LocalAssetMatch] = []) {
+            let rows = all.filter(\.visible), hidden = all.filter { !$0.visible }
             self.rows = rows
             byID = Dictionary(rows.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
             byHash = Dictionary(rows.map { ($0.checksum, $0.assetID) }, uniquingKeysWith: { first, _ in first })
             byCloud = Dictionary(grouping: rows.filter { $0.cloudID != nil }, by: { $0.cloudID ?? "" })
+            hiddenByID = Dictionary(hidden.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
+            hiddenByCloud = Dictionary(grouping: hidden.filter { $0.cloudID != nil }, by: { $0.cloudID ?? "" })
         }
     }
 
@@ -274,8 +282,10 @@ actor DeviceIndexService {
         let named = change.inserted.union(change.removed).union(change.changed).map(\.rawValue)
         pending.formUnion(named)
         removed.formUnion(change.removed.map(\.rawValue))
-        // Photos added to an album name no asset, and a new photo joins smart albums.
-        if change.albumsChanged || !change.inserted.isEmpty { needsMembership = true }
+        // Photos added to an album name no asset, a new photo joins smart albums, and a favorite or
+        // an edit moves a photo in or out of smart albums such as Favorites, which Photos reports
+        // only as a change to the photo. Membership is identifiers only, so it is read again.
+        if change.albumsChanged || !change.inserted.isEmpty || !change.changed.isEmpty { needsMembership = true }
         signal()
     }
 
@@ -398,23 +408,33 @@ actor DeviceIndexService {
         let receipts = inputs?.receipts ?? [:]
         let known = fingerprints ?? [:]
         var result: [String: String] = [:]
+        var unhashed: [String] = []
         for id in items.keys.sorted() {
             guard let item = items[id] else { continue }
             let photo = item.photo
-            if let receipt = receipts[id], photo.modified.map(AssetRevision.init) == receipt.revision,
-               remotes.byID[receipt.original.id]?.checksum == receipt.original.checksum {
-                result[id] = receipt.original.id
+            let receipt = receipts[id].flatMap { photo.modified.map(AssetRevision.init) == $0.revision ? $0.original : nil }
+            if let receipt, remotes.byID[receipt.id]?.checksum == receipt.checksum {
+                result[id] = receipt.id
             } else if let fingerprint = known[id], fingerprint.isCurrent(for: photo.modified), let remote = remotes.byHash[fingerprint.checksum] {
                 result[id] = remote
             } else if item.unadjusted, let cloudID = item.cloudID,
                       let remote = remotes.byCloud[cloudID]?.first(where: { LocalIdentityMatch.matches(photo, remote: $0) }) {
                 result[id] = remote.assetID
+            } else if let receipt, remotes.hiddenByID[receipt.id]?.checksum == receipt.checksum {
+                // Uploaded as a photo the timeline doesn't show: the server keeps one checksum per
+                // owner, so a fingerprint could only name that photo again.
+                continue
+            } else if item.unadjusted, let cloudID = item.cloudID,
+                      remotes.hiddenByCloud[cloudID]?.contains(where: { LocalIdentityMatch.matches(photo, remote: $0) }) == true {
+                continue
+            } else {
+                unhashed.append(id)
             }
         }
         associations = result
         // An incomplete offline library can't prove a fingerprint is absent from the server, so
         // nothing is hashed until it is complete.
-        queue = remotes.rows.isEmpty ? [] : items.keys.filter { result[$0] == nil }.sorted()
+        queue = remotes.rows.isEmpty ? [] : unhashed
         cursor = 0
     }
 
@@ -535,7 +555,7 @@ struct LibraryIndexIdentities: DeviceIndexServer {
         var cursor: String?
         while true {
             try Task.checkCancellation()
-            let page = try await entities.visibleIdentities(after: cursor, limit: 2_000)
+            let page = try await entities.identities(after: cursor, limit: 2_000)
             rows += page
             guard page.count == 2_000, let last = page.last?.assetID else { return rows }
             cursor = last
