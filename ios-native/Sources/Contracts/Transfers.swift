@@ -184,6 +184,8 @@ struct TransferRequest: Hashable, Sendable {
     var displayName: String?
     /// The notification batch the job counts in.
     var batch: UUID?
+    /// The server album a photo joins once backed up (B4). Ignored for a shared file.
+    var album: String?
 }
 
 /// A job as the queue and failure lists show it.

@@ -52,18 +52,39 @@ extension TransferStore {
     // MARK: Jobs
 
     /// Adds a job for each request not already queued, after the lane's last. A photo whose
-    /// confirmation has the same revision is already backed up and gets none.
+    /// confirmation has the same revision is already backed up and gets none; a shared file
+    /// already consumed (its upload committed, its manifest not yet rewritten) gets none either.
+    /// A request with an album adds the album to the photo's destinations (B4): one already
+    /// backed up joins it with its receipt's server ID, the rest once their upload commits. A job
+    /// with a notification batch counts in the batch's total.
     func enqueue(_ requests: [TransferRequest]) throws -> (queued: Int, alreadyBackedUp: Int) {
         let db = try database()
         return try db.transaction {
             var queued = 0, backedUp = 0
             var seqs: [TransferLane: Int64] = [:]
             for request in requests {
+                let album = request.album.flatMap { UUID(uuidString: $0) == nil ? nil : $0 }
                 if case .photo(let id) = request.source, let revision = request.revision {
                     var confirmed = false
                     try db.run("SELECT 1 FROM confirmations WHERE local_id=? AND modification_date=?",
                                [.text(id.rawValue), .real(revision.referenceSeconds)]) { _ in confirmed = true }
-                    if confirmed { backedUp += 1; continue }
+                    if confirmed {
+                        var remoteID: String?
+                        try db.run("SELECT original_id FROM receipts WHERE local_id=?", [.text(id.rawValue)]) { remoteID = $0.text(0) }
+                        // Confirmed without a receipt (a legacy Live Photo): the server ID comes
+                        // from uploading again, which the duplicate check answers.
+                        if album == nil || remoteID != nil {
+                            if let album { try Self.addDestination(db, localID: id.rawValue, album: album, remoteID: remoteID) }
+                            backedUp += 1
+                            continue
+                        }
+                    }
+                }
+                if case .shared(let batch, let attachment) = request.source {
+                    var consumed = false
+                    try db.run("SELECT 1 FROM share_consumed WHERE batch_id=? AND attachment=?",
+                               [.text(batch.uuidString), .text(attachment)]) { _ in consumed = true }
+                    if consumed { backedUp += 1; continue }
                 }
                 let lane = request.source.lane
                 if seqs[lane] == nil {
@@ -79,10 +100,27 @@ extension TransferStore {
                 if db.changes > 0 {
                     queued += 1
                     seqs[lane] = seq
+                    if let batch = request.batch {
+                        try db.run("""
+                            INSERT INTO notification_batches(id,kind,total) VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET total=total+1
+                            """, [.text(batch.uuidString), .text(NotificationBatchKind(lane).rawValue)])
+                    }
+                }
+                if let album, case .photo(let id) = request.source {
+                    try Self.addDestination(db, localID: id.rawValue, album: album, remoteID: nil)
                 }
             }
             return (queued, backedUp)
         }
+    }
+
+    /// The photo is to join the album: pending, with the server ID when it is known. A destination
+    /// that failed is tried again; a pending one keeps the server ID it has.
+    private static func addDestination(_ db: TransferSQLite, localID: String, album: String, remoteID: String?) throws {
+        try db.run("""
+            INSERT INTO album_destinations(local_id,album_id,remote_id,state,attempts,error) VALUES(?,?,?,'pending',0,NULL) \
+            ON CONFLICT(local_id,album_id) DO UPDATE SET state='pending',attempts=0,error=NULL,remote_id=coalesce(remote_id,excluded.remote_id)
+            """, [.text(localID), .text(album), .optionalText(remoteID)])
     }
 
     /// Drops the leases a process that ended held. A job keeps its state and phase, so the next
@@ -217,14 +255,23 @@ extension TransferStore {
         }
     }
 
-    /// Commits a finished share job while its lease holds: the job goes and its attachment is
-    /// recorded as consumed. B4 adds the manifest and notification work.
+    /// Commits a finished share job while its lease holds: the job goes, its attachment is
+    /// recorded as consumed and its notification batch counts it, in one transaction. The
+    /// manifest is rewritten after the commit (ShareJobExecutor.committed), and again from
+    /// share_consumed if the app ended first.
     func completeShare(job: Int64, token: UUID, batch: UUID, attachment: String, remoteID: String?, at date: Date) throws -> Bool {
         let db = try database()
         return try db.transaction {
             var found = false
-            try db.run("SELECT 1 FROM jobs WHERE id=? AND lane='share' AND lease_token=?", [.integer(job), .text(token.uuidString)]) { _ in found = true }
+            var notification: String?
+            try db.run("SELECT batch_id FROM jobs WHERE id=? AND lane='share' AND lease_token=?", [.integer(job), .text(token.uuidString)]) { row in
+                found = true
+                notification = row.text(0)
+            }
             guard found else { return false }
+            if let notification {
+                try db.run("UPDATE notification_batches SET completed=completed+1 WHERE id=?", [.text(notification)])
+            }
             try db.run("DELETE FROM attempts WHERE job_id=?", [.integer(job)])
             try db.run("DELETE FROM stages WHERE job_id=?", [.integer(job)])
             try db.run("DELETE FROM jobs WHERE id=?", [.integer(job)])

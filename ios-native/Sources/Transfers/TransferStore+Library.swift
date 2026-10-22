@@ -85,21 +85,23 @@ extension TransferStore {
     }
 
     /// Writes an attempt's row as it now stands. Returns false when the lease is gone.
-    func saveAttempt(_ attempt: LibraryAttempt, failure: OutcomeRecord? = nil, job: Int64, token: UUID) throws -> Bool {
+    func saveAttempt(_ attempt: LibraryAttempt, failure: OutcomeRecord? = nil, session: TransferSessionID = .backup, job: Int64,
+                     token: UUID) throws -> Bool {
         let db = try database()
         return try db.transaction {
             guard try Self.holds(db, job: job, token: token) else { return false }
-            try Self.writeAttempt(db, attempt, failure: failure, job: job)
+            try Self.writeAttempt(db, attempt, failure: failure, session: session, job: job)
             return true
         }
     }
 
     /// Inserts or replaces an attempt's row.
-    static func writeAttempt(_ db: TransferSQLite, _ attempt: LibraryAttempt, failure: OutcomeRecord?, job: Int64) throws {
+    static func writeAttempt(_ db: TransferSQLite, _ attempt: LibraryAttempt, failure: OutcomeRecord?, session: TransferSessionID = .backup,
+                             job: Int64) throws {
         try db.run("""
             INSERT OR REPLACE INTO attempts(id,job_id,part,session,state,body_path,body_bytes,checksum,os_task_id,remote_id,remote_status,\
             http_status,error_domain,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, [.text(attempt.id.rawValue), .integer(job), .text(attempt.part.rawValue), .text(TransferSessionID.backup.rawValue),
+            """, [.text(attempt.id.rawValue), .integer(job), .text(attempt.part.rawValue), .text(session.rawValue),
                   .text(attempt.state.rawValue), .optionalText(attempt.bodyPath), .optionalInteger(attempt.bodyBytes),
                   .optionalText(attempt.checksum), .optionalInteger(attempt.taskID), .optionalText(attempt.remoteID),
                   .optionalText(attempt.remoteStatus), .optionalInteger(failure?.httpStatus.map(Int64.init)),
@@ -194,7 +196,7 @@ extension TransferStore {
     }
 
     /// Whether the lease still holds the job.
-    private static func holds(_ db: TransferSQLite, job: Int64, token: UUID) throws -> Bool {
+    static func holds(_ db: TransferSQLite, job: Int64, token: UUID) throws -> Bool {
         var found = false
         try db.run("SELECT 1 FROM jobs WHERE id=? AND lease_token=?", [.integer(job), .text(token.uuidString)]) { _ in found = true }
         return found
