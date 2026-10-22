@@ -918,11 +918,12 @@ private struct FrozenFeed {
         defer { if searchGeneration == searchID { isSearching = false } }
         do {
             let state: SearchFeed.State
+            let excluding = removedResultIDs
             switch step {
-            case .first: state = try await feed.first()
-            case .more: state = try await feed.more()
-            case .retry: if fromStart { state = try await feed.first() } else { state = try await feed.retry() }
-            case .refresh: state = try await feed.refresh()
+            case .first: state = try await feed.first(excluding: excluding)
+            case .more: state = try await feed.more(excluding: excluding)
+            case .retry: if fromStart { state = try await feed.first(excluding: excluding) } else { state = try await feed.retry(excluding: excluding) }
+            case .refresh: state = try await feed.refresh(excluding: excluding)
             }
             guard searchGeneration == searchID, query == text, generation == requestGeneration, searchFeed === feed else { return }
             searchCanResume = state.retryPoint != nil
@@ -949,9 +950,11 @@ private struct FrozenFeed {
     }
 
     /// A change the account's sync published takes deleted photos, and photos no longer visible,
-    /// out of the results shown, in place.
+    /// out of the results shown, in place. A photo it upserts (restored, or shared again) may come
+    /// back with the next read.
     func prune(_ change: LibraryChange) {
         let gone = change.removed.union(change.accessLost)
+        if !removedResultIDs.isEmpty { removedResultIDs.subtract(Set(change.upserted.keys).subtracting(gone)) }
         guard !gone.isEmpty, showingResults, let feed = searchFeed else { return }
         removedResultIDs.formUnion(gone)
         Task { await feed.prune(gone) }

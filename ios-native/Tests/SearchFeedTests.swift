@@ -128,6 +128,17 @@ import XCTest
         XCTAssertEqual(state.results.map(\.id), ["a", "c"])
     }
 
+    func testARefreshGivenTheExclusionsBringsBackAPhotoNoLongerRemoved() async throws {
+        let source = ScriptedSearch([.page(["a", "b"]), .page(["a", "b"]), .page(["a", "b"])])
+        let feed = SearchFeed(.init(try Self.smart()), source: source)
+        _ = try await feed.first()
+        await feed.prune(["b"])
+        let stillOut = try await feed.refresh()
+        XCTAssertEqual(stillOut.results.map(\.id), ["a"], "Without exclusions the feed keeps its own.")
+        let back = try await feed.refresh(excluding: [])
+        XCTAssertEqual(back.results.map(\.id), ["a", "b"], "A photo no longer excluded comes back.")
+    }
+
     // MARK: - LibraryStore applies the feed's State
 
     func testRefreshKeepsRowsWhenIDsUnchanged() async throws {
@@ -172,6 +183,26 @@ import XCTest
         store.loadMore()
         try await until("The next page did not show.") { store.results.count == 3 && !store.isSearching }
         XCTAssertEqual(store.results.map(\.id), ["a", "c", "d"], "A later page can't bring the deleted photo back.")
+        await TimelineCache.shared.removeAll(scope: api.cacheScope)
+    }
+
+    func testARestoredPhotoComesBackWithTheNextRefresh() async throws {
+        let api = SearchStoreFixture([.page(["a", "b"]), .page(["a"]), .page(["a", "b"])])
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        store.setMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO")), title: "Videos")
+        try await until("The results did not show.") { store.results.map(\.id) == ["a", "b"] && !store.isSearching }
+        store.removeLocally(["b"])
+        XCTAssertEqual(store.results.map(\.id), ["a"])
+        await store.reload(preservingPosition: true)
+        XCTAssertEqual(store.results.map(\.id), ["a"])
+        var change = LibraryChange(account: LegacyGoldens.account,
+                                   authorization: AuthorizationEpoch(account: LegacyGoldens.account, value: 1),
+                                   indexRevision: 3, origin: .sync)
+        change.upserted = ["b": .init()]
+        store.prune(change)
+        await store.reload(preservingPosition: true)
+        XCTAssertEqual(store.results.map(\.id), ["a", "b"], "A photo restored from Trash shows again.")
         await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
