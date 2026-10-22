@@ -139,6 +139,14 @@ import UIKit
             cell.displayProbe.displayed(.memoryOther)
             return true
         }
+        // A density change keeps the failure it shows as well, until the photo is asked for again
+        // once its wait is over: not a dark cell with no symbol (a phone photo has no sketch), nor
+        // a sketch in place of what the user was told.
+        if samePhoto, let previous, previous.stage == .failed {
+            binding.stage = .failed
+            cell.binding = binding
+            return true
+        }
         guard let hash = binding.thumbhash, !hash.isEmpty else {
             cell.binding = binding
             cell.draw(nil, thumbnail: false, crossfade: false)

@@ -293,18 +293,22 @@ actor MediaPipeline {
         indexedAssets.withLock { $0 = lookup }
     }
 
+    /// The photo a tile knows only by its ID, as the offline library names it, with its revision.
+    /// Only a photo the library lacks is fetched with `fetch`, the server's GET assets/{id}. A tile
+    /// names its photo once and asks for its sizes with the name.
+    func namedAsset(_ assetID: String, fetch: @Sendable (String) async throws -> Asset) async throws -> Asset {
+        let lookup = indexedAssets.withLock { $0 }
+        if let lookup, let named = await lookup(assetID) { return named }
+        try Task.checkCancellation()
+        return try await fetch(assetID)
+    }
+
     /// The grid thumbnail of a photo a tile knows only by its ID, for a tile of `shortSide`
     /// pixels: the offline library names the photo and its revision, so the thumbnail comes from
     /// memory, the disk or the server's thumbnail endpoint with no asset round trip. Only a photo
     /// the library lacks is first fetched with `fetch`, the server's GET assets/{id}.
     func thumbnail(assetID: String, shortSide: Int, fetch: @Sendable (String) async throws -> Asset) async throws -> PreparedImage {
-        let lookup = indexedAssets.withLock { $0 }
-        var named: Asset?
-        if let lookup { named = await lookup(assetID) }
-        try Task.checkCancellation()
-        if named == nil { named = try await fetch(assetID) }
-        guard let named else { throw CancellationError() }
-        return try await image(for: named, size: .thumbnail, pixelSize: shortSide)
+        try await image(for: namedAsset(assetID, fetch: fetch), size: .thumbnail, pixelSize: shortSide)
     }
 
     private func mediaRequest(_ asset: Asset, size: MediaSize, edited: Bool) async throws -> URLRequest {
