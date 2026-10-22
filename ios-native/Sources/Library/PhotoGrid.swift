@@ -242,10 +242,10 @@ struct PhotoGrid: UIViewRepresentable {
             let viewport = collection.bounds
             let middle = CGPoint(x: viewport.midX, y: viewport.midY)
             let store = parent.store
-            let ahead: [(asset: Asset, distance: CGFloat)] = store.isReplacingFeed ? [] : prefetched.compactMap { path in
-                guard let asset = store.entry(section: path.section, item: path.item)?.remote,
+            let ahead: [ThumbnailBinder.Ahead] = store.isReplacingFeed ? [] : prefetched.compactMap { path in
+                guard let entry = store.entry(section: path.section, item: path.item),
                       let frame = layout.layoutAttributesForItem(at: path)?.frame else { return nil }
-                return (asset, hypot(frame.midX - middle.x, frame.midY - middle.y))
+                return ThumbnailBinder.Ahead(entry, distance: hypot(frame.midX - middle.x, frame.midY - middle.y))
             }
             let motion: Motion = !allowsNetwork ? .scrubbing : resting ? .idle(since: CACurrentMediaTime()) : .tracking(speed: 0)
             binder.submit(viewport: viewport, ahead: ahead, shortSide: thumbnailPixels(collection) ?? 128, motion: motion)
@@ -784,8 +784,7 @@ struct PhotoGrid: UIViewRepresentable {
     }()
     /// What the photo layer draws.
     private var drawn: CGImage?
-    /// A photo only on this phone, which needs its orientation, or a status symbol, which needs its
-    /// tint, in an image view made when first needed.
+    /// A status symbol, which needs its tint, in an image view made when first needed.
     private var image: UIImageView?
     /// The length of a video or LIVE, the month chip and the selection check are made when first
     /// needed and sit in the cell only while they show. UIKit walks every view of a cell each time
@@ -799,19 +798,15 @@ struct PhotoGrid: UIViewRepresentable {
     private var check: UIImageView?
     private static let checked = UIImage(systemName: "checkmark.circle.fill")
     private static let unchecked = UIImage(systemName: "circle")
-    /// Streams a photo only on this phone; server photos are bound by the grid's ThumbnailBinder
-    /// and never load anything here.
-    private var task: Task<Void, Never>?
-    /// The phone photo shown, so binding it again changes nothing.
-    private var localIdentity: String?
-    /// The server photo shown and how far it has arrived. Set by the binder.
+    /// The photo shown, on the server or only on this phone, and how far it has arrived. Set by
+    /// the grid's ThumbnailBinder; the cell itself never loads anything.
     var binding: ThumbnailBinder.Binding?
     /// The cell shows a real thumbnail, not the thumbhash sketch or nothing.
     private(set) var showsThumbnail = false
     /// Times the bind to the first real thumbnail while a perf scenario runs.
     var displayProbe = ThumbDisplayProbe()
-    /// The server photo this cell shows, and whether the cell is on screen. While both hold, its
-    /// decoded thumbnail is pinned: memory pressure and the budget evict around it.
+    /// The photo this cell shows, and whether the cell is on screen. While both hold, its decoded
+    /// thumbnail is pinned: memory pressure and the budget evict around it.
     private var pinTarget: (pipeline: MediaPipeline, assetID: String)?
     private var onScreen = true
     /// The pin held now. Read by deinit, which runs off the main actor once nothing else holds the cell.
@@ -859,8 +854,7 @@ struct PhotoGrid: UIViewRepresentable {
         // The next bind always sets the image, so it is not cleared here as well; a cross-dissolve
         // still running is dropped, so the next photo shows at once.
         super.prepareForReuse(); photo.layer.removeAllAnimations()
-        task?.cancel(); task = nil
-        localIdentity = nil; binding = nil; showsThumbnail = false
+        binding = nil; showsThumbnail = false
         displayProbe.reset()
         setPinTarget(nil)
     }
@@ -973,12 +967,12 @@ struct PhotoGrid: UIViewRepresentable {
         photo.layer.backgroundColor = fill
         if drawn !== next { photo.layer.contents = next; drawn = next }
     }
-    /// The server photo could not be loaded.
-    func showUnavailable(name: String) {
-        show(UIImage(systemName: "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
+    /// The photo could not be loaded; a phone photo Photos holds only in iCloud says so.
+    func showUnavailable(name: String, inCloud: Bool = false) {
+        show(UIImage(systemName: inCloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
         accessibilityLabel = "Preview unavailable, \(name)"
     }
-    /// A photo only on this phone, or a status symbol in the given tint, in the image view.
+    /// A status symbol in the given tint, in the image view.
     private func show(_ next: UIImage?, thumbnail: Bool, tint: UIColor? = nil) {
         showsThumbnail = thumbnail && next != nil
         if drawn != nil || photo.layer.backgroundColor != nil { photo.layer.contents = nil; photo.layer.backgroundColor = nil; drawn = nil }
@@ -1001,35 +995,17 @@ struct PhotoGrid: UIViewRepresentable {
         let traits: UIAccessibilityTraits = selected ? [.button, .selected] : [.button]
         if accessibilityTraits != traits { accessibilityTraits = traits }
         if case .local(let photo) = entry {
-            setPinTarget(nil)
-            accessibilityLabel = photo.title + ", on this phone"
+            // Photos renders phone photos through the thumbnail service, like server photos (T6).
+            let key = ThumbnailBinder.Ahead.deviceKey(photo)
+            setPinTarget((binder.pipeline, key.assetID))
+            if binding?.stage != .failed { accessibilityLabel = photo.title + ", on this phone" }
             showBadge(photo.video ? Self.duration(Int(photo.duration * 1000)) : photo.live ? "LIVE" : nil)
-            let key = "local:\(photo.id)|\(photo.modified?.timeIntervalSince1970 ?? 0)"
-            guard key != localIdentity else { return false }
-            let wasBound = binding != nil
-            binder.unbind(self)
-            displayProbe.reset()
-            task?.cancel(); localIdentity = key
-            show(nil as UIImage?, thumbnail: false)
-            // Phone photos stream from PhotoKit until they move into the thumbnail service (T6).
-            let stream = PhotoKitAdapter.shared.media(photo.id, .thumbnail(pixels: 420))
-            task = Task { [weak self] in
-                var shown = false
-                for await event in stream {
-                    guard let self, !Task.isCancelled, self.localIdentity == key else { return }
-                    switch event {
-                    case .image(let image, _): self.show(image, thumbnail: true); shown = true
-                    case .unavailable(let inCloud, _) where !shown:
-                        self.show(UIImage(systemName: inCloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
-                    default: break
-                    }
-                }
-                guard let self, !Task.isCancelled, self.localIdentity == key else { return }
-                self.task = nil
-            }
-            return wasBound
+            let pixels = max(128, Int(bounds.width * traitCollection.displayScale))
+            let before = binding
+            let needs = binder.bind(self, toDevice: photo, shortSide: pixels)
+            if binding?.stage == .failed { accessibilityLabel = "Preview unavailable, \(photo.title)" }
+            return needs || before?.key != binding?.key || before?.shortSide != binding?.shortSide
         }
-        if localIdentity != nil { task?.cancel(); task = nil; localIdentity = nil }
         let asset = entry?.remote
         setPinTarget(asset.map { (binder.pipeline, $0.id) })
         guard let asset else {

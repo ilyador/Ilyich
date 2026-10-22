@@ -13,6 +13,8 @@ enum ThumbSource: Int, CaseIterable, Sendable {
     case memoryOther
     case disk
     case network
+    /// Photos, for a photo only on this phone.
+    case device
 
     var name: String {
         switch self {
@@ -20,6 +22,7 @@ enum ThumbSource: Int, CaseIterable, Sendable {
         case .memoryOther: "memoryOther"
         case .disk: "disk"
         case .network: "network"
+        case .device: "device"
         }
     }
 }

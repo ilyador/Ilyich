@@ -5,6 +5,31 @@ enum ThumbnailKey: Hashable, Sendable {
     /// A server asset at a revision: its media revision, else its thumbhash, else "unversioned".
     case server(assetID: String, revision: String)
     case device(DeviceAssetID, modified: AssetRevision?)
+
+    /// The name the caches, the scheduler and its deliveries file the thumbnail under. A phone
+    /// photo's carries a prefix no server ID has, so the two never meet.
+    var assetID: String {
+        switch self {
+        case .server(let assetID, _): assetID
+        case .device(let id, _): Self.devicePrefix + id.rawValue
+        }
+    }
+
+    /// The revision the thumbnail was made from: the server's, or the phone photo's modification
+    /// date bit for bit, as the device index digests it.
+    var revision: String {
+        switch self {
+        case .server(_, let revision): revision
+        case .device(_, let modified): modified.map { String($0.referenceSeconds.bitPattern) } ?? "-"
+        }
+    }
+
+    var deviceID: DeviceAssetID? {
+        if case .device(let id, _) = self { return id }
+        return nil
+    }
+
+    static let devicePrefix = "device:"
 }
 
 /// How finely a thumbnail is decoded, cheapest first.

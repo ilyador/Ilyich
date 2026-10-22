@@ -84,6 +84,15 @@ struct ViewerPhoto: View {
                     try? await Task.sleep(for: .seconds(0.8))
                     slowPreview = !Task.isCancelled
                 }
+                .task(id: mediaKey) {
+                    // Opened from somewhere other than the grid, with nothing in memory: the grid
+                    // thumbnail on disk stands in while the preview loads (DESIGN 13), through
+                    // the thumbnail service, so the grid finds it in memory too.
+                    guard image == nil, placeholder == nil else { return }
+                    guard let stored = await pipeline.storedThumbnail(for: asset, pixelSize: 1_024), !Task.isCancelled,
+                          image == nil, placeholder == nil else { return }
+                    placeholder = stored.uiImage
+                }
                 .task(id: mediaKey + String(reload) + String(zoomed) + String(fullResolution) + String(active) + String(settled) + String(Int(max(geometry.size.width, geometry.size.height) * scale))) {
                     guard settled else { return }
                     await loadImage(pixels: Int(max(geometry.size.width, geometry.size.height) * scale))
