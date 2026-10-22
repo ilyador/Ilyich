@@ -150,7 +150,7 @@ extension LibraryQuery {
 
 extension LibraryQuery {
     /// Names the feed for what the phone keeps per feed. For the library, favorites, archive,
-    /// trash, Lightroom, partner, album and person feeds it is byte-equal to the key these feeds
+    /// trash, Lightroom, partner, album, person and place feeds it is byte-equal to the key these feeds
     /// were cached under before Q5, which never said withPartners. A query on the account's own
     /// photos says userId=me rather than the user's ID, and a place is named by its membership
     /// revision rather than its photo count.
@@ -201,7 +201,9 @@ extension LibraryQuery {
         }
         let key = items.map { $0.0 + "=" + Self.escaped($0.1) }.joined(separator: "&")
         guard let membership = predicates.place else { return key }
-        return key + "&place=" + Self.escaped(membership.placeID) + "#" + membership.revision
+        // The place ID goes in raw, as it did before Q5: real IDs join their names with '|'. It is
+        // the last item and every free-text item before it is escaped, so it can't imitate one.
+        return key + "&place=" + membership.placeID + "#" + membership.revision
     }
 
     /// IDs, flags and orders pass unchanged, as they did in the keys before Q5; free text is
