@@ -16,10 +16,12 @@ struct FeatureEmpty: View {
     }
 }
 
-/// The pixels a tile of `size` points decodes its thumbnail at: its short side, and no less than
-/// the grid's smallest cell, so tiles and cells share one decoded copy.
+/// The pixels a tile of `size` points decodes its thumbnail at: its long side, so a photo of any
+/// shape aspect-fills it without being stretched (a shelf row is wide and low, and the photo's
+/// shape is unknown here), and no less than the grid's smallest cell. Square tiles, which most
+/// are, share one decoded copy with the grid's cells.
 @MainActor func tilePixels(_ size: CGSize, scale: CGFloat) -> Int {
-    max(128, Int((min(size.width, size.height) * scale).rounded(.up)))
+    max(128, Int((max(size.width, size.height) * scale).rounded(.up)))
 }
 
 /// A tile that knows its photo only by ID: an album cover, a place, a memory. The offline library
