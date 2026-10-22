@@ -39,4 +39,9 @@ final class MediaFence: Sendable {
     func admits(_ id: String, since token: UInt64) -> Bool {
         state.withLock { state in token >= state.floor && (state.forgotten[id] ?? 0) <= token }
     }
+
+    /// Whether `token` is admitted for every photo: nothing was forgotten wholesale since it was taken.
+    func admits(since token: UInt64) -> Bool {
+        state.withLock { state in token >= state.floor }
+    }
 }

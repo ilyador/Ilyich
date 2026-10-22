@@ -487,7 +487,8 @@ final class ThumbnailDiskStore: Sendable {
     // MARK: Coverage
 
     private enum CoverageKey {
-        static let cursor = "coverage_cursor", mark = "coverage_mark", policy = "policy_hash", total = "coverage_total", stored = "coverage_stored"
+        static let cursor = "coverage_cursor", mark = "coverage_mark", passMark = "coverage_pass_mark", policy = "policy_hash",
+                   total = "coverage_total", stored = "coverage_stored"
     }
 
     /// Where coverage is (REBUILD_ROADMAP.md T5), from the index's meta rows. Read on the store's
@@ -497,24 +498,31 @@ final class ThumbnailDiskStore: Sendable {
         await onQueue { [self] in
             state.withLock { state in
                 CoverageState(cursor: state.meta[CoverageKey.cursor], mark: state.meta[CoverageKey.mark].flatMap { Int64($0) },
+                              passMark: state.meta[CoverageKey.passMark].flatMap { Int64($0) },
                               policyHash: state.meta[CoverageKey.policy], total: state.meta[CoverageKey.total].flatMap(Int.init) ?? 0,
                               stored: state.meta[CoverageKey.stored].flatMap(Int.init) ?? 0)
             }
         }
     }
 
-    /// Saves coverage's position and counts in one transaction.
-    func saveCoverageState(_ coverage: CoverageState) async {
+    /// Saves coverage's position and counts in one transaction, unless the store was cleared since
+    /// `token` was taken from its fence (removeAll forgets everything before the files go): a
+    /// position saved into the emptied store would count files that are gone. Whether it was saved.
+    @discardableResult
+    func saveCoverageState(_ coverage: CoverageState, token: UInt64) async -> Bool {
         await onQueue { [self] in
+            guard fence.admits(since: token) else { return false }
             let rows: [(String, String?)] = [
-                (CoverageKey.cursor, coverage.cursor), (CoverageKey.mark, coverage.mark.map { String($0) }), (CoverageKey.policy, coverage.policyHash),
+                (CoverageKey.cursor, coverage.cursor), (CoverageKey.mark, coverage.mark.map { String($0) }),
+                (CoverageKey.passMark, coverage.passMark.map { String($0) }), (CoverageKey.policy, coverage.policyHash),
                 (CoverageKey.total, String(coverage.total)), (CoverageKey.stored, String(coverage.stored)),
             ]
             guard let database = openDatabase() else {
                 for (key, value) in rows { state.withLock { $0.meta[key] = value } }
-                return
+                return true
             }
             try? database.transaction { for (key, value) in rows { setMeta(key, value) } }
+            return true
         }
     }
 
