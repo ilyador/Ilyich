@@ -63,6 +63,40 @@ final class LibraryTests: XCTestCase {
         }.count
         return colored > 80
     }
+    /// Whether a cell shows a fixture photo itself. Each carries a yellow sun; the sketch drawn
+    /// before the photo arrives is a blue-green blur without one, and chromatic enough that
+    /// `hasRenderedPhoto` cannot tell the two apart.
+    @MainActor private func showsPhotoPixels(_ cell: XCUIElement) -> Bool {
+        guard let image = cell.screenshot().image.cgImage else { return false }
+        let side = 24
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let rendered = pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(data: buffer.baseAddress, width: side, height: side,
+                bitsPerComponent: 8, bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard rendered else { return false }
+        return stride(from: 0, to: pixels.count, by: 4).contains { i in pixels[i] > 215 && pixels[i + 1] > 185 && pixels[i + 2] < 185 }
+    }
+    /// Whether a photo mid-screen shows its own pixels within `timeout`.
+    @MainActor private func waitForPhotoPixels(in grid: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let candidates = grid.cells.allElementsBoundByIndex.filter { $0.frame.minY > 200 && $0.frame.maxY < 640 }
+            if candidates.prefix(6).contains(where: showsPhotoPixels) { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return false
+    }
+    /// Drags the rail open and down to `fraction` of the screen, holding until the photos have
+    /// followed the finger, then lets go.
+    @MainActor private func jumpOnRail(_ app: XCUIApplication, to fraction: Double) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.995, dy: 0.5))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.86, dy: fraction)),
+                   withVelocity: .default, thenHoldForDuration: 0.8)
+    }
     @MainActor private func requireHittable(_ element: XCUIElement, in app: XCUIApplication,
                                           file: StaticString = #filePath, line: UInt = #line) {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element)
@@ -177,6 +211,39 @@ final class LibraryTests: XCTestCase {
         capture(app, "Rapid timeline scrubbing — rendered thumbnails")
         XCTAssertTrue(rendered, "Scrubbing must recover actual photo pixels, not just metadata labels on empty cells.")
         XCTAssertFalse(app.staticTexts["Some photos couldn’t load."].exists, "Settled scrub must not leave bucket-loading errors.")
+    }
+    /// With the network gone, rail jumps to months looked at before show the thumbnails stored
+    /// then, and a month never looked at shows no photo (T3).
+    @MainActor func testOfflineRandomRailJumpsShowStoredThumbnails() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 15))
+        let heading = app.staticTexts["library.heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        // Online, two months along the rail are looked at, so their thumbnails are stored.
+        var months: [String] = []
+        for fraction in [0.31, 0.68] {
+            jumpOnRail(app, to: fraction)
+            XCTAssertTrue(waitForPhotoPixels(in: grid, timeout: 15), "Online, the month at \(fraction) shows its photos.")
+            months.append(heading.label)
+        }
+        XCTAssertNotEqual(months[0], months[1], "The two jumps land on different months.")
+        capture(app, "Online rail jumps — downloaded thumbnails")
+        // The store writes on its own queue; give it a moment before the app goes.
+        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+        app.terminate()
+
+        app.launchArguments.append("--ui-testing-offline-media")
+        app.launch()
+        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 15))
+        for (fraction, month) in [(0.68, months[1]), (0.31, months[0])] {
+            jumpOnRail(app, to: fraction)
+            XCTAssertTrue(waitForPhotoPixels(in: grid, timeout: 10), "Offline, the month at \(fraction) shows the thumbnails it stored.")
+            XCTAssertEqual(heading.label, month, "The jump lands on the month looked at online.")
+        }
+        capture(app, "Offline rail jumps — stored thumbnails")
+        jumpOnRail(app, to: 0.5)
+        XCTAssertFalse(waitForPhotoPixels(in: grid, timeout: 3), "Offline, a month never looked at has no photo to show.")
     }
     @MainActor func testLibraryEdgeGesturesOpenShelvesAndScrubTimeline() {
         let app = launch()

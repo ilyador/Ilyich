@@ -37,11 +37,11 @@ struct PhotoGrid: UIViewRepresentable {
         view.register(DayHeaderView.self, forSupplementaryViewOfKind: VirtualPhotoLayout.dayHeaderKind, withReuseIdentifier: "day-header")
         view.dataSource = context.coordinator
         view.delegate = context.coordinator
-        view.prefetchDataSource = context.coordinator
         let refresh = UIRefreshControl()
         refresh.addTarget(context.coordinator, action: #selector(Coordinator.refresh(_:)), for: .valueChanged)
         view.refreshControl = refresh
         context.coordinator.collection = view
+        context.coordinator.viewport.attach(view)
         store.scroller.collection = view
         let selection = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.selectByDragging(_:)))
         selection.minimumPressDuration = 0.35
@@ -80,10 +80,12 @@ struct PhotoGrid: UIViewRepresentable {
             guard let attributes = view.layoutAttributesForItem(at: index) else { return nil }
             return (index, view.contentOffset.y - attributes.frame.minY)
         } : nil
+        var columnsChanged = false
         if let layout = view.collectionViewLayout as? VirtualPhotoLayout {
             layout.showsDayHeaders = showsDayHeaders
             if groupingChanged { layout.dayGroups = dayGroups }
             if layout.columns != columns {
+                columnsChanged = true
                 let anchor = coordinator.firstVisiblePhoto()
                 layout.columns = columns; layout.invalidateLayout(); view.layoutIfNeeded()
                 if let anchor, let frame = layout.layoutAttributesForItem(at: anchor)?.frame {
@@ -93,6 +95,7 @@ struct PhotoGrid: UIViewRepresentable {
         }
         view.contentInset = UIEdgeInsets(top: topInset, left: 0, bottom: bottomInset, right: 0)
         let needsReload = coordinator.sections != sections || reset
+        let revisionChanged = coordinator.revision != store.revision
         coordinator.dayGroups = dayGroups
         coordinator.showsDayHeaders = showsDayHeaders
         if needsReload {
@@ -103,7 +106,6 @@ struct PhotoGrid: UIViewRepresentable {
                 && sections[0].count >= coordinator.sections[0].count
             if !appended { coordinator.dragSelector.end() }
             coordinator.sections = sections; coordinator.resetID = store.resetID
-            coordinator.prefetched.removeAll()
             view.reloadData()
             if reset {
                 view.layoutIfNeeded()
@@ -142,13 +144,16 @@ struct PhotoGrid: UIViewRepresentable {
             // first day header. Scrolled photo positions stay unchanged.
             view.setContentOffset(CGPoint(x: 0, y: -topInset), animated: false)
         }
-        if !needsReload && (groupingChanged || coordinator.revision != store.revision || coordinator.selection != store.selected || coordinator.selecting != store.isSelecting) {
+        if !needsReload && (groupingChanged || revisionChanged || coordinator.selection != store.selected || coordinator.selecting != store.isSelecting) {
             for cell in view.visibleCells {
                 guard let cell = cell as? PhotoCell, let index = view.indexPath(for: cell) else { continue }
                 coordinator.configure(cell, at: index)
             }
         }
         coordinator.revision = store.revision; coordinator.selection = store.selected; coordinator.selecting = store.isSelecting
+        // The rows changed under the grid without a scroll (a month became ready, new rows, a
+        // reset, a new density): the photos ahead of and behind the screen are read again.
+        if needsReload || revisionChanged || groupingChanged || columnsChanged { coordinator.viewport.contentChanged() }
         if let request = store.scrollRequest, request.id != coordinator.lastScrollRequest,
            let index = store.restoredIndex(for: request.position) {
             coordinator.lastScrollRequest = request.id
@@ -158,7 +163,7 @@ struct PhotoGrid: UIViewRepresentable {
         }
     }
 
-    @MainActor final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate, UICollectionViewDataSourcePrefetching, UIGestureRecognizerDelegate {
+    @MainActor final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate, UIGestureRecognizerDelegate {
         var parent: PhotoGrid
         weak var collection: UICollectionView?
         var sections: [LibrarySection] = [] { didSet { sectionCounts = sections.map(\.count) } }
@@ -175,24 +180,23 @@ struct PhotoGrid: UIViewRepresentable {
         var selecting = false
         var showsDayHeaders = false
         var lastScrollRequest: UUID?
-        /// Binds server photos to cells and sends the grid's thumbnail demand.
-        var binder: ThumbnailBinder { didSet { binder.needsDemand = { [weak self] in self?.setNeedsDemand() } } }
-        /// Photos UIKit says are about to scroll in.
-        var prefetched = Set<IndexPath>()
-        private var demandScheduled = false
-        /// Downloads wait while photos fly past faster than they could arrive, or while the rail
-        /// scrubs. Memory and disk still fill cells; the visible ones download when the grid slows.
-        /// Until the viewport motion policy (T3) this gate is the scheduler's motion.
-        private(set) var allowsNetwork = true
-        private var resting = true
-        private var lastScroll: (offset: CGFloat, time: CFTimeInterval)?
-        /// Any stop counts as rest, however the grid moved: a drag, a fling, the rail or a jump.
-        private var rest: DispatchWorkItem?
+        /// Binds photos to cells and sends the grid's thumbnail demand.
+        var binder: ThumbnailBinder { didSet { binder.needsDemand = { [weak self] in self?.viewport.setNeedsDemand() } } }
+        /// How the grid moves and what it is about to show. It sends the demand at most once per
+        /// frame; the policy decides from its motion what may download.
+        let viewport = GridViewport()
         init(_ parent: PhotoGrid) {
             self.parent = parent
             binder = ThumbnailBinder(pipeline: parent.pipeline)
             super.init()
-            binder.needsDemand = { [weak self] in self?.setNeedsDemand() }
+            binder.needsDemand = { [weak self] in self?.viewport.setNeedsDemand() }
+            viewport.entry = { [weak self] path in self?.parent.store.entry(section: path.section, item: path.item) }
+            viewport.isScrubbing = { [weak self] in self?.parent.store.navigation.isScrubbing ?? false }
+            viewport.shortSide = { [weak self] in
+                guard let self, let collection else { return 128 }
+                return thumbnailPixels(collection) ?? 128
+            }
+            viewport.submit = { [weak self] windows in self?.submitDemand(windows) }
             dragSelector.counts = { [weak self] in self?.sectionCounts ?? [] }
             dragSelector.isSelected = { [weak self] index in
                 guard let store = self?.parent.store, let entry = store.entry(section: index.section, item: index.item) else { return nil }
@@ -214,41 +218,16 @@ struct PhotoGrid: UIViewRepresentable {
             }
         }
 
-        func setAllowsNetwork(_ allowed: Bool) {
-            guard allowed != allowsNetwork else { return }
-            allowsNetwork = allowed
-            setNeedsDemand()
-        }
-
-        /// Sends the grid's thumbnail demand once the current layout pass is over, however many
-        /// cells changed in it.
-        func setNeedsDemand() {
-            guard !demandScheduled else { return }
-            demandScheduled = true
-            DispatchQueue.main.async { [weak self] in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.demandScheduled = false
-                    self.submitDemand()
-                }
-            }
-        }
-
-        /// The cells on screen that lack their thumbnail, the middle first, then the photos about
-        /// to scroll in. The scheduler leaves the network alone while the gate is closed.
-        private func submitDemand() {
-            guard let collection, let layout = collection.collectionViewLayout as? VirtualPhotoLayout else { return }
+        /// The grid's demand, once per frame: the cells on screen that lack their thumbnail, then
+        /// the windows the viewport read off the layout. While the feed is being replaced under
+        /// the grid only what is on screen counts.
+        private func submitDemand(_ windows: GridViewport.Windows) {
+            guard let collection else { return }
+            // Right after a jump the cells for the new offset are not laid out yet.
             collection.layoutIfNeeded()
-            let viewport = collection.bounds
-            let middle = CGPoint(x: viewport.midX, y: viewport.midY)
-            let store = parent.store
-            let ahead: [ThumbnailBinder.Ahead] = store.isReplacingFeed ? [] : prefetched.compactMap { path in
-                guard let entry = store.entry(section: path.section, item: path.item),
-                      let frame = layout.layoutAttributesForItem(at: path)?.frame else { return nil }
-                return ThumbnailBinder.Ahead(entry, distance: hypot(frame.midX - middle.x, frame.midY - middle.y))
-            }
-            let motion: Motion = !allowsNetwork ? .scrubbing : resting ? .idle(since: CACurrentMediaTime()) : .tracking(speed: 0)
-            binder.submit(viewport: viewport, ahead: ahead, shortSide: thumbnailPixels(collection) ?? 128, motion: motion)
+            guard parent.store.isReplacingFeed else { return binder.submit(windows) }
+            binder.submit(GridViewport.Windows(visible: windows.visible, visibleBand: windows.visibleBand, ahead: [], behind: [], target: [],
+                                               shortSide: windows.shortSide, motion: windows.motion))
         }
         func numberOfSections(in collectionView: UICollectionView) -> Int { sections.count }
         func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { sections[section].count }
@@ -275,7 +254,7 @@ struct PhotoGrid: UIViewRepresentable {
                            month: index.item == 0 && sections.indices.contains(index.section)
                                 && !(dayGroups.indices.contains(index.section) && dayGroups[index.section].contains(where: { $0.startItem == 0 }))
                                 ? monthBadge(for: sections[index.section].id) : nil)
-            if changed { setNeedsDemand() }
+            if changed { viewport.setNeedsDemand() }
             if sections.indices.contains(index.section), sections[index.section].id == "results",
                index.item >= max(0, sections[index.section].count - 12) {
                 Task { [weak self] in self?.parent.store.loadMore() }
@@ -395,11 +374,11 @@ struct PhotoGrid: UIViewRepresentable {
                 collection.layoutIfNeeded()
             }
             // Cells grew or shrank; ask for thumbnails at their new size, keeping the old ones meanwhile.
-            prefetched.removeAll()
             for cell in collection.visibleCells {
                 guard let cell = cell as? PhotoCell, let index = collection.indexPath(for: cell) else { continue }
                 configure(cell, at: index)
             }
+            viewport.contentChanged()
             parent.onDensityChange?(columns)
             guard let picture else { return }
             picture.frame = CGRect(origin: collection.contentOffset, size: collection.bounds.size)
@@ -435,57 +414,31 @@ struct PhotoGrid: UIViewRepresentable {
             CATransaction.commit()
         }
         func collectionView(_ view: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-            // A cell on screen joins the demand; it left the photos about to scroll in.
+            // A cell on screen joins the demand.
             guard let cell = cell as? PhotoCell else { return }
             cell.setOnScreen(true)
-            prefetched.remove(indexPath)
-            if cell.binding.map({ $0.stage != .exact }) ?? false { setNeedsDemand() }
+            if cell.binding.map({ $0.stage != .exact }) ?? false { viewport.setNeedsDemand() }
         }
         func collectionView(_ view: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
             // Cells that scrolled or scrubbed away give their place in the thumbnail queue to what is on screen.
             guard let cell = cell as? PhotoCell else { return }
             cell.abandonDisplay()
             cell.setOnScreen(false)
-            if cell.binding.map({ $0.stage != .exact }) ?? false { setNeedsDemand() }
-        }
-        func collectionView(_ view: UICollectionView, prefetchItemsAt paths: [IndexPath]) {
-            // The months themselves come from the viewport the store hears of; cells and prefetch
-            // ask for none.
-            guard !parent.store.isReplacingFeed else { return }
-            // Sketches of photos about to scroll in decode now, off the main thread, so their cells have them at once.
-            ThumbHashSketches.shared.prefetch(remoteAssets(at: paths).compactMap(\.thumbhash))
-            // Photos about to scroll in move from disk to memory, so they draw in their first frame.
-            prefetched.formUnion(paths)
-            setNeedsDemand()
-        }
-        func collectionView(_ view: UICollectionView, cancelPrefetchingForItemsAt paths: [IndexPath]) {
-            prefetched.subtract(paths)
-            setNeedsDemand()
+            if cell.binding.map({ $0.stage != .exact }) ?? false { viewport.setNeedsDemand() }
         }
         /// The pixel size cells decode their thumbnails at.
         private func thumbnailPixels(_ view: UICollectionView) -> Int? {
             guard let side = (view.collectionViewLayout as? VirtualPhotoLayout)?.itemSide else { return nil }
             return max(128, Int(side * view.traitCollection.displayScale))
         }
-        private func remoteAssets(at paths: [IndexPath]) -> [Asset] {
-            paths.compactMap { parent.store.entry(section: $0.section, item: $0.item)?.remote }
-        }
+        // The scroll delegate goes to the viewport, which measures the motion, knows where a
+        // fling lands and sends the demand once per frame; the policy decides what may download.
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             publishVisiblePosition()
-            let now = CACurrentMediaTime()
-            if let last = lastScroll, now > last.time, now - last.time < 0.25 {
-                let speed = abs(scrollView.contentOffset.y - last.offset) / CGFloat(now - last.time)
-                let screen = max(1, scrollView.bounds.height)
-                // Above about two screens a second photos pass before they could download.
-                if speed > screen * 2.2 { setAllowsNetwork(false) }
-                else if speed < screen * 1.2 { setAllowsNetwork(true) }
-            }
-            lastScroll = (scrollView.contentOffset.y, now)
-            if resting { resting = false; setNeedsDemand() }
-            rest?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.settle() }
-            rest = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+            viewport.didScroll()
+        }
+        func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+            viewport.willEndDragging(velocity: velocity, target: targetContentOffset.pointee)
         }
         func publishVisiblePosition() {
             guard let collection else { return }
@@ -539,20 +492,17 @@ struct PhotoGrid: UIViewRepresentable {
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             parent.store.cancelPendingNavigation()
             parent.store.navigation.isScrolling = true
+            viewport.willBeginDragging()
         }
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-            if !decelerate { parent.store.navigation.isScrolling = false; settle() }
+            if !decelerate { parent.store.navigation.isScrolling = false }
+            viewport.didEndDragging(decelerate: decelerate)
         }
-        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { parent.store.navigation.isScrolling = false; settle() }
-        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { settle() }
-        /// The grid has come to rest: whatever is on screen downloads now.
-        func settle() {
-            rest?.cancel(); rest = nil
-            lastScroll = nil
-            resting = true
-            setAllowsNetwork(true)
-            setNeedsDemand()
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            parent.store.navigation.isScrolling = false
+            viewport.didEndDecelerating()
         }
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { viewport.didEndScrollingAnimation() }
         @objc func refresh(_ sender: UIRefreshControl) {
             Task { await parent.store.refreshAfterMutation(); sender.endRefreshing() }
         }

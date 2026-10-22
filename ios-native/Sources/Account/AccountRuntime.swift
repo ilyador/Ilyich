@@ -113,8 +113,8 @@ final class AccountRuntime: Sendable {
         do { api = try dependencies.clients.make(credential.server, credential, .session(authorization)) }
         catch { authorization.end(); throw error }
         // Phone photos' grid thumbnails come from Photos through the thumbnail service (T6).
-        let pipeline = MediaPipeline(client: api, device: environment.usesDevicePhotos
-                                        ? DeviceThumbnailSource(imaging: PhotoKitAdapter.thumbnails) : nil)
+        let pipeline = MediaPipeline(client: api, protocolClasses: environment.mediaProtocolClasses,
+                                     device: environment.usesDevicePhotos ? DeviceThumbnailSource(imaging: PhotoKitAdapter.thumbnails) : nil)
         let work = OwnedWork()
         let check = SessionCheck(api: api, work: work, enabled: environment.validatesSession) { error in await expired(id, error) }
         var library: LibraryServices?
