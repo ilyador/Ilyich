@@ -143,7 +143,26 @@ import XCTest
         h.feed.send(removal)
         try await until("The second recheck did not finish.") { third.statistics.rechecked == 2 && !third.isRunning }
         XCTAssertEqual(h.server.requested.count, 6)
+
+        // An album changing moves the index's revision without naming a photo: the mark follows,
+        // so the next launch walks nothing.
+        _ = try await h.index.apply([Self.photo("archived", taken: "2026-06-21T12:00:00Z", visibility: "archive", revision: "r2")], epoch: h.index.epoch())
+        let moved = try await h.index.derivedRevision()
+        XCTAssertNotEqual(moved, changed, "The index's revision moved.")
+        var album = await makeChange(h)
+        album.albums = ["album"]
+        h.feed.send(album)
+        try await until("The album change did not move the mark.") { await h.store.coverageState().mark == moved }
+        XCTAssertEqual(third.statistics.pagesRead, 0)
+        XCTAssertEqual(h.server.requested.count, 6)
         await third.stop()
+
+        let fourth = makeWorker(h)
+        fourth.start()
+        try await until("The relaunched worker did not settle.") { fourth.progress.total == 6 && !fourth.isRunning }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(fourth.statistics.passes, 0, "Nothing is walked after the album change either.")
+        await fourth.stop()
     }
 
     /// A reset, or a change that overflowed, walks the library again instead of checking photos one by one.
@@ -249,17 +268,25 @@ import XCTest
         await worker.stop()
     }
 
-    /// A failing server gets a pause after three failures in a row instead of a stream of requests.
+    /// A failing server gets a pause after three failures in a row instead of a stream of
+    /// requests, and a change of conditions meanwhile does not cut the pause short.
     func testAFailingServerGetsAPause() async throws {
         let h = try await makeHarness(photos: Self.six)
         h.server.fails.store(true, ordering: .relaxed)
-        let worker = makeWorker(h, pageSize: 6)
+        let worker = makeWorker(h, pageSize: 6, failurePause: .seconds(1))
         worker.start()
-        try await until("The first attempts were not made.") { h.server.requested.count >= 3 }
+        try await until("The server was not left alone after three failures.") { worker.progress.hold == .serverFailing }
+        XCTAssertEqual(h.server.requested.count, 4, "The download in flight at the third failure finished; nothing more was asked.")
+        // Opening and closing a photo wakes the worker, but the pause goes on.
+        h.conditions.setViewing(true)
+        h.conditions.setViewing(false)
         try await Task.sleep(for: .milliseconds(100))
-        XCTAssertLessThanOrEqual(h.server.requested.count, 4, "After three failures the server is left alone for a while.")
+        XCTAssertEqual(worker.progress.hold, .serverFailing)
+        XCTAssertEqual(h.server.requested.count, 4)
         h.server.fails.store(false, ordering: .relaxed)
         try await until("Coverage did not carry on after the pause.") { worker.statistics.completedPasses == 1 }
+        XCTAssertEqual(h.server.requested.count, 6, "Each photo was asked for once; the failed ones wait for the next pass.")
+        XCTAssertEqual(worker.progress.stored, 2)
         await worker.stop()
     }
 
@@ -391,11 +418,12 @@ import XCTest
                        authorization: authorization, account: account, feed: ChangeFeed(), root: root)
     }
 
-    private func makeWorker(_ h: Harness, policy: CoveragePolicy = .today, pageSize: Int = 2) -> CoverageWorker {
+    private func makeWorker(_ h: Harness, policy: CoveragePolicy = .today, pageSize: Int = 2,
+                            failurePause: Duration = .milliseconds(300)) -> CoverageWorker {
         let feed = h.feed
         return CoverageWorker(index: h.index, store: h.store, scheduler: h.scheduler, conditions: h.conditions, board: CoverageBoard(),
                               changes: { feed.stream() }, authorization: h.authorization, policy: policy, pageSize: pageSize,
-                              startDelay: .zero, failurePause: .milliseconds(300))
+                              startDelay: .zero, failurePause: failurePause)
     }
 
     private func makeChange(_ h: Harness) async -> LibraryChange {
