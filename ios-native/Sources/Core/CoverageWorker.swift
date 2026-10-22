@@ -81,6 +81,8 @@ enum CoverageHold: Hashable, Sendable {
     case moving
     /// The grid just stopped; coverage waits until `until` on the uptime clock.
     case settling(until: TimeInterval)
+    /// Three downloads in a row failed: the server is left alone for a while.
+    case serverFailing
     /// The thumbnail store is at its cap: downloading more would only evict what the grid showed.
     case diskBudget
     /// The offline library isn't complete yet.
@@ -310,6 +312,10 @@ final class CoverageWorker: Sendable {
         var stopped = false
         /// Photos a change named, to check again.
         var recheck = Set<String>()
+        /// A change touched the library since the mark was last placed.
+        var changed = false
+        /// Photos came or went, so the count is read again.
+        var countStale = false
         var fullPassWanted = false
         var progress = Progress()
         var statistics = Statistics()
@@ -427,7 +433,7 @@ final class CoverageWorker: Sendable {
             }
             guard mayRun else { return }
             let revision = (try? await index.derivedRevision()) ?? 0
-            let (full, pending) = state.withLock { state in (state.fullPassWanted, state.recheck) }
+            let (full, pending, changed) = state.withLock { state in (state.fullPassWanted, state.recheck, state.changed) }
             // While the worker runs, changes name the photos to check again. At the start, a mark
             // behind the index's revision means changes landed while no worker ran, or before a
             // recheck could finish: the library is verified once more, fetching no present file.
@@ -436,7 +442,7 @@ final class CoverageWorker: Sendable {
             if full || saved.cursor != nil || saved.mark == nil || behind {
                 state.withLock { $0.fullPassWanted = false }
                 await verify(resuming: saved)
-            } else if !pending.isEmpty {
+            } else if !pending.isEmpty || changed {
                 await recheck(pending)
             } else {
                 publish { $0.isRunning = false; $0.hold = nil; $0.total = saved.total; $0.stored = saved.stored }
@@ -445,14 +451,18 @@ final class CoverageWorker: Sendable {
         }
     }
 
-    /// A library change: the photos it names are checked again; a reset or an overflow asks for a
-    /// whole pass instead.
+    /// A library change: the photos it names are checked again and the mark follows it, since an
+    /// album or a person changing moves the index's revision too; a reset or an overflow asks for
+    /// a whole pass instead.
     private func received(_ change: LibraryChange) {
+        guard !change.isEmpty else { return }
         state.withLock { state in
             if change.reset || change.overflow {
                 state.fullPassWanted = true
                 state.recheck.removeAll()
             } else {
+                state.changed = true
+                if !change.upserted.isEmpty || !change.removed.isEmpty || !change.accessLost.isEmpty { state.countStale = true }
                 state.recheck.formUnion(change.upserted.keys)
                 state.recheck.formUnion(change.mediaRevisions.keys)
                 state.recheck.subtract(change.removed)
@@ -524,32 +534,45 @@ final class CoverageWorker: Sendable {
         }
     }
 
-    /// Checks the photos a change named: those still in the covered set and not on disk are
-    /// downloaded. The counts follow the index afterwards.
+    /// Checks the photos changes named: those still in the covered set and not on disk are
+    /// downloaded. The count follows the index when photos came or went, and the mark the changes.
     private func recheck(_ ids: Set<String>) async {
-        state.withLock { $0.recheck.subtract(ids) }
+        let countStale = state.withLock { state -> Bool in
+            state.recheck.subtract(ids)
+            state.changed = false
+            defer { state.countStale = false }
+            return state.countStale
+        }
+        // Kept for the next recheck when this one could not finish.
+        func putBack() {
+            state.withLock { state in
+                state.recheck.formUnion(ids)
+                state.changed = true
+                state.countStale = state.countStale || countStale
+            }
+        }
         let revision = (try? await index.derivedRevision()) ?? 0
         guard let revisions = try? await index.coverageRevisions(of: Array(ids)) else {
-            state.withLock { $0.recheck.formUnion(ids) }
+            putBack()
             await wake.wait(upTo: .seconds(30))
             return
         }
         state.withLock { $0.statistics.rechecked += ids.count }
-        publish { $0.isRunning = true }
         let token = store.fence.token()
         let missing = revisions.filter { !store.contains(assetID: $0.key, revision: $0.value) }.map { (id: $0.key, revision: $0.value) }.sorted { $0.id < $1.id }
+        if !missing.isEmpty { publish { $0.isRunning = true } }
         var failures = 0
         let outcome = await download(missing, token: token, failures: &failures)
         guard !outcome.interrupted else {
-            state.withLock { $0.recheck.formUnion(ids) }
+            putBack()
             return
         }
         var kept = await store.coverageState()
         guard mayRun, kept.cursor == nil, kept.mark != nil else { return }
-        if let total = try? await index.coverageCount() { kept.total = total }
+        if countStale, let total = try? await index.coverageCount() { kept.total = total }
         kept.stored = min(kept.stored + outcome.fetched, kept.total)
         // Verified through this revision, unless more changes already wait.
-        let quiet = state.withLock { state in state.recheck.isEmpty && !state.fullPassWanted }
+        let quiet = state.withLock { state in state.recheck.isEmpty && !state.fullPassWanted && !state.changed }
         if quiet { kept.mark = revision }
         await store.saveCoverageState(kept)
         publish { $0.total = kept.total; $0.stored = kept.stored }
@@ -563,8 +586,8 @@ final class CoverageWorker: Sendable {
     }
 
     /// Downloads these photos onto the disk, at most `window` at a time, each only once the
-    /// conditions allow. After three failures in a row the server gets a pause. Interrupted when
-    /// the worker stops or its session ends.
+    /// conditions allow. After three failures in a row what is in flight ends and the server gets
+    /// a pause. Interrupted when the worker stops or its session ends.
     private func download(_ photos: [(id: String, revision: String)], token: UInt64, failures: inout Int) async -> Outcome {
         var outcome = Outcome()
         guard !photos.isEmpty else { return outcome }
@@ -580,19 +603,17 @@ final class CoverageWorker: Sendable {
                 }
             }
             for photo in photos {
-                guard await waitUntilClear() else { outcome.interrupted = true; break }
                 if inFlight >= Self.window, let next = await group.next() {
                     inFlight -= 1
                     settle(next)
                 }
                 if consecutive >= 3 {
-                    // Three failures in a row: what is in flight ends, then the server gets a pause.
                     for await result in group { inFlight -= 1; settle(result) }
                     consecutive = 0
-                    await wake.wait(upTo: failurePause)
-                    guard await waitUntilClear() else { outcome.interrupted = true; break }
+                    guard await pauseAfterFailures() else { outcome.interrupted = true; break }
                 }
-                guard mayRun else { outcome.interrupted = true; break }
+                // Checked just before each download starts, so none starts during a hold.
+                guard await waitUntilClear() else { outcome.interrupted = true; break }
                 let scheduler = scheduler
                 group.addTask {
                     do {
@@ -613,6 +634,19 @@ final class CoverageWorker: Sendable {
         failures = consecutive
         if Task.isCancelled || !mayRun { outcome.interrupted = true }
         return outcome
+    }
+
+    /// The pause after three failures in a row, which a change of conditions or a library change
+    /// meanwhile does not cut short. False once the worker may not run.
+    private func pauseAfterFailures() async -> Bool {
+        publish { $0.hold = .serverFailing }
+        let deadline = ContinuousClock.now + failurePause
+        while mayRun {
+            let remaining = deadline - ContinuousClock.now
+            guard remaining > .zero else { return true }
+            await wake.wait(upTo: remaining)
+        }
+        return false
     }
 
     /// Waits until the conditions allow a download. False once the worker may not run.
@@ -647,14 +681,18 @@ final class CoverageWorker: Sendable {
 
     // MARK: Progress
 
+    /// Shows the progress on the board once it changed; the main actor hears of nothing else.
     private func publish(_ change: (inout Progress) -> Void) {
-        let (progress, sequence) = state.withLock { state -> (Progress, UInt64) in
+        let update = state.withLock { state -> (progress: Progress, sequence: UInt64)? in
+            let before = state.progress
             change(&state.progress)
+            guard state.progress != before else { return nil }
             state.sequence &+= 1
             return (state.progress, state.sequence)
         }
+        guard let update else { return }
         let board = board
-        Task { @MainActor in board.show(progress, sequence: sequence) }
+        Task { @MainActor in board.show(update.progress, sequence: update.sequence) }
     }
 }
 

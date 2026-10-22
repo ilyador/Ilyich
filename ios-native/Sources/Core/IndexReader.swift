@@ -235,20 +235,25 @@ actor IndexReader {
     }
 
     /// One page of the covered photos in the library's order (month and time taken, newest first,
-    /// then ID), after `cursor`, read from asset_index_taken in its order without sorting. Each row
-    /// carries its own position, so a page's last row is the next page's cursor. The rows of the
-    /// cursor's month already walked are skipped as a residual filter on the index range rather
-    /// than with an OR, which SQLite would answer by collecting every older row and sorting it.
+    /// then ID), after `cursor`. The page is chosen on asset_index alone, read from
+    /// asset_index_taken in its order without sorting, and only then joined with each photo's
+    /// entity for its revision: joined first, SQLite (without statistics, which the index never
+    /// gathers) walks every asset and sorts them for every page. Each row carries its own
+    /// position, so a page's last row is the next page's cursor. The rows of the cursor's month
+    /// already walked are skipped as a residual filter on the index range rather than with an OR,
+    /// which SQLite would answer by collecting every older row and sorting it.
     func coveragePage(after cursor: CoverageCursor?, limit: Int) throws -> [CoverageRow] {
-        var sql = "SELECT i.id,\(Self.coverageRevision),i.local_month,i.local_date_time FROM asset_index i "
-            + "JOIN entities a ON a.kind='asset' AND a.id=i.id WHERE \(Self.coverageScope)"
+        var page = "SELECT i.id,i.local_month,i.local_date_time FROM asset_index i WHERE \(Self.coverageScope)"
         var values: [SQLiteValue] = [.text(userID)]
         if let cursor {
-            sql += " AND i.local_month<=? AND NOT (i.local_month=? AND (i.local_date_time>? OR (i.local_date_time=? AND i.id<=?)))"
+            page += " AND i.local_month<=? AND NOT (i.local_month=? AND (i.local_date_time>? OR (i.local_date_time=? AND i.id<=?)))"
             values += [.text(cursor.month), .text(cursor.month), .real(cursor.taken), .real(cursor.taken), .text(cursor.id)]
         }
-        sql += " ORDER BY i.local_month DESC,i.local_date_time DESC,i.id ASC LIMIT ?"
+        page += " ORDER BY i.local_month DESC,i.local_date_time DESC,i.id ASC LIMIT ?"
         values.append(.integer(Int64(min(max(limit, 1), 5_000))))
+        // CROSS JOIN keeps the page as the outer loop, so each of its rows looks its entity up once.
+        let sql = "SELECT p.id,\(Self.coverageRevision),p.local_month,p.local_date_time FROM (\(page)) p "
+            + "CROSS JOIN entities a ON a.kind='asset' AND a.id=p.id ORDER BY p.local_month DESC,p.local_date_time DESC,p.id ASC"
         var rows: [CoverageRow] = []
         try database.run(sql, values) { row in
             guard let id = row.text(0), let revision = row.text(1), let month = row.text(2), let taken = row.real(3) else { return }
