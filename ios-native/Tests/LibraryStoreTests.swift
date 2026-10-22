@@ -87,7 +87,7 @@ import XCTest
         XCTAssertEqual(store.title, "August 2026")
         store.clearFilters()
         XCTAssertEqual(store.title, "April 2018", "Clearing results restores the saved timeline heading.")
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testDevelopedShelfFilterContinuesPastZeroMatchesAndClearRestoresTimelinePosition() async throws {
@@ -110,7 +110,7 @@ import XCTest
         store.clearFilters()
         XCTAssertEqual(store.restorePosition, position)
         XCTAssertFalse(store.isFiltered)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testClearingAFilterReopensTheLibraryOnTheBackendRoutingMovedItTo() async throws {
@@ -133,7 +133,7 @@ import XCTest
         }
         XCTAssertEqual(store.restorePosition, position, "Reopening on the index keeps the place in the library.")
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testLibrarySearchesNeverReachTheLockedFolder() async throws {
@@ -151,7 +151,7 @@ import XCTest
         store.clearFilters()
         XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility)
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testLightroomIsATimelineOfEveryDevelopedPhoto() async throws {
@@ -166,7 +166,7 @@ import XCTest
         XCTAssertNotEqual(store.sections.first?.id, "results", "Lightroom is a timeline by month, with its rail.")
         XCTAssertEqual(store.filterTitle, "Lightroom")
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testTheDevelopedShelfLooksPastHundredsOfRecentUndevelopedPhotos() async throws {
@@ -182,7 +182,7 @@ import XCTest
         XCTAssertEqual(store.results.map(\.id), ["developed"])
         let sizes = await api.metadataSizes
         XCTAssertEqual(Set(sizes), [500], "The developed shelf reads big pages.")
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testChoosingAPlaceKeepsTheTimelineAndItsRailAsAPersonDoes() async throws {
@@ -197,7 +197,7 @@ import XCTest
         store.clearFilters()
         XCTAssertEqual(store.feedQuery, .library, "Clearing the place brings the library back.")
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testAPlaceIsFoundBySearchWhenTheOfflineLibraryCannotLayItOut() async throws {
@@ -210,7 +210,7 @@ import XCTest
         XCTAssertTrue(store.feedPlan?.limitations.contains(.noMonths) == true)
         XCTAssertEqual(store.results.map(\.id), ["lisbon-1", "lisbon-2"])
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testAPlaceKeepsItsOwnCachesAndTheServerNeverSeesIt() throws {
@@ -241,7 +241,7 @@ import XCTest
         XCTAssertEqual(store.monthPlaces["2024-10-01"]?.first?.name, "Kyoto", "Clearing the person brings the library's places straight back.")
         XCTAssertNil(store.monthPlaces["2024-08-01"], "The person's places do not stay on the library.")
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testPlacesArriveWhileTheLibraryKeepsChanging() async throws {
@@ -256,7 +256,7 @@ import XCTest
         }
         try await until("The places never arrived while the library kept changing.") { store.monthPlaces["2024-10-01"] != nil }
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope); await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
+        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testALaunchShowsTheKeptPlacesWhileTheyAreCountedAgain() async throws {
@@ -273,7 +273,7 @@ import XCTest
         await next.reload()
         try await until("The kept places did not show at launch.") { next.monthPlaces["2024-10-01"]?.first?.name == "Kyoto" }
         next.stop()
-        await TimelineCache.shared.removeAll(scope: scope); await TimelinePlacesCache.shared.removeAll(scope: scope)
+        await TimelinePlacesCache.shared.removeAll(scope: scope)
     }
 
     func testADeletedPhotoLeavesTheFeedBeforeTheServerConfirms() async throws {
@@ -288,7 +288,7 @@ import XCTest
         XCTAssertEqual([0, 1].compactMap { store.asset(section: 0, item: $0)?.id }, ["a", "c"])
         store.removeLocally(["a", "c"])
         XCTAssertTrue(store.sections.isEmpty, "A month with nothing left goes.")
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testFilterKeepsLoadedFeedUntilReplacementBucketCommits() async throws {
@@ -312,7 +312,7 @@ import XCTest
         try await until("The replacement feed did not commit.") { !store.isReplacingFeed && store.asset(section: 0, item: 0)?.id == "favorite-a" }
         XCTAssertEqual(store.sections.first?.count, 1)
         XCTAssertNotEqual(store.resetID, initialResetID)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testFailedReplacementRetainsOldFeedAndClearRestoresIt() async throws {
@@ -334,7 +334,7 @@ import XCTest
         store.clearFilters()
         XCTAssertFalse(store.isReplacingFeed)
         XCTAssertEqual(store.asset(section: 0, item: 0)?.id, "old-photo")
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     /// F7 review: More's filtered view, opened with no text, keeps the feed shown on screen until it
@@ -377,7 +377,6 @@ import XCTest
         XCTAssertEqual(store.totalCount, 0)
         try await until("The filtered view did not fail.") { await api.metadataCalls == 2 && store.error != nil }
         XCTAssertNil(store.asset(section: 0, item: 0))
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testRapidScopeReplacementAndClearCannotCommitStaleFeed() async throws {
@@ -400,7 +399,7 @@ import XCTest
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(store.isReplacingFeed)
         XCTAssertEqual(store.asset(section: 0, item: 0)?.id, "old-photo")
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testSwitchingScopeClearsSelectionAndInvalidatesPendingSearch() async throws {
@@ -418,7 +417,6 @@ import XCTest
         XCTAssertTrue(store.results.isEmpty)
         XCTAssertEqual(store.sections.first?.id, "2026-01-01T00:00:00Z")
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testClearingFilterRestoresScrollPositionAndTimelineRetryStaysTimeline() async throws {
@@ -436,7 +434,6 @@ import XCTest
         XCTAssertTrue(calls.isEmpty)
         XCTAssertEqual(store.sections.first?.id, position.section)
         store.stop()
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     private func settle(_ store: LibraryStore, calls: Int, api: LibraryAPIFixture) async throws {
@@ -473,7 +470,7 @@ import XCTest
         XCTAssertEqual(afterUnknown, initial + 1, "Without a change to go on, the refresh reloads.")
         let refreshes = await api.refreshes
         XCTAssertEqual(refreshes, 2)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testMonthSelectionResolvesEvictedAssetsAndKeepsRemoteAndLocalIdentitiesSeparate() async throws {
@@ -497,7 +494,7 @@ import XCTest
         try await settleSelection(store)
         XCTAssertTrue(store.selected.isEmpty)
         XCTAssertTrue(store.selectedLocalPhotos.isEmpty)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testPhoneOnlyPhotoSwipesThroughEverythingOnThePhone() async throws {
@@ -516,7 +513,7 @@ import XCTest
         XCTAssertEqual(Set(store.availableLocalPhotos(around: phoneOnly).map(\.id)), ["phone-only", "backed-up"],
                        "A phone-only photo should swipe to the other photos on this phone, not open alone.")
         XCTAssertEqual(store.availableLocalPhotos(around: LocalPhoto(id: "elsewhere", date: date)).map(\.id), ["elsewhere"])
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testPendingGroupSelectionCannotReappearAfterLeavingSelection() async throws {
@@ -529,7 +526,7 @@ import XCTest
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertTrue(store.selected.isEmpty)
         XCTAssertFalse(store.isSelectingGroup)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testDeduplicationKeepsTheVisiblePhotoAnchoredWhenEarlierRowsDisappear() async throws {
@@ -548,7 +545,7 @@ import XCTest
         XCTAssertEqual(position.offset, 17)
         store.updateDeviceTimeline(MergedTimeline(photos: photos, associations: ["a": "timeline-photo", "b": "timeline-photo"]))
         XCTAssertEqual(store.restorePosition?.assetID, "timeline-photo")
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testRepeatedDeviceSnapshotKeepsGridIdentityAndLocalEditStillInvalidatesMedia() throws {
@@ -576,25 +573,9 @@ import XCTest
         store.stop()
     }
 
-    func testCachedTimelineShowsItsMonthBeforeNetworkRefreshFinishes() async throws {
-        let bucket = "2026-01-01T00:00:00Z"
-        let api = LibraryAPIFixture([], delayedSummary: true)
-        let epoch = await TimelineCache.shared.epoch(scope: api.cacheScope)
-        await TimelineCache.shared.save(
-            TimelineSnapshot(buckets: [.init(timeBucket: bucket, count: 1)], assets: [bucket: [Asset(id: "cached-photo")]]),
-            scope: api.cacheScope, query: .library, epoch: epoch)
-        let store = LibraryStore(source: api)
-        let reload = Task { await store.reload() }
-        defer { reload.cancel(); store.stop() }
-        try await until("The cached feed did not appear before the network summary.") {
-            store.isLoading && store.asset(section: 0, item: 0)?.id == "cached-photo"
-        }
-        XCTAssertEqual(store.title, "January 2026")
-        reload.cancel(); await reload.value
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
-    }
-
-    func testBackgroundRefreshKeepsLiveRowsAndDoesNotReplayOlderDiskSnapshot() async throws {
+    /// A sync's reload keeps the rows shown until their months are read again (F2: the
+    /// whole-snapshot cache is gone, so nothing older can be replayed over them either).
+    func testBackgroundRefreshKeepsLiveRowsUntilTheirMonthsAreReadAgain() async throws {
         let api = LibraryAPIFixture([], delayedTimeline: true)
         let store = LibraryStore(source: api)
         await store.reload()
@@ -602,16 +583,12 @@ import XCTest
         store.loaded = [bucket: [Asset(id: "live-photo")]]
         let reset = store.resetID
         store.position = GridPosition(section: bucket, item: 0, offset: 17, assetID: "live-photo")
-        let epoch = await TimelineCache.shared.epoch(scope: api.cacheScope)
-        await TimelineCache.shared.save(
-            TimelineSnapshot(buckets: [.init(timeBucket: bucket, count: 1)], assets: [bucket: [Asset(id: "older-cached-photo")]]),
-            scope: api.cacheScope, query: .library, epoch: epoch)
 
         await store.reload(preservingPosition: true)
         XCTAssertEqual(store.resetID, reset, "An unchanged sync summary must not recycle visible image cells.")
         XCTAssertEqual(store.asset(section: 0, item: 0)?.id, "live-photo")
         XCTAssertEqual(store.restorePosition, store.position)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     private static let june = "2025-06-01T00:00:00Z"
@@ -649,7 +626,7 @@ import XCTest
         XCTAssertEqual(store.navigation.section, 2)
         XCTAssertEqual(store.resetID, reset)
         XCTAssertEqual(store.restorePosition, store.position)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testPlaceRefreshKeepsUnchangedRowsAndRestoresAssetAfterReordering() async throws {
@@ -687,7 +664,7 @@ import XCTest
         XCTAssertEqual(store.results.map(\.id), ["place-c", "place-b", "place-a"])
         XCTAssertEqual(store.restorePosition, anchor)
         XCTAssertEqual(store.restoredIndex(for: anchor)?.item, 1)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testRepeatedDateNavigationToLoadedBucketPublishesWithoutAnotherFetch() async throws {
@@ -711,12 +688,12 @@ import XCTest
         XCTAssertEqual(store.scrollRequest?.position.assetID, asset.id)
         let callsAfter = await api.bucketCalls.count
         XCTAssertEqual(callsAfter, callsBefore)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testColdRailScrubBoundsRequestsAndLoadsLatestIntent() async throws {
         let assets = Dictionary(uniqueKeysWithValues: (0..<60).map { index in
-            (String(format: "month-%03d", index), [Asset(id: "photo-\(index)")])
+            (String(format: "%04d-%02d-01T00:00:00Z", 2000 + index / 12, index % 12 + 1), [Asset(id: "photo-\(index)")])
         })
         let api = LibraryAPIFixture([], bucketAssets: assets, bucketDelay: .milliseconds(40))
         let store = LibraryStore(source: api)
@@ -731,12 +708,12 @@ import XCTest
         XCTAssertLessThanOrEqual(calls.count, 10, "Intermediate drag positions must be coalesced, not queued indefinitely.")
         XCTAssertEqual(store.resetID, reset, "Scrubbing must not reload the entire collection.")
         XCTAssertEqual(store.loaded[target]?.first?.id, assets[target]?.first?.id)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testCancelledScrubRequestsDoNotBlockTheNextFeedGeneration() async throws {
         let assets = Dictionary(uniqueKeysWithValues: (0..<20).map { index in
-            (String(format: "month-%03d", index), [Asset(id: "photo-\(index)")])
+            (String(format: "%04d-%02d-01T00:00:00Z", 2000 + index / 12, index % 12 + 1), [Asset(id: "photo-\(index)")])
         })
         let api = LibraryAPIFixture([], bucketAssets: assets, bucketDelay: .milliseconds(100))
         let store = LibraryStore(source: api)
@@ -751,12 +728,12 @@ import XCTest
         try await until("Cancelled requests poisoned the new generation's target.") { store.loaded[target] != nil }
         XCTAssertEqual(store.loaded[target]?.first?.id, assets[target]?.first?.id)
         XCTAssertNil(store.bucketErrors[target])
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testBackgroundBucketCompletionsCannotEvictVisiblePhotos() async throws {
         let assets = Dictionary(uniqueKeysWithValues: (0..<18).map { index in
-            (String(format: "month-%03d", index), [Asset(id: "photo-\(index)")])
+            (String(format: "%04d-%02d-01T00:00:00Z", 2000 + index / 12, index % 12 + 1), [Asset(id: "photo-\(index)")])
         })
         let api = LibraryAPIFixture([], bucketAssets: assets)
         let store = LibraryStore(source: api)
@@ -772,7 +749,7 @@ import XCTest
             XCTAssertEqual(store.loaded[first]?.map(\.id), original)
         }
         XCTAssertLessThanOrEqual(store.loaded.count, 12)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testRepeatedRailJumpsToTheSameMonthAreDistinctRequests() async throws {
@@ -787,7 +764,7 @@ import XCTest
         XCTAssertEqual(first.position, second.position)
         XCTAssertEqual(first.position.section, "2026-02-01T00:00:00Z")
         XCTAssertEqual(first.position.item, 0)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testRailJumpPreservesAndClampsTheRequestedItemWithinItsMonth() async throws {
@@ -804,7 +781,7 @@ import XCTest
         XCTAssertEqual(store.scrollRequest?.position.item, 0)
         store.scrollToBucket(0, item: 99)
         XCTAssertEqual(store.scrollRequest?.position.item, 2)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testShowInTimelineLoadsTheUnloadedMonthAndFindsTheAsset() async throws {
@@ -832,7 +809,7 @@ import XCTest
         try await until("The fallback navigation never published.") { store.scrollRequest != nil }
         XCTAssertEqual(store.scrollRequest?.position.assetID, "late")
         XCTAssertNotEqual(store.scrollRequest?.id, request.id)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     /// From the library itself (a memory's Show in timeline), the feed shown stays, and the
@@ -849,7 +826,7 @@ import XCTest
         XCTAssertEqual(store.scrollRequest?.position.assetID, "late")
         XCTAssertNotNil(store.feedPlan)
         XCTAssertNil(store.error)
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     func testScopeChangeOrStopPreventsAnOldDateNavigationFromPublishing() async throws {
@@ -868,7 +845,6 @@ import XCTest
         store.stop()
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertNil(store.scrollRequest)
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testRailJumpSupersedesPendingDateNavigation() async throws {
@@ -882,7 +858,7 @@ import XCTest
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(store.scrollRequest, request)
         XCTAssertEqual(request.position.section, "2026-03-01T00:00:00Z")
-        store.stop(); await TimelineCache.shared.removeAll(scope: api.cacheScope)
+        store.stop()
     }
 
     private func settleSelection(_ store: LibraryStore) async throws {

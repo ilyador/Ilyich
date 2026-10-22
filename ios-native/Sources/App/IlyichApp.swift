@@ -15,6 +15,8 @@ import SwiftUI
         TransferHost.shared.setRestore { await session.restore() }
         BackupLifecycle.shared.setBackgroundPreparation { await session.prepareForBackgroundBackup() }
         _ = CastSessionService.shared
+        // The feed's whole-snapshot cache went in F2 (the index is the cache); its folder goes with it.
+        Task.detached(priority: .utility) { TimelineFeed.deleteLegacySnapshots() }
     }
     var body: some Scene {
         WindowGroup {

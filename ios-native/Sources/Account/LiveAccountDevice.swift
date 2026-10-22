@@ -39,7 +39,6 @@ struct LiveAccountDevice: AccountDevice {
     func removeNetworkSettings(server: URL) async throws { try NetworkConfigurationStore.remove(server: server) }
 
     func clearTimelineCaches(scope: String) async {
-        await TimelineCache.shared.removeAll(scope: scope)
         await TimelinePlacesCache.shared.removeAll(scope: scope)
     }
 

@@ -7,7 +7,6 @@ struct DiagnosticsView: View {
     @AppStorage(DiagnosticsStore.levelKey) private var level = DiagnosticLevel.errors.rawValue
     @State private var events: [DiagnosticEvent] = []
     @State private var media: MediaCacheUsage?
-    @State private var timeline: CachedTimelineUsage?
     @State private var syncStatistics: EntityStoreStatistics?
     @State private var statisticsError: String?
     @State private var backup = BackupStore.shared
@@ -75,10 +74,6 @@ struct DiagnosticsView: View {
                 Text("Keeps library metadata on this phone for browsing and applies server changes. Counts exclude the locked folder. Downloaded photo previews have a separate cache; an indexed photo is not necessarily available offline.")
             }
             Section {
-                if let timeline {
-                    LabeledContent("Visited timeline snapshots", value: timeline.snapshotCount.formatted())
-                    LabeledContent("Timeline cache", value: bytes(timeline.diskBytes))
-                }
                 if let warmer = session?.thumbnailWarmer, warmer.total > 0 {
                     LabeledContent("Thumbnails kept offline", value: "\(warmer.stored.formatted()) of \(warmer.total.formatted())")
                 }
@@ -91,7 +86,7 @@ struct DiagnosticsView: View {
                 if let resetMessage { Text(resetMessage).font(.footnote).foregroundStyle(.secondary) }
                 if session != nil { Button("Clear browsing cache", role: .destructive) { confirmReset = true }.disabled(clearing) }
             } header: { Text("Browsing cache") } footer: {
-                Text("Clears downloaded previews and visited timeline metadata for this account. Offline previews will need to download again. Originals, backup receipts, your upload queue and photos on the server stay intact.")
+                Text("Clears downloaded previews for this account. Offline previews will need to download again. Originals, backup receipts, your upload queue and photos on the server stay intact.")
             }
             Section {
                 Picker("Record", selection: $level) { ForEach(DiagnosticLevel.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) } }
@@ -167,7 +162,6 @@ struct DiagnosticsView: View {
         events = await DiagnosticsStore.shared.snapshot()
         transferImport = await DiagnosticsStore.shared.transferImportReport()
         if let pipeline { media = await pipeline.cacheUsage() }
-        timeline = await TimelineCache.shared.cacheUsage(scope: api.cacheScope)
         do { syncStatistics = try await api.syncStatistics(); statisticsError = nil }
         catch is CancellationError { }
         catch { statisticsError = "Saved metadata counts could not be read. Refresh to try again." }

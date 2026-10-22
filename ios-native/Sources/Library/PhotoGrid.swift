@@ -272,7 +272,6 @@ struct PhotoGrid: UIViewRepresentable {
                                 && !(dayGroups.indices.contains(index.section) && dayGroups[index.section].contains(where: { $0.startItem == 0 }))
                                 ? monthBadge(for: sections[index.section].id) : nil)
             if changed { setNeedsDemand() }
-            if entry == nil && !parent.store.isReplacingFeed { parent.store.requestBucket(index.section) }
             if sections.indices.contains(index.section), sections[index.section].id == "results",
                index.item >= max(0, sections[index.section].count - 12) {
                 Task { [weak self] in self?.parent.store.loadMore() }
@@ -446,8 +445,9 @@ struct PhotoGrid: UIViewRepresentable {
             if cell.binding.map({ $0.stage != .exact }) ?? false { setNeedsDemand() }
         }
         func collectionView(_ view: UICollectionView, prefetchItemsAt paths: [IndexPath]) {
+            // The months themselves come from the viewport the store hears of; cells and prefetch
+            // ask for none.
             guard !parent.store.isReplacingFeed else { return }
-            for section in Set(paths.map(\.section)) { parent.store.requestBucket(section) }
             // Sketches of photos about to scroll in decode now, off the main thread, so their cells have them at once.
             ThumbHashSketches.shared.prefetch(remoteAssets(at: paths).compactMap(\.thumbhash))
             // Photos about to scroll in move from disk to memory, so they draw in their first frame.

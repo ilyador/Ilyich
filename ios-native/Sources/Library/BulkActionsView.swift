@@ -160,12 +160,7 @@ struct BulkActionsView: View {
     private func stack() { run { let _: AssetStack = try await api.request(.post, path: "stacks", body: ["assetIds": ids]) } }
     private func update(_ body: SelectionUpdate) { run {
         try await api.requestVoid(.put, path: "assets", body: body)
-        if body.visibility == .locked {
-            await pipeline.forget(assetIDs: Set(ids), revoked: true)
-            await TimelineCache.shared.removeAll(scope: api.cacheScope)
-        } else if body.visibility == .timeline {
-            await TimelineCache.shared.removeAll(scope: api.cacheScope)
-        }
+        if body.visibility == .locked { await pipeline.forget(assetIDs: Set(ids), revoked: true) }
     } }
     private func run(_ action: @escaping @MainActor () async throws -> Void) {
         busy = true; failure = nil

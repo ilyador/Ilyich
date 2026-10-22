@@ -555,7 +555,6 @@ struct AssetViewer: View {
             let updated = try await api.updateAsset(id: id, update: .init(visibility: visibility))
             if visibility == .locked {
                 await pipeline.forget(assetIDs: [id], revoked: true)
-                await TimelineCache.shared.removeAll(scope: api.cacheScope)
                 onDeleted(); close()
             } else { update(updated) }
         }

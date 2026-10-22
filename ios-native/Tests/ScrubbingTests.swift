@@ -191,7 +191,6 @@ import XCTest
         let api = MonthLibrary(months: library)
         let store = LibraryStore(source: api)
         defer { store.stop() }
-        addTeardownBlock { await TimelineCache.shared.removeAll(scope: api.cacheScope) }
         await store.reload()
         for section in store.buckets.indices {
             store.requestBucket(section)
@@ -280,7 +279,6 @@ import XCTest
         let months = (0..<30).map { String(format: "%04d-06-01T00:00:00Z", 2000 + $0) }
         let api = MonthLibrary(months: Dictionary(uniqueKeysWithValues: months.map { ($0, [Asset(id: "photo-\($0)")]) }),
                                delay: .seconds(1), cancelled: URLError(.cancelled))
-        addTeardownBlock { await TimelineCache.shared.removeAll(scope: api.cacheScope) }
         let store = LibraryStore(source: api)
         await store.reload()
         return (store, api)

@@ -77,11 +77,12 @@ import XCTest
         }
     }
 
-    /// FEED-3. A sync that lands while a new scope's feed is loading reloads it keeping the
-    /// position, as LibraryView does on every sync. That reload asks first for the month under the
-    /// old position and the one after it, then for the first two months, so the second month waits
-    /// for a free slot. The reload awaits only requests already running, finds the second month
-    /// missing and gives up, and nothing else commits the frozen feed.
+    /// FEED-3, fixed in rebuild milestone F2. A sync that lands while a new scope's feed is loading
+    /// reloads it keeping the position, as LibraryView does on every sync. That reload asks first
+    /// for the month under the old position and the one after it, then for the first two months,
+    /// so the second month waits for a free slot. The reload used to await only requests already
+    /// running, found the second month missing and gave up, and nothing else committed the frozen
+    /// feed. It now joins the first months' loads through the feed, queued or not.
     func testReplacementCommitsWhenASyncReloadRacesTheScopeChange() async throws {
         let months = Dictionary(uniqueKeysWithValues: (1...6).map { month in
             (String(format: "2026-%02d-01T00:00:00Z", month), [Asset(id: "photo-\(month)")])
@@ -103,10 +104,7 @@ import XCTest
         await api.releaseSummaries()
         await sync.value
         let committed = await eventually(within: .seconds(3)) { !store.isReplacingFeed }
-
-        XCTExpectFailure("FEED-3: a sync reload racing a scope change leaves the feed frozen. F4 removes this wrapper.", strict: true) {
-            XCTAssertTrue(committed, "The new scope's feed replaces the frozen one.")
-        }
+        XCTAssertTrue(committed, "The new scope's feed replaces the frozen one.")
     }
 
     /// FEED-4, fixed in scrubbing step 3. Months waiting for a request slot used to be queued by
@@ -132,9 +130,10 @@ import XCTest
         XCTAssertTrue(loaded, "A month asked for loads once a slot frees.")
     }
 
-    /// FEED-5. A month's size comes only from the summary and is never reconciled with the photos
-    /// the month returns. A month holding fewer photos than its count keeps "Loading photo" cells
-    /// for good, because a loaded month is never asked for again.
+    /// FEED-5, fixed in rebuild milestone F2. A month's size came only from the summary and was
+    /// never reconciled with the photos the month returned. A month holding fewer photos than its
+    /// count kept "Loading photo" cells for good, because a loaded month is never asked for again.
+    /// The month's own count now stands over the summary's.
     func testMonthSmallerThanItsSummaryLeavesNoPermanentPlaceholder() async throws {
         let month = "2026-01-01T00:00:00Z"
         let api = LedgerLibrary(months: [month: [Asset(id: "first"), Asset(id: "second")]], counts: [month: 3])
@@ -150,9 +149,8 @@ import XCTest
             return count > 0 && (0..<count).allSatisfy { store.asset(section: 0, item: $0) != nil }
         }
 
-        XCTExpectFailure("FEED-5: a month smaller than its summary keeps placeholders. F2 removes this wrapper.", strict: true) {
-            XCTAssertTrue(complete, "Every cell of a loaded month shows a photo.")
-        }
+        XCTAssertTrue(complete, "Every cell of a loaded month shows a photo.")
+        XCTAssertEqual(store.sections.first?.count, 2, "The month's own count stands.")
     }
 
     /// FEED-6, fixed in rebuild milestone C6. A feed's month places were saved on the phone from
@@ -173,7 +171,6 @@ import XCTest
 
         // Access changes, and SessionStore drops what the phone kept for this account.
         await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
-        await TimelineCache.shared.removeAll(scope: api.cacheScope)
         await api.releasePlaces()
         try await until("The count never finished.") { await api.placesAnswered == 1 }
         let saved = await eventually(within: .seconds(1)) {
@@ -523,7 +520,6 @@ import XCTest
 
     private func removeCachesAfterwards(_ scope: String) {
         addTeardownBlock {
-            await TimelineCache.shared.removeAll(scope: scope)
             await TimelinePlacesCache.shared.removeAll(scope: scope)
         }
     }
