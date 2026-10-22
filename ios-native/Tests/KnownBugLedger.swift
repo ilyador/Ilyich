@@ -13,10 +13,11 @@ import XCTest
 @MainActor final class KnownBugLedgerTests: XCTestCase {
     // MARK: - Feed
 
-    /// FEED-1. Opening a photo calls update(_:) with its detailed record, as
-    /// AssetViewer.refreshCurrentAsset does on every open, and update drops the saved library
-    /// timeline. Clearing the filter then reloads the library from its top instead of returning to
-    /// the photo it was showing.
+    /// FEED-1, fixed in rebuild milestone F4. Opening a photo calls update(_:) with its detailed
+    /// record, as AssetViewer.refreshCurrentAsset does on every open, and update used to drop the
+    /// saved library timeline. Clearing the filter then reloaded the library from its top instead
+    /// of returning to the photo it was showing. The saved library now takes the record and keeps
+    /// its place.
     func testOpeningAPhotoInAFilterKeepsTheLibraryPositionForClear() async throws {
         let june = "2025-06-01T00:00:00Z"
         let early = try XCTUnwrap(APIDate.parse("2025-06-02T12:00:00Z"))
@@ -39,17 +40,16 @@ import XCTest
         store.update(Asset(id: "late", originalFileName: "late.jpg", localDateTime: late))
         store.clearFilters()
         let restored = await eventually { store.restorePosition == position }
-
-        XCTExpectFailure("FEED-1: opening a photo in a filter loses the library position. F4 removes this wrapper.", strict: true) {
-            XCTAssertTrue(restored, "Clearing the filter returns to the photo the library was showing.")
-        }
+        XCTAssertTrue(restored, "Clearing the filter returns to the photo the library was showing.")
     }
 
-    /// FEED-2. With the phone's photos merged in, a month only the phone has is a section of its
-    /// own. A reload that replaces a frozen feed commits only once its first two months have
-    /// loaded from the server, which a phone-only month never does, so the old feed stays frozen:
-    /// no scrolling, no taps and no rail. Clearing a filter takes that path whenever its saved
-    /// timeline is gone, here after a refresh that follows a mutation.
+    /// FEED-2, fixed in rebuild milestone F4. With the phone's photos merged in, a month only the
+    /// phone has is a section of its own. A reload that replaces a frozen feed committed only once
+    /// its first two months had loaded from the server, which a phone-only month never does, so
+    /// the old feed stayed frozen: no scrolling, no taps and no rail. Clearing a filter took that
+    /// path whenever its saved timeline was gone, here after a refresh that follows a mutation. A
+    /// month only the phone has now counts as ready (FeedSession), and a refresh keeps the saved
+    /// library, which the clear restores.
     func testClearingCommitsWhenTheNewestMonthIsOnlyOnThePhone() async throws {
         let january = "2026-01-01T00:00:00Z"
         let day = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
@@ -68,12 +68,8 @@ import XCTest
         await store.refreshAfterMutation()
         store.clearFilters()
         let committed = await eventually(within: .seconds(3)) { !store.isReplacingFeed }
-        let newest = store.sections.first?.id
-
-        XCTExpectFailure("FEED-2: a phone-only newest month freezes Clear. F4 removes this wrapper.", strict: true) {
-            XCTAssertTrue(committed, "Clearing replaces the frozen feed with the library.")
-            XCTAssertEqual(newest, "2026-02-01", "The library leads with the phone's month again.")
-        }
+        XCTAssertTrue(committed, "Clearing replaces the frozen feed with the library.")
+        XCTAssertEqual(store.sections.first?.id, "2026-02-01", "The library leads with the phone's month again.")
     }
 
     /// FEED-3, fixed in rebuild milestone F2. A sync that lands while a new scope's feed is loading

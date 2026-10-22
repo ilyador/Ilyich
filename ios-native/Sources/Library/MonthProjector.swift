@@ -34,6 +34,15 @@ enum MonthProjector {
         func removing(_ ids: Set<String>) -> Projection {
             Projection(entries: entries.filter { !ids.contains($0.id) }, days: days, placeSummary: placeSummary)
         }
+
+        /// The rows with a newer record of one server photo, its phone copy kept beside it. Its
+        /// place in the month is redone when the month is projected again.
+        func replacing(_ asset: Asset) -> Projection {
+            Projection(entries: entries.map { entry in
+                if case .remote(let old, let local) = entry, old.id == asset.id { return .remote(asset, local: local) }
+                return entry
+            }, days: days, placeSummary: placeSummary)
+        }
     }
 
     struct Result: Sendable {
