@@ -409,6 +409,11 @@ LibraryStore applies its State. A LibraryChange prunes deleted results in place.
   - UI testSearchContinuesAnEmptyVerifiedPageAndCanClear
 - **Acceptance:**
   - On the phone, verified search behaves as before
+- **As built:**
+  - SearchFeed (Sources/Library/SearchFeed.swift) is an actor per search with first, more, retry, refresh, prune and replace; LibraryStore.loadResults' loop moved into it unchanged, and its cursor, retry batch and page count are gone from LibraryStore, which keeps one SearchFeed per search and shows the State it returns. Every feed operation commits only if no later one started, and the store still drops a State whose search, text or generation moved on.
+  - A LibraryChange reaches LibraryStore.prune(_:) through the legacy notification, which now carries the change: removed and access-lost photos leave the results shown in place (revision, no reset), and neither a later page, a retry nor a refresh brings them back for that search. removeLocally and update also go through the feed, so a later page no longer restores a deleted photo or an older copy.
+  - Results still load further on scroll; Check more and Keep looking remain for verified searches.
+  - Match count: Immich's search returns no total (its `total` is the page length), so State.totalCount is always nil and the header keeps showing the number of results shown, as before. The critic's correction (no count under post-filters) only concerns a server total, which never exists; the shown count can't overstate what is shown. Owner question: keep the count of photos shown, or show none.
 
 ### B3 — Library job executor and discovery (dormant)
 

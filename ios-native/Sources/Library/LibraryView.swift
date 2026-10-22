@@ -249,6 +249,8 @@ struct LibraryView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { notification in
             guard notification.userInfo?["scope"] as? String == api.cacheScope else { return }
+            // Search results drop deleted photos at once; a search with text is not read again.
+            if let change = notification.userInfo?["change"] as? LibraryChange { store.prune(change) }
             Task {
                 if store.query.isEmpty { await store.reload(preservingPosition: true) }
                 if notification.userInfo?["collections"] as? Bool == true {

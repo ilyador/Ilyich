@@ -149,9 +149,12 @@ private struct FrozenFeed {
     private(set) var searchFilter = ServerSearchRequest.filter(for: LibraryStore.librarySearch)
     private(set) var searchMode = SearchMode.context
     private var similarAssetID: String?
-    private var cursor: String?
-    private var retryBatch: (cursor: String?, prefix: [Asset])?
-    private var loadedResultPageCount = 0
+    /// The search shown, which reads its pages; nil until one starts, and after a change of scope.
+    @ObservationIgnored private var searchFeed: SearchFeed?
+    /// The search stopped at a page it can read again; otherwise a retry starts it over.
+    @ObservationIgnored private var searchCanResume = false
+    /// Results taken out while this search shows, kept out of every page that arrives after.
+    @ObservationIgnored private var removedResultIDs: Set<String> = []
     // The month queue drives no view. Observing it made SwiftUI update the grid on every scrolled
     // frame, since binding a cell that waits for its month reads it.
     @ObservationIgnored private var requests: [String: Task<Void, Never>] = [:]
@@ -488,7 +491,7 @@ private struct FrozenFeed {
         }
         defer { if generation == current { isLoading = false } }
         do {
-            if showingResults { await loadResults(reset: true, preservingPosition: preservingPosition); return }
+            if showingResults { await loadResults(preservingPosition ? .refresh : .first); return }
             // The feed is planned on every load, so a change of routing (the offline library
             // becoming readable, or going away) reopens it on the new backend, anchored by the
             // photo it showed; every month of one load comes from that load's backend.
@@ -500,7 +503,7 @@ private struct FrozenFeed {
                 // A feed only search can serve, such as a place before the offline library is
                 // readable, is one list of results: the plan's noMonths limitation.
                 usesMetadata = true; showingResults = true
-                await loadResults(reset: true, preservingPosition: preservingPosition); return
+                await loadResults(preservingPosition ? .refresh : .first); return
             }
             cacheEpoch = await TimelineCache.shared.epoch(scope: source.cacheScope)
             // A background sync refresh already has current in-memory rows. Disk
@@ -801,7 +804,7 @@ private struct FrozenFeed {
         searchScope = scope
         filterTitle = title; query = ""; searchMode = .context
         usesMetadata = true; showingResults = true
-        queryTask = Task { await loadResults(reset: true) }
+        queryTask = Task { await loadResults(.first) }
     }
 
     /// Every photo developed in Lightroom, laid out by month as a person's photos are. A search
@@ -847,32 +850,31 @@ private struct FrozenFeed {
             return
         }
         // Keep the current grid visible until the replacement query returns.
-        queryTask = Task { await loadResults(reset: true) }
+        queryTask = Task { await loadResults(.first) }
     }
 
     func applySearchOptions(mode: SearchMode, filter: SearchFilter) {
         rememberOriginal(); beginScopeChange()
         searchMode = mode; searchScope = LibraryQuery(filter, base: searchScope); usesMetadata = true; showingResults = true
         filterTitle = mode == .context ? "Filtered library" : mode.rawValue
-        queryTask = Task { await loadResults(reset: true) }
+        queryTask = Task { await loadResults(.first) }
     }
 
     func findSimilar(to asset: Asset) {
         rememberOriginal(); beginScopeChange()
         query = ""; searchMode = .context; searchScope = Self.librarySearch; similarAssetID = asset.id
         filterTitle = "Similar photos"; showingResults = true; usesMetadata = true
-        queryTask = Task { await loadResults(reset: true) }
+        queryTask = Task { await loadResults(.first) }
     }
 
     func loadMore() {
         guard hasMore, !isSearching, error == nil else { return }
         isSearching = true
-        queryTask = Task { await loadResults(reset: false) }
+        queryTask = Task { await loadResults(.more) }
     }
     func retrySearch() {
         queryTask?.cancel()
-        let batch = retryBatch
-        queryTask = Task { await loadResults(reset: batch == nil, retry: batch) }
+        queryTask = Task { await loadResults(.retry) }
     }
     func retryCurrent() {
         if showingResults || !query.isEmpty { retrySearch() }
@@ -893,94 +895,80 @@ private struct FrozenFeed {
         return try ServerSearchRequest(scope, userID: source.userID)
     }
 
-    private func loadResults(reset: Bool, retry: (cursor: String?, prefix: [Asset])? = nil,
-                             preservingPosition: Bool = false) async {
+    private enum SearchStep { case first, more, retry, refresh }
+
+    /// Runs one step of the search shown through its SearchFeed and shows the State it returns.
+    /// The first pages and a retry from the start make a new feed; a refresh reads the feed's
+    /// loaded pages again, keeping the grid where it is when the rows are unchanged.
+    private func loadResults(_ step: SearchStep) async {
         let searchID = UUID(); searchGeneration = searchID
         let text = query, requestGeneration = generation
-        let request: ServerSearchRequest
-        do { request = try searchRequest(text: text) } catch {
-            self.error = error.localizedDescription; return
+        let fromStart = step == .first || (step == .retry && !searchCanResume)
+        let feed: SearchFeed
+        if !fromStart, let searchFeed { feed = searchFeed }
+        else if step == .more { isSearching = false; return }
+        else {
+            do { feed = SearchFeed(SearchFeed.Request(try searchRequest(text: text)), source: source) } catch {
+                self.error = error.localizedDescription; return
+            }
+            searchFeed = feed; searchCanResume = false; removedResultIDs = []
         }
         let previousResultIDs = results.map(\.id)
-        // Developed photos can sit a thousand photos deep behind recent phone shots, so a search the
-        // phone filters (developed, or one owner's photos) reads bigger pages and keeps going, up to
-        // its scan budget of 20,000 photos, until it finds some.
-        let scans = request.scanBudget != nil
-        let pageSize = scans ? 500 : 100
-        let requestLimit = preservingPosition ? max(1, loadedResultPageCount) : scans ? (request.scanBudget ?? 0) / 500 : 3
-        let startCursor: String?
-        if let retry { startCursor = retry.cursor } else { startCursor = reset ? nil : cursor }
-        let prefix = retry?.prefix ?? (reset ? [] : results)
-        var failedBatch = (cursor: startCursor, prefix: prefix)
         isSearching = true; error = nil
         defer { if searchGeneration == searchID { isSearching = false } }
         do {
-            var nextCursor = startCursor
-            var seen: Set<String> = []
-            var accumulated: [Asset] = []
-            var latest: Verification?
-            var pendingRetry: (cursor: String?, prefix: [Asset])?
-            var fetchedPageCount = 0
-            // A verified page can contain zero matches and still have a continuation.
-            // Bound automatic work; expose Check more when the server has more candidates.
-            for _ in 0..<requestLimit {
-                try Task.checkCancellation()
-                failedBatch = (nextCursor, prefix + accumulated)
-                let response = switch request.endpoint {
-                case .smart: try await source.smart(request, cursor: nextCursor)
-                case .metadata: try await source.metadata(request, cursor: nextCursor, size: pageSize)
-                }
-                try Task.checkCancellation()
-                fetchedPageCount += 1
-                accumulated += response.assets.items
-                latest = response.verification
-                // Structured filters select this server's cursor API. A legacy page
-                // number must never be sent back as an opaque cursor.
-                if response.assets.nextCursor == nil, response.assets.nextPage != nil {
-                    throw APIError.invalidResponse("The server returned an incompatible search continuation.")
-                }
-                let newCursor = response.assets.nextCursor
-                if latest?.canRetry == true {
-                    pendingRetry = failedBatch; nextCursor = newCursor; break
-                }
-                if newCursor == nextCursor || (newCursor.map { seen.contains($0) } ?? false) { nextCursor = nil; break }
-                nextCursor = newCursor
-                if let nextCursor { seen.insert(nextCursor) }
-                if nextCursor == nil || (!preservingPosition && !accumulated.isEmpty) { break }
+            let state: SearchFeed.State
+            switch step {
+            case .first: state = try await feed.first()
+            case .more: state = try await feed.more()
+            case .retry: if fromStart { state = try await feed.first() } else { state = try await feed.retry() }
+            case .refresh: state = try await feed.refresh()
             }
-            guard searchGeneration == searchID, query == text, generation == requestGeneration else { return }
-            if preservingPosition, let pendingRetry {
-                cursor = nextCursor; retryBatch = pendingRetry; hasMore = false; verification = latest
+            guard searchGeneration == searchID, query == text, generation == requestGeneration, searchFeed === feed else { return }
+            searchCanResume = state.retryPoint != nil
+            if step == .refresh, state.retryPoint != nil {
+                // An unchecked page met while refreshing keeps the rows shown until it is retried.
+                hasMore = false; verification = state.verification
                 revision += 1
                 return
             }
-            var IDs = Set(prefix.map(\.id))
-            let unique = accumulated.filter { IDs.insert($0.id).inserted }
-            let updatedResults = prefix + unique
+            let updatedResults = removedResultIDs.isEmpty ? state.results : state.results.filter { !removedResultIDs.contains($0.id) }
             let resultRowsChanged = previousResultIDs != updatedResults.map(\.id)
             results = updatedResults
-            showingResults = true; cursor = nextCursor; retryBatch = pendingRetry
-            hasMore = nextCursor != nil && pendingRetry == nil; verification = latest
+            showingResults = true
+            hasMore = state.hasMore; verification = state.verification
             revision += 1
-            if reset {
-                loadedResultPageCount = retry == nil ? fetchedPageCount : max(loadedResultPageCount, fetchedPageCount)
-            } else {
-                loadedResultPageCount += fetchedPageCount
-            }
-            if reset && (!preservingPosition || resultRowsChanged) { resetID = UUID() }
+            if fromStart || (step == .refresh && resultRowsChanged) { resetID = UUID() }
             commitFrozenFeed()
             updateVisibleResultsTitle()
         } catch is CancellationError {} catch {
-            if searchGeneration == searchID, query == text, generation == requestGeneration {
-                retryBatch = failedBatch; self.error = error.localizedDescription
+            if searchGeneration == searchID, query == text, generation == requestGeneration, searchFeed === feed {
+                searchCanResume = true; self.error = error.localizedDescription
             }
         }
+    }
+
+    /// A change the account's sync published takes deleted photos, and photos no longer visible,
+    /// out of the results shown, in place.
+    func prune(_ change: LibraryChange) {
+        let gone = change.removed.union(change.accessLost)
+        guard !gone.isEmpty, showingResults, let feed = searchFeed else { return }
+        removedResultIDs.formUnion(gone)
+        Task { await feed.prune(gone) }
+        let before = results.count
+        results.removeAll { gone.contains($0.id) }
+        guard results.count != before else { return }
+        revision += 1
+        updateVisibleResultsTitle()
     }
 
     func update(_ asset: Asset) {
         originalTimeline = nil
         if asset.visibility == .locked { Task { await reload() }; return }
-        if let i = results.firstIndex(where: { $0.id == asset.id }) { results[i] = asset }
+        if let i = results.firstIndex(where: { $0.id == asset.id }) {
+            results[i] = asset
+            if let feed = searchFeed { Task { await feed.replace(asset) } }
+        }
         for key in Array(loaded.keys) {
             if let i = loaded[key]?.firstIndex(where: { $0.id == asset.id }) { loaded[key]?[i] = asset }
         }
@@ -992,6 +980,10 @@ private struct FrozenFeed {
     func removeLocally(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
         originalTimeline = nil
+        if let feed = searchFeed {
+            removedResultIDs.formUnion(ids)
+            Task { await feed.prune(ids) }
+        }
         results.removeAll { ids.contains($0.id) }
         var removed: [String: Int] = [:]
         for key in Array(loaded.keys) {
@@ -1034,8 +1026,8 @@ private struct FrozenFeed {
     private func beginScopeChange() {
         freezeCurrentFeedIfNeeded()
         stop(); selected = []; isSelecting = false; isSearching = false; isLoading = false
-        verification = nil; retryBatch = nil; cursor = nil; hasMore = false
-        loadedResultPageCount = 0
+        verification = nil; hasMore = false
+        searchFeed = nil; searchCanResume = false; removedResultIDs = []
         similarAssetID = nil
         // The next feed plans its own months; none is read with this one's plan.
         feedPlan = nil
