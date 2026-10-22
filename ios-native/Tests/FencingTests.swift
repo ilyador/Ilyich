@@ -57,27 +57,35 @@ import XCTest
 
     // MARK: - Places
 
-    /// A clear of an account's places moves its epoch: a save made under the epoch from before is
-    /// refused, one made under the new epoch is kept, and other accounts are untouched.
-    func testPlacesSavedUnderAStaleEpochAreRefused() async throws {
-        let scope = "test-fencing-" + UUID().uuidString, other = "test-fencing-" + UUID().uuidString
-        let cache = TimelinePlacesCache.shared
-        addTeardownBlock { await cache.removeAll(scope: scope); await cache.removeAll(scope: other) }
-        let places = TimelinePlaces(counts: [MonthPlaceCount(bucket: "2026-02-01", city: "Kyoto", country: "Japan", count: 4)])
-        let before = await cache.epoch(scope: scope), otherBefore = await cache.epoch(scope: other)
+    /// The index keeps a feed's places only while the access epoch they were counted under is
+    /// current: a write whose epoch moved meanwhile is refused, one under the current epoch is
+    /// kept, and an access change drops every feed's places.
+    func testPlacesKeptUnderAStaleEpochAreRefused() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FencingTests-" + UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let index = try LibraryIndex(scope: "https://fencing.example.test/api|alice", userID: "alice", directory: directory)
+        let authorization = AuthorizationState(account: AccountID(server: URL(string: "https://fencing.example.test/api")!, userID: "alice"),
+                                               token: "session", readOnly: false, requiresPasswordChange: false, mirror: nil)
+        let rows = [MonthPlaceCount(bucket: "2026-02-01", city: "Kyoto", country: "Japan", count: 4)]
+        let key = LibraryQuery.library.stableKey
 
-        await cache.removeAll(scope: scope)
-        let stale = await cache.save(places, scope: scope, query: .library, epoch: before)
-        XCTAssertFalse(stale, "Places counted before the clear are refused.")
-        let refused = await cache.load(scope: scope, query: .library)
-        XCTAssertNil(refused)
+        let before = authorization.snapshot.epoch
+        authorization.accessChanged()
+        try await index.keepMonthPlaces(rows, forKey: key, ifCurrent: { authorization.isCurrent(before) })
+        let refused = try await index.monthPlaces(forKey: key)
+        XCTAssertNil(refused, "Places counted before the access change are refused.")
 
-        let current = await cache.save(places, scope: scope, query: .library, epoch: cache.epoch(scope: scope))
-        XCTAssertTrue(current)
-        let kept = await cache.load(scope: scope, query: .library)
-        XCTAssertEqual(kept, places, "Places counted after it are kept.")
-        let untouched = await cache.save(places, scope: other, query: .library, epoch: otherBefore)
-        XCTAssertTrue(untouched, "Another account's clear changes nothing here.")
+        let now = authorization.snapshot.epoch
+        try await index.keepMonthPlaces(rows, forKey: key, ifCurrent: { authorization.isCurrent(now) })
+        let kept = try await index.monthPlaces(forKey: key)
+        XCTAssertEqual(kept, rows, "Places counted after it are kept.")
+        // A read-only toggle moves no access epoch, so it keeps them too.
+        authorization.setReadOnly(true)
+        XCTAssertTrue(authorization.isCurrent(now))
+
+        try await index.clearMonthPlaces()
+        let cleared = try await index.monthPlaces(forKey: key)
+        XCTAssertNil(cleared, "An access change drops every feed's places.")
     }
 
     // MARK: - Support

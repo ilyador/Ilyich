@@ -4,53 +4,39 @@ struct SearchPeoplePicker: View {
     let api: APIClient
     @Binding var selected: [String]
     @State private var query = ""
-    @State private var people: [Person] = []
-    @State private var nextPage = 1
-    @State private var more = true
-    @State private var loading = false
-    @State private var failure: String?
-    @State private var generation = UUID()
+    /// The pages of people, by name, with the offline library standing in when the server is away.
+    @State private var pager: PeoplePager
     @State private var pageTask: Task<Void, Never>?
+
+    init(api: APIClient, selected: Binding<[String]>) {
+        self.api = api; _selected = selected
+        _pager = State(initialValue: PeoplePager(source: api))
+    }
+
     var body: some View {
         List {
             if !selected.isEmpty { Section { Text("\(selected.count) people required"); Button("Clear people") { selected = [] } } }
-            ForEach(people) { person in
+            ForEach(pager.people) { person in
                 Toggle(person.name.isEmpty ? "Unnamed person" : person.name, isOn: selectedBinding(person.id))
             }
-            if loading { ProgressView("Loading people") }
-            if let failure {
+            if pager.isLoading { ProgressView("Loading people") }
+            if let failure = pager.failure {
                 Text(failure).font(.footnote).foregroundStyle(.secondary)
-                Button("Retry") { pageTask = Task { await load(generation: generation) } }.disabled(loading)
-            } else if more {
-                Button("Load more people") { pageTask = Task { await load(generation: generation) } }.disabled(loading)
-            } else if people.isEmpty && !loading {
+                Button("Retry") { pageTask = Task { await pager.loadMore() } }.disabled(pager.isLoading)
+            } else if pager.hasMore {
+                Button("Load more people") { pageTask = Task { await pager.loadMore() } }.disabled(pager.isLoading)
+            } else if pager.people.isEmpty && !pager.isLoading {
                 ContentUnavailableView(query.isEmpty ? "No people found" : "No matching people", systemImage: "person.2")
             }
         }.navigationTitle("People").searchable(text: $query, prompt: "Find a person")
         .task(id: query) {
-            pageTask?.cancel(); let token = UUID(); generation = token
-            people = []; nextPage = 1; more = true; failure = nil; loading = true
-            do {
-                if !query.isEmpty { try await Task.sleep(for: .milliseconds(250)) }
-                try Task.checkCancellation(); await load(generation: token)
-            } catch { if generation == token { loading = false } }
+            pageTask?.cancel()
+            await pager.start(query: query, debounce: query.isEmpty ? .zero : .milliseconds(250))
         }
-        .onDisappear { pageTask?.cancel(); generation = UUID() }
+        .onDisappear { pageTask?.cancel(); pager.cancel() }
     }
     private func selectedBinding(_ id: String) -> Binding<Bool> {
         .init(get: { selected.contains(id) }, set: { checked in selected.removeAll { $0 == id }; if checked { selected.append(id) } })
-    }
-    private func load(generation token: UUID) async {
-        guard token == generation else { return }
-        loading = true; failure = nil
-        defer { if token == generation { loading = false } }
-        do {
-            let result = try await api.people(page: nextPage, size: 100, name: query.isEmpty ? nil : query)
-            try Task.checkCancellation(); guard token == generation else { return }
-            let known = Set(people.map(\.id))
-            people += result.people.filter { !known.contains($0.id) }
-            nextPage += 1; more = result.hasNextPage ?? (result.people.count == 100)
-        } catch is CancellationError { } catch { if token == generation { failure = error.localizedDescription } }
     }
 }
 

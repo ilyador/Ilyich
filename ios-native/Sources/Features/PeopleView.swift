@@ -4,14 +4,18 @@ struct PeopleView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onSelect: (Person) -> Void
-    @State private var people: [Person] = []
+    /// The pages of people, by name, with the offline library standing in when the server is away.
+    @State private var pager: PeoplePager
     @State private var query = ""
-    @State private var page = 1
-    @State private var hasMore = true
-    @State private var loading = false
-    @State private var failure: FeatureFailure?
     @State private var editing: Person?
-    @State private var generation = UUID()
+
+    init(api: APIClient, pipeline: MediaPipeline, onSelect: @escaping (Person) -> Void) {
+        self.api = api; self.pipeline = pipeline; self.onSelect = onSelect
+        _pager = State(initialValue: PeoplePager(source: api))
+    }
+
+    private var people: [Person] { pager.people }
+    private var loading: Bool { pager.isLoading }
     var body: some View {
         ScrollView {
             if people.isEmpty && !loading {
@@ -31,42 +35,21 @@ struct PeopleView: View {
                     .contextMenu { Button("Edit person", systemImage: "pencil") { editing = person }.requiresWriteAccess() }
                 }
             }.padding(20)
-            if hasMore {
-                Button { Task { await loadMore() } } label: {
+            if pager.hasMore {
+                Button { Task { await pager.loadMore() } } label: {
                     if loading { ProgressView() } else { Text("Load more people") }
                 }.disabled(loading).padding()
             }
         }
         .navigationTitle("People").searchable(text: $query, prompt: "Find a person")
-        .task(id: query) {
-            do { if !query.isEmpty { try await Task.sleep(for: .milliseconds(250)) }; await loadMore(replacing: true) } catch { }
-        }
-        .refreshable { await loadMore(replacing: true) }
+        .task(id: query) { await pager.start(query: query, debounce: query.isEmpty ? .zero : .milliseconds(250)) }
+        .refreshable { await pager.start(query: query) }
         .sheet(item: $editing) { person in
-            NavigationStack { PersonEditor(api: api, person: person) { updated in
-                if let index = people.firstIndex(where: { $0.id == updated.id }) { people[index] = updated }
-            } }
+            NavigationStack { PersonEditor(api: api, person: person) { updated in pager.replace(updated) } }
         }
-        .alert("Couldn’t load people", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("Retry") { Task { await loadMore() } }; Button("Cancel", role: .cancel) { }
-        } message: { Text(failure?.message ?? "") }
-    }
-    private func loadMore(replacing: Bool = false) async {
-        guard replacing || !loading else { return }
-        if replacing { generation = UUID() }
-        let requestGeneration = generation, requestedPage = replacing ? 1 : page
-        loading = true; defer { if requestGeneration == generation { loading = false } }
-        do {
-            var parameters = [URLQueryItem(name: "page", value: String(requestedPage)), .init(name: "size", value: "100")]
-            if !query.isEmpty { parameters.append(.init(name: "name", value: query)) }
-            let result: PeopleResponse = try await api.request(.get, path: "people", query: parameters)
-            guard requestGeneration == generation else { return }
-            if replacing { people = [] }
-            let known = Set(people.map(\.id))
-            people += result.people.filter { !known.contains($0.id) }
-            hasMore = result.hasNextPage ?? (result.people.count == 100)
-            page = requestedPage + 1
-        } catch is CancellationError { } catch { if requestGeneration == generation { failure = .init(error) } }
+        .alert("Couldn’t load people", isPresented: Binding(get: { pager.failure != nil }, set: { if !$0 { pager.dismissFailure() } })) {
+            Button("Retry") { Task { await pager.loadMore() } }; Button("Cancel", role: .cancel) { }
+        } message: { Text(pager.failure ?? "") }
     }
 }
 

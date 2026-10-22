@@ -138,20 +138,14 @@ private struct SavedTimeline {
     var error: String?
     var bucketErrors: [String: String] = [:]
     var title = "Library"
-    /// Each feed's places, so a month has a name before its photos load. They are kept per filter,
-    /// so the places shown are always those of the feed shown, and clearing a filter brings the
-    /// library's places straight back.
-    private var placesByFilter: [LibraryQuery: TimelinePlaces] = [:]
+    /// Each feed's places, so a month has a name before its photos load (F5). They are kept per
+    /// feed, so the places shown are always those of the feed shown, and clearing a filter brings
+    /// the library's places straight back.
+    let places: MonthPlacesService
     /// Each month's places in the feed shown, ranked.
-    var monthPlaces: [String: [PlaceTally]] { placesByFilter[feedQuery]?.months ?? [:] }
+    var monthPlaces: [String: [PlaceTally]] { places.places(of: feedQuery)?.months ?? [:] }
     /// Months spent abroad, named for the time rail.
-    var trips: [String: String] { placesByFilter[feedQuery]?.trips ?? [:] }
-    /// The places being counted, and for which feed.
-    @ObservationIgnored private var placesLoad: (query: LibraryQuery, plan: QueryPlan, id: UUID, task: Task<Void, Never>)?
-    /// The library changed while its places were being counted, so they are counted again after.
-    @ObservationIgnored private var placesStale = false
-    /// Counting every photo's place is one long read, so it waits for the first months of the grid.
-    private let placesDelay: Duration
+    var trips: [String: String] { places.places(of: feedQuery)?.trips ?? [:] }
     var filterTitle: String?
     var query = ""
     /// The server's check of the results shown; nil unless a checked Photo content search returned them.
@@ -250,9 +244,11 @@ private struct SavedTimeline {
     }
     @ObservationIgnored var started = false
 
+    /// Without `places`, the feeds' places live in memory only, counted after `placesDelay`.
     init(source: any LibraryFeedSource, includesDevicePhotos: Bool = false, placesDelay: Duration = .seconds(3),
-         choices: SearchChoicesStorage? = nil) {
-        self.source = source; self.includesDevicePhotos = includesDevicePhotos; self.placesDelay = placesDelay
+         choices: SearchChoicesStorage? = nil, places: MonthPlacesService? = nil) {
+        self.source = source; self.includesDevicePhotos = includesDevicePhotos
+        self.places = places ?? MonthPlacesService(source: source, delay: placesDelay)
         choicesStorage = choices
         searchChoices = choices?.load() ?? SearchChoices()
         feed = TimelineFeed(source: source, viewport: feedViewport)
@@ -403,60 +399,12 @@ private struct SavedTimeline {
         return projections[id]?.placeSummary ?? MonthPlaces.summary(monthPlaces[id])
     }
 
-    /// The places of a whole year, for the rail's year lens.
-    func placeSummary(year: Int) -> String? {
-        var totals: [String: Int] = [:]
-        for (bucket, places) in monthPlaces where bucket.hasPrefix("\(year)-") {
-            for place in places { totals[place.name, default: 0] += place.count }
-        }
-        return MonthPlaces.summary(MonthPlaces.ranked(totals))
-    }
+    /// The places of a whole year, for the rail's year lens, worked out once per count.
+    func placeSummary(year: Int) -> String? { places.places(of: feedQuery)?.years[year] }
 
-    /// Counts the feed's places once its first months are in, showing the copy kept on the phone
-    /// meanwhile. A reload while they are being counted lets the count finish and then counts
-    /// again, so a library that keeps changing still gets its places. The count is kept on the
-    /// phone by the same task, under the epoch it began with, so a count that an access change
-    /// overtook is never kept.
-    private func loadMonthPlaces(_ query: LibraryQuery, plan: QueryPlan) {
-        if let placesLoad {
-            if placesLoad.query == query, placesLoad.plan == plan { placesStale = true; return }
-            placesLoad.task.cancel()
-        }
-        placesStale = false
-        let source = self.source, scope = source.cacheScope, delay = placesDelay, id = UUID()
-        let task = Task { [weak self] in
-            defer { self?.finishPlacesLoad(id) }
-            if self?.placesByFilter[query] == nil, let saved = await TimelinePlacesCache.shared.load(scope: scope, query: query),
-               !Task.isCancelled, self?.placesByFilter[query] == nil {
-                self?.keepPlaces(saved, for: query)
-            }
-            try? await Task.sleep(for: delay)
-            let epoch = await TimelinePlacesCache.shared.epoch(scope: scope)
-            guard !Task.isCancelled, let counts = try? await source.monthPlaces(query, plan: plan), !Task.isCancelled else { return }
-            let places = await Task.detached(priority: .utility) { TimelinePlaces(counts: counts) }.value
-            guard !Task.isCancelled, let self else { return }
-            self.keepPlaces(places, for: query)
-            await TimelinePlacesCache.shared.save(places, scope: scope, query: query, epoch: epoch)
-        }
-        placesLoad = (query, plan, id, task)
-    }
-
-    private func finishPlacesLoad(_ id: UUID) {
-        guard let load = placesLoad, load.id == id else { return }
-        placesLoad = nil
-        if placesStale {
-            placesStale = false
-            if load.query == feedQuery, let plan = feedPlan { loadMonthPlaces(load.query, plan: plan) }
-        }
-    }
-
-    private func keepPlaces(_ places: TimelinePlaces, for query: LibraryQuery) {
-        // The library and a handful of people or albums are plenty to keep.
-        if placesByFilter[query] == nil, placesByFilter.count >= 8 {
-            placesByFilter = placesByFilter.filter { $0.key == .library || $0.key == feedQuery }
-        }
-        placesByFilter[query] = places
-    }
+    /// Shows the feed's places: the copy kept on the phone at once, and a fresh count once its
+    /// first months are in (MonthPlacesService).
+    private func loadMonthPlaces(_ query: LibraryQuery, plan: QueryPlan) { places.show(query, plan: plan) }
     /// Search/filter results when showing them, otherwise the month under the viewport.
     var currentPlaceSummary: String? {
         if let frozenFeed {
@@ -790,7 +738,7 @@ private struct SavedTimeline {
             project()
             error = nil; isLoading = false; isSearching = false; originalTimeline = nil
             // The library's places come back with it, unless they were never counted.
-            if placesByFilter[feedQuery] == nil { loadMonthPlaces(feedQuery, plan: plan) }
+            if places.places(of: feedQuery) == nil { loadMonthPlaces(feedQuery, plan: plan) }
             let anchor = saved.position, current = generation
             Task { guard generation == current else { return }; await replanRestoredLibrary(plan, anchor: anchor) }
         } else { scheduleReload() }
@@ -1152,7 +1100,7 @@ private struct SavedTimeline {
         if !keepingFeed { cancelRequests() }
         queryTask?.cancel(); cancelPendingNavigation(); groupSelectionTask?.cancel(); isSelectingGroup = false
         generation = UUID(); searchGeneration = UUID()
-        placesLoad?.task.cancel(); placesLoad = nil; placesStale = false
+        places.cancel()
     }
     private func beginScopeChange(keepingFeed: Bool = false) {
         freezeCurrentFeedIfNeeded()

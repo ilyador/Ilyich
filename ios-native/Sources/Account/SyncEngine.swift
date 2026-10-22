@@ -55,7 +55,6 @@ actor SyncEngine {
     private let board: SyncStatusBoard
     private let connect: @Sendable () async throws -> ServerEventConnection
     private let debounce: Duration
-    private let scope: String
 
     /// Until the account's runtime closes.
     private(set) var isOpen = true
@@ -103,7 +102,6 @@ actor SyncEngine {
         board = status
         self.connect = connect ?? { try await client.serverEvents() }
         self.debounce = debounce
-        scope = client.cacheScope
         self.hub = hub ?? LibraryChangeHub(pipeline: pipeline, scope: client.cacheScope)
     }
 
@@ -184,8 +182,10 @@ actor SyncEngine {
         do {
             try await entities.clear()
             guard isOpen else { resetting = false; return }
+            // The index's month places went with its derived tables; a count that landed between
+            // the clear and the epoch's move goes too.
             moveAccessEpoch()
-            await TimelinePlacesCache.shared.removeAll(scope: scope)
+            try? await entities.clearMonthPlaces()
             var change = LibraryChange(account: authorization.account, authorization: authorization.snapshot.epoch,
                                        indexRevision: await entities.revision, origin: .sync)
             change.reset = true
@@ -338,9 +338,10 @@ actor SyncEngine {
         guard isOpen else { return nil }
         let accessChanged = resetDue || !index.accessLost.isEmpty || !purged.revoked.isEmpty
         if accessChanged {
-            // Places are kept through ordinary syncs, but not past a change in what may be seen.
+            // Places are kept through ordinary syncs, but not past a change in what may be seen:
+            // the epoch moves first, so a count begun before it is never written after this.
             moveAccessEpoch()
-            await TimelinePlacesCache.shared.removeAll(scope: scope)
+            try? await entities.clearMonthPlaces()
             guard isOpen else { return nil }
         }
         var change = LibraryChange(account: authorization.account, authorization: authorization.snapshot.epoch,

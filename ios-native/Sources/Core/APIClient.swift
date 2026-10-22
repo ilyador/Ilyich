@@ -175,18 +175,19 @@ actor APIClient {
             return cached
         }
     }
-    func people(page: Int = 1, size: Int = 100, name: String? = nil) async throws -> PeopleResponse {
+    /// One page of people from the server, numbered from one. Nothing stands in for a failure:
+    /// PeopleDirectory and PeoplePager fall back to the offline library as one source per run.
+    func peoplePage(_ page: Int, size: Int, name: String?) async throws -> PeopleResponse {
         let name = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         var query = [URLQueryItem(name: "page", value: String(page)), .init(name: "size", value: String(size))]
         if !name.isEmpty { query.append(.init(name: "name", value: name)) }
-        do { return try await request(.get, path: "people", query: query) }
-        catch {
-            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .complete) else { throw error }
-            let all = try await store.people().filter { name.isEmpty || $0.name.localizedStandardContains(name) }
-            let visible = all.filter { $0.isHidden != true }
-            let safeSize = min(max(size, 1), 1_000), start = min(max(page - 1, 0), visible.count) * min(max(size, 1), 1_000)
-            return PeopleResponse(people: Array(visible.dropFirst(start).prefix(safeSize)), total: all.count, hidden: all.count - visible.count, hasNextPage: start + safeSize < visible.count)
-        }
+        return try await request(.get, path: "people", query: query)
+    }
+    /// Every person the offline library holds, when it may answer for `error`: a definite transport
+    /// failure, and a complete first sync. Nil otherwise.
+    func offlinePeople(after error: any Error) async throws -> [Person]? {
+        guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .complete) else { return nil }
+        return try await store.people()
     }
     func person(id: String) async throws -> Person {
         do { return try await request(.get, path: "people/\(id)") }

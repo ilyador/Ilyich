@@ -74,6 +74,24 @@ actor IndexWriter {
         guard let value = try metadata(Self.cachedServerFeaturesKey) else { return nil }
         return try APIJSON.decoder().decode(ServerFeatures.self, from: Data(value.utf8))
     }
+    /// Keeps one feed's month places (REBUILD_ROADMAP.md F5): its rows are replaced, unless
+    /// `ifCurrent` says no once the write holds the connection, so a count begun under an access
+    /// epoch that moved meanwhile is never kept. The feeds kept are bounded to the twelve written
+    /// most recently, as the files these rows replace were.
+    func keepMonthPlaces(_ counts: [MonthPlaceCount], forKey key: String, ifCurrent: @Sendable () -> Bool) throws {
+        try write {
+            guard ifCurrent() else { return }
+            try database.execute("DELETE FROM month_places WHERE query_key=?", [.text(key)])
+            for row in counts {
+                try database.execute("INSERT INTO month_places(query_key,bucket,city,country,count) VALUES(?,?,?,?,?)",
+                                     [.text(key), .text(row.bucket), .optionalText(row.city), .optionalText(row.country), .integer(Int64(row.count))])
+            }
+            try database.execute("DELETE FROM month_places WHERE query_key IN (SELECT query_key FROM month_places GROUP BY query_key ORDER BY max(rowid) DESC LIMIT -1 OFFSET \(Self.monthPlacesFeedLimit))")
+        }
+    }
+    /// Every feed's month places go, as when access to some photos was lost.
+    func clearMonthPlaces() throws { try write { try database.execute("DELETE FROM month_places") } }
+    static let monthPlacesFeedLimit = 12
     /// A reset survives a later stream failure, allowing the UI to discard stale media even
     /// when the overall sync did not return a success summary.
     func takeAccessInvalidation() throws -> Bool {

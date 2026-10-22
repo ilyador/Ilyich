@@ -133,7 +133,6 @@ import XCTest
         }
         XCTAssertEqual(store.restorePosition, position, "Reopening on the index keeps the place in the library.")
         store.stop()
-        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testLibrarySearchesNeverReachTheLockedFolder() async throws {
@@ -151,7 +150,6 @@ import XCTest
         store.clearFilters()
         XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility)
         store.stop()
-        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testLightroomIsATimelineOfEveryDevelopedPhoto() async throws {
@@ -166,7 +164,6 @@ import XCTest
         XCTAssertNotEqual(store.sections.first?.id, "results", "Lightroom is a timeline by month, with its rail.")
         XCTAssertEqual(store.filterTitle, "Lightroom")
         store.stop()
-        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testTheDevelopedShelfLooksPastHundredsOfRecentUndevelopedPhotos() async throws {
@@ -197,7 +194,6 @@ import XCTest
         store.clearFilters()
         XCTAssertEqual(store.feedQuery, .library, "Clearing the place brings the library back.")
         store.stop()
-        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testAPlaceIsFoundBySearchWhenTheOfflineLibraryCannotLayItOut() async throws {
@@ -210,7 +206,6 @@ import XCTest
         XCTAssertTrue(store.feedPlan?.limitations.contains(.noMonths) == true)
         XCTAssertEqual(store.results.map(\.id), ["lisbon-1", "lisbon-2"])
         store.stop()
-        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testAPlaceKeepsItsOwnCachesAndTheServerNeverSeesIt() throws {
@@ -241,7 +236,6 @@ import XCTest
         XCTAssertEqual(store.monthPlaces["2024-10-01"]?.first?.name, "Kyoto", "Clearing the person brings the library's places straight back.")
         XCTAssertNil(store.monthPlaces["2024-08-01"], "The person's places do not stay on the library.")
         store.stop()
-        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testPlacesArriveWhileTheLibraryKeepsChanging() async throws {
@@ -256,24 +250,23 @@ import XCTest
         }
         try await until("The places never arrived while the library kept changing.") { store.monthPlaces["2024-10-01"] != nil }
         store.stop()
-        await TimelinePlacesCache.shared.removeAll(scope: api.cacheScope)
     }
 
     func testALaunchShowsTheKeptPlacesWhileTheyAreCountedAgain() async throws {
         let scope = "test-places-" + UUID().uuidString
+        let kept = MemoryPlacesStore()
         let counted = PlacesAPIFixture(scope: scope, places: [nil: [MonthPlaceCount(bucket: "2024-10-01", city: "Kyoto", country: "Japan", count: 40)]])
-        let first = LibraryStore(source: counted, placesDelay: .zero)
+        let first = LibraryStore(source: counted, placesDelay: .zero, places: MonthPlacesService(source: counted, store: kept, delay: .zero))
         await first.reload()
         try await until("The places were not counted.") { first.monthPlaces["2024-10-01"] != nil }
-        try await until("The places were not kept on the phone.") { await TimelinePlacesCache.shared.load(scope: scope, query: .library) != nil }
+        try await until("The places were not kept on the phone.") { await kept.rows[LibraryQuery.library.stableKey] != nil }
         first.stop()
         // The next launch is slow to count; the kept places show meanwhile.
         let slow = PlacesAPIFixture(scope: scope, places: [:], delay: .seconds(10))
-        let next = LibraryStore(source: slow, placesDelay: .zero)
+        let next = LibraryStore(source: slow, placesDelay: .zero, places: MonthPlacesService(source: slow, store: kept, delay: .zero))
         await next.reload()
         try await until("The kept places did not show at launch.") { next.monthPlaces["2024-10-01"]?.first?.name == "Kyoto" }
         next.stop()
-        await TimelinePlacesCache.shared.removeAll(scope: scope)
     }
 
     func testADeletedPhotoLeavesTheFeedBeforeTheServerConfirms() async throws {
