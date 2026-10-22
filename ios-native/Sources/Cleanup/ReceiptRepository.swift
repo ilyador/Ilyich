@@ -41,8 +41,8 @@ struct VerifiedSize: Hashable, Sendable {
     let motion: Int64?
 }
 
-/// The receipts cleanup reads (DS12: exactly one is authoritative). Until the cutover (B9) that is
-/// today's backup state, through LegacyStateReceipts.
+/// The receipts cleanup reads (DS12: exactly one is authoritative): the transfers database's once
+/// the engine runs the account's backup, else today's backup state (CutoverReceipts).
 protocol ReceiptRepository: Sendable {
     /// The account's receipts by local ID, or nil when they can't be read for that account now.
     func receipts(account: String) async -> [String: CleanupReceipt]?
@@ -54,7 +54,7 @@ protocol ReceiptRepository: Sendable {
     func changes() async -> AsyncStream<Void>
 }
 
-/// The temporary receipts adapter over today's backup state (architecture section 9: P4 -> B9).
+/// The temporary receipts adapter over today's backup state, for the way back (P4 -> B10).
 /// BackupCoordinator keeps the receipts on the main actor; this reads them there and hands back a
 /// value copy, which is cheap.
 ///

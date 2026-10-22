@@ -18,10 +18,14 @@ final class AccountRuntime: Sendable {
     let library: LibraryServices?
     /// Why the offline library couldn't open.
     let libraryError: String?
-    /// The account's transfers database, with the shadow import of today's backup state into it
-    /// (REBUILD_ROADMAP.md B1). Nil when the environment runs without it. Backup still runs from
-    /// the backup state; nothing reads the database's records yet.
+    /// The account's transfers database and the import of today's backup state into it
+    /// (REBUILD_ROADMAP.md B1, B9). Nil when the environment runs without it.
     let transfers: TransferServices?
+    /// Which engine the account's backup runs on, once TransferHost decided: cleanup and the
+    /// device index read their receipts from it.
+    let cutover: TransferCutoverState
+    /// The folder that holds each account's Backup/<digest>/state.json: nil for the App Group.
+    let backupContainer: URL?
     /// The session checks with the server.
     let check: SessionCheck
     /// The account's tasks, cancelled and waited for at shutdown.
@@ -35,7 +39,12 @@ final class AccountRuntime: Sendable {
     let deviceIndex: DeviceIndexService?
     private let device: any AccountDevice
     private let presence: AppPresence
-    private let backupStateCopyDelay: Duration
+    private let usesDevicePhotos: Bool
+    /// The authoritative import, run once per runtime.
+    private let importing = Mutex<Task<TransferCutover, Never>?>(nil)
+    /// The account's transfer engine and its work, once TransferHost made it, with how to tell
+    /// the host it ends.
+    private let engine = Mutex<(runtime: TransferRuntime, detach: @MainActor @Sendable () -> Void)?>(nil)
 
     struct LibraryServices: Sendable {
         let entities: LibraryIndex
@@ -55,8 +64,10 @@ final class AccountRuntime: Sendable {
     var requiresPasswordChange: Bool { credential.requiresPasswordChange == true }
 
     /// The transfer engine's server calls, over the account's one client (REBUILD_ROADMAP.md B3).
-    /// Dormant: nothing calls it before the cutover (B9).
     var transferServer: APITransferServer { APITransferServer(client: api) }
+
+    /// The account's transfer engine, while it runs.
+    var transferRuntime: TransferRuntime? { engine.withLock { $0?.runtime } }
 
     /// What Cast works with for this account.
     var cast: CastAccount { CastAccount(scope: api.cacheScope, grants: castGrants, resolver: CastMediaResolver(api: api)) }
@@ -64,7 +75,7 @@ final class AccountRuntime: Sendable {
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
                  cleanup: CleanupService, deviceIndex: DeviceIndexService?, device: any AccountDevice, presence: AppPresence,
-                 backupStateCopyDelay: Duration) {
+                 cutover: TransferCutoverState, backupContainer: URL?, usesDevicePhotos: Bool) {
         self.id = id
         self.credential = credential
         self.authorization = authorization
@@ -80,7 +91,9 @@ final class AccountRuntime: Sendable {
         self.deviceIndex = deviceIndex
         self.device = device
         self.presence = presence
-        self.backupStateCopyDelay = backupStateCopyDelay
+        self.cutover = cutover
+        self.backupContainer = backupContainer
+        self.usesDevicePhotos = usesDevicePhotos
     }
 
     /// Opens `credential`'s services. The client reads the server's saved network settings from
@@ -125,27 +138,29 @@ final class AccountRuntime: Sendable {
             let store = TransferStore(url: TransferStore.url(for: account, in: environment.transfersDirectory))
             let container = environment.backupContainer ?? (try? AppGroupLayout.current().container)
             let folder = container?.appendingPathComponent(AccountStoragePaths(account).backup, isDirectory: true)
-            transfers = TransferServices(store: store, importer: LegacyBackupImporter(mode: .shadow, store: store, folder: folder))
+            transfers = TransferServices(store: store, importer: LegacyBackupImporter(mode: .authoritative, store: store, folder: folder))
         }
+        let cutover = TransferCutoverState()
+        let receipts = CutoverReceipts(cutover: cutover)
         let cleanup = makeCleanup(credential, authorization: authorization, api: api, library: library,
-                                  credentials: environment.credentialStore())
+                                  credentials: environment.credentialStore(), receipts: receipts)
         var deviceIndex: DeviceIndexService?
         if environment.usesDevicePhotos {
             let server = library.map { library in
                 LibraryIndexIdentities(entities: library.entities, libraryChanges: { await library.sync.changes() })
             }
             deviceIndex = DeviceIndexService(account: credential.account.digest, reader: PhotoKitIndexReader(adapter: .shared), server: server,
-                                             backup: LegacyBackupIndexInputs(), database: PhotoKitAdapter.shared.database, presence: presence)
+                                             backup: receipts, database: PhotoKitAdapter.shared.database, presence: presence)
         }
         return AccountRuntime(id: id, credential: credential, authorization: authorization, api: api, pipeline: pipeline,
                               library: library, libraryError: libraryError, transfers: transfers, check: check, work: work,
                               cleanup: cleanup, deviceIndex: deviceIndex, device: dependencies.device, presence: presence,
-                              backupStateCopyDelay: dependencies.backupStateCopyDelay)
+                              cutover: cutover, backupContainer: environment.backupContainer, usesDevicePhotos: environment.usesDevicePhotos)
     }
 
     /// Starts the account's work once the screens show it: the warmer once the offline library is
-    /// complete, sync while the app is in front, the session check, and in front the shadow import
-    /// of the backup state.
+    /// complete, sync while the app is in front, and the session check. Backup starts when the
+    /// account becomes active (TransferHost.activate).
     @MainActor func start() async {
         if let library {
             let entities = library.entities
@@ -156,14 +171,13 @@ final class AccountRuntime: Sendable {
             entities.startBackfill()
         }
         check.validate()
-        // A background launch, for a backup window or a finished upload, leaves it for the next
-        // time the app comes forward.
-        if presence.isForeground { importBackupStateInShadow() }
     }
 
     /// Cancels the account's work and waits for it to end: the warmer, sync and its live stream,
-    /// the session check, read-only changes still on their way and the shadow import, which rolls
-    /// back. Then the transfers database closes. It stays on disk, whatever the reason for ending.
+    /// the session check, read-only changes still on their way, the import, which rolls back, and
+    /// the transfer engine with everything beside it, which gives its leases back. Then the
+    /// transfers database closes. It stays on disk, whatever the reason for ending, and so do the
+    /// staged copies (the owner's decision).
     func cancelAndJoin() async {
         await cleanup.shutdown()
         await deviceIndex?.shutdown()
@@ -173,15 +187,88 @@ final class AccountRuntime: Sendable {
             await library.entities.stopBackfill()
         }
         await work.cancelAndJoin()
+        importing.withLock { $0?.cancel() }
+        if let (transfers, detach) = engine.withLock({ $0 }) {
+            await MainActor.run { detach() }
+            await transfers.stop()
+        }
+        cutover.decide(.unavailable)
         await transfers?.store.close()
     }
 
+    /// Sign-out, before the account's work ends: the transfer engine switches automatic backup
+    /// off unless `keepingAutomaticBackup`, pauses, and cancels the account's tasks with iOS.
+    func prepareForSignOut(keepingAutomaticBackup: Bool) async {
+        await transferRuntime?.signOut(keepingAutomaticBackup: keepingAutomaticBackup)
+    }
+
+    // MARK: Transfers
+
+    /// Imports the account's state.json into its transfers database, authoritatively, once per
+    /// runtime (BM1 to BM8), and says which engine the account's backup can run on: the transfer
+    /// engine once the database is its own, whether this import or an earlier one handed it over,
+    /// else today's backup, with the reason. state.json stays where it is either way. Afterwards
+    /// the photos cleanup removed are marked in the receipts, from the device journal.
+    func prepareTransfers() async -> TransferCutover {
+        let task = importing.withLock { slot -> Task<TransferCutover, Never> in
+            if let slot { return slot }
+            let task = Task { await self.importBackupState() }
+            slot = task
+            return task
+        }
+        return await task.value
+    }
+
+    private func importBackupState() async -> TransferCutover {
+        guard let transfers else { return .legacy("Backup records aren’t kept here.") }
+        let report = await transfers.importer.run()
+        if let report { await device.recordTransferImport(report) }
+        guard !Task.isCancelled else { return .legacy("The account closed.") }
+        if report?.outcome == .quarantined { _ = try? await transfers.store.adoptAfterQuarantine() }
+        let meta: TransferMeta
+        do { meta = try await transfers.store.meta() } catch { return .legacy("The backup records database can’t be opened.") }
+        guard meta.schema <= TransferStore.schemaVersion else { return .legacy("The backup records were written by a newer version.") }
+        guard meta.engine == .transfer else {
+            let outcome = report?.outcome.rawValue ?? "cancelled"
+            return .legacy("The backup records couldn’t be imported (\(outcome)); backup carries on with them as they are.")
+        }
+        if usesDevicePhotos { await importLocalDeletions(into: transfers.store) }
+        return .engine
+    }
+
+    /// Cleanup removals Photos committed for this account before the cutover were recorded only in
+    /// the device journal: each marks its receipt, where the receipt is still of the revision
+    /// removed (the critic's correction for B9). Idempotent.
+    private func importLocalDeletions(into store: TransferStore) async {
+        guard let records = try? await PhotoKitAdapter.shared.database.records() else { return }
+        _ = try? await store.markLocallyDeleted(Self.localDeletions(records, account: credential.account.digest))
+    }
+
+    static func localDeletions(_ records: [DeviceJournalRecord], account: String) -> [LocalDeletion] {
+        var deletions: [LocalDeletion] = []
+        for record in records {
+            guard case .delete(let ids, let expected, .cleanup(_, let owner)) = record.entry.mutation, owner == account,
+                  case .committed(let affected, _)? = record.outcome else { continue }
+            let removed = Set(affected)
+            for id in ids where removed.contains(id) {
+                deletions.append(LocalDeletion(localID: id.rawValue, revision: expected[id], date: record.finishedAt ?? record.entry.createdAt))
+            }
+        }
+        return deletions
+    }
+
+    /// TransferHost made the account's transfer engine; `detach` tells it the engine ends.
+    func attachTransfers(_ runtime: TransferRuntime, detach: @escaping @MainActor @Sendable () -> Void) {
+        engine.withLock { $0 = (runtime, detach) }
+    }
+
     /// The account's cleanup service. Nothing touches Photos or the backup state until a check
-    /// starts. Its receipts are today's backup state (LegacyStateReceipts, until B9); its server
+    /// starts. Its receipts are the transfers database's once the engine runs the account's
+    /// backup, else today's backup state (CutoverReceipts); its server
     /// reads are strict, over the account's client; removing needs the saved credential to still
     /// be this session's.
     private static func makeCleanup(_ credential: StoredCredential, authorization: AuthorizationState, api: APIClient,
-                                    library: LibraryServices?, credentials: any CredentialStore) -> CleanupService {
+                                    library: LibraryServices?, credentials: any CredentialStore, receipts: CutoverReceipts) -> CleanupService {
         let server = APITransferServer(client: api)
         var serverChanges: (@Sendable () async -> AsyncStream<LibraryChange>)?
         if let sync = library?.sync { serverChanges = { await sync.changes() } }
@@ -191,39 +278,18 @@ final class AccountRuntime: Sendable {
             return saved.scope == credential.scope && saved.token == credential.token
         }
         return CleanupService(
-            account: credential.account.digest, ownerID: credential.userID, authorization: authorization, receipts: LegacyStateReceipts(),
+            account: credential.account.digest, ownerID: credential.userID, authorization: authorization, receipts: receipts,
             device: { PhotoKitCleanupDevice(adapter: .shared, reader: SystemPhotoKit()) },
             remote: remote, credentialIsCurrent: credentialIsCurrent, serverChanges: serverChanges)
     }
 
-    // MARK: Transfers
-
-    /// Brings the transfers database's copy of the backup state up to date, if state.json changed,
-    /// and compares it with the file, as owned work: when the runtime opens in front and whenever
-    /// the app comes forward, a few seconds later, and at once when Diagnostics asks (`comparing`,
-    /// which compares again even when nothing changed). Never on a write of state.json. Runs follow
-    /// one another, and the report goes to Diagnostics and the console. Nil when there is nothing
-    /// to run.
-    @discardableResult
-    func importBackupStateInShadow(comparing: Bool = false) -> Task<Void, Never>? {
-        guard let transfers else { return nil }
-        let previous = work.current(Self.shadowImportSlot), device = device
-        let delay = comparing ? .zero : backupStateCopyDelay
-        let run = Task {
-            await withTaskCancellationHandler {
-                await previous?.value
-                if delay > .zero { try? await Task.sleep(for: delay) }
-                guard !Task.isCancelled, let report = await transfers.importer.run(comparing: comparing), !Task.isCancelled else { return }
-                await device.recordTransferImport(report)
-            } onCancel: {
-                previous?.cancel()
-            }
-        }
-        guard work.put(run, in: Self.shadowImportSlot, cancelling: false) else { return nil }
-        return run
+    /// Compares the transfers database with state.json again, for Diagnostics. Once the engine
+    /// runs the account's backup, the comparison made at the import stands; today's backup is
+    /// left alone.
+    func compareBackupRecords() async {
+        guard let transfers, case .engine = await prepareTransfers(), let report = await transfers.importer.run(comparing: true) else { return }
+        await device.recordTransferImport(report)
     }
-
-    private static let shadowImportSlot = "shadowImport"
 
     /// Empties the offline library: entities, acknowledgements and metadata. The file stays.
     func clearLibrary() async {

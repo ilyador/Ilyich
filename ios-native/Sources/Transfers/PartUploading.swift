@@ -2,8 +2,8 @@ import Foundation
 import Synchronization
 
 /// How the library job executor hands a part's body to the background transport and learns how
-/// its upload ended (B3). Dormant: the real one runs over the backup session's transport and its
-/// events, which nothing creates before B9; tests use a fake.
+/// its upload ended (B3). The real one runs over a background session's transport and its events
+/// (TransferRuntime); tests use a fake.
 protocol PartUploading: Sendable {
     /// Hands the attempt's body to the transport and returns the task's ID. A task iOS still holds
     /// for the attempt is adopted rather than sent again.

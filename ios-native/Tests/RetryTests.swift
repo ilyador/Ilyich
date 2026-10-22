@@ -57,8 +57,7 @@ final class RetryTests: XCTestCase {
 
         await h.engine.conditionsChanged()
         try await untilTransfers("The manual run carries on.") { try await h.confirmed("a") }
-        let intent = await h.engine.currentSnapshot.intent
-        XCTAssertEqual(intent, .manual)
+        await untilTransfers("With nothing left, the run ends, as today’s runs do.") { await h.engine.currentSnapshot.intent == .paused }
         await h.tearDown()
     }
 

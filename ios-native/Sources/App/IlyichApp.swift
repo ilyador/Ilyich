@@ -10,6 +10,9 @@ import SwiftUI
         PerfScenarioDriver.arm()
         let session = AccountSession(environment: .current)
         _session = State(initialValue: session)
+        // A launch for background work opens the saved account; today's backup, the way back,
+        // also syncs before its windows.
+        TransferHost.shared.setRestore { await session.restore() }
         BackupLifecycle.shared.setBackgroundPreparation { await session.prepareForBackgroundBackup() }
         _ = CastSessionService.shared
     }

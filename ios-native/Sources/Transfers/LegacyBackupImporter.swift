@@ -15,7 +15,8 @@ import OSLog
 ///
 /// Authoritative mode, from B9: the first import hands the database to the transfer engine; the
 /// same digest again is a no-op; a later digest, which only a reinstalled older build can write,
-/// is reported for B9's merge and changes nothing; an unreadable file is moved aside, never fatal.
+/// is merged (TransferStore.mergeLegacy); an unreadable file is moved aside, never fatal. The file
+/// itself stays where it is, so an older build reinstalled finds its records (B10 retires it).
 ///
 /// The app runs it when the account's runtime opens in front, whenever the app comes forward, and
 /// from Diagnostics, never on a write of state.json: BackupCoordinator writes it several times per
@@ -89,11 +90,25 @@ actor LegacyBackupImporter {
         guard meta.schema <= TransferStore.schemaVersion else { return (.skipped, nil) }
         if mode == .shadow, meta.engine == .transfer { return (.skipped, nil) }
         let current = meta.legacyImportDigest == digest && (mode == .shadow || meta.engine == .transfer)
-        if current, !comparing, meta.legacyReportDigest == digest,
+        // Once the engine owns the database it moves on from state.json, so comparing them again
+        // shows only what was backed up since: the comparison made at the import stands.
+        if current, !comparing || mode == .authoritative, meta.legacyReportDigest == digest,
            let stored = meta.legacyReport.flatMap({ TransferJSON.decode(LegacyImportComparison.self, $0) }) {
             return (data == nil ? .absent : .unchanged, stored)
         }
-        if !current, mode == .authoritative, meta.engine == .transfer { return (.needsMerge, nil) }
+        if !current, mode == .authoritative, meta.engine == .transfer {
+            // Only an older build reinstalled over this one writes state.json now (BM8).
+            guard let data else { return (.unchanged, nil) }
+            let state: Legacy.BackupState
+            do { state = try Legacy.decoder().decode(Legacy.BackupState.self, from: data) } catch {
+                Self.log.error("A later backup state can't be decoded: \(String(describing: error), privacy: .private)")
+                return (.needsMerge, nil)
+            }
+            try Task.checkCancellation()
+            let merge = try await store.mergeLegacy(LegacyBackupPlan(state), digest: digest, at: now())
+            Self.log.notice("Merged a later backup state: \(merge.receipts) receipts, \(merge.confirmations) confirmations, \(merge.queued) queued, \(merge.settled) settled, \(merge.albumAdds) album adds")
+            return (.merged, nil)
+        }
 
         let state: Legacy.BackupState
         if let data {
@@ -173,9 +188,9 @@ actor LegacyBackupImporter {
 /// - Album adds: one destination per photo and album, pending. Its server ID is the receipt's for
 ///   a photo with no job, so it can run at once; a photo with a job fills it in when it commits.
 ///   In state.json such an add was stranded until the photo went through the queue again.
-/// - The run intent: paused stays paused; a running backup is automatic when automatic backup is
-///   on, else manual (the critic's correction for B9). The last error becomes the last message,
-///   never an account blocker.
+/// - The run intent: automatic whenever automatic backup is on, since today's backup is paused
+///   between its runs; with it off, a running backup is manual and anything else paused. The
+///   last error becomes the last message, never an account blocker.
 /// - The notification batch, started and not yet ended: the queue's jobs count towards it while
 ///   it runs; once it ended, its final notification waits to be posted.
 struct LegacyBackupPlan: Sendable {
@@ -275,10 +290,16 @@ struct LegacyBackupPlan: Sendable {
         batch = state.transferNotification
     }
 
+    /// Today's backup marks itself paused at the end of every run, automatic or not, and starts
+    /// automatic backup again whenever it is on: paused is its idle state, and only the Pause
+    /// button switches automatic backup off. So automatic backup on is the automatic intent,
+    /// whether a run was under way or not; with it off, a run under way is a manual run, and
+    /// anything else is paused. Mapping an idle automatic backup to paused would stop it at the
+    /// cutover.
     static func intent(_ state: Legacy.BackupState) -> RunIntent {
+        if state.preferences?.automatic == true { return .automatic }
         // BackupState() starts paused, and a file without the key was never read by the app.
-        guard state.paused == false else { return .paused }
-        return (state.preferences?.automatic ?? false) ? .automatic : .manual
+        return state.paused == false ? .manual : .paused
     }
 
     static func jobs(_ state: Legacy.BackupState) -> [Job] {
@@ -531,8 +552,12 @@ struct LegacyImportReport: Codable, Equatable, Sendable {
         case quarantined
         /// state.json or the database couldn't be read now; the next run tries again.
         case unavailable
-        /// The transfer engine owns the database and state.json changed since its import: B9 merges.
+        /// The transfer engine owns the database and state.json changed since its import, but the
+        /// change couldn't be read to merge it.
         case needsMerge
+        /// The transfer engine owns the database, and the state.json an older build wrote since
+        /// was merged into it (BM8).
+        case merged
         /// The database belongs to the transfer engine or to a later build, so a copy isn't made.
         case skipped
     }

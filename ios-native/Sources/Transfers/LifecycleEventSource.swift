@@ -42,10 +42,8 @@ struct WindowRequest: Hashable, Sendable {
 // MARK: - Source
 
 /// The device's conditions and the app's background time, as one stream of LifecycleEvent (B7).
-/// Dormant until the cutover (B9): BackupLifecycle registers the same two identifiers and runs
-/// backup today, and iOS allows one launch handler per identifier, so nothing in the app creates
-/// this source (scripts/check-single-engine.sh fails the build if code outside Sources/Transfers
-/// names it).
+/// TransferHost creates it once the process runs the transfer engine (B9), over the router that
+/// registered the two identifiers at launch: iOS allows one launch handler per identifier.
 ///
 /// - Conditions fold into one EnvironmentSnapshot, and an event goes out only when the snapshot
 ///   changes. A reading that only says how things already are is no event: the network monitor's
@@ -251,7 +249,7 @@ private final class CompletionBox: @unchecked Sendable {
 
 // MARK: - Live inputs
 
-/// BGTaskScheduler behind the seam. For B9's launch sequence only.
+/// BGTaskScheduler behind the seam, for TransferHost's router.
 @MainActor final class SystemBackgroundTaskScheduler: BackgroundTaskScheduling {
     func register(identifier: String, launch: @escaping @MainActor (any BackgroundTaskHandle) -> Void) -> Bool {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { task in
@@ -296,7 +294,7 @@ private final class CompletionBox: @unchecked Sendable {
 }
 
 /// Feeds the source from the network monitor, battery, temperature, Low Power Mode and the app's
-/// state. For B9's launch sequence only.
+/// state, for TransferHost.
 @MainActor final class SystemLifecycleInputs {
     private let monitor = NWPathMonitor()
     private var observers: [NSObjectProtocol] = []

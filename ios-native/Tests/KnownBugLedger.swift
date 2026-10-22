@@ -446,14 +446,45 @@ import XCTest
         XCTAssertFalse(shown.contains("carol-photo"), "A partner kept out of the timeline stays out.")
     }
 
-    // MARK: - Not reproduced here
-    //
-    // BACKUP-1 (a 5xx blocks automatic backup, B9) and BACKUP-2 (an album failure keeps a photo
-    // queued, B9). BackupCoordinator uploads only with the signed-in account's Keychain credential,
-    // a real PHAsset (PhotoKitAdapter.stage) and the background URLSession, which URLProtocol stubs
-    // cannot serve. In this test host that means the simulator's own saved session and Photos
-    // library. From B2 on, the transfer engine runs behind fakes, where B9 pins both.
-    //
+    // MARK: - Backup
+
+    /// BACKUP-1, fixed in B9. A server error (5xx) used to stop automatic backup with "Backup needs
+    /// attention" until the user acted. The transfer engine retries it by itself after a backoff,
+    /// and automatic backup carries on. (BackupCoordinator could only be driven with the
+    /// simulator's own session, Photos and background URLSession, so the bug is pinned on the
+    /// engine that replaced it, behind fakes.)
+    func testAServerErrorDoesNotStopAutomaticBackup() async throws {
+        let h = try await TransferEngineHarness()
+        h.executor.script("a", .fail { ServerFailure.http(503, "Service Unavailable") }, .succeed)
+        _ = try await h.engine.enqueue([h.photo("a")])
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        try await untilTransfers("The photo waits to retry.") { try await h.job("a")?.state == .retryScheduled }
+        let waiting = await h.engine.currentSnapshot
+        XCTAssertEqual(waiting.intent, .automatic, "Automatic backup stays on.")
+        if case .blocked = waiting.phase { XCTFail("A server error doesn't block backup.") }
+        h.clock.advance(by: .seconds(3_600))
+        try await untilTransfers("The retry backs the photo up.") { try await h.confirmed("a") }
+        await h.tearDown()
+    }
+
+    /// BACKUP-2, fixed in B9. A photo whose album add failed after it uploaded used to stay in the
+    /// queue as a failure. Now the backup is confirmed and leaves the queue; only the album add
+    /// waits for the user's retry.
+    func testAnAlbumFailureDoesNotKeepThePhotoQueued() async throws {
+        let h = try await PostUploadHarness()
+        try await h.backUp("p1", album: PostUploadHarness.albumA)
+        h.server.failAlbum(PostUploadHarness.albumA) { ServerFailure.forbidden("No permission") }
+        _ = await h.worker.runPass(linkedAlbums: false)
+        let job = try await h.store.job(lane: .library, sourceKey: "p1")
+        XCTAssertNil(job, "The photo left the queue.")
+        let confirmed = try await h.confirmed("p1")
+        XCTAssertTrue(confirmed)
+        let counts = try await h.store.albumUploadCounts()
+        XCTAssertEqual(counts[PostUploadHarness.albumA]?.failed, 1, "Only the album add needs a retry.")
+        await h.tearDown()
+    }
+
     // MARK: - Cleanup
 
     /// CLEAN-1, fixed in P4. One missing server copy used to abort the whole cleanup check; now it

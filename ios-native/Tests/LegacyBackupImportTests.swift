@@ -352,7 +352,7 @@ import XCTest
 
     /// Once the transfer engine owns the database (B9), a shadow import, as an older build would
     /// run, leaves it alone. Authoritatively, the same file is a no-op, and a file an older build
-    /// changed since is reported for B9's merge without changing anything.
+    /// changed since is merged into what the engine has (BM8), once.
     func testAnEngineOwnedDatabaseIsNeverRebuiltFromTheFile() async throws {
         let account = try makeAccount(state: FixtureLoader.data("backup/state-current.json"))
         let shadowCopy = try unwrapped(await account.importer().run())
@@ -360,20 +360,27 @@ import XCTest
         let cutover = try unwrapped(await account.importer(mode: .authoritative).run())
         XCTAssertEqual(cutover.outcome, .imported, "The cutover imports the file once more, as the engine's.")
         XCTAssertEqual(cutover.comparison?.total, 0)
-        let owned = try await account.store.dump()
+        let owned = try await account.store.contents()
         let meta = try await account.store.meta()
         XCTAssertEqual(meta.engine, .transfer)
         XCTAssertEqual(meta.legacyImportMode, .authoritative)
 
         let same = try unwrapped(await account.importer(mode: .authoritative).run())
         XCTAssertEqual(same.outcome, .unchanged)
+        let compared = try unwrapped(await account.importer(mode: .authoritative).run(comparing: true))
+        XCTAssertEqual(compared.comparison, cutover.comparison, "The comparison made at the cutover stands.")
         try account.writeState(FixtureLoader.data("backup/state-9780e9625.json"))
         let merge = try unwrapped(await account.importer(mode: .authoritative).run())
-        XCTAssertEqual(merge.outcome, .needsMerge)
+        XCTAssertEqual(merge.outcome, .merged)
+        let again = try unwrapped(await account.importer(mode: .authoritative).run())
+        XCTAssertEqual(again.outcome, .unchanged, "A file merges once.")
         let shadow = try unwrapped(await account.importer().run())
         XCTAssertEqual(shadow.outcome, .skipped)
-        let after = try await account.store.dump()
-        XCTAssertEqual(after, owned, "Nothing changed.")
+        let after = try await account.store.contents()
+        XCTAssertEqual(after.receipts, owned.receipts, "Nothing the engine had is lost.")
+        XCTAssertTrue(Set(owned.confirmations.map(\.localID)).isSubset(of: Set(after.confirmations.map(\.localID))))
+        XCTAssertEqual(after.preferences, owned.preferences, "The engine's preferences are newer.")
+        XCTAssertEqual(after.engine, owned.engine)
     }
 
     /// The comparison Diagnostics shows sees every kind of difference, one per category.

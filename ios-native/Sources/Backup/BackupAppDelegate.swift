@@ -8,22 +8,11 @@ import UIKit
         Task { await photos.start() }
         // Share folders a killed app left behind; no share can be open this early.
         Task.detached(priority: .utility) { DeviceShareExporter.sweep() }
-        // Upload progress reaches the backup and Shared files screens as the sessions report it.
-        // Neither session is made here: one relaunched for its events is made once its completion
-        // is in hand, or when backup or sharing first needs it.
-        BackgroundUploads.observeProgress(of: BackgroundUploads.identifier) { value in
-            Task { @MainActor in BackupCoordinator.shared.applyProgress(value) }
-        }
-        BackgroundUploads.observeProgress(of: BackgroundUploads.shareIdentifier) { value in
-            Task { @MainActor in ShareInboxStore.shared.applyProgress(value) }
-        }
         // The backup screens' store follows backup from launch, so it is current when one opens.
         _ = BackupStore.shared
-        // UI tests run without the phone's photos and backup.
-        if AccountEnvironment.current.usesDevicePhotos {
-            BackupLifecycle.shared.register()
-            Task { await BackupCoordinator.shared.activate() }
-        }
+        // The background task identifiers are registered now, as iOS requires, and their tasks
+        // wait for the account's backup engine. UI tests run without the phone's photos and backup.
+        TransferHost.shared.launch(usesDevicePhotos: AccountEnvironment.current.usesDevicePhotos)
         return true
     }
 
@@ -31,23 +20,18 @@ import UIKit
         // Photos access may have changed in Settings meanwhile.
         let photos = PhotoKitAdapter.shared
         Task { await photos.refreshAccess() }
-        BackupLifecycle.shared.foregroundChanged()
+        TransferHost.shared.becameActive()
     }
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         OrientationLock.mask
     }
+    /// The session's completion goes to the process's backup engine, which answers it once what the
+    /// session delivered is committed, or at iOS's deadline.
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
-        let uploads: BackgroundUploads
-        switch identifier {
-        case BackgroundUploads.identifier: uploads = .shared
-        case BackgroundUploads.shareIdentifier: uploads = .sharing
-        default: completionHandler(); return
-        }
-        let completion = MainActorCompletion(completionHandler)
-        uploads.handleEvents { Task { @MainActor in completion.call() } }
-        if identifier == BackgroundUploads.identifier { Task { await BackupCoordinator.shared.activate() } }
+        let completion = SystemCompletion(completionHandler)
+        TransferHost.shared.handleEvents(identifier: identifier) { completion.call() }
     }
 }
 
@@ -74,7 +58,8 @@ import UIKit
     }
 }
 
-@MainActor private final class MainActorCompletion: Sendable {
+/// iOS's completion handler for a session's events, which it may be called with on any thread.
+private final class SystemCompletion: @unchecked Sendable {
     private let completion: () -> Void
     init(_ completion: @escaping () -> Void) { self.completion = completion }
     func call() { completion() }

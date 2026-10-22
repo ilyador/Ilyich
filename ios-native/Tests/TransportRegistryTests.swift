@@ -103,24 +103,77 @@ final class TransportRegistryTests: XCTestCase {
     }
 }
 
-/// Rebuild milestone B5 ships the new transport dormant. If the app created it before B9, iOS
-/// would see two sessions for one identifier beside BackgroundUploads, with undefined delivery.
-@MainActor final class TransferDormancyTests: XCTestCase {
-    func testTransportRegistryIsNeverInstantiatedInTheAppBeforeB9() async throws {
-        XCTAssertEqual(URLSessionTransportSession.created, 0, "Launching the app created no session of the new transport.")
-        let delegate = BackupAppDelegate()
-        let sessions = [(BackgroundUploads.identifier, BackgroundUploads.shared), (BackgroundUploads.shareIdentifier, BackgroundUploads.sharing)]
-        for (identifier, uploads) in sessions {
-            let answered = expectation(description: identifier)
-            delegate.application(UIApplication.shared, handleEventsForBackgroundURLSession: identifier) { answered.fulfill() }
-            // Today's session reports its events delivered, and iOS gets its completion, as before.
-            uploads.urlSessionDidFinishEvents(forBackgroundURLSession: URLSession.shared)
-            await fulfillment(of: [answered], timeout: 5)
-            XCTAssertEqual(TransferSessionConfiguration.configurations(of: identifier), 1, "\(identifier) has one session in the process.")
+/// One engine per process (B9): TransferHost starts exactly one of the transfer engine's sessions
+/// and today's BackgroundUploads, whichever the first account activated needs, and never the other.
+/// Background session events that come before the choice wait for it.
+@MainActor final class TransferHostTests: XCTestCase {
+    private func host(registries: Locked<Int>, legacyEvents: Locked<[String]>, group: TemporaryAppGroup) -> TransferHost {
+        var legacy = TransferHost.LegacyBackup.live
+        legacy.coordinator = { BackupCoordinator() }
+        legacy.inbox = { ShareInboxStore() }
+        legacy.registerLifecycle = { _ in }
+        legacy.handleEvents = { identifier, completion in
+            legacyEvents.mutate { $0.append(identifier) }
+            completion()
         }
-        let unknown = expectation(description: "another app's identifier")
-        delegate.application(UIApplication.shared, handleEventsForBackgroundURLSession: "com.example.downloads") { unknown.fulfill() }
-        await fulfillment(of: [unknown], timeout: 1)
-        XCTAssertEqual(URLSessionTransportSession.created, 0, "Background events created no session of the new transport.")
+        let journal = group.journal
+        return TransferHost(legacy: legacy, scheduler: FakeTaskScheduler(), makeRegistry: {
+            registries.mutate { $0 += 1 }
+            return TransportRegistry { session, emit in
+                BackgroundTransport(session: session, journal: journal, emit: emit) { _ in FakeTransportSession() }
+            }
+        })
+    }
+
+    func testEventsWaitForTheEngineAndOnlyTheTransferEngineGetsThem() async throws {
+        let group = try TemporaryAppGroup()
+        defer { group.remove() }
+        let registries = Locked(0), legacyEvents = Locked<[String]>([])
+        let host = host(registries: registries, legacyEvents: legacyEvents, group: group)
+        var answered = 0
+        host.handleEvents(identifier: TransferSessionID.backup.identifier) { answered += 1 }
+        host.handleEvents(identifier: "com.example.downloads") { answered += 10 }
+        XCTAssertEqual(answered, 10, "Another app's identifier is answered at once; ours waits for the engine.")
+        XCTAssertEqual(registries.value, 0, "No session is made before the engine is chosen.")
+
+        XCTAssertTrue(host.chooseTransfer())
+        XCTAssertEqual(registries.value, 1)
+        XCTAssertEqual(host.registry?.connected, [.backup, .shareUpload], "Every session is made, so iOS delivers what it queued.")
+        XCTAssertFalse(host.chooseLegacy("test"), "Today's backup can't start beside the transfer engine.")
+        host.handleEvents(identifier: TransferSessionID.shareUpload.identifier) {}
+        XCTAssertTrue(legacyEvents.value.isEmpty, "Today's sessions never see the events.")
+        XCTAssertEqual(registries.value, 1)
+        XCTAssertEqual(host.summary, "Transfer engine")
+    }
+
+    func testTheWayBackStartsOnlyTodaysBackup() async throws {
+        let group = try TemporaryAppGroup()
+        defer { group.remove() }
+        let registries = Locked(0), legacyEvents = Locked<[String]>([])
+        let host = host(registries: registries, legacyEvents: legacyEvents, group: group)
+        var answered = 0
+        host.handleEvents(identifier: TransferSessionID.backup.identifier) { answered += 1 }
+
+        XCTAssertTrue(host.chooseLegacy("The backup records couldn’t be imported."))
+        XCTAssertEqual(answered, 1, "The held completion went to today's session.")
+        XCTAssertEqual(legacyEvents.value, [TransferSessionID.backup.identifier])
+        XCTAssertFalse(host.chooseTransfer())
+        XCTAssertEqual(registries.value, 0, "The transfer engine's sessions are never made.")
+        XCTAssertTrue(host.summary.hasPrefix("Old engine"), "Diagnostics says why.")
+    }
+
+    /// A background task that comes before the engine is chosen waits for the engine's handler.
+    func testBackgroundTasksWaitForTheChosenEnginesHandler() {
+        let scheduler = FakeTaskScheduler()
+        let router = BackgroundTaskRouter(system: scheduler)
+        var restores = 0
+        router.registerWithSystem { restores += 1 }
+        XCTAssertEqual(scheduler.registeredIdentifiers, Set(BackgroundWindowKind.allCases.map(\.identifier)), "Both identifiers are registered at launch.")
+        let task = scheduler.launch(.processing)
+        XCTAssertEqual(restores, 1, "The account is restored for it.")
+        XCTAssertTrue(task.completions.isEmpty, "It waits.")
+        var handled: [String] = []
+        XCTAssertTrue(router.register(identifier: BackgroundWindowKind.processing.identifier) { handled.append($0.identifier) })
+        XCTAssertEqual(handled, [BackgroundWindowKind.processing.identifier])
     }
 }

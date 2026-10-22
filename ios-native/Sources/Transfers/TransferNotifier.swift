@@ -21,8 +21,8 @@ import Foundation
     func withdraw(id: UUID) { TransferNotifications.cancel(id: id) }
 }
 
-/// Turns notification_batches into notifications (B4, dormant until B9): nothing in the app creates
-/// it, and BackupCoordinator and ShareInboxStore still post their own.
+/// Turns notification_batches into notifications (B4). Each account's TransferRuntime runs one
+/// (B9); today's backup, on the way back, posts its own.
 ///
 /// It watches the database, never the engine's work: the engine wakes it through `changed()`, or a
 /// stream of its snapshots, and never waits for it, so a notification that hangs holds up nothing

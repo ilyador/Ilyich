@@ -340,11 +340,14 @@ extension TransferStore {
         return page
     }
 
-    /// Confirmed photos, the latest first; those imported from state.json, which kept no time, last.
+    /// Confirmed photos, the latest first. A confirmation imported from state.json, which kept no
+    /// time, takes its receipt's, as the confirmed uploads screen always ordered them; those with
+    /// neither come last.
     func historyPage(offset: Int, limit: Int) throws -> [TransferHistoryItem] {
         var page: [TransferHistoryItem] = []
         try database().run("""
-            SELECT local_id,confirmed_at FROM confirmations ORDER BY confirmed_at IS NULL,confirmed_at DESC,local_id LIMIT ? OFFSET ?
+            SELECT c.local_id,coalesce(c.confirmed_at,r.confirmed_at) AS at FROM confirmations c LEFT JOIN receipts r ON r.local_id=c.local_id \
+            ORDER BY at IS NULL,at DESC,c.local_id LIMIT ? OFFSET ?
             """, [.integer(Int64(max(limit, 1))), .integer(Int64(max(offset, 0)))]) { row in
             page.append(TransferHistoryItem(localID: DeviceAssetID(rawValue: row.text(0) ?? ""), confirmedAt: row.date(1)))
         }

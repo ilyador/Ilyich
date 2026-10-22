@@ -36,8 +36,8 @@ struct DeviceIndexBackupInputs: Equatable, Sendable {
     var receipts: [String: CleanupReceipt] = [:]
 }
 
-/// Backup's preferences and receipts for the device index. Until B9 they are today's backup
-/// state (LegacyBackupIndexInputs), read as ReceiptRepository reads the receipts.
+/// Backup's preferences and receipts for the device index: the transfers database's, or on the
+/// way back today's backup state (CutoverReceipts), read as ReceiptRepository reads the receipts.
 protocol DeviceIndexBackupSource: Sendable {
     /// The account's inputs, or nil while its backup state isn't the one taken up.
     func inputs(account: String) async -> DeviceIndexBackupInputs?
@@ -565,7 +565,7 @@ struct LibraryIndexIdentities: DeviceIndexServer {
     func changes() async -> AsyncStream<LibraryChange> { await libraryChanges() }
 }
 
-/// The device index's inputs from today's backup state, until B9. They count only while the
+/// The device index's inputs from today's backup state, on the way back (until B10). They count only while the
 /// account's backup state is the one taken up; reading them never takes it up.
 struct LegacyBackupIndexInputs: DeviceIndexBackupSource {
     private let coordinator: @MainActor @Sendable () -> BackupCoordinator

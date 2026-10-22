@@ -4,8 +4,7 @@ import IlyichPlatform
 import IlyichShareInbox
 import Synchronization
 
-/// Uploads one shared file for the transfer engine (B4, dormant until B9): nothing in the app
-/// creates it, and Shared files still upload through ShareInboxStore and BackgroundUploads.
+/// Uploads one shared file for the transfer engine (B4), in each account's TransferRuntime (B9).
 ///
 /// A job is one attachment of a share batch, which the user approved:
 /// - Repository validation: the batch's manifest is read on its own through ShareInboxRepository,

@@ -313,8 +313,8 @@ struct SplitMix64 {
 
     /// Only reads what is running; starting a backup or anything else is never the driver's.
     private func sampleBackground() {
-        let backup = BackupCoordinator.shared
-        var tally = background ?? BackgroundTally(backupAtStart: backup.isRunning, queuedAtStart: backup.queuedLocalIDs.count)
+        let backup = BackupStore.shared
+        var tally = background ?? BackgroundTally(backupAtStart: backup.isRunning, queuedAtStart: backup.remaining)
         tally.samples += 1
         if backup.isRunning { tally.backup += 1 }
         if session?.isSyncing == true { tally.syncing += 1 }

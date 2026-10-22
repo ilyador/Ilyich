@@ -55,10 +55,11 @@ struct SignOutPolicy: Equatable, Sendable {
 /// The device-wide services that still hold some of an account's work until later milestones
 /// move it into the runtime, and the stores sign-out clears outside it.
 protocol AccountDevice: Sendable {
-    /// Takes up the account's backup state, from `container` (nil for the App Group), each time
-    /// the account becomes active: at launch and after every sign-in, so the backup screens show
-    /// the account signed in without a relaunch.
-    func activateBackup(for credential: StoredCredential, container: URL?) async
+    /// Starts the account's backup each time the account becomes active: at launch and after
+    /// every sign-in, so the backup screens show the account signed in without a relaunch. The
+    /// transfer engine runs it once the account's backup records are imported, else today's
+    /// backup takes up its state (TransferHost).
+    func activateBackup(_ runtime: AccountRuntime) async
     /// Stops backup and shared uploads, and switches automatic backup off unless
     /// `keepingAutomaticBackup`. The backup state stays on disk with its receipts.
     func stopUploads(keepingAutomaticBackup: Bool) async
@@ -105,9 +106,6 @@ struct AccountDependencies: Sendable {
     var expiryRecheckDelay: Duration = .seconds(2)
     /// How long sign-out waits for the server to revoke the cast session and end the session.
     var serverSignOutBudget: Duration = .seconds(3)
-    /// How long the copy of the backup state waits after the app opens or comes forward, so a
-    /// rebuild never competes with the first photos on screen.
-    var backupStateCopyDelay: Duration = .seconds(5)
 }
 
 /// Owns the signed-in account: restores it at launch, signs in and out, and opens and tears down
@@ -289,7 +287,7 @@ actor AccountManager {
             await publish()
             await runtime.start()
             if phase == .active, environment.usesDevicePhotos {
-                await dependencies.device.activateBackup(for: credential, container: environment.backupContainer)
+                await dependencies.device.activateBackup(runtime)
             }
         } catch {
             phase = .signedOut(nil)
@@ -328,7 +326,9 @@ actor AccountManager {
         // The address step 3's requests go to is chosen now, if it needs choosing, while the
         // account's work ends: checking every address can take longer than step 3's budget.
         let address = Task { _ = try? await runtime.api.activeEndpoint() }
-        // 2. The account's work ends, and uploads stop while the session can still answer them.
+        // 2. The account's work ends, and uploads stop while the session can still answer them:
+        //    the transfer engine winds down first, then everything the runtime runs.
+        await runtime.prepareForSignOut(keepingAutomaticBackup: policy.keepsAutomaticBackup)
         await runtime.cancelAndJoin()
         await device.stopUploads(keepingAutomaticBackup: policy.keepsAutomaticBackup)
         // 3. While the token and the network settings still work: casting stops and its grants
@@ -403,8 +403,8 @@ actor AccountManager {
         }
     }
 
-    /// Restores the session if needed, then syncs the library once for a background backup
-    /// window. Returns whether the library is ready for it.
+    /// Restores the session if needed, then syncs the library once for a background window of
+    /// today's backup. Returns whether the library is ready for it.
     func prepareForBackgroundBackup() async -> Bool {
         await restore()
         guard phase == .active, let sync = runtime?.library?.sync else { return false }

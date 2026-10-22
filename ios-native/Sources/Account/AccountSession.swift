@@ -95,11 +95,11 @@ import IlyichPlatform
 
     func clearBrowsingCache() async { await manager.clearBrowsingCache() }
 
-    /// Compares the transfers database's copy of the backup state with the backup state now,
-    /// importing it first if it changed, for Diagnostics. Returns once the report is recorded.
+    /// How the import of the backup records compares with state.json, for Diagnostics. Returns
+    /// once the report is recorded.
     func compareBackupRecords() async {
         guard let runtime, phase == .active || phase == .passwordChangeRequired else { return }
-        await runtime.importBackupStateInShadow(comparing: true)?.value
+        await runtime.compareBackupRecords()
     }
 
     /// Turns read-only mode on or off for the signed-in account. The setting and the write
@@ -128,10 +128,7 @@ import IlyichPlatform
                 runtime.check.validate()
                 if let sync = runtime.library?.sync { Task { await sync.presenceChanged() } }
                 // Only out of the background: Control Center and alerts only make the app inactive.
-                if cameForward {
-                    runtime.importBackupStateInShadow()
-                    if let index = runtime.deviceIndex { Task { await index.presenceChanged() } }
-                }
+                if cameForward, let index = runtime.deviceIndex { Task { await index.presenceChanged() } }
             }
             if phase == .waitingForUnlock { Task { await manager.retryRestoreIfWaiting() } }
         } else if scene == .background {

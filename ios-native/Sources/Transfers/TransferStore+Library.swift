@@ -130,7 +130,11 @@ extension TransferStore {
     /// The jobs of `gone`, photos no longer in Photos, are dropped with their stage and attempt
     /// rows (the owner's decision), unless a lease holds one or its upload is with the transport,
     /// whose outcome still has to land. Their files are left for the staging sweep (B6).
-    func mergeDiscovery(_ found: [DeviceCandidate], gone: [String], origin: JobOrigin = .discovery) throws -> DiscoveryMerge {
+    ///
+    /// With `notifying`, the photos queued count in a backup notification batch, as each of
+    /// today's runs posts one: the batch still open, or a new one.
+    func mergeDiscovery(_ found: [DeviceCandidate], gone: [String], origin: JobOrigin = .discovery,
+                        notifying: Bool = false) throws -> DiscoveryMerge {
         let db = try database()
         let merge = try db.transaction {
             try db.run("CREATE TEMP TABLE IF NOT EXISTS discovered(local_id TEXT PRIMARY KEY,modification_date)")
@@ -159,14 +163,27 @@ extension TransferStore {
             }
             var last: Int64 = -1
             try db.run("SELECT max(seq) FROM jobs WHERE lane='library'") { last = $0.integer(0) ?? -1 }
+            var batch: String?
+            if notifying {
+                try db.run("SELECT id FROM notification_batches WHERE kind='backup' AND terminal_posted=0 ORDER BY rowid DESC LIMIT 1") {
+                    batch = $0.text(0)
+                }
+                batch = batch ?? UUID().uuidString
+            }
             try db.run("""
-                INSERT OR IGNORE INTO jobs(lane,source_key,origin,state,seq,retry_count) \
-                SELECT 'library',d.local_id,?,'queued',?+row_number() OVER (ORDER BY d.local_id),0 FROM temp.discovered d \
+                INSERT OR IGNORE INTO jobs(lane,source_key,origin,state,seq,retry_count,batch_id) \
+                SELECT 'library',d.local_id,?,'queued',?+row_number() OVER (ORDER BY d.local_id),0,? FROM temp.discovered d \
                 WHERE NOT EXISTS(SELECT 1 FROM confirmations c WHERE c.local_id=d.local_id AND \
                 (d.modification_date IS NULL OR c.modification_date=d.modification_date)) \
                 AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.lane='library' AND j.source_key=d.local_id)
-                """, [.text(origin.rawValue), .integer(last)])
-            let queued = db.changes + edited.count
+                """, [.text(origin.rawValue), .integer(last), .optionalText(batch)])
+            let inserted = db.changes
+            if let batch, inserted > 0 {
+                try db.run("""
+                    INSERT INTO notification_batches(id,kind,total) VALUES(?,'backup',?) ON CONFLICT(id) DO UPDATE SET total=total+excluded.total
+                    """, [.text(batch), .integer(Int64(inserted))])
+            }
+            let queued = inserted + edited.count
             var dropped = 0
             if !gone.isEmpty {
                 let match = """
