@@ -2,8 +2,7 @@ import Foundation
 import IlyichPlatform
 import Synchronization
 
-/// Backs up one phone photo for the transfer engine (B3, dormant until B9): nothing in the app
-/// creates it, and backup still runs through BackupCoordinator and state.json.
+/// Backs up one phone photo for the transfer engine (B3), in each account's TransferRuntime (B9).
 ///
 /// A job stages the photo through P2's PhotoLibraryStaging (PhotoKitAdapter), on the adapter's own
 /// queue, then uploads its parts: a Live Photo's video first, hidden and without the mobile-app
@@ -46,13 +45,19 @@ final class LibraryJobExecutor: JobExecuting {
     /// The account's Backup folder, relative to the App Group.
     private let backupFolder: String
     private let checksum: @Sendable (URL) async throws -> String
+    /// Whether the device's conditions let a photo upload now, given Require charging: not while
+    /// the phone is hot, and only while charging when the setting asks, as backup always checked
+    /// before each photo. When they don't, the whole engine waits for them to change.
+    private let conditionsPermit: @Sendable (_ requireCharging: Bool) async -> Bool
     /// Stage folders of jobs that returned a result, removed once the engine commits it.
     private let finishedFolders = Mutex<[Int64: String]>([:])
 
     init(store: TransferStore, staging: any PhotoLibraryStaging, server: any TransferServerAPI, uploader: any PartUploading,
          layout: AppGroupLayout, account: AccountID, pipeline: TransferPipeline = TransferPipeline(),
-         checksum: @escaping @Sendable (URL) async throws -> String = { url in try await UploadBody.work { try UploadBody.checksum(url) } }) {
+         checksum: @escaping @Sendable (URL) async throws -> String = { url in try await UploadBody.work { try UploadBody.checksum(url) } },
+         conditionsPermit: @escaping @Sendable (_ requireCharging: Bool) async -> Bool = { _ in true }) {
         self.store = store
+        self.conditionsPermit = conditionsPermit
         self.staging = staging
         self.server = server
         self.uploader = uploader
@@ -71,6 +76,8 @@ final class LibraryJobExecutor: JobExecuting {
         finishedFolders.withLock { _ = $0.removeValue(forKey: job.lease.job) }
         // The preferences as the lease is taken decide this job's network use.
         let preferences = try await store.preferences() ?? TransferPreferences(Legacy.BackupPreferences())
+        try await context.ensureOwned()
+        guard await conditionsPermit(preferences.requireCharging) else { throw TransferDeferral.deviceConditions }
         try await context.ensureOwned()
 
         let stagingTurn = try await pipeline.acquireStaging()

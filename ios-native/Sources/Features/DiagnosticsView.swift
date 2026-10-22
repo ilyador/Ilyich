@@ -34,6 +34,7 @@ struct DiagnosticsView: View {
             }
             if let session, session.runtime?.transfers != nil {
                 Section {
+                    LabeledContent("Engine") { Text(TransferHost.shared.summary).multilineTextAlignment(.trailing) }
                     if let transferImport {
                         LabeledContent("Mismatches", value: transferImportSummary(transferImport))
                         LabeledContent("Checked") { Text(transferImport.date, format: .dateTime.month().day().hour().minute()).multilineTextAlignment(.trailing) }
@@ -49,8 +50,8 @@ struct DiagnosticsView: View {
                     }
                     Button("Compare again", systemImage: "arrow.left.arrow.right") { Task { await compareBackupRecords() } }
                         .disabled(comparingBackupRecords)
-                } header: { Text("Backup records copy") } footer: {
-                    Text("Ilyich keeps a copy of this account’s backup records for the backup engine that will replace today’s, and checks it against the records backup uses now. Backup still runs from its own records; this copy changes nothing.")
+                } header: { Text("Backup records") } footer: {
+                    Text("Ilyich moved this account’s backup records to its new backup engine and checked them against the old records, which stay on the phone unchanged. If they can’t be moved, backup carries on with the old engine and says why here.")
                 }
             }
             Section {
@@ -146,6 +147,7 @@ struct DiagnosticsView: View {
         return switch report.outcome {
         case .unreadable, .quarantined: "Backup records can’t be read"
         case .needsMerge: "Changed since the copy"
+        case .merged: "An older version’s records were merged"
         case .skipped: "Copy kept by a newer version"
         case .unavailable, .imported, .unchanged, .absent: "Couldn’t compare now"
         }

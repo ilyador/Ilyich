@@ -202,7 +202,7 @@ import XCTest
                                       uploads: LiveAccountDevice(backup: { backup.coordinator }))
             await harness.manager.restore()
             let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
-            await runtime.importBackupStateInShadow()?.value
+            _ = await runtime.prepareTransfers()
             let transfers = TransferStore.url(for: saved.account, in: environment.transfersDirectory)
             XCTAssertTrue(FileManager.default.fileExists(atPath: transfers.path), name)
             let library = try XCTUnwrap(runtime.library)
@@ -493,11 +493,11 @@ import XCTest
         XCTAssertNil(session.pendingLink, "A link for the account that signed out is dropped.")
     }
 
-    /// The account's backup state is copied into its transfers database when the account opens in
-    /// front and each time the app comes out of the background, and compared again when Diagnostics
-    /// asks; never when state.json is written, which BackupCoordinator does several times per photo.
-    /// A background launch, for a backup window or a finished upload, leaves it for the foreground.
-    func testBackupStateIsCopiedWhenTheAppComesForwardNeverOnWrites() async throws {
+    /// The account's backup records are imported into its transfers database once, when its
+    /// backup starts (TransferHost.activate), authoritatively: the engine owns the database from
+    /// then on. Never when state.json is written or the app comes forward, and Diagnostics shows
+    /// the comparison made at the import. state.json is only ever read, and both stay at sign-out.
+    func testBackupRecordsAreImportedOnceWhenBackupStartsNeverOnWrites() async throws {
         let server = makeStubServer()
         server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
         server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
@@ -513,32 +513,32 @@ import XCTest
 
         await session.restore()
         XCTAssertEqual(session.phase, .active)
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertTrue(device.transferImports.isEmpty, "Opened in the background, nothing is copied.")
-
+        let runtime = try XCTUnwrap(session.runtime)
         session.sceneChanged(.active)
-        try await until("Coming forward didn't copy the backup state.") { device.transferImports.count == 1 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(device.transferImports.isEmpty, "Nothing is imported until backup starts.")
+
+        let decision = await runtime.prepareTransfers()
+        XCTAssertEqual(decision, .engine)
+        XCTAssertEqual(device.transferImports.count, 1)
         XCTAssertEqual(device.transferImports.last?.outcome, .imported)
         XCTAssertEqual(device.transferImports.last?.comparison?.total, 0)
+        let meta = try await XCTUnwrap(runtime.transfers).store.meta()
+        XCTAssertEqual(meta.engine, .transfer)
         let database = TransferStore.url(for: saved.account, in: environment.transfersDirectory)
         XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
 
-        // BackupCoordinator writes state.json, and Control Center comes and goes: nothing is copied.
+        // An older build writing state.json, the app coming and going, asking again: nothing more.
         try FixtureLoader.data("backup/state-9780e9625.json").write(to: stateFile, options: .atomic)
-        session.sceneChanged(.inactive)
-        session.sceneChanged(.active)
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertEqual(device.transferImports.count, 1)
         session.sceneChanged(.background)
         session.sceneChanged(.active)
-        try await until("Coming forward again didn't copy the changed state.") { device.transferImports.count == 2 }
-        XCTAssertEqual(device.transferImports.last?.outcome, .imported)
-        XCTAssertEqual(device.transferImports.last?.comparison?.total, 0)
+        _ = await runtime.prepareTransfers()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(device.transferImports.count, 1)
 
         await session.compareBackupRecords()
-        XCTAssertEqual(device.transferImports.count, 3, "Diagnostics compares again.")
-        XCTAssertEqual(device.transferImports.last?.outcome, .unchanged)
-        XCTAssertEqual(device.transferImports.last?.comparison?.total, 0)
+        XCTAssertEqual(device.transferImports.count, 2, "Diagnostics asks.")
+        XCTAssertEqual(device.transferImports.last?.outcome, .merged, "The older build's file merges.")
 
         await session.signOut()
         XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
@@ -709,7 +709,7 @@ import XCTest
         }
         return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log, uploads: uploads, uploadsStop: uploadsStop),
                                    clients: clients, unlockEvents: { unlockEvents }, expiryRecheckDelay: .milliseconds(20),
-                                   serverSignOutBudget: serverSignOutBudget, backupStateCopyDelay: .milliseconds(20))
+                                   serverSignOutBudget: serverSignOutBudget)
     }
 
     private func makeHarness(_ credential: StoredCredential?, server: StubServer, environment: AccountEnvironment? = nil,
@@ -862,9 +862,9 @@ final class FakeAccountDevice: AccountDevice {
         self.uploadsStop = uploadsStop
     }
 
-    func activateBackup(for credential: StoredCredential, container: URL?) async {
-        log.append("activateBackup(\(credential.userID))")
-        await uploads?.activateBackup(for: credential, container: container)
+    func activateBackup(_ runtime: AccountRuntime) async {
+        log.append("activateBackup(\(runtime.credential.userID))")
+        await uploads?.activateBackup(runtime)
     }
     func stopUploads(keepingAutomaticBackup: Bool) async {
         log.append(keepingAutomaticBackup ? "stopUploads(keepingAutomaticBackup)" : "stopUploads")

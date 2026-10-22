@@ -3,8 +3,8 @@ import IlyichPlatform
 import os
 import Synchronization
 
-/// One background URLSession for one TransferSessionID, backup or share-upload. Dormant until B9,
-/// which deletes today's BackgroundUploads in the same change that starts using this.
+/// One background URLSession for one TransferSessionID, backup or share-upload, which TransferHost
+/// creates once the process runs the transfer engine (B9).
 ///
 /// New tasks get a version 2 descriptor. A task iOS still holds for an attempt, from this launch,
 /// an earlier one or an earlier build, is adopted by its attempt rather than sent again, and a

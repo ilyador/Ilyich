@@ -305,17 +305,18 @@ import XCTest
 
         preferences.requireCharging = true
         try await h.engine.setPreferences(preferences)
+        // A manual run keeps asking for windows with automatic backup off (the owner's decision).
         preferences.automatic = false
         try await h.engine.setPreferences(preferences)
+        try await h.engine.setIntent(.paused)
         preferences.automatic = true
         try await h.engine.setPreferences(preferences)
-        try await h.engine.setIntent(.paused)
         try await h.engine.setIntent(.automatic)
         h.authorization.setReadOnly(true)
-        await untilTransfers("Read-only blocks the engine and its windows.") { scheduler.plans.count == 8 }
+        await untilTransfers("Read-only blocks the engine and its windows.") { scheduler.plans.count == 6 }
         let charging = SchedulePlan.automatic(requireCharging: true, triggerDelay: 30)
-        XCTAssertEqual(scheduler.plans.suffix(6), [charging, .none, charging, .none, charging, .none],
-                       "The preference decides the windows; a pause and a block drop them.")
+        XCTAssertEqual(scheduler.plans.suffix(4), [charging, .none, charging, .none],
+                       "The preference or a manual run decides the windows; a pause and a block drop them.")
         await h.tearDown()
     }
 

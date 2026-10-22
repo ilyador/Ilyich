@@ -100,8 +100,8 @@ struct JobContext: Sendable {
 
 // MARK: - Engine
 
-/// The transfer engine (B2), dormant until the cutover (B9): nothing in the app creates it, and
-/// backup still runs through BackupCoordinator and state.json.
+/// The transfer engine (B2). From the cutover (B9) each signed-in account's runtime runs one,
+/// over the account's transfers database (TransferRuntime).
 ///
 /// Commands only write rows and wake the loop. One owned loop leases the next job, runs it
 /// through the executor, then commits the result or records the failure, each WHERE the lease
@@ -165,6 +165,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var finishing: [UUID: Task<Void, Never>] = [:]
     /// Discovery passes under way.
     private var discovering = 0
+    /// Manual runs still setting up: the run doesn't end meanwhile.
+    private var manualHolds = 0
 
     private var loop: Task<Void, Never>?
     private var watcher: Task<Void, Never>?
@@ -299,8 +301,15 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     // MARK: TransferControlling
 
     func setIntent(_ intent: RunIntent) async throws {
+        try await setIntent(intent, requeueingFailures: true)
+    }
+
+    /// Sets the run intent. A manual intent retries every failed photo once unless
+    /// `requeueingFailures` is off, as when automatic backup is switched off during a run and the
+    /// run only carries on.
+    func setIntent(_ intent: RunIntent, requeueingFailures: Bool) async throws {
         self.intent = intent
-        if intent == .manual {
+        if intent == .manual, requeueingFailures {
             // A manual run retries every failed photo once, and the albums and stacks that failed
             // after an upload; a second start changes nothing else.
             try await store.requeueFailed(lane: .library)
@@ -348,6 +357,23 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         await changed()
     }
 
+    /// Saves the preferences as the backup screen edits them, with the Automatic backup switch
+    /// taking effect as it always has: switched on, a paused engine starts automatic backup;
+    /// switched off, a run under way finishes as a manual one, and then the engine pauses.
+    func setPreferencesFollowingAutomatic(_ preferences: TransferPreferences) async throws {
+        let wasAutomatic = self.preferences?.automatic == true
+        try await setPreferences(preferences)
+        if preferences.automatic, !wasAutomatic, intent == .paused {
+            try await setIntent(.automatic, requeueingFailures: false)
+        } else if !preferences.automatic, wasAutomatic, intent == .automatic {
+            try await setIntent(.manual, requeueingFailures: false)
+            await settleManualRun()
+        }
+    }
+
+    /// The run intent now.
+    var runIntent: RunIntent { intent }
+
     func retry(_ sources: [TransferSource]?) async throws {
         if let sources {
             for lane in [TransferLane.library, .share] {
@@ -394,6 +420,47 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         discovering -= 1
         await changed()
         return merge
+    }
+
+    // MARK: Manual runs
+
+    /// Back up now: the library lane runs, failed photos are retried once, `discovery` looks for
+    /// new photos, and the run ends once nothing is left to upload, as today's run does: the
+    /// intent then goes back to automatic when automatic backup is on, else to paused. Background
+    /// windows are asked for while it runs (the owner's decision). Nil, with nothing read, when
+    /// discovery is refused.
+    @discardableResult
+    func runManually(_ discovery: LibraryDiscovery?) async throws -> DiscoveryMerge? {
+        manualHolds += 1
+        var merge: DiscoveryMerge?
+        do {
+            try await setIntent(.manual)
+            if let discovery { merge = try await discover(discovery) }
+        } catch {
+            manualHolds -= 1
+            await settleManualRun()
+            throw error
+        }
+        manualHolds -= 1
+        await settleManualRun()
+        return merge
+    }
+
+    /// Ends a manual run that has nothing left to upload: no job running, none queued, retrying,
+    /// waiting or with the transport, and no discovery under way.
+    func settleManualRun() async {
+        guard intent == .manual, manualHolds == 0, discovering == 0, active.isEmpty, !stopped else { return }
+        await refreshCounts()
+        guard intent == .manual, manualHolds == 0, discovering == 0, active.isEmpty, counts.remaining == 0 else { return }
+        intent = preferences?.automatic == true ? .automatic : .paused
+        try? await saveEngineState()
+        await changed()
+    }
+
+    /// Something outside the engine changed the database (recovery committed an outcome): the
+    /// counts and the snapshot are read again, and the loop looks for work.
+    func refresh() async {
+        await changed()
     }
 
     // MARK: Background windows
@@ -445,10 +512,10 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     /// The windows this state asks for: automatic backup's while the preference is on and nothing
-    /// blocks the engine, as BackupLifecycle schedules today. A manual run keeps them; turning
-    /// automatic backup off drops them, and so does a pause, which turns it off today.
+    /// blocks the engine, as BackupLifecycle scheduled them. A manual run asks for them too, even
+    /// with automatic backup off (the owner's decision), until it ends; a pause drops them.
     private func currentPlan() -> SchedulePlan {
-        guard preferences?.automatic == true, intent != .paused, blocker == nil else { return .none }
+        guard intent != .paused, blocker == nil, preferences?.automatic == true || intent == .manual else { return .none }
         return .automatic(requireCharging: preferences?.requireCharging ?? false, triggerDelay: preferences?.triggerDelay ?? 0)
     }
 
@@ -515,6 +582,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                 if ranSinceDrain {
                     ranSinceDrain = false
                     followUp?(.drained)
+                    await settleManualRun()
                 }
             }
             let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]

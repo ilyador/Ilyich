@@ -6,8 +6,8 @@ private let logger = Logger(subsystem: "app.ilyich.native", category: "Transfers
 /// The completion handlers iOS passes to application(_:handleEventsForBackgroundURLSession:
 /// completionHandler:). iOS suspends the app once a handler runs, so each runs only after the
 /// engine has durably committed what its session delivered, or after a 20-second deadline,
-/// whichever comes first; iOS allows about 30. Dormant until B9, whose app delegate registers the
-/// handler first and only then touches the session.
+/// whichever comes first; iOS allows about 30. TransferHost registers each handler first and only
+/// then touches the session (B9).
 ///
 /// A handler belongs to one drain of its session, numbered by the transport, and only a commit
 /// through that drain answers it. It waits for the session's next drain, so a commit that comes

@@ -5,10 +5,9 @@ import Synchronization
 /// never twice, whichever launch path asks first (launch, background events or the engine), with
 /// their events merged into one stream for the transfer engine.
 ///
-/// Dormant until B9: nothing in the app creates a registry, since a live one would open a second
-/// session beside today's BackgroundUploads for the same identifier. scripts/check-single-engine.sh
-/// fails the build if code outside this folder names it, and a test checks that the app creates
-/// none of its sessions at launch or for background events.
+/// Only TransferHost creates one, once the process runs the transfer engine (B9): a live registry
+/// beside today's BackgroundUploads would open a second session for the same identifier.
+/// scripts/check-single-engine.sh fails the build if code outside this folder names it.
 final class TransportRegistry: Sendable {
     typealias Factory = @Sendable (TransferSessionID, _ emit: @escaping @Sendable (TransportEvent) -> Void) -> BackgroundTransport
 
@@ -23,7 +22,7 @@ final class TransportRegistry: Sendable {
         self.factory = factory
     }
 
-    /// The real sessions, recording outcomes in the App Group. For B9's launch sequence only.
+    /// The real sessions, recording outcomes in the App Group, for TransferHost.
     static func live() -> TransportRegistry { TransportRegistry { BackgroundTransport.live($0, emit: $1) } }
 
     /// A session's transport, created the first time it is asked for. Racing callers wait for that

@@ -7,9 +7,9 @@ import SQLite3
 /// lock of it is ever held in the App Group when iOS suspends the app, excluded from iCloud backup
 /// and readable after the first unlock. It runs on a queue of its own and opens on first use.
 ///
-/// Until the cutover (B9) it is a shadow copy: LegacyBackupImporter rebuilds the library lane from
-/// state.json, which BackupCoordinator still runs from. The transfer engine (B2, dormant) writes
-/// only a database it owns, which no shadow import touches.
+/// From the cutover (B9) LegacyBackupImporter imports state.json into it authoritatively, once,
+/// and the transfer engine owns it; before, B1 kept it as a shadow copy of state.json. The engine
+/// writes only a database it owns, which no shadow import touches.
 ///
 /// Tables:
 /// - meta: schema, engine (legacy while BackupCoordinator is authoritative, transfer once this

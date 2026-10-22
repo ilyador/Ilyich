@@ -27,8 +27,8 @@ struct AccountEnvironment: Sendable {
     var keepsShelvesOpen = false
     /// Where the offline library is kept: nil for Application Support, a folder for tests.
     var libraryDirectory: URL?
-    /// The backup state is copied into the account's transfers database and compared with it, in
-    /// shadow (REBUILD_ROADMAP.md B1). Backup itself still runs from the backup state.
+    /// The account's backup state is imported into its transfers database, which the transfer
+    /// engine runs backup from (REBUILD_ROADMAP.md B9).
     var importsBackupState = true
     /// Where the transfers databases are kept: nil for Application Support/IlyichTransfers, a
     /// folder for tests.

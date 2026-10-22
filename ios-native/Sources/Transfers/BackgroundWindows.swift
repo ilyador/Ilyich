@@ -82,7 +82,7 @@ protocol BackgroundWindowWork: Sendable {
     }
 }
 
-/// UIApplication's background time. For B9's launch sequence only.
+/// UIApplication's background time, for TransferHost.
 @MainActor final class SystemBackgroundTime: BackgroundTimeGranting {
     func begin(name: String, expiration: @escaping @MainActor () -> Void) -> Int? {
         let id = UIApplication.shared.beginBackgroundTask(withName: name) { MainActor.assumeIsolated { expiration() } }
@@ -96,8 +96,7 @@ protocol BackgroundWindowWork: Sendable {
 
 // MARK: - Lifecycle
 
-/// Turns LifecycleEvent into backup work (B7), dormant until the cutover (B9): BackupLifecycle and
-/// BackupAppDelegate run backup's background time today.
+/// Turns LifecycleEvent into backup work (B7), in each account's TransferRuntime (B9).
 ///
 /// - A background window runs runWindow's steps. One window works at a time; another that comes
 ///   meanwhile completes at once, as today.

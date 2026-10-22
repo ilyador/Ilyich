@@ -1,7 +1,7 @@
 import Foundation
 
 /// One background session as the transfer engine uses it. Its results, progress and drains arrive
-/// on TransportRegistry's merged event stream rather than here. Dormant until B9.
+/// on TransportRegistry's merged event stream rather than here.
 protocol TransferTransport: Sendable {
     var session: TransferSessionID { get }
     /// Uploads the attempt's body and returns the task's ID. A task iOS still holds for the attempt,

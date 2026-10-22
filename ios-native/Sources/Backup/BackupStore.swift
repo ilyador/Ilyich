@@ -8,7 +8,9 @@ import Photos
 /// failures, album counts and preferences with each. Preference edits are written once they
 /// settle, and before any command, so a command always runs with what the screen shows.
 @MainActor @Observable final class BackupStore: BackupEnqueuing {
-    static let shared = BackupStore(backend: LegacyCoordinatorBackend.shared)
+    /// The app's store, over the process's backup engine: the account's transfer engine, or
+    /// today's backup (TransferHost).
+    static let shared = BackupStore(backend: TransferHost.shared.backend)
 
     private(set) var snapshot = TransferSnapshot(intent: .paused, phase: .idle, remaining: 0, confirmed: 0, failed: 0, fileProgress: nil,
                                                  bytesSent: 0, bytesExpected: 0, bytesPerSecond: nil, lastMessage: nil)
@@ -183,7 +185,7 @@ struct BackupPhotoAccess: Sendable {
         requestAccess: {
             let status = await PhotoKitAdapter.shared.requestAccess().status
             // Automatic backup starts watching Photos once it may.
-            BackupLifecycle.shared.configure()
+            TransferHost.shared.accessChanged()
             return status
         })
 
@@ -206,28 +208,54 @@ extension AccountRestriction {
     }
 }
 
-/// What the Shared files sheet shows and the commands it sends (REBUILD_ROADMAP.md B8). Uploads
-/// start and pause through TransferControlling; the inbox's batches, and today's upload state,
-/// are read from ShareInboxStore, whose progress arrives from the share session as it is sent.
+/// What the Shared files sheet shows and the commands it sends (REBUILD_ROADMAP.md B8, B9).
+/// Uploads start and pause through TransferControlling. The inbox's batches are read from
+/// ShareInboxStore, the inbox's owner. While the transfer engine runs the account's uploads, what
+/// is uploading, its progress and each file's error come from the engine's share lane; otherwise
+/// from today's ShareInboxStore, whose progress arrives from the share session as it is sent.
 @MainActor @Observable final class ShareInboxModel {
     let api: APIClient
     @ObservationIgnored private let inbox: ShareInboxStore
     @ObservationIgnored private let backend: any TransferControlling
+    /// The engine's share lane is the source of the upload's state.
+    @ObservationIgnored private let onEngine: Bool
+    @ObservationIgnored private var following: Task<Void, Never>?
+    private var engineState = EngineShares()
 
-    init(api: APIClient, inbox: ShareInboxStore = .shared, backend: (any TransferControlling)? = nil) {
+    /// The engine's share lane as the sheet shows it.
+    private struct EngineShares: Equatable {
+        var queued: [String] = []
+        var current: String?
+        var progress: Double?
+        var completed = 0
+        var errors: [String: String] = [:]
+        var error: String?
+    }
+
+    init(api: APIClient, inbox: ShareInboxStore = .shared, backend: (any TransferControlling)? = nil, engine: EngineBackend? = TransferHost.shared.backend.engine) {
         self.api = api
         self.inbox = inbox
-        self.backend = backend ?? LegacyCoordinatorBackend(inbox: inbox, shareClient: api)
+        if let backend {
+            self.backend = backend
+            onEngine = false
+        } else if let engine {
+            self.backend = engine
+            onEngine = true
+        } else {
+            self.backend = LegacyCoordinatorBackend(inbox: inbox, shareClient: api)
+            onEngine = false
+        }
+        if onEngine { follow() }
     }
 
     var batches: [SharedBatch] { inbox.batches }
     var unreadableBatches: Int { inbox.unreadableBatches }
-    var isRunning: Bool { inbox.isRunning }
-    var currentID: String? { inbox.currentID }
-    var progress: Double? { inbox.progress }
-    var completed: Int { inbox.completed }
-    var errors: [String: String] { inbox.errors }
-    var error: String? { inbox.error }
+    var isRunning: Bool { onEngine ? !engineState.queued.isEmpty : inbox.isRunning }
+    var currentID: String? { onEngine ? engineState.current : inbox.currentID }
+    var progress: Double? { onEngine ? engineState.progress : inbox.progress }
+    var completed: Int { onEngine ? engineState.completed : inbox.completed }
+    var errors: [String: String] { onEngine ? engineState.errors : inbox.errors }
+    var error: String? { onEngine ? engineState.error ?? inbox.error : inbox.error }
 
     func refresh() async { await inbox.refresh() }
 
@@ -240,6 +268,7 @@ extension AccountRestriction {
             }
         }
         guard !requests.isEmpty else { return }
+        if onEngine { engineState.completed = 0 }
         _ = try? await backend.enqueue(requests)
     }
 
@@ -250,4 +279,47 @@ extension AccountRestriction {
     }
 
     func discard(_ batch: SharedBatch) { inbox.discard(batch) }
+
+    /// Follows the engine's snapshots while the sheet is open, rereading the share lane with each.
+    private func follow() {
+        let backend = self.backend
+        following = Task { [weak self] in
+            for await snapshot in await backend.snapshots() {
+                guard let self, !Task.isCancelled else { return }
+                await self.read(snapshot)
+            }
+        }
+    }
+
+    private func read(_ snapshot: TransferSnapshot) async {
+        guard let queue = try? await backend.queuePage(lane: .share, after: nil, limit: 1_000),
+              let failures = try? await backend.failures(limit: 1_000) else { return }
+        var next = engineState
+        let attachments = queue.compactMap(\.attachment)
+        var errors: [String: String] = [:]
+        for failure in failures { if let attachment = failure.attachment { errors[attachment] = failure.message ?? "This file couldn’t be uploaded." } }
+        // A file that left the queue without failing was uploaded.
+        let finished = Set(next.queued).subtracting(attachments).subtracting(errors.keys)
+        next.completed += finished.count
+        next.queued = attachments
+        next.current = queue.first { [.staging, .staged, .submitting, .submitted, .finalizing].contains($0.state) }?.attachment
+        next.progress = next.current == nil ? nil : snapshot.fileProgress
+        next.errors = errors
+        if case .blocked(let restriction) = snapshot.phase, restriction != .readOnly, !attachments.isEmpty {
+            next.error = restriction.backupMessage
+        } else {
+            next.error = nil
+        }
+        let left = next.queued != engineState.queued
+        if next != engineState { engineState = next }
+        // Uploaded files leave their batch's manifest.
+        if left { await inbox.refresh() }
+    }
+}
+
+private extension TransferQueueItem {
+    var attachment: String? {
+        if case .shared(_, let attachment) = source { return attachment }
+        return nil
+    }
 }

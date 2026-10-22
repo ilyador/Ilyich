@@ -19,8 +19,7 @@ enum FollowUpTrigger: Hashable, Sendable {
     case retryDue
 }
 
-/// The work an upload leaves for later (B4, dormant until B9): nothing in the app creates it, and
-/// BackupCoordinator still adds photos to albums, stacks them and syncs linked albums itself.
+/// The work an upload leaves for later (B4), beside the engine in each account's TransferRuntime (B9).
 ///
 /// It runs beside the engine, never inside a job, so nothing it meets un-confirms a backup or stops
 /// the engine's run: a photo stays backed up, with its receipt, whatever an album, stack or linked

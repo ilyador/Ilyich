@@ -1,7 +1,7 @@
 import Foundation
 import IlyichPlatform
 
-/// One account's staging folders in the App Group (B6, dormant until B9): Backup/<digest>/<uuid>/,
+/// One account's staging folders in the App Group (B6): Backup/<digest>/<uuid>/,
 /// each holding a stage's files (original, motion, sidecar) and its attempts' bodies and outcome
 /// files (<attempt>.multipart, <attempt>.receipt). Only folders named by a UUID directly inside the
 /// account's Backup folder are ever touched; state.json and anything else there stays, and so does

@@ -2,9 +2,11 @@ import BackgroundTasks
 import UIKit
 import Network
 
-/// iOS chooses background execution times. A processing window discovers and
-/// prepares a file, then hands its transfer to the system URLSession daemon. While automatic
-/// backup is on, each burst of changes the Photos adapter reports starts it again.
+/// Today's backup's background time, the way back when an account's backup records couldn't be
+/// imported (TransferHost; REBUILD_ROADMAP.md B9, retired in B10). iOS chooses background
+/// execution times. A processing window discovers and prepares a file, then hands its transfer to
+/// the system URLSession daemon. While automatic backup is on, each burst of changes the Photos
+/// adapter reports starts it again.
 @MainActor final class BackupLifecycle {
     static let shared = BackupLifecycle()
     static let identifier = "app.ilyich.native.backup.processing"
@@ -17,19 +19,17 @@ import Network
     private var observers: [NSObjectProtocol] = []
     private let network = NWPathMonitor()
 
-    func register() {
+    /// Takes both identifiers' tasks from the router, which registered them with iOS at launch:
+    /// today's backup runs the process's background windows (TransferHost chose it).
+    func register(using router: BackgroundTaskRouter) {
         guard !registered else { return }
-        let processingRegistered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.identifier, using: .main) { task in
-            MainActor.assumeIsolated {
-                guard task is BGProcessingTask else { task.setTaskCompleted(success: false); return }
-                self.process(task)
-            }
+        let processingRegistered = router.register(identifier: Self.identifier) { handle in
+            guard let task = handle as? BGTask, task is BGProcessingTask else { handle.setTaskCompleted(success: false); return }
+            self.process(task)
         }
-        let refreshRegistered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshIdentifier, using: .main) { task in
-            MainActor.assumeIsolated {
-                guard task is BGAppRefreshTask else { task.setTaskCompleted(success: false); return }
-                self.process(task)
-            }
+        let refreshRegistered = router.register(identifier: Self.refreshIdentifier) { handle in
+            guard let task = handle as? BGTask, task is BGAppRefreshTask else { handle.setTaskCompleted(success: false); return }
+            self.process(task)
         }
         registered = processingRegistered && refreshRegistered
         UIDevice.current.isBatteryMonitoringEnabled = true

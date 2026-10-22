@@ -4,8 +4,8 @@ import IlyichShareInbox
 import os
 
 /// Puts the transfers database back in step with what iOS and the disk hold after the app ended,
-/// for one account (B6, dormant until B9): nothing in the app creates it, and backup still runs
-/// through BackupCoordinator and state.json. It runs only on a database the transfer engine owns,
+/// for one account (B6), in each account's TransferRuntime (B9). It runs only on a database the
+/// transfer engine owns,
 /// never on the shadow copy B1 rebuilds, and it leaves every job a lease holds to the engine. It
 /// needs neither the server nor the network, so a launch in the background can run it at once.
 ///

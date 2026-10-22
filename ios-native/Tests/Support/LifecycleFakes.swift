@@ -21,6 +21,8 @@ import XCTest
     private(set) var cancelled: [String] = []
     /// What iOS held from an earlier launch.
     var pendingAtLaunch: [WindowRequest] = []
+    /// The identifiers a launch handler is registered for.
+    var registeredIdentifiers: Set<String> { Set(handlers.keys) }
 
     func register(identifier: String, launch: @escaping @MainActor (any BackgroundTaskHandle) -> Void) -> Bool {
         guard handlers[identifier] == nil else { return false }
