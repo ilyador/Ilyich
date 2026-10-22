@@ -79,7 +79,7 @@ import XCTest
                                    userID: "feed-" + UUID().uuidString)
         let pipeline = MediaPipeline(client: client)
         addTeardownBlock { await pipeline.removeAll() }
-        // A phone's screen of one photo a month in three columns: a row a month, some seven rows.
+        // A phone's screen of one photo a month in three columns: months share rows, some eighteen on screen.
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: .zero)
         window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
@@ -91,11 +91,17 @@ import XCTest
         await store.reload()
         let first = Set(store.buckets.prefix(2).map(\.id))
         try await until("The first months did not load.") { first.isSubset(of: store.loaded.keys) }
-        let shown = Set(store.buckets.prefix(6).map(\.id))
-        try await until("The months on screen beyond the first two did not load without a scroll.") { shown.isSubset(of: store.loaded.keys) }
+        try await until("The months on screen beyond the first two did not all load without a scroll.") {
+            let shown = store.visibleBucketIDs
+            return shown.count > 2 && shown.isSubset(of: store.loaded.keys)
+        }
         XCTAssertEqual(store.navigation.section, 0, "The grid reported where it is.")
         try await Task.sleep(for: .milliseconds(200))
-        XCTAssertLessThanOrEqual(store.loaded.count, 9, "Only the months on screen and beside them load.")
+        let shown = store.visibleBucketIDs
+        let near = Set(store.buckets.indices.filter { shown.contains(store.buckets[$0].id) }
+            .flatMap { [$0 - 1, $0, $0 + 1] }.filter { store.buckets.indices.contains($0) }.map { store.buckets[$0].id })
+        XCTAssertTrue(Set(store.loaded.keys).isSubset(of: near.union(first)), "Only the months on screen and beside them load.")
+        XCTAssertLessThan(store.loaded.count, store.buckets.count, "Months far below the screen stay unread.")
     }
 
     /// A sync's reload takes the banner and its Retry down and marks every month stale, the
@@ -149,6 +155,26 @@ import XCTest
         try await until("The month the grid moved to never landed.") { recorder.loaded[keys[12]] != nil }
         XCTAssertEqual(recorder.evicted, [keys[1]], "The month just scrolled on stays; the next least recent goes.")
         XCTAssertNotNil(recorder.loaded[keys[0]])
+        await feed.handle([.close])
+    }
+
+    /// A sparse feed (an album with a photo or two a month) puts many months on one screen: every
+    /// one of them loads, not only the first few the queue holds at a time, without another scroll.
+    func testEveryMonthOnASparseScreenLoads() async throws {
+        let months = Self.months(20)
+        let api = FeedLibrary(months: months, delay: .milliseconds(20))
+        let keys = try months.map { try XCTUnwrap(MonthKey(bucketID: $0)) }
+        let feed = TimelineFeed(source: api, viewport: TimelineFeed.Viewport())
+        let recorder = FeedRecorder()
+        let ticket = TimelineFeed.Ticket()
+        let plan = try await api.plan(.library)
+        await feed.handle([.attach(recorder), .open(ticket, .library, plan),
+                           .months(keys, buckets: Dictionary(uniqueKeysWithValues: zip(keys, months))),
+                           .viewport(visible: Set(keys))])
+        try await until("Months on screen were left as placeholders.") { Set(recorder.loaded.keys) == Set(keys) }
+        XCTAssertEqual(recorder.evicted, [], "Months on screen are never let go.")
+        let calls = await api.calls
+        XCTAssertEqual(calls.values.reduce(0, +), keys.count, "Each month is read once.")
         await feed.handle([.close])
     }
 
