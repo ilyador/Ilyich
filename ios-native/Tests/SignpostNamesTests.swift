@@ -7,7 +7,7 @@ final class SignpostNamesTests: XCTestCase {
     func testTheSubsystemAndEveryNameAreStable() {
         XCTAssertEqual(PerfSignpost.subsystem, "app.ilyich.native")
         let catalog = PerfSignpost.catalog.map { ($0.category, $0.names.map(\.description)) }
-        XCTAssertEqual(catalog.map(\.0), ["thumbnails", "scrub", "feed", "launch", "sync", "index", "transfer", "memory", "perf"])
+        XCTAssertEqual(catalog.map(\.0), ["thumbnails", "scrub", "feed", "launch", "sync", "index", "transfer", "memory", "perf", "cleanup"])
         XCTAssertEqual(Dictionary(uniqueKeysWithValues: catalog), [
             "thumbnails": ["thumb.display", "thumb.placeholder"],
             "scrub": ["rail.scrub", "grid.fling"],
@@ -18,6 +18,7 @@ final class SignpostNamesTests: XCTestCase {
             "transfer": ["transfer.stage", "transfer.submit", "transfer.commit"],
             "memory": ["mem.footprint"],
             "perf": ["perf.scenario"],
+            "cleanup": ["cleanup.scan"],
         ])
     }
 
@@ -30,6 +31,7 @@ final class SignpostNamesTests: XCTestCase {
             (PerfSignpost.indexBackfill, "index.backfill"), (PerfSignpost.transferStage, "transfer.stage"),
             (PerfSignpost.transferSubmit, "transfer.submit"), (PerfSignpost.transferCommit, "transfer.commit"),
             (PerfSignpost.memFootprint, "mem.footprint"), (PerfSignpost.perfScenario, "perf.scenario"),
+            (PerfSignpost.cleanupScan, "cleanup.scan"),
         ]
         for (constant, name) in constants { XCTAssertEqual(constant.description, name) }
         let all = PerfSignpost.catalog.flatMap(\.names).map(\.description)
