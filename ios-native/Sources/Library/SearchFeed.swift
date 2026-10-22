@@ -54,6 +54,8 @@ actor SearchFeed {
     private let source: any SearchSource
     private(set) var state = State()
     /// Results taken out (deleted, or no longer visible) stay out of every later page and retry.
+    /// A read given `excluding` takes that set instead, so the caller can let a photo that came
+    /// back (restored, or shared again) return.
     private var removed: Set<String> = []
     /// Newer copies of results, by the edit that made them; a refresh started after an edit
     /// carries it from the server.
@@ -66,18 +68,21 @@ actor SearchFeed {
     }
 
     /// The first pages.
-    func first() async throws -> State {
-        try await read(from: nil, prefix: [], limit: request.followLimit, replay: false, kind: .first)
+    func first(excluding: Set<String>? = nil) async throws -> State {
+        if let excluding { removed = excluding }
+        return try await read(from: nil, prefix: [], limit: request.followLimit, replay: false, kind: .first)
     }
 
     /// The next pages, when there are more and nothing waits for a retry.
-    func more() async throws -> State {
+    func more(excluding: Set<String>? = nil) async throws -> State {
+        if let excluding { removed = excluding }
         guard state.hasMore, state.retryPoint == nil else { return state }
         return try await read(from: state.cursor, prefix: state.results, limit: request.followLimit, replay: false, kind: .more)
     }
 
     /// Reads again from where the last read stopped, or from the start when nothing stopped.
-    func retry() async throws -> State {
+    func retry(excluding: Set<String>? = nil) async throws -> State {
+        if let excluding { removed = excluding }
         guard let point = state.retryPoint else {
             return try await read(from: nil, prefix: [], limit: request.followLimit, replay: false, kind: .first)
         }
@@ -85,8 +90,9 @@ actor SearchFeed {
     }
 
     /// Reads again as many pages as were loaded, from the start.
-    func refresh() async throws -> State {
-        try await read(from: nil, prefix: [], limit: max(1, state.pagesLoaded), replay: true, kind: .first)
+    func refresh(excluding: Set<String>? = nil) async throws -> State {
+        if let excluding { removed = excluding }
+        return try await read(from: nil, prefix: [], limit: max(1, state.pagesLoaded), replay: true, kind: .first)
     }
 
     /// Takes results out in place.
