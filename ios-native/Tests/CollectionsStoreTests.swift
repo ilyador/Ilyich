@@ -77,6 +77,39 @@ import XCTest
         XCTAssertEqual(store.orderedAlbums.map(\.id), ["harbor", "coast"])
     }
 
+    /// The shelves read the people and albums in the owner's order on every touch of a drag, at
+    /// every level of them, so the store puts them in it when they or the order change and a read
+    /// sorts nothing; they keep to the order through a load, a rename, a move, an album made or
+    /// left and an order saved.
+    func testTheOwnersOrderIsAppliedWhenItChangesNotOnEveryRead() async throws {
+        server.route("GET", "server/features", features(map: true))
+        server.route("GET", "people", page(["maya", "leo", "ana"]))
+        server.route("GET", "albums", albums(["coast", "harbor", "reef"]))
+        let store = makeStore()
+        store.saveOrder(["ana", "maya"], for: .people)
+        store.saveOrder(["reef"], for: .albums)
+        await store.load()
+        XCTAssertEqual(store.orderedPeople.map(\.id), ["ana", "maya", "leo"], "The owner's order first, then the server's.")
+        XCTAssertEqual(store.orderedAlbums.map(\.id), ["reef", "coast", "harbor"])
+
+        // Two reads are one list: neither sorted it again.
+        let people = store.orderedPeople, peopleAgain = store.orderedPeople
+        XCTAssertTrue(sharesStorage(people, peopleAgain), "Reading the people in the owner's order sorted them again.")
+        let albums = store.orderedAlbums, albumsAgain = store.orderedAlbums
+        XCTAssertTrue(sharesStorage(albums, albumsAgain), "Reading the albums in the owner's order sorted them again.")
+
+        store.apply(.personUpdated(person("leo", name: "Leonard")))
+        XCTAssertEqual(store.orderedPeople.map(\.name), ["Ana", "Maya", "Leonard"])
+        XCTAssertTrue(store.moveRow(from: 0, to: 2, of: .people))
+        XCTAssertEqual(store.orderedPeople.map(\.id), ["maya", "leo", "ana"])
+        store.albumCreated(album("lagoon"))
+        XCTAssertEqual(store.orderedAlbums.map(\.id), ["lagoon", "reef", "coast", "harbor"])
+        store.albumRemoved("reef")
+        XCTAssertEqual(store.orderedAlbums.map(\.id), ["lagoon", "coast", "harbor"])
+        store.saveOrder(["harbor"], for: .albums)
+        XCTAssertEqual(store.orderedAlbums.map(\.id), ["harbor", "lagoon", "coast"])
+    }
+
     /// A launch load that fails leaves the shelves as they are and marks a reload, which the app
     /// coming forward or the shelves opening runs; a later failed reload keeps what loaded before.
     func testFailedLaunchLoadKeepsPeopleAndAlbumsAndReloadsLater() async throws {
@@ -303,6 +336,12 @@ import XCTest
 
     private func albumJSON(_ id: String, name: String, count: Int = 1) -> String {
         #"{"id":"\#(id)","albumName":"\#(name)","assetCount":\#(count),"shared":false,"albumUsers":[],"updatedAt":"2026-12-01T12:00:00Z","order":"desc"}"#
+    }
+
+    /// Whether two lists are one in memory, as two reads of a kept list are and two lists sorted
+    /// apart are not.
+    private func sharesStorage<Element>(_ first: [Element], _ second: [Element]) -> Bool {
+        first.withUnsafeBufferPointer { first in second.withUnsafeBufferPointer { second in first.baseAddress == second.baseAddress } }
     }
 
     /// A request's JSON body.

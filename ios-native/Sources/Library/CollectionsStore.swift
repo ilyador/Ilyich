@@ -12,11 +12,16 @@ import Foundation
 /// that fails keeps what the shelves show, and is tried again when the app comes forward or the
 /// shelves open.
 @MainActor @Observable final class CollectionsStore {
-    private(set) var people: [Person] = []
-    private(set) var albums: [Album] = []
+    private(set) var people: [Person] = [] { didSet { orderPeople() } }
+    private(set) var albums: [Album] = [] { didSet { orderAlbums() } }
     private(set) var features: ServerFeatures?
-    private(set) var peopleOrder: [String] = []
-    private(set) var albumOrder: [String] = []
+    private(set) var peopleOrder: [String] = [] { didSet { orderPeople() } }
+    private(set) var albumOrder: [String] = [] { didSet { orderAlbums() } }
+    /// The people and albums in the owner's order. They are put in it when they or the order
+    /// change, not when they are read: the shelves read them on every touch of a drag, at every
+    /// level of the shelves.
+    private(set) var orderedPeople: [Person] = []
+    private(set) var orderedAlbums: [Album] = []
     /// The last load left people, albums or features unloaded.
     private(set) var lastLoadFailed = false
     @ObservationIgnored private let api: APIClient
@@ -28,9 +33,6 @@ import Foundation
     /// The collection changes since the newest load began, in order, which its answer may not know of.
     @ObservationIgnored private var changes: [CollectionChange] = []
     @ObservationIgnored private let follower = LibraryFollower()
-
-    var orderedPeople: [Person] { ShelfOrder.apply(peopleOrder, to: people, id: \.id) }
-    var orderedAlbums: [Album] { ShelfOrder.apply(albumOrder, to: albums, id: \.id) }
 
     /// `pipeline` warms the faces of the People shelf once they are known.
     init(api: APIClient, people: PeopleDirectory, order: ShelfOrder, pipeline: MediaPipeline? = nil) {
@@ -109,6 +111,9 @@ import Foundation
         }
         order.save(ids, for: kind)
     }
+
+    private func orderPeople() { orderedPeople = ShelfOrder.apply(peopleOrder, to: people, id: \.id) }
+    private func orderAlbums() { orderedAlbums = ShelfOrder.apply(albumOrder, to: albums, id: \.id) }
 
     /// A collection change, applied in place at once and again over the answer of a load on its
     /// way. An album made here leads the shelf, as it leads the server's list and the owner's
