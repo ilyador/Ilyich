@@ -9,7 +9,9 @@
 # app five times. The phone must be unlocked, on the same network, and signed in.
 #
 # Environment: ILYICH_PERF_TIMEOUT (seconds to wait for a summary, default 300),
-# ILYICH_PERF_DEVICE and ILYICH_PERF_BUNDLE to aim at another phone or build.
+# ILYICH_PERF_DEVICE and ILYICH_PERF_BUNDLE to aim at another phone or build, and
+# ILYICH_PERF_DRIVE=finger to drive the grid as a finger does (the rail's lens and haptics, a
+# fling's landing) instead of as C4's driver did; those numbers compare only with each other.
 set -euo pipefail
 
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then
@@ -22,6 +24,7 @@ SEED=${3:-7}
 DEVICE=${ILYICH_PERF_DEVICE:-00008130-000E0C910C38001C}
 BUNDLE=${ILYICH_PERF_BUNDLE:-app.alextran.immich.H4K2MSF2SG}
 TIMEOUT=${ILYICH_PERF_TIMEOUT:-300}
+DRIVE=${ILYICH_PERF_DRIVE:-baseline}
 REMOTE=Library/Caches/IlyichPerf
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 
@@ -31,6 +34,11 @@ case $SCENARIO in
 esac
 case $SEED in
   ''|*[!0-9]*) echo "the seed must be a whole number: $SEED" >&2; exit 2 ;;
+esac
+case $DRIVE in
+  baseline) TABLE=$SCENARIO-$SEED ;;
+  finger) TABLE=$SCENARIO-$SEED-finger ;;
+  *) echo "ILYICH_PERF_DRIVE must be baseline or finger: $DRIVE" >&2; exit 2 ;;
 esac
 
 cd "$(dirname "$0")/../.."
@@ -54,9 +62,9 @@ summaries() {
 record_once() {
   local before name="" deadline
   before=$(summaries)
-  echo "Launching $SCENARIO, seed $SEED" >&2
+  echo "Launching $SCENARIO, seed $SEED, $DRIVE drive" >&2
   xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --timeout 120 \
-    "$BUNDLE" -- -IlyichPerfScenario "$SCENARIO" -IlyichPerfSeed "$SEED" >&2
+    "$BUNDLE" -- -IlyichPerfScenario "$SCENARIO" -IlyichPerfSeed "$SEED" -IlyichPerfDrive "$DRIVE" >&2
   deadline=$((SECONDS + TIMEOUT))
   while [ -z "$name" ]; do
     if [ "$SECONDS" -ge "$deadline" ]; then
@@ -79,5 +87,5 @@ for run in $(seq 1 "$RUNS"); do
   file=$(record_once) || exit 1
   FILES+=("$file")
 done
-python3 scripts/perf/summarize.py "${FILES[@]}" | tee "$OUT/$SCENARIO-$SEED.md"
+python3 scripts/perf/summarize.py "${FILES[@]}" | tee "$OUT/$TABLE.md"
 echo "Summaries are in $OUT" >&2

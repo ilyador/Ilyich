@@ -58,6 +58,11 @@ extension LibraryStore: TimeRailFeed {}
     @ObservationIgnored var animateOpening: (_ animation: Animation?, _ change: () -> Void, _ completion: @escaping () -> Void) -> Void = { animation, change, completion in
         withAnimation(animation, change, completion: completion)
     }
+    /// Takes the lens, the column and the puck away, and calls back once what melts back into the
+    /// rail has gone. Tests close them by hand.
+    @ObservationIgnored var animateClosing: (_ animation: Animation?, _ change: () -> Void, _ completion: @escaping () -> Void) -> Void = { animation, change, completion in
+        withAnimation(animation, completionCriteria: .removed, change, completion: completion)
+    }
     @ObservationIgnored var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     /// The finger is on the rail.
@@ -68,6 +73,8 @@ extension LibraryStore: TimeRailFeed {}
     @ObservationIgnored private var rest = TimeRailRest()
     @ObservationIgnored private var restTask: Task<Void, Never>?
     @ObservationIgnored private var dismissTask: Task<Void, Never>?
+    /// Counts the rail's closings, so a closing forgets the finger only if none came after it.
+    @ObservationIgnored private var closings = 0
     /// The rail is on screen. A pan that goes on after it left is not its own any more.
     @ObservationIgnored private var presented = false
     /// The rail view last shown, which lives as long as the rail's own state used to.
@@ -122,14 +129,20 @@ extension LibraryStore: TimeRailFeed {}
     var activeIndex: Int { min(max(0, selected ?? feed.navigation.section), max(0, feed.buckets.count - 1)) }
 
     /// Where the accent line marks the position: under the finger while scrubbing, the grid's own
-    /// position otherwise.
-    func currentY(height: CGFloat) -> CGFloat { fingerY ?? (expanded ? puckFraction * height + 24 : 24) }
+    /// position otherwise. What reads it (the lens, its bridge, the line and the trips) reads it
+    /// while it melts back into the rail too, so it does not change as the rail closes: neither
+    /// with the rail's state, nor before what places it has gone (`close`).
+    func currentY(height: CGFloat) -> CGFloat { fingerY ?? puckY(height: height) }
 
     /// The lens and its bridge follow the finger, clear of the rail's ends.
     func lensY(_ y: CGFloat, size: CGSize) -> CGFloat { min(max(78, fingerY ?? y), size.height - 78) }
 
+    /// Where the puck sits: on the grid's position, or a chosen month's. It never shows under a
+    /// finger, so it does not follow one: a finger landing as it slides out leaves it in place.
+    func puckY(height: CGFloat) -> CGFloat { puckFraction * height + 24 }
+
     /// Where a chosen month or year sits, while no finger is on the rail.
-    var chosenFraction: CGFloat? { selected != nil && fingerY == nil ? fraction(activeIndex) : nil }
+    private var chosenFraction: CGFloat? { selected != nil && fingerY == nil ? fraction(activeIndex) : nil }
 
     private var puckFraction: CGFloat { chosenFraction ?? gridFraction }
 
@@ -196,6 +209,7 @@ extension LibraryStore: TimeRailFeed {}
 
     /// A tap shows the rail on the grid's month for a few seconds.
     func tap() {
+        reopen()
         visible = true
         open { }
         scheduleDismiss(delay: .seconds(3))
@@ -215,6 +229,7 @@ extension LibraryStore: TimeRailFeed {}
 
     private func choose(_ index: Int, year: Int? = nil) {
         guard feed.buckets.indices.contains(index) else { return }
+        reopen()
         selected = index; yearSelection = year; expanded = true; visible = true
         if viewport.scroller.collection != nil {
             feed.cancelPendingNavigation()
@@ -224,10 +239,11 @@ extension LibraryStore: TimeRailFeed {}
 
     // MARK: Driven scrubs
 
-    /// A scrub the perf scenarios make (C4), as a finger's goes once the rail is open: the rail
-    /// opens at once, the grid is the rail's, a jump on its way is dropped, and the grid goes to
-    /// `fraction` of the way down the library, the lens and the month following as they do for a
-    /// finger. Nothing waits for the opening, so the grid moves on the frames it always did.
+    /// A scrub the perf scenarios make with their finger drive (-IlyichPerfDrive finger), as a
+    /// finger's goes once the rail is open: the rail opens at once, the grid is the rail's, a jump
+    /// on its way is dropped, and the grid goes to `fraction` of the way down the library, the
+    /// lens and the month following as they do for a finger. Nothing waits for the opening, so the
+    /// grid moves on the frames it always did.
     func beginDrivenScrub(atFraction fraction: CGFloat) {
         let y = 24 + min(1, max(0, fraction)) * layout.height
         RailScrubProbe.began()
@@ -268,6 +284,7 @@ extension LibraryStore: TimeRailFeed {}
     /// While the lens opens it follows the finger and shows the month there, leaving the photos
     /// where they are.
     private func preview(at y: CGFloat) {
+        reopen()
         dismissTask?.cancel(); visible = true
         fingerY = min(layout.height + 24, max(24, y))
         yearSelection = nil
@@ -334,11 +351,36 @@ extension LibraryStore: TimeRailFeed {}
         dismissTask?.cancel()
         dismissTask = Task { [weak self] in
             do { try await Task.sleep(for: delay) } catch { return }
-            guard let self else { return }
-            withAnimation(reduceMotion ? nil : .smooth(duration: duration)) { expanded = false; visible = false }
-            railOpen = false
-            selected = nil; yearSelection = nil; fingerY = nil
+            self?.close(duration: duration)
         }
+    }
+
+    /// The lens, the column and the puck go. The lens, its bridge, the line and the trips read the
+    /// finger and the month themselves while they melt back into the rail, so those are forgotten
+    /// only once they have gone: forgetting them first would move what is melting (DESIGN 9).
+    private func close(duration: TimeInterval) {
+        let melting = expanded
+        closings += 1
+        let closing = closings
+        animateClosing(reduceMotion ? nil : .smooth(duration: duration), {
+            self.expanded = false; self.visible = false
+        }) { [weak self] in
+            guard let self, closing == closings, !expanded else { return }
+            forgetPosition()
+        }
+        railOpen = false
+        if !melting { forgetPosition() }
+    }
+
+    /// The finger, the month under it or chosen, and a chosen year go: the rail shows the grid's.
+    private func forgetPosition() {
+        selected = nil; yearSelection = nil; fingerY = nil
+    }
+
+    /// The rail is used again, perhaps before its last closing ended: what that closing would
+    /// have forgotten goes now, so the rail opens on the grid's position as after any closing.
+    private func reopen() {
+        if !expanded { forgetPosition() }
     }
 }
 

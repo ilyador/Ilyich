@@ -100,6 +100,27 @@ import XCTest
         })
     }
 
+    /// The rail's closings, finished by hand: each takes the lens and the column away at once,
+    /// and what follows once they have melted waits for the returned call.
+    private func closingByHand(_ rail: TimeRailController) -> () -> Void {
+        var closings: [() -> Void] = []
+        rail.animateClosing = { _, change, completion in change(); closings.append(completion) }
+        return {
+            let finished = closings
+            closings.removeAll()
+            finished.forEach { $0() }
+        }
+    }
+
+    /// Lets the main actor run, as the app's does, until `done` holds.
+    private func wait(until done: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !done() {
+            guard ContinuousClock.now < deadline else { return XCTFail("Still waiting after 5 s.") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     private func offset(_ grid: Grid, at fraction: CGFloat) throws -> CGFloat {
         try XCTUnwrap(grid.viewport.scroller.offset(atFraction: fraction)).rounded(.toNearestOrEven)
     }
@@ -156,6 +177,124 @@ import XCTest
         XCTAssertEqual(grid.collection.contentOffset.y, start, "Letting go before the rail is open leaves the photos where they were.")
         XCTAssertEqual(grid.viewport.phase, .idle)
         XCTAssertEqual(grid.feed.cancelledNavigations, 0, "Nothing was dropped for a move that never happened.")
+    }
+
+    /// The lens, its bridge, the line and the trips read the finger and the month themselves,
+    /// also while they melt back into the rail, so closing keeps both until they have gone:
+    /// they melt where they were (DESIGN 9), and only then does the rail forget them.
+    func testClosingLeavesTheLensWhereItWasUntilItHasGone() async throws {
+        let grid = Grid(feed: Feed(buckets: Self.months()))
+        let (rail, finishOpening) = makeRail(grid)
+        let finishClosing = closingByHand(rail)
+        let size = CGSize(width: 44, height: Self.layout.height + 48)
+        rail.handle(Self.pan(.began, at: 0.62))
+        finishOpening()
+        rail.handle(Self.pan(.changed, at: 0.7))
+        let line = rail.currentY(height: Self.layout.height)
+        let lens = rail.lensY(line, size: size)
+        let month = try XCTUnwrap(rail.selected)
+
+        // A cancelled pan closes the rail at once.
+        rail.handle(Self.pan(.cancelled, at: 0.7))
+        try await wait { !rail.expanded }
+        XCTAssertFalse(rail.visible)
+        let melting = rail.currentY(height: Self.layout.height)
+        XCTAssertEqual(melting, line, "The line melts where it was…")
+        XCTAssertEqual(rail.lensY(melting, size: size), lens, "…and so do the lens and its bridge…")
+        XCTAssertEqual(rail.selected, month, "…showing the month they showed.")
+
+        finishClosing()
+        XCTAssertNil(rail.fingerY, "Once they have gone, the rail forgets the finger…")
+        XCTAssertNil(rail.selected, "…and the month.")
+        XCTAssertNil(rail.yearSelection)
+    }
+
+    /// A rail tapped open marks the grid's own position, and keeps marking it as it closes.
+    func testClosingATappedRailLeavesItsLineWhereItWas() async throws {
+        let grid = Grid(feed: Feed(buckets: Self.months()))
+        let (rail, finishOpening) = makeRail(grid)
+        let finishClosing = closingByHand(rail)
+        grid.collection.contentOffset.y = try offset(grid, at: 0.4)
+        rail.tap()
+        finishOpening()
+        let line = rail.currentY(height: Self.layout.height)
+        XCTAssertEqual(line, 24 + 0.4 * Self.layout.height, accuracy: 1, "The grid's position.")
+
+        // A drag of the grid that ends brings the closing on after the usual pause.
+        grid.viewport.willBeginDragging()
+        grid.viewport.didEndDragging(decelerate: false)
+        try await wait { !rail.expanded }
+        XCTAssertEqual(rail.currentY(height: Self.layout.height), line, "The line melts where it was.")
+        finishClosing()
+        XCTAssertEqual(rail.currentY(height: Self.layout.height), line)
+    }
+
+    /// The rail used again before its closing has ended opens on the grid, as after any closing,
+    /// and that closing's late end forgets nothing of the new use.
+    func testTheRailUsedAgainWhileClosingStartsAfresh() async throws {
+        let grid = Grid(feed: Feed(buckets: Self.months()))
+        let (rail, finishOpening) = makeRail(grid)
+        let finishClosing = closingByHand(rail)
+        rail.handle(Self.pan(.began, at: 0.7))
+        finishOpening()
+        rail.handle(Self.pan(.cancelled, at: 0.7))
+        try await wait { !rail.expanded }
+        XCTAssertNotNil(rail.fingerY, "Still melting.")
+
+        rail.tap()
+        XCTAssertNil(rail.fingerY, "The tapped rail marks the grid's position…")
+        XCTAssertNil(rail.selected, "…and month.")
+        rail.handle(Self.pan(.began, at: 0.2))
+        let finger = try XCTUnwrap(rail.fingerY)
+        let month = try XCTUnwrap(rail.selected)
+        finishClosing()
+        XCTAssertEqual(rail.fingerY, finger, "The old closing's end leaves the new finger alone…")
+        XCTAssertEqual(rail.selected, month, "…and its month.")
+    }
+
+    /// The puck slides out as a finger lands on the rail, from where it was: it marks the grid,
+    /// never the finger.
+    func testThePuckSlidesOutFromTheGridsPosition() throws {
+        let grid = Grid(feed: Feed(buckets: Self.months()))
+        let (rail, _) = makeRail(grid)
+        grid.collection.contentOffset.y = try offset(grid, at: 0.4)
+        let puck = rail.puckY(height: Self.layout.height)
+        rail.handle(Self.pan(.began, at: 0.8))
+        XCTAssertTrue(rail.expanded)
+        XCTAssertEqual(rail.currentY(height: Self.layout.height), 24 + 0.8 * Self.layout.height, accuracy: 0.001,
+                       "The lens opens on the finger…")
+        XCTAssertEqual(rail.puckY(height: Self.layout.height), puck, "…and the puck leaves from the grid's position.")
+    }
+
+    /// The rail's touch never reaches the grid, so a fling coasting under a touch that moves
+    /// nothing coasts on: coverage still waits, and UIKit reports the coast's end. Once the rail
+    /// moves the grid, the coast is over (setContentOffset ends it without a word).
+    func testACoastGoesOnUnderATouchThatMovesNothing() throws {
+        let grid = Grid(feed: Feed(buckets: Self.months()))
+        let (rail, finishOpening) = makeRail(grid)
+        var moving: [Bool] = []
+        grid.viewport.onMotionChange = { moving.append($0) }
+        grid.viewport.willBeginDragging()
+        grid.viewport.didEndDragging(decelerate: true)
+        let coasting = grid.collection.contentOffset.y
+        rail.handle(Self.pan(.began, at: 0.7))
+        rail.handle(Self.pan(.ended, at: 0.7))
+        finishOpening()
+        XCTAssertEqual(grid.collection.contentOffset.y, coasting)
+        XCTAssertEqual(grid.viewport.phase, .decelerating, "The coast goes on.")
+        XCTAssertEqual(moving, [true], "Coverage waits for it.")
+        grid.viewport.didEndDecelerating()
+        XCTAssertEqual(grid.viewport.phase, .idle)
+        XCTAssertEqual(moving, [true, false])
+
+        grid.viewport.willBeginDragging()
+        grid.viewport.didEndDragging(decelerate: true)
+        rail.handle(Self.pan(.began, at: 0.3))
+        finishOpening()
+        XCTAssertEqual(grid.collection.contentOffset.y, try offset(grid, at: 0.3), "The rail took the grid.")
+        rail.handle(Self.pan(.ended, at: 0.3))
+        XCTAssertEqual(grid.viewport.phase, .idle, "That coast is over.")
+        XCTAssertEqual(moving, [true, false, true, false])
     }
 
     /// The perf scenarios scrub as a finger does once the rail is open, without waiting for it to

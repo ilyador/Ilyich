@@ -159,6 +159,9 @@ struct PerfSummary: Codable, Equatable, Sendable {
     var schema = 1
     var scenario: String
     var seed: UInt64
+    /// "finger" for a run driven as a finger drives the grid; absent for the default, which
+    /// drives it as C4's baseline did, so those summaries read as they always have.
+    var drive: String?
     /// completed, noFirstContent, noGrid or cancelled.
     var status: String
     var startedAt: String

@@ -59,6 +59,9 @@ def row(path, summary):
     # The launch time in the file name tells several runs of one scenario apart.
     stamp = os.path.basename(path).rsplit("-", 1)[-1].replace(".json", "")
     run = f"{summary.get('scenario', '?')} s{summary.get('seed', '?')} {stamp}"
+    # A run driven as a finger does measures more than C4's baseline did; say so.
+    if summary.get("drive"):
+        run += f" ({summary['drive']} drive)"
     if status != "completed":
         run += f" ({status})"
     return [

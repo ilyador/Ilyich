@@ -34,6 +34,34 @@ final class PerfScenarioDriverTests: XCTestCase {
         XCTAssertEqual(PerfScenarioConfiguration(arguments: ["Ilyich", "-IlyichPerfScenario", "fling", "-IlyichPerfSeed"])?.seed, 7)
     }
 
+    /// The grid is driven as C4's driver drove it unless the finger drive is asked for, so the
+    /// numbers of a default run compare with the C4 baseline.
+    func testTheDriveDefaultsToTheBaseline() {
+        XCTAssertEqual(PerfScenarioConfiguration.Drive.allCases.map(\.rawValue), ["baseline", "finger"])
+        XCTAssertEqual(PerfScenarioConfiguration(arguments: ["Ilyich", "-IlyichPerfScenario", "rail-sweep"])?.drive, .baseline)
+        XCTAssertEqual(PerfScenarioConfiguration(arguments: ["Ilyich", "-IlyichPerfScenario", "rail-sweep", "-IlyichPerfDrive", "baseline"])?.drive,
+                       .baseline)
+        XCTAssertEqual(PerfScenarioConfiguration(arguments: ["Ilyich", "-IlyichPerfDrive", "finger", "-IlyichPerfScenario", "rail-sweep"]),
+                       PerfScenarioConfiguration(scenario: .railSweep, seed: 7, drive: .finger))
+        for unknown in ["", "thumb", "Finger"] {
+            XCTAssertEqual(PerfScenarioConfiguration(arguments: ["Ilyich", "-IlyichPerfScenario", "fling", "-IlyichPerfDrive", unknown])?.drive,
+                           .baseline)
+        }
+        XCTAssertNil(PerfScenarioConfiguration(arguments: ["Ilyich", "-IlyichPerfDrive", "finger"]), "A drive alone starts nothing.")
+    }
+
+    /// A default run writes the summary it always wrote; a finger-driven one says how it ran.
+    func testOnlyTheFingerDriveIsNamedInTheSummary() throws {
+        let measurements = PerfRecorder(processStart: 0, now: 0).measurements(at: 1_000_000_000)
+        func written(drive: String?) throws -> [String: Any] {
+            let summary = PerfSummary(scenario: "rail-sweep", seed: 7, drive: drive, status: "completed", startedAt: "",
+                                      app: .init(), device: .init(), library: nil, measurements: measurements, background: nil)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(summary)) as? [String: Any])
+        }
+        XCTAssertNil(try written(drive: nil)["drive"])
+        XCTAssertEqual(try written(drive: "finger")["drive"] as? String, "finger")
+    }
+
     func testASeedAlwaysMakesTheSameJumps() {
         let jumps = PerfScenarioPlan.jumps(seed: 7)
         XCTAssertEqual(jumps.count, 20)

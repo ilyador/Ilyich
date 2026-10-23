@@ -109,6 +109,10 @@ import UIKit
 
     /// What moves the grid now.
     private(set) var phase: Phase = .idle
+    /// What UIKit's own scrolling is doing (idle, dragging or decelerating), whatever the rail
+    /// does. The rail's touch never reaches the grid, so a drag or a coast its finger lands on
+    /// goes on unless the rail moves the grid, and is the phase again when the finger lifts.
+    private var scrollPhase: Phase = .idle
     /// A finger drags the grid, or it coasts after one: the puck shows.
     var isScrolling: Bool { phase == .dragging || phase == .decelerating }
     /// How the grid moves, as of the last frame.
@@ -151,7 +155,7 @@ import UIKit
     func willBeginDragging() {
         flingTarget = nil
         stopped = false
-        setPhase(.dragging)
+        setScrollPhase(.dragging)
         wake()
     }
 
@@ -168,12 +172,12 @@ import UIKit
     }
 
     func didEndDragging(decelerate: Bool) {
-        if phase != .scrubbing { setPhase(decelerate ? .decelerating : .idle) }
+        setScrollPhase(decelerate ? .decelerating : .idle)
         if decelerate { wake() } else { rest() }
     }
 
     func didEndDecelerating() {
-        if phase == .decelerating { setPhase(.idle) }
+        if scrollPhase == .decelerating { setScrollPhase(.idle) }
         rest()
     }
 
@@ -181,17 +185,26 @@ import UIKit
 
     // MARK: Rail
 
-    /// The rail's finger is down: the grid is the rail's until it lifts. A fling it interrupts
-    /// ends here, since setContentOffset stops a deceleration without the delegate saying so.
+    /// The rail's finger is down: the grid is the rail's until it lifts.
     func beginScrub() { setPhase(.scrubbing) }
 
     /// The finger moves the grid to `fraction` of the way down the library, at once, in the
-    /// gesture's own callback.
-    func scrub(toFraction fraction: CGFloat) { scroller.scroll(toFraction: fraction) }
+    /// gesture's own callback. A fling coasting under the finger ends here, since setContentOffset
+    /// stops a deceleration without the delegate saying so.
+    func scrub(toFraction fraction: CGFloat) {
+        if scrollPhase == .decelerating { scrollPhase = .idle }
+        scroller.scroll(toFraction: fraction)
+    }
 
-    /// The finger lifted.
+    /// The finger lifted. A coast it never moved the grid from goes on until UIKit reports its end.
     func endScrub() {
-        if phase == .scrubbing { setPhase(.idle) }
+        if phase == .scrubbing { setPhase(scrollPhase) }
+    }
+
+    /// UIKit's scrolling changed: it is the phase, unless the rail has the grid.
+    private func setScrollPhase(_ next: Phase) {
+        scrollPhase = next
+        if phase != .scrubbing { setPhase(next) }
     }
 
     private func setPhase(_ next: Phase) {
@@ -284,7 +297,7 @@ import UIKit
         let still = stopped || stillFor >= ViewportPolicy.restAfter
         let next: Motion
         if scrubbing {
-            // The rail has the grid. A fling it interrupted ended without the delegate saying so
+            // The rail has the grid. A fling under it ends once the finger moves the grid
             // (setContentOffset stops a deceleration silently), and its landing screen is not where
             // the grid goes any more.
             flingTarget = nil
@@ -293,7 +306,7 @@ import UIKit
             speed = 0
             flingTarget = nil
             // A coast whose end was never reported (a jump took the grid from it) is over.
-            if phase == .decelerating { setPhase(.idle) }
+            if phase == .decelerating { setScrollPhase(.idle) }
             next = .idle(since: stillSince ?? time)
         } else if phase == .dragging {
             next = .tracking(speed: speed)
