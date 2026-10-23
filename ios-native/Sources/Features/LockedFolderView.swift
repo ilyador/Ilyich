@@ -63,24 +63,19 @@ private struct LockedFolderScreen: View {
                 Label("Locked folder", systemImage: "lock.shield").font(.title2.bold()).padding(.vertical, 14)
                 Text("Unlock to view your private photos.").foregroundStyle(.secondary)
             }
-            if let status = session.status {
+            // Only the PIN unlocks, as in Immich: the account's password resets the PIN, in
+            // Settings, and never unlocks.
+            if session.status != nil {
                 let settingUp = session.settingUp
                 Section(settingUp ? "Set a 6-digit PIN" : "Unlock") {
-                    if !settingUp && session.entry.usePassword {
-                        SecureField("Account password", text: $session.entry.password).textContentType(.password)
-                    } else {
-                        SecureField("6-digit PIN", text: $session.entry.pin).keyboardType(.numberPad).textContentType(.oneTimeCode)
-                        if settingUp { SecureField("Confirm PIN", text: $session.entry.confirmation).keyboardType(.numberPad) }
-                    }
-                    if session.biometricAvailable && !session.entry.usePassword { Toggle("Enable biometric unlock", isOn: $session.entry.remember) }
+                    SecureField("6-digit PIN", text: $session.entry.pin).keyboardType(.numberPad).textContentType(.oneTimeCode)
+                    if settingUp { SecureField("Confirm PIN", text: $session.entry.confirmation).keyboardType(.numberPad) }
+                    if session.biometricAvailable { Toggle("Enable biometric unlock", isOn: $session.entry.remember) }
                     Button(settingUp ? "Set PIN and unlock" : "Unlock") { session.unlock() }
                         .disabled(!session.canUnlock).requiresWriteAccess(when: settingUp)
                 }
-                if !settingUp {
-                    if session.biometricAvailable {
-                        Button("Unlock with biometrics", systemImage: "faceid") { session.unlockBiometrically() }.disabled(session.phase != .locked)
-                    }
-                    if status.password { Button(session.entry.usePassword ? "Use PIN" : "Use account password") { session.entry.usePassword.toggle() } }
+                if !settingUp && session.biometricAvailable {
+                    Button("Unlock with biometrics", systemImage: "faceid") { session.unlockBiometrically() }.disabled(session.phase != .locked)
                 }
             } else { ProgressView() }
         }

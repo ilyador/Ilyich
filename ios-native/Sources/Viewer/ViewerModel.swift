@@ -345,6 +345,17 @@ enum ViewerConfirmation: Hashable {
         if accessChanged { accessRefreshRevision = refreshRevision }
     }
 
+    /// Reads a photo the viewer shows from the server again, wherever the viewer reads one: on
+    /// showing it, before the editor opens, and for its details, tags and faces. A Locked Folder
+    /// photo is read from the server alone, never the offline library, whose row may not know yet
+    /// that the photo was locked: as a library photo its media would go through the library's
+    /// caches, which a relock doesn't empty (N5).
+    var readAsset: @Sendable (String) async throws -> Asset {
+        let api = api
+        if window.isPrivate { return { try await api.serverAsset(id: $0) } }
+        return { try await api.asset(id: $0) }
+    }
+
     /// Reads the photo on screen from the server again: on showing it, and after each change the
     /// library publishes. A photo found gone, locked or put in Trash elsewhere leaves its source
     /// and the viewer closes; any other record shows here, and reaches the source only when it
@@ -356,9 +367,7 @@ enum ViewerConfirmation: Hashable {
         let accessMustBeConfirmed = accessRefreshRevision >= 0 && accessRefreshRevision <= revision
         do {
             if revision > 0 { try await Task.sleep(for: .milliseconds(250)) }
-            // A Locked Folder photo is read from the server alone: no library cache holds it (N5).
-            let asset: Asset
-            if window.isPrivate { asset = try await api.serverAsset(id: id) } else { asset = try await api.asset(id: id) }
+            let asset = try await readAsset(id)
             try Task.checkCancellation()
             guard selectedID == id, refreshRevision == revision, showDetails(asset, over: previous) else { return }
             accessRefreshRevision = -1
@@ -479,7 +488,7 @@ enum ViewerConfirmation: Hashable {
         guard capabilities[.edit].awaitsDetails else { return }
         let id = selectedID
         run {
-            let asset = try await self.api.asset(id: id)
+            let asset = try await self.readAsset(id)
             guard self.selectedID == id, self.showDetails(asset, over: self.current) else { return }
             if self.capabilities.offers(.edit), self.sheet == nil, self.cover == nil { self.cover = .editor }
         }
