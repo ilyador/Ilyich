@@ -4,12 +4,12 @@ struct SimilarPhotosView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let reference: Asset
-    @State private var store: LibraryStore
+    @State private var store: LibraryFeedStore
     @State private var viewing: Asset?
     @Environment(\.dismiss) private var dismiss
     init(api: APIClient, pipeline: MediaPipeline, reference: Asset) {
         self.api = api; self.pipeline = pipeline; self.reference = reference
-        _store = State(initialValue: LibraryStore(source: LibraryRepository(client: api, index: nil, sync: nil)))
+        _store = State(initialValue: LibraryFeedStore(source: LibraryRepository(client: api, index: nil, sync: nil)))
     }
     var body: some View {
         NavigationStack {

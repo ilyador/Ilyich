@@ -3,7 +3,7 @@ import XCTest
 @testable import Ilyich
 
 @MainActor final class SearchFeedTests: XCTestCase {
-    // MARK: - Continuation and verification, ported from LibraryStoreTests
+    // MARK: - Continuation and verification, ported from the feed store's tests
 
     func testPartialPageStopsAndRetriesItsOwnCursorWithoutLosingEarlierMatches() async throws {
         let source = ScriptedSearch([
@@ -139,14 +139,14 @@ import XCTest
         XCTAssertEqual(back.results.map(\.id), ["a", "b"], "A photo no longer excluded comes back.")
     }
 
-    // MARK: - LibraryStore applies the feed's State
+    // MARK: - LibraryFeedStore applies the feed's State
 
     func testRefreshKeepsRowsWhenIDsUnchanged() async throws {
         let api = SearchStoreFixture([
             .page(["a"], next: "c1"), .page(["b"], next: "c2"),
             .page(["a"], next: "c1"), .page(["b"], next: "c2"),
         ])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         store.setMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO")), title: "Videos")
         try await until("The first page did not show.") { store.results.map(\.id) == ["a"] && !store.isSearching }
@@ -165,7 +165,7 @@ import XCTest
         let api = SearchStoreFixture(smart: [
             .page(["a", "b", "c"], next: "c1"), .page(["b", "d"]),
         ])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         store.search("beach")
         try await until("The results did not show.") { store.results.count == 3 && !store.isSearching }
@@ -186,7 +186,7 @@ import XCTest
 
     func testARestoredPhotoComesBackWithTheNextRefresh() async throws {
         let api = SearchStoreFixture([.page(["a", "b"]), .page(["a"]), .page(["a", "b"])])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         store.setMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO")), title: "Videos")
         try await until("The results did not show.") { store.results.map(\.id) == ["a", "b"] && !store.isSearching }
@@ -215,7 +215,7 @@ import XCTest
     }
 
     private static func smart() throws -> ServerSearchRequest {
-        try ServerSearchRequest(LibraryStore.librarySearch.refined(text: "red hat", mode: .context), userID: nil)
+        try ServerSearchRequest(LibraryFeedStore.librarySearch.refined(text: "red hat", mode: .context), userID: nil)
     }
 
     private static func metadata(developed: Bool = false) throws -> ServerSearchRequest {

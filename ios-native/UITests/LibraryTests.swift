@@ -163,6 +163,28 @@ final class LibraryTests: XCTestCase {
         let moved = grid.cells.matching(NSPredicate(format: "label == %@", label)).firstMatch
         XCTAssertTrue(!moved.exists || moved.frame.minY < rows[0][0].minY - 40, "A vertical drag scrolls the grid.")
     }
+    /// Selecting the month under the viewport selects every photo of it, read through the feed,
+    /// not only the photos the screen holds; deselecting it takes them all out again (F6).
+    @MainActor func testSelectingTheMonthSelectsEveryPhotoOfItNotOnlyThoseOnScreen() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 15))
+        pressPhoto(grid.cells.element(boundBy: 1))
+        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
+        XCTAssertLessThan(grid.cells.count, 100, "The newest month holds more photos than the screen shows.")
+        // A Menu's label holds a button of its own over the same frame, so XCUITest never
+        // reports the labelled one hittable; it is tapped once it is there.
+        let month = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Selection for")).firstMatch
+        XCTAssertTrue(month.waitForExistence(timeout: 5)); month.tap()
+        let select = app.buttons["Select this month"]
+        XCTAssertTrue(select.waitForExistence(timeout: 5)); select.tap()
+        XCTAssertTrue(app.staticTexts["100 selected"].waitForExistence(timeout: 10), "The whole month is selected.")
+        capture(app, "Selection — the whole month")
+        XCTAssertTrue(month.waitForExistence(timeout: 5)); month.tap()
+        let deselect = app.buttons["Deselect this month"]
+        XCTAssertTrue(deselect.waitForExistence(timeout: 5)); deselect.tap()
+        XCTAssertTrue(app.staticTexts["0 selected"].waitForExistence(timeout: 10), "Deselecting the month takes all of it out.")
+    }
     @MainActor func testPinchingChangesDensityWhileTheFingersMove() {
         let app = launch()
         let grid = app.collectionViews["library.grid"]

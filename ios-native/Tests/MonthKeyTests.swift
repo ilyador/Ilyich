@@ -7,6 +7,8 @@ final class MonthKeyTests: XCTestCase {
         XCTAssertEqual(MonthKey(bucketID: "2024-01-01T00:00:00Z"), MonthKey(year: 2024, month: 1))
         XCTAssertEqual(MonthKey(bucketID: "2024-01-01T00:00:00.000Z"), MonthKey(year: 2024, month: 1))
         XCTAssertEqual(MonthKey(bucketID: "2024-12-01 00:00:00"), MonthKey(year: 2024, month: 12), "A time without a zone is UTC.")
+        XCTAssertEqual(MonthKey(bucketID: "2024-12-01T00:00:00"), MonthKey(year: 2024, month: 12))
+        XCTAssertEqual(MonthKey(bucketID: "2024-12-01T01:00:00+01:00"), MonthKey(year: 2024, month: 12), "Midnight UTC written in another zone.")
         XCTAssertEqual(MonthKey(bucketID: "2024-01-01T00:30:00+02:00"), MonthKey(year: 2023, month: 12), "In UTC, as the time rail reads it.")
     }
 

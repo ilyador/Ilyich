@@ -13,7 +13,7 @@ import XCTest
         let api = SearchRecorder(userID: "alice", items: [
             photo("own", owner: "alice", developed: true), photo("partner's", owner: "bob"), photo("trashed", owner: "alice", trashed: true),
         ])
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         defer { store.stop() }
 
         func search(_ text: String = "beach") async throws -> SearchQuery {
@@ -79,7 +79,7 @@ import XCTest
         var locked = photo("locked", owner: "alice"); locked.visibility = .locked
         var hidden = photo("hidden", owner: "alice"); hidden.visibility = .hidden
         let api = SearchRecorder(userID: "alice", items: [locked, hidden, photo("shown", owner: "alice")])
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         defer { store.stop() }
 
         store.search("beach")

@@ -16,7 +16,7 @@ import XCTest
     /// viewport the store hears of, after the feed's first two.
     func testMonthsLoadFromTheViewportWithoutCellsAsking() async throws {
         let api = FeedLibrary(months: Self.months(12))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         let first = Set(store.buckets.prefix(2).map(\.id))
@@ -35,7 +35,7 @@ import XCTest
     /// wants them, as every month shown is after a sync.
     func testSyncReloadDoesNotRestartAnInFlightMonth() async throws {
         let api = FeedLibrary(months: Self.months(6), delay: .milliseconds(300))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         let first = store.buckets[0].id, second = store.buckets[1].id, third = store.buckets[2].id
@@ -73,7 +73,7 @@ import XCTest
     /// from the top of the library) loads every month shown without the user dragging.
     func testTheGridReportsItsViewportAfterAReloadWithoutAScroll() async throws {
         let api = FeedLibrary(months: Self.months(24))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         let client = try APIClient(baseURL: XCTUnwrap(URL(string: "https://media.example")), accessToken: "feed-session",
                                    userID: "feed-" + UUID().uuidString)
@@ -112,7 +112,7 @@ import XCTest
         let api = FeedLibrary(months: months)
         let refused = months[2]
         await api.fail(refused, times: 1, with: ServerFailure.http(403, nil))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         store.visibleSections([2])
@@ -188,7 +188,7 @@ import XCTest
         await api.fail(passing, times: 1, with: URLError(.timedOut))
         await api.fail(refused, times: 10, with: ServerFailure.http(404, nil))
         await api.fail(unseen, times: 10, with: URLError(.timedOut))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         XCTAssertEqual(store.buckets.map(\.id), months)
@@ -220,7 +220,7 @@ import XCTest
     /// that follows a clear (F4), whose counts agree with it, nor for a selection.
     func testRestoredMonthsStayWithinTheResidentBound() async throws {
         let api = FeedLibrary(months: Self.months(20))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         store.loaded = Dictionary(uniqueKeysWithValues: store.buckets.map { ($0.id, [Asset(id: $0.id + "#saved")]) })
@@ -252,7 +252,7 @@ import XCTest
         let months = Self.months(6)
         let slow = months[3]
         let api = FeedLibrary(months: months, slow: [slow: .milliseconds(600)])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         let section = try XCTUnwrap(store.buckets.firstIndex { $0.id == slow })
@@ -273,7 +273,7 @@ import XCTest
     /// folder an older build left is deleted at launch.
     func testNoTimelineSnapshotIsKeptAndTheOldFolderIsDeleted() async throws {
         let api = FeedLibrary(months: Self.months(3))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The months did not load.") { store.loaded.count == 2 }

@@ -11,7 +11,7 @@ import XCTest
     func testAFeedNeverMixesBackends() async throws {
         let months = ["2026-04-01T00:00:00Z", "2026-03-01T00:00:00Z", "2026-02-01T00:00:00Z", "2026-01-01T00:00:00Z"]
         let source = RoutedLibrary(months: months)
-        let store = LibraryStore(source: source, placesDelay: .zero)
+        let store = LibraryFeedStore(source: source, placesDelay: .zero)
         addTeardownBlock { @MainActor in store.stop() }
 
         await store.reload()

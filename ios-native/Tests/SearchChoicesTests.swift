@@ -11,7 +11,7 @@ import XCTest
     /// Photo content is smart search, with verify: false unless the AI check is on; on leaves
     /// verification to the server, as before. The other modes are metadata searches on their field.
     func testEachModeBuildsTheRightRequest() throws {
-        let library = LibraryStore.librarySearch
+        let library = LibraryFeedStore.librarySearch
         let plain = try ServerSearchRequest(library.refined(text: "red hat", mode: .context), userID: "alice", checksContent: false)
         XCTAssertEqual(plain.endpoint, .smart)
         var body = try json(plain.smartBody(cursor: nil))
@@ -45,7 +45,7 @@ import XCTest
                                   takenAt: DateFilter(gte: start, lt: end), visibility: StringFilter(eq: "archive"),
                                   isFavorite: BoolFilter(eq: true), make: StringFilter(eq: "Apple"), hasAlbums: BoolFilter(eq: false))
         for mode in SearchMode.allCases {
-            let query = LibraryStore.librarySearch.narrowed(by: chosen).refined(text: "beach", mode: mode)
+            let query = LibraryFeedStore.librarySearch.narrowed(by: chosen).refined(text: "beach", mode: mode)
             let request = try ServerSearchRequest(query, userID: "alice")
             let filter = request.filter
             XCTAssertEqual(filter.type, StringFilter(eq: "VIDEO"), "\(mode)")
@@ -73,7 +73,7 @@ import XCTest
     /// The mode stays through clearing, a new search, and a change of feed.
     func testTheModeSurvivesClearingAndANewSearch() async throws {
         let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")])
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         defer { store.stop() }
 
         store.applySearchOptions(mode: .description, filter: SearchFilter())
@@ -101,7 +101,7 @@ import XCTest
     func testTheSwitchTogglesVerificationInTheRequest() async throws {
         let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")],
                                  verification: Verification(status: .complete, checked: 10, rejected: 9))
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         defer { store.stop() }
 
         XCTAssertFalse(store.searchChoices.checksContent)
@@ -142,7 +142,7 @@ import XCTest
         let storage = SearchChoicesStorage(scope: "server|alice", defaults: defaults)
         storage.save(SearchChoices(mode: .filename, filter: SearchFilter(type: StringFilter(eq: "VIDEO"), isFavorite: BoolFilter(eq: true))))
         let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")])
-        let store = LibraryStore(source: api, placesDelay: .zero, choices: storage)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero, choices: storage)
         defer { store.stop() }
 
         store.removeChoice(.mode)
@@ -167,7 +167,7 @@ import XCTest
         var archivedPhoto = Asset(id: "archived")
         archivedPhoto.visibility = .archive
         let api = SearchRecorder(userID: "alice", items: [archivedPhoto])
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         defer { store.stop() }
 
         // In the library, which is searched with the archive, Only archived keeps to the archive.
@@ -208,7 +208,7 @@ import XCTest
     /// the chips one by one narrows less, and the last one brings the library back.
     func testChipsShowAndClearOneByOne() async throws {
         let api = SearchRecorder(userID: "alice", items: [Asset(id: "shown")])
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         defer { store.stop() }
 
         store.applySearchOptions(mode: .filename, filter: SearchFilter(type: StringFilter(eq: "VIDEO"), isFavorite: BoolFilter(eq: true)))
@@ -260,13 +260,13 @@ import XCTest
         XCTAssertEqual(storage.load(), SearchChoices(), "Nothing chosen yet: Photo content, no AI check, no filters.")
 
         let api = SearchRecorder(userID: "alice", items: [])
-        let store = LibraryStore(source: api, placesDelay: .zero, choices: storage)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero, choices: storage)
         store.setChecksContent(true)
         store.applySearchOptions(mode: .ocr, filter: SearchFilter(personIds: IDsFilter(all: ["maya"]), isFavorite: BoolFilter(eq: true),
                                                                  trashedAt: .set))
         store.stop()
 
-        let reopened = LibraryStore(source: api, placesDelay: .zero, choices: storage)
+        let reopened = LibraryFeedStore(source: api, placesDelay: .zero, choices: storage)
         defer { reopened.stop() }
         XCTAssertTrue(reopened.searchChoices.checksContent)
         XCTAssertEqual(reopened.searchMode, .ocr)

@@ -12,7 +12,7 @@ import UIKit
     func scrollToBucket(_ index: Int, item: Int)
 }
 
-extension LibraryStore: TimeRailFeed {}
+extension LibraryFeedStore: TimeRailFeed {}
 
 /// The time rail's interaction (REBUILD_ROADMAP.md T4): where the finger is, the month under it,
 /// whether the lens and the column are out, and the hold where the finger stops. The library's

@@ -48,7 +48,7 @@ protocol DeviceIndexBackupSource: Sendable {
 /// The phone's photos as the merged library shows them at one moment.
 struct DeviceIndexSnapshot: Sendable {
     let access: DeviceAccess
-    /// What LibraryStore merges today.
+    /// What LibraryFeedStore merges today.
     let timeline: MergedTimeline
     /// Every phone photo in the backup albums, by local ID.
     let items: [String: DeviceTimelineItem]

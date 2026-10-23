@@ -9,7 +9,7 @@ private final class ChromeAwareCollectionView: UICollectionView {
 }
 
 struct PhotoGrid: UIViewRepresentable {
-    let store: LibraryStore
+    let store: LibraryFeedStore
     let pipeline: MediaPipeline
     let columns: Int
     var showsDayHeaders = false

@@ -3,14 +3,14 @@ import IlyichPlatform
 import XCTest
 @testable import Ilyich
 
-@MainActor final class LibraryStoreTests: XCTestCase {
+@MainActor final class LibraryFeedStoreTests: XCTestCase {
     func testPartialPageStopsAndRetriesItsOwnCursorWithoutLosingEarlierMatches() async throws {
         let api = LibraryAPIFixture([
             .page(["first"], next: "second"),
             .page([], next: "third", status: .partial),
             .page(["second"], next: "third"),
         ])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         // A checked search: the AI check starts off.
         store.setChecksContent(true)
         store.search("me wearing a red hat in Amsterdam")
@@ -35,7 +35,7 @@ import XCTest
             .page([], next: "later", status: .unavailable),
             .page(["found"]),
         ])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         store.setChecksContent(true)
         store.search("Maya in Amsterdam")
         try await settle(store, calls: 2, api: api)
@@ -51,7 +51,7 @@ import XCTest
 
     func testMediaShelfFilterLoadsIntoTheLibraryResultsFeed() async throws {
         let api = LibraryAPIFixture([], metadataPages: [.page(["video-1"])])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         store.setMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO")), title: "Videos")
         let deadline = ContinuousClock.now + .seconds(5)
         while ContinuousClock.now < deadline {
@@ -73,7 +73,7 @@ import XCTest
         ], metadataPages: [.page(assets: [
             Asset(id: "june-photo", localDateTime: june), Asset(id: "august-photo", fileCreatedAt: august)
         ])])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         store.visibleSection(0)
         store.position = GridPosition(section: "2018-04-01T00:00:00Z", item: 0, offset: 0, assetID: "timeline-photo")
@@ -95,7 +95,7 @@ import XCTest
             .page(assets: [Asset(id: "not-developed", isDeveloped: false)], next: "developed-page"),
             .page(assets: [Asset(id: "developed", isDeveloped: true)]),
         ])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         let bucket = try XCTUnwrap(store.buckets.first?.id)
         let position = GridPosition(section: bucket, item: 0, offset: 19, assetID: "timeline-photo")
@@ -115,7 +115,7 @@ import XCTest
 
     func testClearingAFilterReopensTheLibraryOnTheBackendRoutingMovedItTo() async throws {
         let api = RoutingAPIFixture()
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         await store.reload()
         XCTAssertEqual(store.feedPlan?.backend, .serverTimeline)
         let position = GridPosition(section: "2024-10-01T00:00:00Z", item: 0, offset: 7, assetID: "photo")
@@ -139,7 +139,7 @@ import XCTest
         let library = try XCTUnwrap(SearchFilter.library.visibility?.in)
         XCTAssertEqual(Set(library), ["timeline", "archive"])
         let api = PlacesAPIFixture(places: [:])
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility, "Searching the library leaves the Locked Folder out.")
         store.setPerson(Person(id: "maya", name: "Maya", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: nil, isFavorite: nil))
         XCTAssertEqual(store.searchFilter.visibility, SearchFilter.library.visibility, "So does searching a person's photos.")
@@ -154,7 +154,7 @@ import XCTest
 
     func testLightroomIsATimelineOfEveryDevelopedPhoto() async throws {
         let api = PlacesAPIFixture(places: [:])
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         await store.reload()
         store.setDeveloped(title: "Lightroom")
         XCTAssertEqual(store.feedQuery, .lightroom)
@@ -172,7 +172,7 @@ import XCTest
             .page(assets: (0..<5).map { Asset(id: "phone-\(page)-\($0)", isDeveloped: false) }, next: "page-\(page + 1)")
         }
         let api = LibraryAPIFixture([], metadataPages: recent + [.page(assets: [Asset(id: "developed", isDeveloped: true)])])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         store.setMetadataFilter(SearchFilter(visibility: StringFilter(eq: "timeline")), title: "Lightroom", developedOnly: true)
         try await until("The developed photo behind the recent ones was not found.") { await api.metadataCalls == 13 && !store.isSearching }
@@ -184,7 +184,7 @@ import XCTest
 
     func testChoosingAPlaceKeepsTheTimelineAndItsRailAsAPersonDoes() async throws {
         let api = PlacesAPIFixture(places: [:], byMonth: true)
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         await store.reload()
         store.setPlace(id: "lisbon", assetIDs: ["lisbon-1", "lisbon-2"], title: "Lisbon")
         try await until("The place's months did not load.") { store.canScrubTimeline && store.buckets.first?.id == "2023-05-01T00:00:00Z" }
@@ -198,7 +198,7 @@ import XCTest
 
     func testAPlaceIsFoundBySearchWhenTheOfflineLibraryCannotLayItOut() async throws {
         let api = PlacesAPIFixture(places: [:], byMonth: true, placeFails: true)
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         await store.reload()
         store.setPlace(id: "lisbon", assetIDs: ["lisbon-1", "lisbon-2"], title: "Lisbon")
         try await until("The place did not fall back to search.") { store.sections.first?.id == "results" }
@@ -226,7 +226,7 @@ import XCTest
             nil: [MonthPlaceCount(bucket: "2024-10-01", city: "Kyoto", country: "Japan", count: 40)],
             "maya": [MonthPlaceCount(bucket: "2024-08-01", city: "Oslo", country: "Norway", count: 20)],
         ])
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         await store.reload()
         try await until("The library's places were not counted.") { store.monthPlaces["2024-10-01"] != nil }
         store.setPerson(Person(id: "maya", name: "Maya", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: nil, isFavorite: nil))
@@ -241,7 +241,7 @@ import XCTest
     func testPlacesArriveWhileTheLibraryKeepsChanging() async throws {
         let api = PlacesAPIFixture(places: [nil: [MonthPlaceCount(bucket: "2024-10-01", city: "Kyoto", country: "Japan", count: 40)]],
                                    delay: .milliseconds(300))
-        let store = LibraryStore(source: api, placesDelay: .zero)
+        let store = LibraryFeedStore(source: api, placesDelay: .zero)
         await store.reload()
         // Syncs reload the feed more often than its places take to count.
         for _ in 0..<8 {
@@ -256,14 +256,14 @@ import XCTest
         let scope = "test-places-" + UUID().uuidString
         let kept = MemoryPlacesStore()
         let counted = PlacesAPIFixture(scope: scope, places: [nil: [MonthPlaceCount(bucket: "2024-10-01", city: "Kyoto", country: "Japan", count: 40)]])
-        let first = LibraryStore(source: counted, placesDelay: .zero, places: MonthPlacesService(source: counted, store: kept, delay: .zero))
+        let first = LibraryFeedStore(source: counted, placesDelay: .zero, places: MonthPlacesService(source: counted, store: kept, delay: .zero))
         await first.reload()
         try await until("The places were not counted.") { first.monthPlaces["2024-10-01"] != nil }
         try await until("The places were not kept on the phone.") { await kept.rows[LibraryQuery.library.stableKey] != nil }
         first.stop()
         // The next launch is slow to count; the kept places show meanwhile.
         let slow = PlacesAPIFixture(scope: scope, places: [:], delay: .seconds(10))
-        let next = LibraryStore(source: slow, placesDelay: .zero, places: MonthPlacesService(source: slow, store: kept, delay: .zero))
+        let next = LibraryFeedStore(source: slow, placesDelay: .zero, places: MonthPlacesService(source: slow, store: kept, delay: .zero))
         await next.reload()
         try await until("The kept places did not show at launch.") { next.monthPlaces["2024-10-01"]?.first?.name == "Kyoto" }
         next.stop()
@@ -272,7 +272,7 @@ import XCTest
     func testADeletedPhotoLeavesTheFeedBeforeTheServerConfirms() async throws {
         let bucket = "2026-01-01T00:00:00Z"
         let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "a"), Asset(id: "b"), Asset(id: "c")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         try await until("The timeline did not load.") { store.loaded[bucket]?.count == 3 }
 
@@ -288,7 +288,7 @@ import XCTest
         let bucket = "2026-01-01T00:00:00Z"
         let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "old-a"), Asset(id: "old-b")],
                                     scopedTimelineAssets: ["favorites": [Asset(id: "favorite-a")]])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         try await until("Initial timeline assets did not load.") { store.loaded[bucket]?.count == 2 }
         store.position = GridPosition(section: bucket, item: 1, offset: 17, assetID: "old-b")
@@ -313,7 +313,7 @@ import XCTest
         let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "old-photo")],
                                     scopedTimelineAssets: ["favorites": [Asset(id: "favorite-photo")]],
                                     failingTimelineScopes: ["favorites"])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         try await until("Initial timeline asset did not load.") { store.loaded[bucket]?.first?.id == "old-photo" }
         let initialResetID = store.resetID
@@ -338,7 +338,7 @@ import XCTest
         // No metadata pages: the filtered view's search fails.
         let api = LibraryAPIFixture([.page(["beach-1", "beach-2"])], timelineAssets: [Asset(id: "timeline-photo")],
                                     scopedTimelineAssets: ["favorites": []])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The timeline did not load.") { store.loaded[bucket]?.first?.id == "timeline-photo" }
@@ -376,7 +376,7 @@ import XCTest
         let bucket = "2026-01-01T00:00:00Z"
         let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "old-photo")],
                                     scopedTimelineAssets: ["favorites": [Asset(id: "stale-favorite")], "archive": [Asset(id: "archive-photo")]])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         try await until("Initial timeline asset did not load.") { store.loaded[bucket]?.first?.id == "old-photo" }
         await api.setTimelineBehavior(scope: "favorites", delayed: true)
@@ -397,7 +397,7 @@ import XCTest
 
     func testSwitchingScopeClearsSelectionAndInvalidatesPendingSearch() async throws {
         let api = LibraryAPIFixture([.page(["old-query"])], delayed: true)
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         store.search("old query")
         for _ in 0..<100 where await api.cursors.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
         store.selected = ["invisible-photo"]; store.isSelecting = true
@@ -414,7 +414,7 @@ import XCTest
 
     func testClearingFilterRestoresScrollPositionAndTimelineRetryStaysTimeline() async throws {
         let api = LibraryAPIFixture([])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         let position = GridPosition(section: "2026-01-01T00:00:00Z", item: 0, offset: 17)
         store.position = position
@@ -429,7 +429,7 @@ import XCTest
         store.stop()
     }
 
-    private func settle(_ store: LibraryStore, calls: Int, api: LibraryAPIFixture) async throws {
+    private func settle(_ store: LibraryFeedStore, calls: Int, api: LibraryAPIFixture) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while ContinuousClock.now < deadline {
             if await api.cursors.count >= calls, !store.isSearching { return }
@@ -443,7 +443,7 @@ import XCTest
     /// library that can't say what changed, still reloads here.
     func testRefreshAfterMutationLeavesAPublishedChangeToTheViewsReload() async throws {
         let api = LibraryAPIFixture([])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         let initial = await api.summaryCalls
         XCTAssertGreaterThan(initial, 0)
@@ -469,7 +469,7 @@ import XCTest
     func testMonthSelectionResolvesEvictedAssetsAndKeepsRemoteAndLocalIdentitiesSeparate() async throws {
         let assets = (0..<650).map { Asset(id: "remote-\($0)") }
         let api = LibraryAPIFixture([], timelineAssets: assets)
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         await store.reload()
         let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
         store.updateDeviceTimeline(MergedTimeline(photos: [.init(id: "phone-only", date: date), .init(id: "backed-up", date: date)],
@@ -492,7 +492,7 @@ import XCTest
 
     func testPhoneOnlyPhotoSwipesThroughEverythingOnThePhone() async throws {
         let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "remote-0"), Asset(id: "remote-1")])
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         await store.reload()
         let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
         let phoneOnly = LocalPhoto(id: "phone-only", date: date)
@@ -511,7 +511,7 @@ import XCTest
 
     func testPendingGroupSelectionCannotReappearAfterLeavingSelection() async throws {
         let api = LibraryAPIFixture([], delayedTimeline: true)
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         store.isSelecting = true; store.selectMonth(true)
         await Task.yield()
@@ -525,7 +525,7 @@ import XCTest
     func testDeduplicationKeepsTheVisiblePhotoAnchoredWhenEarlierRowsDisappear() async throws {
         let bucket = "2026-01-01T00:00:00Z"
         let api = LibraryAPIFixture([])
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         await store.reload()
         try await until("The timeline did not load.") { store.loaded[bucket] != nil }
         let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
@@ -549,7 +549,7 @@ import XCTest
 
     func testRepeatedDeviceSnapshotKeepsGridIdentityAndLocalEditStillInvalidatesMedia() async throws {
         let api = LibraryAPIFixture([])
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
         let photo = LocalPhoto(id: "phone", date: date, modified: date)
         let snapshot = MergedTimeline(photos: [photo])
@@ -580,7 +580,7 @@ import XCTest
     func testDevicePublishUpdatesOnlyItsMonth() async throws {
         let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
         let api = try datedFixture()
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         await store.reload()
         try await until("The first months did not load.") { store.loaded[march] != nil && store.loaded[february] != nil }
         await store.settleProjections()
@@ -618,7 +618,7 @@ import XCTest
     func testProjectionsNeverRunOnMain() async throws {
         let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
         let api = try datedFixture()
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         MonthProjector.Probe.start()
         defer { MonthProjector.Probe.stop() }
         await store.reload()
@@ -642,7 +642,7 @@ import XCTest
     func testAMonthLetGoDuringAProjectionRunStaysGone() async throws {
         let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
         let api = try datedFixture()
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         await store.reload()
         try await until("The first months did not load.") { store.loaded[march] != nil && store.loaded[february] != nil }
         await store.settleProjections()
@@ -672,7 +672,7 @@ import XCTest
         let late = try XCTUnwrap(APIDate.parse("2026-02-20T12:00:00Z")), early = try XCTUnwrap(APIDate.parse("2026-02-05T12:00:00Z"))
         let server = [Asset(id: "late", localDateTime: late), Asset(id: "early", localDateTime: early)]
         let api = LibraryAPIFixture([], bucketAssets: [february: server])
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         await store.reload()
         try await until("February did not load.") { store.loaded[february] != nil }
         let before = try XCTUnwrap(APIDate.parse("2026-02-03T12:00:00Z")), after = try XCTUnwrap(APIDate.parse("2026-02-25T12:00:00Z"))
@@ -701,7 +701,7 @@ import XCTest
     func testClearingAFilterMergesThePhonesPhotosThatChangedMeanwhile() async throws {
         let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
         let api = try datedFixture()
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         await store.reload()
         try await until("The first months did not load.") { store.loaded[march] != nil && store.loaded[february] != nil }
         let deleted = try XCTUnwrap(APIDate.parse("2026-02-10T12:00:00Z"))
@@ -727,7 +727,7 @@ import XCTest
     /// whole-snapshot cache is gone, so nothing older can be replayed over them either).
     func testBackgroundRefreshKeepsLiveRowsUntilTheirMonthsAreReadAgain() async throws {
         let api = LibraryAPIFixture([], delayedTimeline: true)
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         let bucket = "2026-01-01T00:00:00Z"
         store.loaded = [bucket: [Asset(id: "live-photo")]]
@@ -763,7 +763,7 @@ import XCTest
 
     func testBackgroundRefreshPreservesTheVisibleOlderMonthHeading() async throws {
         let api = try datedFixture()
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         store.visibleSection(2)
         store.navigation.section = 2
@@ -788,7 +788,7 @@ import XCTest
             .page(["place-c"], next: "page-2"),
             .page(["place-b", "place-a"]),
         ])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         store.setFeed(.person("stale-person"), title: "Someone")
         store.setPlace(id: "nearby", assetIDs: ["place-a", "place-b", "place-c"], title: "Nearby")
         XCTAssertEqual(store.feedQuery, .place(PlaceMembership(placeID: "nearby", assetIDs: ["place-a", "place-b", "place-c"], markerQuery: "")),
@@ -822,7 +822,7 @@ import XCTest
         let date = try XCTUnwrap(APIDate.parse("2026-01-15T12:00:00Z"))
         let asset = Asset(id: "loaded-photo", localDateTime: date)
         let api = LibraryAPIFixture([], bucketAssets: [bucket: [asset]])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         try await until("Initial bucket did not load.") { store.loaded[bucket] != nil }
         let callsBefore = await api.bucketCalls.count
@@ -846,7 +846,7 @@ import XCTest
             (String(format: "%04d-%02d-01T00:00:00Z", 2000 + index / 12, index % 12 + 1), [Asset(id: "photo-\(index)")])
         })
         let api = LibraryAPIFixture([], bucketAssets: assets, bucketDelay: .milliseconds(40))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         let reset = store.resetID
         for section in store.buckets.indices { store.scrollToBucket(section) }
@@ -866,7 +866,7 @@ import XCTest
             (String(format: "%04d-%02d-01T00:00:00Z", 2000 + index / 12, index % 12 + 1), [Asset(id: "photo-\(index)")])
         })
         let api = LibraryAPIFixture([], bucketAssets: assets, bucketDelay: .milliseconds(100))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         for section in store.buckets.indices { store.scrollToBucket(section) }
         await Task.yield()
@@ -886,7 +886,7 @@ import XCTest
             (String(format: "%04d-%02d-01T00:00:00Z", 2000 + index / 12, index % 12 + 1), [Asset(id: "photo-\(index)")])
         })
         let api = LibraryAPIFixture([], bucketAssets: assets)
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         let first = try XCTUnwrap(store.buckets.first?.id)
         try await until("Initial bucket did not load.") { store.loaded[first] != nil }
@@ -904,7 +904,7 @@ import XCTest
 
     func testRepeatedRailJumpsToTheSameMonthAreDistinctRequests() async throws {
         let api = try datedFixture()
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         store.scrollToBucket(1)
         let first = try XCTUnwrap(store.scrollRequest)
@@ -920,7 +920,7 @@ import XCTest
     func testRailJumpPreservesAndClampsTheRequestedItemWithinItsMonth() async throws {
         let bucket = "2026-01-01T00:00:00Z"
         let api = LibraryAPIFixture([], bucketAssets: [bucket: (0..<3).map { Asset(id: "photo-\($0)") }])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
 
         store.scrollToBucket(0, item: 1)
@@ -936,7 +936,7 @@ import XCTest
 
     func testShowInTimelineLoadsTheUnloadedMonthAndFindsTheAsset() async throws {
         let api = try datedFixture()
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         store.setFeed(.favorites, title: "Favorites")
         store.selected = ["other"]; store.isSelecting = true
         let date = try XCTUnwrap(APIDate.parse("2025-06-20T12:00:00Z"))
@@ -966,7 +966,7 @@ import XCTest
     /// photo's month still loads with the plan the library was opened with.
     func testShowInTimelineFromTheLibraryLoadsAnUnloadedMonth() async throws {
         let api = try datedFixture()
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         try await until("The library did not load.") { store.loaded["2026-03-01T00:00:00Z"] != nil }
         XCTAssertNil(store.loaded[Self.june])
@@ -981,7 +981,7 @@ import XCTest
 
     func testScopeChangeOrStopPreventsAnOldDateNavigationFromPublishing() async throws {
         let api = try datedFixture(slow: [Self.june])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         let date = try XCTUnwrap(APIDate.parse("2025-06-20T12:00:00Z"))
         let asset = Asset(id: "late", fileCreatedAt: date, localDateTime: date)
         store.showInTimeline(asset)
@@ -999,7 +999,7 @@ import XCTest
 
     func testRailJumpSupersedesPendingDateNavigation() async throws {
         let api = try datedFixture(slow: [Self.june])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         let date = try XCTUnwrap(APIDate.parse("2025-06-20T12:00:00Z"))
         store.showInTimeline(Asset(id: "late", localDateTime: date))
         try await until("The target month was never requested.") { await api.bucketCalls.contains(Self.june) }
@@ -1011,7 +1011,7 @@ import XCTest
         store.stop()
     }
 
-    private func settleSelection(_ store: LibraryStore) async throws {
+    private func settleSelection(_ store: LibraryFeedStore) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while store.isSelectingGroup && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertFalse(store.isSelectingGroup)
