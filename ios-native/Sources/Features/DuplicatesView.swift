@@ -4,6 +4,7 @@ struct DuplicatesView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
+    @Environment(\.mutations) private var mutations
     @State private var groups: [DuplicateGroup] = []
     @State private var keep: [String: Set<String>] = [:]
     @State private var loading = true
@@ -43,6 +44,8 @@ struct DuplicatesView: View {
             }.padding(.vertical, 20)
         }.navigationTitle("Duplicates").disabled(busy)
         .task { await load() }.refreshable { await load() }
+        // A group resolved or dismissed goes, and a photo deleted elsewhere leaves its group.
+        .onMutationApplied { groups = DuplicateGroups.applying($0, to: groups) }
         .confirmationDialog("Move \(confirming.map { $0.assets.count - selected($0).count } ?? 0) items to trash?", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }), titleVisibility: .visible) {
             Button("Move to trash", role: .destructive) { if let group = confirming { Task { await resolve(group) } } }.requiresWriteAccess()
         } message: { Text("The items marked Keep will remain in your library.") }
@@ -58,21 +61,22 @@ struct DuplicatesView: View {
         } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func dismissGroup(_ group: DuplicateGroup) async {
-        busy = true; defer { busy = false }
-        do { try await api.requestVoid(.delete, path: "duplicates/\(group.id)"); groups.removeAll { $0.id == group.id } } catch { failure = .init(error) }
+        await change(.dismissDuplicate(group: group.id), on: group)
     }
+    /// The others go to Trash, never for good, so their thumbnails stay on the phone and a restore
+    /// shows them at once; the account's mutations refuse a server without a Trash.
     private func resolve(_ group: DuplicateGroup) async {
-        struct Group: Encodable, Sendable { let duplicateId: String; let keepAssetIds: [String]; let trashAssetIds: [String] }
-        struct Body: Encodable, Sendable { let groups: [Group] }
-        busy = true; defer { busy = false }
         let kept = selected(group), trashed = group.assets.map(\.id).filter { !kept.contains($0) }
-        do {
-            guard try await api.serverFeatures().trash else { throw APIError.invalidResponse("Trash is turned off on this server. No photos were removed.") }
-            let result: [BulkResult] = try await api.request(.post, path: "duplicates/resolve", body: Body(groups: [.init(duplicateId: group.id, keepAssetIds: Array(kept), trashAssetIds: trashed)]))
-            guard result.allSatisfy(\.success) else { throw APIError.invalidResponse("Some items could not be moved. Refresh this collection and try again.") }
-            groups.removeAll { $0.id == group.id }; confirming = nil
-            await invalidateBrowsingCache(api: api, pipeline: pipeline)
-        } catch { failure = .init(error) }
+        let keep = group.assets.map(\.id).filter(kept.contains)
+        if await change(.resolveDuplicate(group: group.id, keep: keep, trash: trashed), on: group) { confirming = nil }
+    }
+    /// Has the account's mutations make the change. The group leaves the list from the result,
+    /// as do photos the feed and other screens show.
+    @discardableResult private func change(_ request: MutationRequest, on group: DuplicateGroup) async -> Bool {
+        guard let mutations else { failure = .init(APIError.signedOut); return false }
+        busy = true; defer { busy = false }
+        do { _ = try await mutations.start(request, on: group.assets).result; return true }
+        catch { failure = .init(error); return false }
     }
 }
 
@@ -80,6 +84,7 @@ struct TrashView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
+    @Environment(\.mutations) private var mutations
     @State private var assets: [Asset] = []
     @State private var buckets: [TimeBucket] = []
     @State private var nextBucket = 0
@@ -124,6 +129,8 @@ struct TrashView: View {
             }
         }
         .task { await reload() }.refreshable { await reload() }
+        // Photos restored or deleted, here or from their viewer, leave in place.
+        .onMutationApplied(apply)
         .confirmationDialog("Permanently delete \(selection.count) items?", isPresented: $confirmPermanent, titleVisibility: .visible) {
             Button("Delete forever", role: .destructive) { Task { await remove() } }.requiresWriteAccess()
         } message: { Text("These photos and videos will be permanently removed from your server. This cannot be undone.") }
@@ -153,40 +160,48 @@ struct TrashView: View {
         loading = true; defer { loading = false }
         do { assets += try await api.timeBucket(buckets[nextBucket].timeBucket, of: try timeline); nextBucket += 1 } catch { failure = .init(error) }
     }
+    /// Restored photos keep their thumbnails; the account's mutations forget only those deleted
+    /// for good.
     private func restore() async {
-        loading = true; defer { loading = false }
-        do {
-            let result = try await api.restoreAssets(ids: Array(selection))
-            await invalidateBrowsingCache(api: api, pipeline: pipeline)
-            resultMessage = "Restored \(result.count.formatted()) items."
-            loading = false; await reload()
-        } catch { failure = .init(error) }
+        let ids = Array(selection)
+        if let result = await change(.restore(ids), on: assets.filter { selection.contains($0.id) }) {
+            resultMessage = "Restored \((result.affected ?? result.succeeded.count).formatted()) items."
+        }
     }
     private func remove() async {
-        loading = true; defer { loading = false }
-        do {
-            try await api.trashAssets(ids: Array(selection), permanently: true)
-            await invalidateBrowsingCache(api: api, pipeline: pipeline, deleted: selection)
-            loading = false; await reload()
-        } catch { failure = .init(error) }
+        await change(.deletePermanently(Array(selection)), on: assets.filter { selection.contains($0.id) })
     }
     private func changeAll(permanently: Bool) async {
         guard !loading else { return }
-        loading = true; defer { loading = false }
         do {
             guard try await api.serverFeatures().trash else { throw APIError.invalidResponse("Trash is turned off on this server.") }
-            let result: TrashResult = try await api.request(.post, path: permanently ? "trash/empty" : "trash/restore")
-            resultMessage = permanently ? "Permanently removed \(result.count.formatted()) items." : "Restored \(result.count.formatted()) items."
-            // The sync forgets the rest of an emptied Trash as their deletions arrive.
-            await invalidateBrowsingCache(api: api, pipeline: pipeline, deleted: permanently ? Set(assets.map(\.id)) : [])
-            loading = false; await reload()
-        } catch { failure = .init(error) }
+        } catch { failure = .init(error); return }
+        // Photos not loaded here are named by the sync, which forgets an emptied Trash's as their
+        // deletions arrive.
+        guard let result = await change(permanently ? .emptyTrash : .restoreAllTrash, on: assets) else { return }
+        let count = (result.affected ?? result.succeeded.count).formatted()
+        resultMessage = permanently ? "Permanently removed \(count) items." : "Restored \(count) items."
     }
-}
-
-/// The timeline reloads after a change made here. Trashed and restored photos keep their media;
-/// photos deleted for good lose theirs.
-@MainActor private func invalidateBrowsingCache(api: APIClient, pipeline: MediaPipeline, deleted: Set<String> = []) async {
-    await pipeline.forget(assetIDs: deleted)
-    LegacyNotificationBridge.cachesReset(scope: api.cacheScope)
+    /// Has the account's mutations make the change, and says what it did. The photos leave the
+    /// grid from the result, in place, as they leave the feed.
+    @discardableResult private func change(_ request: MutationRequest, on records: [Asset]) async -> MutationResult? {
+        guard let mutations else { failure = .init(APIError.signedOut); return nil }
+        loading = true; defer { loading = false }
+        do {
+            let result = try await mutations.start(request, on: records).result
+            if !result.failed.isEmpty { failure = .init(APIError.invalidResponse("\(result.failed.count.formatted()) items couldn’t be changed. Refresh and try again.")) }
+            return result
+        } catch { failure = .init(error); return nil }
+    }
+    /// What a mutation leaves of the Trash shown: everything goes when it was emptied or restored
+    /// whole, and otherwise each photo restored or deleted.
+    private func apply(_ result: MutationResult) {
+        switch result.request {
+        case .emptyTrash, .restoreAllTrash:
+            assets = []; buckets = []; nextBucket = 0; selection = []
+        default:
+            assets = result.applied(to: assets, keeping: CollectionMembership.trash)
+            selection.formIntersection(assets.map(\.id))
+        }
+    }
 }

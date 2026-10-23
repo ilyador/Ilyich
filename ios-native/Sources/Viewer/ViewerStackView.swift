@@ -4,14 +4,15 @@ struct ViewerStackView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let stackID: String
+    /// A fresher record of a photo, read from the server.
     let onUpdated: (Asset) -> Void
-    let onChanged: () -> Void
     @State private var stack: StackDetails?
     @State private var viewing: Asset?
     @State private var error: String?
     @State private var confirmUnstack = false
     @State private var busy = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mutations) private var mutations
     private var context: CapabilityContext { CapabilityContext(api: api, features: nil) }
     /// Whether this photo's place in the stack can be changed: only its owner can.
     private func stacking(_ asset: Asset) -> ActionAvailability { AssetCapabilityPolicy.evaluate(asset, context: context)[.stack] }
@@ -34,8 +35,8 @@ struct ViewerStackView: View {
                     let availability = stacking(asset)
                     if availability != .hidden {
                         Menu {
-                            Button("Set as stack cover") { run { let _: StackDetails = try await api.request(.put, path: "stacks/\(stackID)", body: ["primaryAssetId": asset.id]) } }
-                            Button("Remove from stack") { run { try await api.requestVoid(.delete, path: "stacks/\(stackID)/assets/\(asset.id)") } }
+                            Button("Set as stack cover") { run(.setStackCover(stack: stackID, asset: asset.id), on: [asset]) }
+                            Button("Remove from stack") { run(.removeFromStack(stack: stackID, assets: [asset.id]), on: [asset]) }
                         } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("Stack actions for \(asset.displayName)")
                             .disabled(availability != .offered)
                     }
@@ -51,29 +52,31 @@ struct ViewerStackView: View {
                 }
             }
             .confirmationDialog("Unstack these photos?", isPresented: $confirmUnstack, titleVisibility: .visible) {
-                Button("Unstack") {
-                    busy = true
-                    Task {
-                        defer { busy = false }
-                        do { try await api.requestVoid(.delete, path: "stacks/\(stackID)"); onChanged(); dismiss() }
-                        catch { self.error = error.localizedDescription }
-                    }
-                }
+                Button("Unstack") { run(.unstack(stack: stackID), on: stack?.assets ?? [], then: { dismiss() }) }
             } message: { Text("All photos are kept and will appear separately in the timeline.") }
             .task { await load() }
+            // The stack is read again whenever one of its photos changes, here or in its viewer;
+            // the feed takes stack changes from the sync's change.
+            .onMutationApplied { result in
+                guard !Set(result.succeeded).isDisjoint(with: (stack?.assets ?? []).map(\.id)) else { return }
+                Task { await load() }
+            }
             .fullScreenCover(item: $viewing) { asset in
-                AssetViewer(api: api, pipeline: pipeline, assets: stack?.assets ?? [asset], initial: asset, onUpdated: onUpdated, onDeleted: { _ in onChanged(); Task { await load() } })
+                AssetViewer(api: api, pipeline: pipeline, assets: stack?.assets ?? [asset], initial: asset, onUpdated: onUpdated, onDeleted: { _ in Task { await load() } })
             }
     }
     private func load() async {
         do { stack = try await api.request(.get, path: "stacks/\(stackID)") }
         catch { self.error = error.localizedDescription }
     }
-    private func run(_ operation: @escaping @MainActor () async throws -> Void) {
+    /// Has the account's mutations make the change; the stack is read again once it is made.
+    private func run(_ request: MutationRequest, on assets: [Asset], then: @escaping @MainActor () -> Void = {}) {
+        guard let mutations else { error = APIError.signedOut.localizedDescription; return }
         busy = true
+        let handle = mutations.start(request, on: assets)
         Task {
             defer { busy = false }
-            do { try await operation(); onChanged(); await load() }
+            do { _ = try await handle.result; then() }
             catch { self.error = error.localizedDescription }
         }
     }

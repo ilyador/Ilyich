@@ -5,7 +5,7 @@ struct PhotoEditor: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let asset: Asset
-    let onSaved: (Asset) -> Void
+    @Environment(\.mutations) private var mutations
     @State private var image: UIImage?
     @State private var dimensions: PixelDimensions?
     @State private var crop = CGRect(x: 0, y: 0, width: 1, height: 1)
@@ -117,23 +117,20 @@ struct PhotoEditor: View {
             try Task.checkCancellation(); image = prepared.uiImage
         } catch is CancellationError { } catch { self.error = error.localizedDescription }
     }
+    /// Saves the edits through the account's mutations, which wait for the server's new preview
+    /// (a new media revision, not a made-up cache-buster, proves it exists) and show it in the
+    /// viewer and the feed even if the editor has closed by then.
     private func save() async {
         guard let dimensions else { return }; saving = true; defer { saving = false }
         do {
+            guard let mutations else { throw APIError.signedOut }
             let pixels = try PixelCrop.normalized(x: crop.minX, y: crop.minY, width: crop.width, height: crop.height, in: dimensions)
             let full = PixelCrop(x: 0, y: 0, width: dimensions.width, height: dimensions.height)
             let edits: [PhotoEdit] = (pixels == full ? [] : [.crop(pixels)]) + transform.edits
-            if edits.isEmpty { try await api.removeEdits(id: asset.id) }
-            else { _ = try await api.saveEdits(id: asset.id, edits: edits) }
+            let result = try await mutations.start(.edits(asset: asset.id, edits), on: [asset]).result
             initialCrop = crop; initialTransform = transform
-            // Editing queues preview work. A new mediaRevision, not a fabricated cache-buster, proves publication.
-            var latest = asset
-            for _ in 0..<20 {
-                latest = try await api.asset(id: asset.id)
-                if latest.cacheRevision != asset.cacheRevision { onSaved(latest); dismiss(); return }
-                try await Task.sleep(for: .milliseconds(500))
-            }
-            onSaved(latest); previewPending = true
+            if result.fresh[asset.id].map({ $0.cacheRevision != asset.cacheRevision }) == true { dismiss() }
+            else { previewPending = true }
         } catch is CancellationError { } catch { self.error = error.localizedDescription }
     }
 }

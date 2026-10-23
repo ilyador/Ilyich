@@ -6,8 +6,11 @@ struct AssetViewer: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let assets: [Asset]
+    /// A fresher record of a photo, read from the server. The viewer's own changes reach the
+    /// screens through the account's mutations instead (N2).
     let onUpdated: (Asset) -> Void
-    /// The photo with this ID left the list: deleted, locked, restored, or no longer visible.
+    /// The photo with this ID was found gone: deleted, locked or put in Trash elsewhere, or no
+    /// longer visible. A change made here reaches the screens through the account's mutations.
     let onDeleted: (String) -> Void
     let onExploreLocation: ((PlaceFocus) -> Void)?
     let albumID: String?
@@ -67,6 +70,7 @@ struct AssetViewer: View {
     @AppStorage("shareFileType") private var shareFileType = "original"
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(\.mutations) private var mutations
 
     init(api: APIClient, pipeline: MediaPipeline, assets: [Asset], initial: Asset,
          onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping (String) -> Void, albumID: String? = nil,
@@ -147,6 +151,14 @@ struct AssetViewer: View {
             guard note.userInfo?["scope"] as? String == api.cacheScope else { return }
             refreshRevision += 1
             if note.userInfo?["accessChanged"] as? Bool == true { accessRefreshRevision = refreshRevision }
+        }
+        // A change to a photo here, from its details, its editor or its stack, shows at once. The
+        // records shown are the live ones; the list this closure was made with may be older.
+        .onMutationApplied { result in
+            for id in result.succeeded {
+                guard let shown = replacements[id] ?? result.fresh[id] ?? assets.first(where: { $0.id == id }) else { continue }
+                if let record = result.record(for: shown) { replacements[id] = record }
+            }
         }
     }
 
@@ -264,15 +276,15 @@ struct AssetViewer: View {
         mediaSheets
         .sheet(isPresented: $info, onDismiss: finishLocationNavigation) { infoSheet }
         .fullScreenCover(isPresented: $editing) {
-            PhotoEditor(api: api, pipeline: pipeline, asset: current, onSaved: update)
+            PhotoEditor(api: api, pipeline: pipeline, asset: current)
         }
         .sheet(isPresented: $chooseAlbum) {
-            NavigationStack { ViewerAlbumPicker(api: api, assetID: current.id) }
+            NavigationStack { ViewerAlbumPicker(api: api, asset: current) }
         }
         .fullScreenCover(isPresented: $slideshow) { SlideshowView(api: api, pipeline: pipeline, assets: assets.map { replacements[$0.id] ?? $0 }, initial: current) }
         .sheet(isPresented: $sharedLink) { NavigationStack { SharedLinkEditor(api: api, album: nil, assetIDs: [current.id]) } }
         .sheet(isPresented: $showStack) {
-            if let stack = current.stack { NavigationStack { ViewerStackView(api: api, pipeline: pipeline, stackID: stack.id, onUpdated: update, onChanged: { onDeleted(selectedID) }) } }
+            if let stack = current.stack { NavigationStack { ViewerStackView(api: api, pipeline: pipeline, stackID: stack.id, onUpdated: update) } }
         }
         .sheet(isPresented: $albumActivity) {
             if let albumID { NavigationStack { AlbumActivityView(api: api, albumID: albumID, assetID: current.id) } }
@@ -353,8 +365,8 @@ struct AssetViewer: View {
                 menuItem(.sharedLink, can, "Create shared link", systemImage: "link") { sharedLink = true }
                 if let albumID {
                     menuItem(.albumCover, can, "Set album cover", systemImage: "photo.on.rectangle.angled") {
-                        let id = current.id
-                        run { let _: Album = try await api.request(.patch, path: "albums/\(albumID)", body: ["albumThumbnailAssetId": id]) }
+                        let asset = current
+                        run { _ = try await mutate(.setAlbumCover(album: albumID, asset: asset.id), on: asset) }
                     }
                 }
                 menuItem(.comments, can, "Comments and likes", systemImage: "bubble") { albumActivity = true }
@@ -548,21 +560,28 @@ struct AssetViewer: View {
         guard !busy else { return }; working = true
         Task { defer { working = false }; do { try await operation() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
     }
+    /// Has the account's mutations make the change to `asset`, and waits for the server's answer.
+    /// The viewer and every screen showing the photo take the result from the service, so the
+    /// change shows here and in the feed the same whether or not the viewer is still open.
+    private func mutate(_ request: MutationRequest, on asset: Asset) async throws -> MutationResult {
+        guard let mutations else { throw APIError.signedOut }
+        let result = try await mutations.start(request, on: [asset]).result
+        if let reason = result.failed.values.first { throw APIError.invalidResponse(reason) }
+        return result
+    }
     private func toggleFavorite() {
         guard capabilities.offers(.favorite) else { return }
         let asset = current
-        run { update(try await api.updateFavorite(assetID: asset.id, value: !asset.isFavorite)) }
+        run { _ = try await mutate(.favorite([asset.id], !asset.isFavorite), on: asset) }
     }
     private func changeVisibility(_ visibility: AssetVisibility) {
         let locking = visibility == .locked || current.visibility == .locked
         guard capabilities.offers(locking ? .lock : .archive) else { return }
-        let id = current.id
+        let asset = current
         run {
-            let updated = try await api.updateAsset(id: id, update: .init(visibility: visibility))
-            if visibility == .locked {
-                await pipeline.forget(assetIDs: [id], revoked: true)
-                onDeleted(id); close()
-            } else { update(updated) }
+            _ = try await mutate(.visibility([asset.id], visibility), on: asset)
+            // A locked photo leaves the library, its media gone with it.
+            if visibility == .locked { close() }
         }
     }
     private func requestDeletion() {
@@ -578,12 +597,12 @@ struct AssetViewer: View {
     private func deleteAsset() {
         guard let asset = deletionTarget, asset.ownerId != nil, asset.ownerId == api.userID else { return }
         let permanently = deletePermanently
-        run { try await api.trashAssets(ids: [asset.id], permanently: permanently); onDeleted(asset.id); close() }
+        run { _ = try await mutate(permanently ? .deletePermanently([asset.id]) : .trash([asset.id]), on: asset); close() }
     }
     private func restoreAsset() {
         guard capabilities.offers(.restore) else { return }
-        let id = current.id
-        run { _ = try await api.restoreAssets(ids: [id]); onDeleted(id); close() }
+        let asset = current
+        run { _ = try await mutate(.restore([asset.id]), on: asset); close() }
     }
     private func refreshCurrentAsset() async {
         let id = selectedID, revision = refreshRevision
@@ -651,20 +670,23 @@ struct AssetViewer: View {
 
 private struct ViewerAlbumPicker: View {
     let api: APIClient
-    let assetID: String
+    let asset: Asset
     @State private var albums: [Album] = []
     @State private var error: String?
     @State private var adding = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mutations) private var mutations
     var body: some View {
         List(albums) { album in
             Button(album.albumName) {
+                guard let mutations else { error = APIError.signedOut.localizedDescription; return }
                 adding = true
+                let handle = mutations.start(.addToAlbum(album: album.id, assets: [asset.id]), on: [asset])
                 Task {
                     defer { adding = false }
                     do {
-                        let results = try await api.addToAlbum(id: album.id, assetIDs: [assetID])
-                        guard results.allSatisfy({ $0.success || $0.error == "duplicate" }) else { throw APIError.invalidResponse("The photo could not be added to this album.") }
+                        // A photo already in the album counts as added.
+                        guard try await handle.result.failed.isEmpty else { throw APIError.invalidResponse("The photo could not be added to this album.") }
                         dismiss()
                     } catch { self.error = error.localizedDescription }
                 }

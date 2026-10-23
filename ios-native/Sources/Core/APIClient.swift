@@ -213,7 +213,35 @@ actor APIClient {
         try await requestVoid(.delete, path: "assets", body: AssetDeletion(ids: ids, force: permanently))
     }
     func restoreAssets(ids: [String]) async throws -> TrashResult { try await request(.post, path: "trash/restore/assets", body: BulkIDs(ids: ids)) }
+    /// Everything in the Trash comes back.
+    func restoreTrash() async throws -> TrashResult { try await request(.post, path: "trash/restore") }
     func emptyTrash() async throws -> TrashResult { try await request(.post, path: "trash/empty") }
+    /// Changes the same fields of many photos in one call. The server answers with nothing.
+    func updateAssets(_ update: AssetBulkUpdate) async throws { try await requestVoid(.put, path: "assets", body: update) }
+    func setAlbumCover(id: String, assetID: String) async throws -> Album {
+        try await request(.patch, path: "albums/\(id)", body: ["albumThumbnailAssetId": assetID])
+    }
+    /// Stacks the photos; the first becomes the stack's cover.
+    func createStack(assetIDs: [String]) async throws -> AssetStack { try await request(.post, path: "stacks", body: ["assetIds": assetIDs]) }
+    func deleteStack(id: String) async throws { try await requestVoid(.delete, path: "stacks/\(id)") }
+    func removeFromStack(id: String, assetID: String) async throws { try await requestVoid(.delete, path: "stacks/\(id)/assets/\(assetID)") }
+    func setStackCover(id: String, assetID: String) async throws -> StackDetails {
+        try await request(.put, path: "stacks/\(id)", body: ["primaryAssetId": assetID])
+    }
+    func tagAssets(ids: [String], tagIDs: [String]) async throws -> TagAssignment {
+        try await request(.put, path: "tags/assets", body: ["assetIds": ids, "tagIds": tagIDs])
+    }
+    /// Gives a detected face to a person.
+    func reassignFace(_ faceID: String, to personID: String) async throws -> Person {
+        try await request(.put, path: "faces/\(personID)", body: ["id": faceID])
+    }
+    /// Removes a detected face; the photo and other people in it are kept.
+    func removeFace(_ faceID: String) async throws { try await requestVoid(.delete, path: "faces/\(faceID)", body: ["force": false]) }
+    func resolveDuplicates(_ groups: [DuplicateResolution]) async throws -> [BulkResult] {
+        try await request(.post, path: "duplicates/resolve", body: DuplicateResolutions(groups: groups))
+    }
+    /// Unlinks a duplicate group's photos without deleting any.
+    func dismissDuplicate(id: String) async throws { try await requestVoid(.delete, path: "duplicates/\(id)") }
     func createAlbum(name: String, assetIDs: [String] = []) async throws -> Album {
         try await request(.post, path: "albums", body: AlbumCreation(albumName: name, assetIds: assetIDs))
     }
@@ -330,6 +358,9 @@ private struct MemoryPreferences: Decodable {
     let memories: Memories
 }
 struct BulkIDs: Encodable, Sendable { let ids: [String] }
+/// How many photos a tag was given to.
+struct TagAssignment: Decodable, Sendable { let count: Int }
+private struct DuplicateResolutions: Encodable, Sendable { let groups: [DuplicateResolution] }
 private struct AssetDeletion: Encodable, Sendable { let ids: [String]; let force: Bool }
 private struct AlbumCreation: Encodable, Sendable { let albumName: String; let assetIds: [String] }
 struct AssetUpdate: Encodable, Sendable {

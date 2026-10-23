@@ -5,6 +5,8 @@ import MapKit
 struct AssetInfoView: View {
     let api: APIClient
     let pipeline: MediaPipeline
+    /// A fresher record of the photo, read from the server. Its own changes reach the viewer and
+    /// the feed through the account's mutations.
     let onUpdated: (Asset) -> Void
     let onExploreLocation: ((PlaceFocus) -> Void)?
     @State private var asset: Asset
@@ -21,6 +23,7 @@ struct AssetInfoView: View {
     @State private var exports: ExportTracker
     @State private var shared: ExportedFiles?
     @State private var tagging = false
+    @Environment(\.mutations) private var mutations
 
     init(api: APIClient, pipeline: MediaPipeline, asset: Asset, onUpdated: @escaping (Asset) -> Void,
          onExploreLocation: ((PlaceFocus) -> Void)? = nil) {
@@ -154,7 +157,7 @@ struct AssetInfoView: View {
         .task { await loadDetails() }
         // Download original is for this sheet: closing it, or going on to a place, stops it.
         .onDisappear { exports.cancel() }
-        .sheet(isPresented: $editingMetadata) { NavigationStack { MetadataEditor(api: api, asset: asset, onUpdated: update) } }
+        .sheet(isPresented: $editingMetadata) { NavigationStack { MetadataEditor(api: api, asset: asset, onUpdated: show) } }
         .sheet(isPresented: $editingFaces) { NavigationStack { FaceAssignmentView(api: api, pipeline: pipeline, asset: asset, onChanged: { Task { if let fresh = try? await api.asset(id: asset.id) { update(fresh) } } }) } }
         .sheet(item: $collection) { selection in
             NavigationStack { InfoCollectionView(api: api, pipeline: pipeline, collection: selection) }
@@ -175,7 +178,10 @@ struct AssetInfoView: View {
     private func exifMetric(_ title: String, value: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) { Text(value ?? "—").font(.headline); Text(title).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading)
     }
-    private func update(_ asset: Asset) { self.asset = asset; caption = asset.exifInfo?.description ?? ""; onUpdated(asset) }
+    private func update(_ asset: Asset) { show(asset); onUpdated(asset) }
+    /// Shows a record here only: one the photo's own change left, which the account's mutations
+    /// hand to the viewer and the feed.
+    private func show(_ asset: Asset) { self.asset = asset; caption = asset.exifInfo?.description ?? "" }
     private func downloadOriginal() {
         exports.start(.share([asset], original: true)) { outcome in
             switch outcome {
@@ -185,13 +191,17 @@ struct AssetInfoView: View {
             }
         }
     }
-    private func saveCaption() {
+    private func saveCaption() { change(.update(asset.id, .init(description: caption))) }
+    private func setRating(_ rating: Int?) { change(.rating([asset.id], rating)) }
+    /// Has the account's mutations change the photo's details, and shows the record it answers with.
+    private func change(_ request: MutationRequest) {
+        guard let mutations else { error = APIError.signedOut.localizedDescription; return }
         saving = true
-        Task { defer { saving = false }; do { update(try await api.updateAsset(id: asset.id, update: .init(description: caption))) } catch { self.error = error.localizedDescription } }
-    }
-    private func setRating(_ rating: Int?) {
-        saving = true
-        Task { defer { saving = false }; do { update(try await api.updateRating(id: asset.id, rating: rating)) } catch { self.error = error.localizedDescription } }
+        let asset = asset, handle = mutations.start(request, on: [asset])
+        Task {
+            defer { saving = false }
+            do { if let fresh = try await handle.result.fresh[asset.id] { show(fresh) } } catch { self.error = error.localizedDescription }
+        }
     }
     private func loadDetails() async {
         loading = true; error = nil
@@ -215,6 +225,7 @@ private extension Result where Failure == Error, Success: Sendable {
 private struct MetadataEditor: View {
     let api: APIClient
     let asset: Asset
+    /// The record the change left.
     let onUpdated: (Asset) -> Void
     @State private var date: Date
     @State private var latitude: String
@@ -223,6 +234,7 @@ private struct MetadataEditor: View {
     @State private var saving = false
     @State private var pickingLocation = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mutations) private var mutations
     init(api: APIClient, asset: Asset, onUpdated: @escaping (Asset) -> Void) {
         self.api = api; self.asset = asset; self.onUpdated = onUpdated
         _date = State(initialValue: asset.fileCreatedAt ?? .now)
@@ -260,12 +272,15 @@ private struct MetadataEditor: View {
         if !latitude.isEmpty || !longitude.isEmpty {
             guard let lat, let lon, lat.isFinite, lon.isFinite, (-90...90).contains(lat), (-180...180).contains(lon) else { error = "Enter a latitude from −90 to 90 and longitude from −180 to 180."; return }
         }
+        guard let mutations else { error = APIError.signedOut.localizedDescription; return }
         saving = true
+        let fields = MutationRequest.AssetFields(dateTimeOriginal: date.ISO8601Format(), latitude: lat, longitude: lon)
+        let id = asset.id, handle = mutations.start(.update(id, fields), on: [asset])
         Task {
             defer { saving = false }
             do {
-                let updated = try await api.updateAsset(id: asset.id, update: .init(dateTimeOriginal: date.ISO8601Format(), latitude: lat, longitude: lon))
-                onUpdated(updated); dismiss()
+                if let updated = try await handle.result.fresh[id] { onUpdated(updated) }
+                dismiss()
             } catch { self.error = error.localizedDescription }
         }
     }
@@ -300,6 +315,9 @@ struct InfoCollectionView: View {
             if assets.isEmpty && !loading && !more { ContentUnavailableView("No photos", systemImage: "photo") }
         }.navigationTitle(collection.title).navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            // A photo changed here or in its viewer shows the change; one deleted, locked or put
+            // in Trash leaves the grid in place.
+            .onMutationApplied { assets = $0.applied(to: assets, keeping: CollectionMembership.searched) }
             .fullScreenCover(item: $viewing) { asset in
                 AssetViewer(api: api, pipeline: pipeline, assets: assets, initial: asset,
                             onUpdated: { fresh in if let i = assets.firstIndex(where: { $0.id == fresh.id }) { assets[i] = fresh } },

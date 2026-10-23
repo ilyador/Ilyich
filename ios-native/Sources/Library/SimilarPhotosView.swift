@@ -6,7 +6,10 @@ struct SimilarPhotosView: View {
     let reference: Asset
     @State private var store: LibraryFeedStore
     @State private var viewing: Asset?
+    /// Changes made here, or anywhere, reach the results in place (N2).
+    @State private var follower = MutationFollower()
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mutations) private var mutations
     init(api: APIClient, pipeline: MediaPipeline, reference: Asset) {
         self.api = api; self.pipeline = pipeline; self.reference = reference
         _store = State(initialValue: LibraryFeedStore(source: LibraryRepository(client: api, index: nil, sync: nil)))
@@ -26,10 +29,14 @@ struct SimilarPhotosView: View {
             .navigationTitle("Similar photos").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .task { if !store.started { store.started = true; store.findSimilar(to: reference) } }
+            .onAppear {
+                let store = store
+                follower.follow(mutations) { await FeedMutationApplier.apply($0, to: store, refreshes: false) }
+            }
             .onDisappear { store.stop() }
             .fullScreenCover(item: $viewing) { asset in
                 AssetViewer(api: api, pipeline: pipeline, assets: store.results, initial: asset,
-                            onUpdated: store.update, onDeleted: { _ in store.findSimilar(to: reference) })
+                            onUpdated: store.update, onDeleted: { store.removeLocally([$0]) })
             }
         }
     }

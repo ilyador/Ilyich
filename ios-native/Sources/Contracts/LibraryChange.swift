@@ -168,11 +168,18 @@ enum MutationRequest: Equatable, Sendable {
 struct MutationResult: Sendable {
     let operation: OperationID
     let request: MutationRequest
+    /// The photos the change was made to.
     let succeeded: [String]
     /// Asset ID to the reason it failed.
     let failed: [String: String]
-    /// Assets as the server returned them after the change.
+    /// Assets as the change left them: the server's record where it answered with one, else the
+    /// record of the screen that asked, changed as the server changed it. None for a photo
+    /// deleted for good.
     let fresh: [String: Asset]
     /// The sync pass that followed, merged in when it arrives.
     var followUp: LibraryChange?
+    /// The album the server answered with: the one made, or the one whose cover was set.
+    var album: Album? = nil
+    /// How many photos the server says it changed, where it says so (Trash's restore and empty).
+    var affected: Int? = nil
 }

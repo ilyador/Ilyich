@@ -41,8 +41,10 @@ import SwiftUI
                     SignInView(session: session)
                 }
             }
-            // Every control that changes something reads what the account may do from here.
+            // Every control that changes something reads what the account may do from here, and
+            // every screen that changes or shows photos reaches the account's mutations.
             .environment(\.authorization, session.authorization)
+            .environment(\.mutations, session.mutations)
             .environment(\.freeUpSpace, session.freeUpSpace)
             .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
             .task { await session.restore() }

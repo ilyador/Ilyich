@@ -60,6 +60,8 @@ import IlyichPlatform
     var coverage: CoverageWorker? { runtime?.library?.coverage }
     /// The phone's side of the merged library.
     var deviceIndex: DeviceIndexService? { runtime?.deviceIndex }
+    /// The account's changes to its library on the server, which the app puts in the environment.
+    var mutations: LibraryMutationService? { runtime?.mutations }
     var isSyncing: Bool { runtime?.library?.status.status.isSyncing ?? false }
     var syncError: String? { runtime?.library?.status.status.error ?? runtime?.libraryError }
     var lastSyncDate: Date? { runtime?.library?.status.status.lastSyncDate }

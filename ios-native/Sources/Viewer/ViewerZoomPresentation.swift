@@ -24,6 +24,8 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
     let sourceView: (String) -> UIView?
     /// What the account may do. The viewer is outside the app's environment, so it is handed on.
     let authorization: AuthorizationSnapshot?
+    /// The account's mutations, handed on for the same reason.
+    var mutations: LibraryMutationService? = nil
     let onDismiss: () -> Void
     let content: (Asset, ViewerTransitionState, @escaping () -> Void) -> AnyView
     /// Outside the app's scene the viewer would always read as in the background, which keeps
@@ -155,7 +157,7 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
         private func root(_ asset: Asset) -> AnyView {
             guard let parent, let state else { return AnyView(EmptyView()) }
             return AnyView(ViewerRoot(content: parent.content(asset, state, { [weak self] in self?.close() }), authorization: parent.authorization,
-                                      scenePhase: parent.scenePhase)
+                                      mutations: parent.mutations, scenePhase: parent.scenePhase)
                 .id(asset.id))
         }
 
@@ -208,15 +210,16 @@ final class ViewerHostingController: UIHostingController<AnyView> {
 }
 
 /// A presented controller does not inherit the app's environment, so the accent, what the
-/// account may do and the scene's phase are applied again.
+/// account may do, its mutations and the scene's phase are applied again.
 private struct ViewerRoot: View {
     let content: AnyView
     let authorization: AuthorizationSnapshot?
+    let mutations: LibraryMutationService?
     let scenePhase: ScenePhase
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     var body: some View {
         content.tint((AppearanceAccent(rawValue: accentName) ?? .design).tint).environment(\.authorization, authorization)
-            .environment(\.scenePhase, scenePhase)
+            .environment(\.mutations, mutations).environment(\.scenePhase, scenePhase)
     }
 }
 

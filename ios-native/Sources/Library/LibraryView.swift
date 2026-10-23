@@ -46,6 +46,8 @@ struct LibraryView: View {
     /// A newer open or close makes a pending close stale.
     @State private var closeGeneration = 0
     @State private var selectionBusy = false
+    /// Applies the account's mutations to the feed, made here or on any screen over it (N2).
+    @State private var mutationFollower = MutationFollower()
     /// Height of the chips floating at the top: filter, uploads, search checking, selection.
     @State private var chromeHeight: CGFloat = 0
     @State private var shareInbox = ShareInboxStore.shared
@@ -59,6 +61,7 @@ struct LibraryView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.authorization) private var authorization
+    @Environment(\.mutations) private var mutations
 
     private enum Shelf { case root, people, albums, more, settings }
 
@@ -216,19 +219,19 @@ struct LibraryView: View {
             // The viewer zooms out of its grid cell and back into the cell of the photo it closes on.
             .background {
                 ViewerZoomPresenter(item: viewerItem, sourceView: { viewport.scroller.zoomSourceView(for: $0, in: store) }, authorization: authorization,
-                                    onDismiss: { navigator.layerDidDismiss(level: 0) }) { asset, transition, close in
+                                    mutations: mutations, onDismiss: { navigator.layerDidDismiss(level: 0) }) { asset, transition, close in
                     AnyView(assetViewer(asset, transition: transition, close: close))
                 }
             }
             .alert("Couldn’t complete action", isPresented: alertShown { if case .error = $0 { true } else { false } }) {
                 Button("OK", role: .cancel) { }
             } message: { Text(errorMessage) }
-            .confirmationDialog(features?.trash == false ? "Permanently delete \(store.selected.count) items?" : "Move \(store.selected.count) items to Trash?", isPresented: alertShown { $0 == .confirm(.deleteSelection) }, titleVisibility: .visible) {
-                Button(features?.trash == false ? "Delete permanently" : "Move to Trash", role: .destructive) {
-                    let permanently = features?.trash == false
-                    runSelection { ids in try await api.trashAssets(ids: ids, permanently: permanently); store.removeLocally(Set(ids)) }
+            .confirmationDialog(deletesSelectionPermanently ? "Permanently delete \(store.selected.count) items?" : "Move \(store.selected.count) items to Trash?", isPresented: alertShown { $0 == .confirm(.deleteSelection) }, titleVisibility: .visible) {
+                Button(deletesSelectionPermanently ? "Delete permanently" : "Move to Trash", role: .destructive) {
+                    let permanently = deletesSelectionPermanently
+                    changeSelection { permanently ? .deletePermanently($0) : .trash($0) }
                 }
-            } message: { Text(features?.trash == false ? "This cannot be undone. Photos on your phone are kept." : "This changes the server library. Photos on your phone are kept.") }
+            } message: { Text(deletesSelectionPermanently ? "This cannot be undone. Photos on your phone are kept." : "This changes the server library. Photos on your phone are kept.") }
             .confirmationDialog("Sign out of Ilyich?", isPresented: alertShown { $0 == .confirm(.signOut) }, titleVisibility: .visible) {
                 Button("Sign out", role: .destructive) { store.stop(); Task { await session.signOut() } }
             } message: { Text("Backup will stop on this phone. Photos already on your server are kept.") }
@@ -236,7 +239,9 @@ struct LibraryView: View {
                 TextField("Album name", text: $albumName)
                 Button("Create") {
                     let name = albumName
-                    runSelection { ids in _ = try await api.createAlbum(name: name, assetIDs: ids) }
+                    changeSelection({ .createAlbum(name: name, assets: $0) }) { result in
+                        if let album = result.album { collections.albumCreated(album) }
+                    }
                 }.disabled(albumName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Cancel", role: .cancel) { }
             }
@@ -250,6 +255,10 @@ struct LibraryView: View {
         .onAppear {
             connectNavigator()
             model.start()
+            // A mutation's result reaches the feed in place. The sync pass after it reaches the
+            // feed as every pass does; without an offline library the feed reads its months again.
+            let store = store, refreshes = !(mutations?.followsUp ?? true)
+            mutationFollower.follow(mutations) { event in await FeedMutationApplier.apply(event, to: store, refreshes: refreshes) }
             // A link closes whatever is open, then opens its photo, filter or screen.
             model.takeLinks(from: session) { [collections] in (collections.albums, collections.people) }
         }
@@ -606,20 +615,29 @@ struct LibraryView: View {
     }
 
     private var selectionBar: some View {
-        HStack {
+        let selected = store.selectedAssets
+        let owned = !selected.isEmpty && selected.allSatisfy { $0.ownerId == api.userID }
+        return HStack {
             Text("\(store.selected.count) selected").font(.subheadline.monospacedDigit())
             Spacer()
-            if store.selectedLocalPhotos.isEmpty {
-            Button { navigator.show(.newAlbumFromSelection) } label: { Image(systemName: "rectangle.stack.badge.plus").frame(width: 44, height: 44) }.accessibilityLabel("Create album from selection").requiresWriteAccess()
-            Button { runSelection { ids in try await api.requestVoid(.put, path: "assets", body: SelectionUpdate(ids: ids, isFavorite: true)) } }
-                label: { Image(systemName: "heart").frame(width: 44, height: 44) }.accessibilityLabel("Favorite selected photos").requiresWriteAccess().disabled(!ownsSelection)
-            Button(role: .destructive) { navigator.show(.confirm(.deleteSelection)) } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel(features?.trash == false ? "Delete selection permanently" : "Move selection to Trash").requiresWriteAccess().disabled(features == nil || !ownsSelection)
-            } else {
+            if !store.selectedLocalPhotos.isEmpty {
                 Button {
                     let localIDs = store.selectedLocalPhotos.map(\.id)
                     Task { _ = await backupStore.enqueue(localIDs: localIDs, albumID: nil) }
                 } label: { Image(systemName: "icloud.and.arrow.up").frame(width: 44, height: 44) }
                     .accessibilityLabel("Back up selected phone photos").requiresWriteAccess().disabled(backupStore.isRunning)
+            } else if SelectionCapabilities.isTrash(selected) {
+                // A Trash selection only comes back or goes for good (N2).
+                let can = SelectionCapabilities.evaluate(selected, context: CapabilityContext(api: api, features: features))
+                Button { changeSelection { .restore($0) } } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }
+                    .accessibilityLabel("Restore selected photos").requiresWriteAccess().disabled(!can.offers(.restore))
+                Button(role: .destructive) { navigator.show(.confirm(.deleteSelection)) } label: { Image(systemName: "trash").frame(width: 44, height: 44) }
+                    .accessibilityLabel("Delete selection permanently").requiresWriteAccess().disabled(!can.offers(.deletePermanently))
+            } else {
+                Button { navigator.show(.newAlbumFromSelection) } label: { Image(systemName: "rectangle.stack.badge.plus").frame(width: 44, height: 44) }.accessibilityLabel("Create album from selection").requiresWriteAccess()
+                Button { changeSelection { .favorite($0, true) } }
+                    label: { Image(systemName: "heart").frame(width: 44, height: 44) }.accessibilityLabel("Favorite selected photos").requiresWriteAccess().disabled(!owned)
+                Button(role: .destructive) { navigator.show(.confirm(.deleteSelection)) } label: { Image(systemName: "trash").frame(width: 44, height: 44) }.accessibilityLabel(features?.trash == false ? "Delete selection permanently" : "Move selection to Trash").requiresWriteAccess().disabled(features == nil || !owned)
             }
             Button { navigator.present(.selectionActions(SelectionSnapshot(assets: store.selectedAssets, local: store.selectedDevicePhotos))) } label: {
                 Image(systemName: "ellipsis").frame(width: 44, height: 44)
@@ -922,10 +940,10 @@ struct LibraryView: View {
         case .sharedFiles:
             AnyView(ShareInboxView(api: api))
         case .selectionActions(let selection):
+            // The feed takes the change from the account's mutations; only the selection ends here.
             AnyView(NavigationStack {
                 SelectionActionsView(api: api, pipeline: pipeline, selection: selection) {
                     store.selected = []; store.isSelecting = false
-                    Task { await store.refreshAfterMutation() }
                 }
             })
         case .albumSharing(let album, let sharing):
@@ -1144,16 +1162,29 @@ struct LibraryView: View {
         }
     }
     private func animate(_ changes: () -> Void) { withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.88), changes) }
-    private var ownsSelection: Bool {
-        !store.selectedAssets.isEmpty && store.selectedAssets.allSatisfy { $0.ownerId == api.userID }
-    }
-    private func runSelection(_ action: @escaping @MainActor ([String]) async throws -> Void) {
+    /// The selection is deleted for good: the server keeps no Trash, or the photos are in it, as
+    /// they are in the Trash's feed and searches inside it. Read from the feed rather than the
+    /// selected photos, which the library's body would otherwise go through on every update.
+    private var deletesSelectionPermanently: Bool { features?.trash == false || store.feedQuery.trash == .trashed }
+    /// Has the account's mutations make `request` of the selected photos. The selection ends once
+    /// the server has made the change, and the feed takes the change in place from the result.
+    private func changeSelection(_ request: ([String]) -> MutationRequest, then: @escaping @MainActor (MutationResult) -> Void = { _ in }) {
         guard !selectionBusy else { return }
-        let ids = Array(store.selected)
+        guard let mutations else { return navigator.show(.error(APIError.signedOut.localizedDescription)) }
+        let handle = mutations.start(request(Array(store.selected)), on: store.selectedAssets)
         selectionBusy = true
         Task {
             defer { selectionBusy = false }
-            do { try await action(ids); store.selected = []; store.isSelecting = false; await store.refreshAfterMutation() }
+            do {
+                let result = try await handle.result
+                then(result)
+                guard result.failed.isEmpty else {
+                    // The photos the server changed are out of the selection with the change made.
+                    store.selected.subtract(result.succeeded)
+                    return navigator.show(.error("\(result.failed.count.formatted()) of the selected photos couldn’t be changed."))
+                }
+                store.selected = []; store.isSelecting = false
+            }
             catch { navigator.show(.error(error.localizedDescription)) }
         }
     }
