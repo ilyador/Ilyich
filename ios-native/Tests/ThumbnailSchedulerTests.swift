@@ -192,6 +192,14 @@ final class ThumbnailSchedulerTests: XCTestCase {
 
     /// The viewer, a feature tile or the info view asking for a photo the grid failed to load
     /// tries at once instead of waiting out the grid's backoff.
+    /// One decode lane for each core the main thread and the system leave free, three to five.
+    func testDecodeLanesFollowThePhonesCores() {
+        XCTAssertEqual(ThumbnailScheduler.lanes(cores: 2), 3)
+        XCTAssertEqual(ThumbnailScheduler.lanes(cores: 6), 4, "An iPhone 15 Pro has six cores.")
+        XCTAssertEqual(ThumbnailScheduler.lanes(cores: 7), 5)
+        XCTAssertEqual(ThumbnailScheduler.lanes(cores: 12), 5)
+    }
+
     func testASinglePhotoRequestDoesNotWaitOutTheBackoff() async throws {
         let clock = Clock()
         let server = FakeServer(holds: false, fails: true)

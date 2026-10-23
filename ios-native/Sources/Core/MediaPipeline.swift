@@ -288,7 +288,7 @@ actor MediaPipeline {
         privateMedia = PrivateMediaMemory(authorization: client.authorization)
         scheduler = ThumbnailScheduler(store: thumbnails, memory: thumbs,
                                        fetcher: ThumbnailFetcher(client: client, protocolClasses: protocolClasses),
-                                       device: device, watchesNetwork: true)
+                                       device: device, lanes: ThumbnailScheduler.deviceLanes, watchesNetwork: true)
         let decoded = memory.decoded, latest = memory.latest
         decoded.totalCostLimit = memoryLimit
         decoded.countLimit = 2_000
