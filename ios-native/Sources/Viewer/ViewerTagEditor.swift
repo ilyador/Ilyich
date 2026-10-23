@@ -3,6 +3,8 @@ import SwiftUI
 struct ViewerTagEditor: View {
     let api: APIClient
     let asset: Asset
+    /// Reads the photo again once its tags change, as its viewer reads it (ViewerModel.readAsset).
+    let read: @Sendable (String) async throws -> Asset
     let onUpdated: (Asset) -> Void
     @State private var tags: [AssetTag] = []
     @State private var selected = Set<String>()
@@ -39,7 +41,7 @@ struct ViewerTagEditor: View {
             let results: [BulkResult] = try await api.request(selected.contains(tag.id) ? .delete : .put, path: "tags/\(tag.id)/assets", body: BulkIDs(ids: [asset.id]))
             guard results.allSatisfy(\.success) else { throw APIError.invalidResponse("The tag could not be updated. Refresh and try again.") }
             if !selected.insert(tag.id).inserted { selected.remove(tag.id) }
-            onUpdated(try await api.asset(id: asset.id))
+            onUpdated(try await read(asset.id))
         } catch { self.error = error.localizedDescription }
     }
     private func create() {

@@ -10,21 +10,25 @@ extension EnvironmentValues {
     @Entry var lockedFolder: LockedFolderSession? = nil
 }
 
-/// One account's Locked Folder (REBUILD_ROADMAP.md N5): unlocking by PIN, account password or
-/// biometrics, the server's elevation running out, reading the folder's months as its grid
-/// scrolls, and relocking. AccountSession makes one per account, ends it with the account and
-/// hands it the app's scene changes, so the folder relocks the moment the app goes to the
-/// background, whatever is on screen.
+/// One account's Locked Folder (REBUILD_ROADMAP.md N5): unlocking by PIN or biometrics, the
+/// server's elevation running out, reading the folder's months as its grid scrolls, and
+/// relocking. AccountSession makes one per account, ends it with the account and hands it the
+/// app's scene changes, so the folder relocks the moment the app goes to the background, whatever
+/// is on screen. Immich unlocks only with the PIN: the account's password resets the PIN, in
+/// Settings, and never unlocks.
 ///
 /// Relocking is synchronous: when it returns the folder shows nothing, its viewer is closed, what
 /// was typed is gone, the account's private epoch has moved and the pipeline holds no locked
 /// photo's image. Only telling the server waits. Everything the folder asks of the server runs
 /// under the private epoch of the moment, so an answer that comes after a relock is dropped, and
-/// an unlock that lands after one has the server lock again.
+/// an unlock that lands after one has the server lock again. An unlock waits for the locks asked
+/// for before it, so none lands after it, and a lock the server may not have heard is asked for
+/// again.
 @MainActor @Observable final class LockedFolderSession {
     enum Phase: Equatable, Sendable {
         case locked
-        /// An unlock was sent, or biometrics are being asked for the PIN.
+        /// An unlock is under way: biometrics are being asked for the PIN, a lock asked for before
+        /// is being waited for, or the unlock was sent.
         case unlocking
         case unlocked
     }
@@ -49,15 +53,12 @@ extension EnvironmentValues {
     struct Entry: Equatable, Sendable {
         var pin = ""
         var confirmation = ""
-        var password = ""
-        var usePassword = false
         /// Keep the PIN on this phone, behind biometrics.
         var remember = false
     }
 
     private(set) var phase = Phase.locked
-    /// How the folder unlocks, as the server says: whether a PIN is set, whether the account's
-    /// password may stand in for it, and when an unlock runs out.
+    /// How the folder unlocks, as the server says: whether a PIN is set, and when an unlock runs out.
     private(set) var status: AuthStatus?
     /// The phone has Face ID or Touch ID set up, so the PIN can be kept behind it and unlock with it.
     private(set) var biometricAvailable = false
@@ -86,8 +87,20 @@ extension EnvironmentValues {
     /// The read of the folder's months under way, which a relock cancels.
     @ObservationIgnored private var reading: Task<Void, Never>?
     @ObservationIgnored private var expiry: Task<Void, Never>?
-    /// The last request that the server lock the folder, after the ones before it.
+    /// The last request that the server lock the folder, after the ones before it. An unlock waits
+    /// for it before it is sent.
     @ObservationIgnored private(set) var serverLock: Task<Void, Never>?
+    /// The server may hold the folder unlocked though it is locked here: an unlock was sent, or the
+    /// server said its session is elevated, and no lock asked for since was heard. Such a lock is
+    /// asked for again (`lockIfOwed`), as Immich extends an elevation while requests keep coming.
+    @ObservationIgnored private var serverMayBeUnlocked = false
+    /// How many unlocks were sent, and how many of them are on their way. A lock heard clears
+    /// `serverMayBeUnlocked` only if no unlock was on its way when it was asked for, which the
+    /// server may have heard after it, and none was sent since.
+    @ObservationIgnored private var unlocksSent = 0
+    @ObservationIgnored private var unlocksUnanswered = 0
+    /// Locks asked for and not answered yet.
+    @ObservationIgnored private var locksPending = 0
     @ObservationIgnored private var ended = false
 
     /// The folder has its own query; no library query reaches it.
@@ -113,11 +126,10 @@ extension EnvironmentValues {
     var isUnlocked: Bool { phase == .unlocked }
     /// No PIN is set yet: the form sets one, then unlocks with it.
     var settingUp: Bool { status?.pinCode == false }
-    /// Whether what is typed can be sent: a 6-digit PIN (twice, to set one), or the password.
+    /// Whether what is typed can be sent: a 6-digit PIN, twice to set one.
     var canUnlock: Bool {
         guard phase == .locked, !ended, let status else { return false }
-        if !status.pinCode { return Self.isPIN(entry.pin) && entry.pin == entry.confirmation }
-        return entry.usePassword ? !entry.password.isEmpty : Self.isPIN(entry.pin)
+        return Self.isPIN(entry.pin) && (status.pinCode || entry.pin == entry.confirmation)
     }
 
     private static func isPIN(_ text: String) -> Bool { text.count == 6 && text.allSatisfy { "0123456789".contains($0) } }
@@ -125,14 +137,20 @@ extension EnvironmentValues {
     // MARK: Commands
 
     /// The folder's screen appeared: reads how the folder unlocks, each time, as the PIN may have
-    /// been set or changed elsewhere.
+    /// been set or changed elsewhere. A server that says the folder is unlocked while it is locked
+    /// here, as when a lock was lost or the app was killed with the folder open, is locked.
     func appear() async {
         guard !ended else { return }
         var error: NSError?
         biometricAvailable = LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
         do {
             let status = try await api.authStatus()
-            if !ended, phase == .locked { self.status = status }
+            guard !ended, phase == .locked else { return }
+            self.status = status
+            if status.isElevated {
+                serverMayBeUnlocked = true
+                lockIfOwed(keepingAppAwake: false)
+            }
         } catch is CancellationError {
         } catch {
             if !ended { failure = FeatureFailure(error) }
@@ -145,20 +163,22 @@ extension EnvironmentValues {
     /// The Lock button.
     func lock() { relock(.user) }
 
-    /// The app's scene changed, as AccountSession hears it: going to the background relocks at once.
+    /// The app's scene changed, as AccountSession hears it: going to the background relocks at
+    /// once, and coming back asks again for a lock the server may not have heard.
     func sceneChanged(_ scene: ScenePhase) {
-        if scene == .background { relock(.background) }
+        switch scene {
+        case .background: relock(.background)
+        case .active: lockIfOwed(keepingAppAwake: false)
+        default: break
+        }
     }
 
-    /// Unlocks with what was typed: the PIN, or the account password. With no PIN set yet, the
-    /// PIN typed is set first, which read-only mode refuses as it refuses any change.
+    /// Unlocks with the PIN typed. With no PIN set yet, the PIN typed is set first, which
+    /// read-only mode refuses as it refuses any change.
     func unlock() {
         guard canUnlock, let status else { return }
-        let entry = entry
-        let kept = entry.remember && !entry.usePassword && biometricAvailable ? entry.pin : nil
-        if !status.pinCode { begin(.pin(entry.pin), settingPIN: true, keeping: kept) }
-        else if entry.usePassword { begin(.password(entry.password), settingPIN: false, keeping: nil) }
-        else { begin(.pin(entry.pin), settingPIN: false, keeping: kept) }
+        let pin = entry.pin
+        begin(.pin(pin), settingPIN: !status.pinCode, keeping: entry.remember && biometricAvailable ? pin : nil)
     }
 
     /// Unlocks with the PIN kept on this phone, which Face ID or Touch ID hands over.
@@ -178,10 +198,14 @@ extension EnvironmentValues {
 
     /// Locks the folder at once, as the type's notes say. The server is told afterwards, unless
     /// the account is closing; going to the background keeps the app running until it has been.
+    /// With the folder locked here already, a lock the server may not have heard is asked for again.
     func relock(_ reason: Relock) {
         let wasOpen = phase != .locked || authorization.snapshot.lockedFolderUnlocked
         if entry != Entry() { entry = Entry() }
-        guard wasOpen else { return }
+        guard wasOpen else {
+            if reason != .signedOut { lockIfOwed(keepingAppAwake: reason == .background) }
+            return
+        }
         expiry?.cancel(); expiry = nil
         reading?.cancel(); reading = nil
         openEpoch = nil
@@ -213,7 +237,6 @@ extension EnvironmentValues {
 
     private enum Credential: Sendable {
         case pin(String)
-        case password(String)
         /// The PIN kept on this phone, which biometrics hand over.
         case biometrics
     }
@@ -238,28 +261,34 @@ extension EnvironmentValues {
         !ended && phase == .unlocked && openEpoch == epoch && authorization.snapshot.privateEpoch == epoch
     }
 
+    /// Whether the read under way may still show what it read: the folder is open under `epoch`,
+    /// and no newer read took the read's place, which cancels it.
+    private func isReading(_ epoch: UInt64) -> Bool { isOpen(epoch) && !Task.isCancelled }
+
     private func unlock(_ credential: Credential, settingPIN: Bool, keeping kept: String?, attempt: UInt64) async {
         let api = api
         // Once the server may have been asked to unlock, a relock that came first must reach it after.
         var sent = false
         let status: AuthStatus
         do {
+            let pin: String
             switch credential {
-            case .pin(let pin):
-                if settingPIN { try await api.requestVoid(.post, path: "auth/pin-code", body: ["pinCode": pin]) }
-                guard isUnlocking(attempt) else { return }
-                sent = true
-                try await api.unlock(pin: pin)
-            case .password(let password):
-                sent = true
-                try await api.requestVoid(.post, path: "auth/session/unlock", body: ["password": password])
+            case .pin(let typed): pin = typed
             case .biometrics:
                 // The Keychain asks Face ID or Touch ID for the PIN, off the main actor.
-                let pin = try await Task.detached(priority: .userInitiated) { try LockedPINStore.read(for: api) }.value
-                guard isUnlocking(attempt) else { return }
-                sent = true
-                try await api.unlock(pin: pin)
+                pin = try await Task.detached(priority: .userInitiated) { try LockedPINStore.read(for: api) }.value
             }
+            guard isUnlocking(attempt) else { return }
+            if settingPIN {
+                try await api.requestVoid(.post, path: "auth/pin-code", body: ["pinCode": pin])
+                guard isUnlocking(attempt) else { return }
+            }
+            // The locks asked for before reach the server first: one landing after the unlock
+            // would lock the folder again under it.
+            await serverLock?.value
+            guard isUnlocking(attempt) else { return }
+            sent = true
+            try await sendUnlock(pin)
             guard isUnlocking(attempt) else { return landedAfterRelock() }
             let answer = try await api.authStatus()
             guard isUnlocking(attempt) else { return landedAfterRelock() }
@@ -278,6 +307,16 @@ extension EnvironmentValues {
         await open(status, keeping: kept)
     }
 
+    /// Sends the unlock. From now on the server may hold the folder unlocked, and a lock asked for
+    /// before the answer comes may reach the server before the unlock does.
+    private func sendUnlock(_ pin: String) async throws {
+        unlocksSent += 1
+        unlocksUnanswered += 1
+        serverMayBeUnlocked = true
+        defer { unlocksUnanswered -= 1 }
+        try await api.unlock(pin: pin)
+    }
+
     /// An unlock the server may have made landed after the folder relocked: the server locks
     /// again, after it. Not when a newer unlock is under way or open, which the server then
     /// serves, nor once the account has closed.
@@ -286,7 +325,7 @@ extension EnvironmentValues {
         lockServer(keepingAppAwake: UIApplication.shared.applicationState == .background)
     }
 
-    /// A failed unlock, in the server's own words where it gave any, as for a wrong PIN or password.
+    /// A failed unlock, in the server's own words where it gave any, as for a wrong PIN.
     private static func unlockFailure(_ error: any Error) -> FeatureFailure {
         switch error {
         case ServerFailure.http(400, let message?) where !message.isEmpty: FeatureFailure(APIError.invalidResponse(message))
@@ -357,28 +396,35 @@ extension EnvironmentValues {
     /// Reads the folder's months, then its newest months until the grid has photos to scroll
     /// through; the rest follow as it scrolls. Each month shows as it comes in: the newest replaces
     /// what was shown before, and the others are added after it, so a photo moved out of the folder
-    /// meanwhile stays out.
+    /// meanwhile stays out. What is shown, the months it was read from and what is left to read
+    /// change together, so a read that fails part-way leaves them in step: what was shown stays
+    /// until the newest month arrives, and the grid then reads on from where the read stopped,
+    /// never a month twice.
     private func readMonths(epoch: UInt64, relockingOnFailure: Bool) async {
         isLoading = true
         do {
             let months = try await api.timeBuckets(Self.timeline)
-            guard isOpen(epoch) else { return }
-            self.months = months
-            nextMonth = 0
-            var replaced = false
-            while nextMonth < months.count, !replaced || photos.assets.count < Self.firstPage {
-                let page = try await month(months[nextMonth])
-                guard isOpen(epoch) else { return }
-                if replaced { photos.assets += page } else { photos.assets = page; replaced = true }
-                nextMonth += 1
+            guard isReading(epoch) else { return }
+            var newest: [Asset] = []
+            if let first = months.first {
+                newest = try await month(first)
+                guard isReading(epoch) else { return }
             }
-            // The folder is empty now.
-            if !replaced, !photos.assets.isEmpty { photos.assets = [] }
+            self.months = months
+            if photos.assets != newest { photos.assets = newest }
+            nextMonth = months.isEmpty ? 0 : 1
             hasMore = nextMonth < months.count
+            while hasMore, photos.assets.count < Self.firstPage {
+                let page = try await month(months[nextMonth])
+                guard isReading(epoch) else { return }
+                photos.assets += page
+                nextMonth += 1
+                hasMore = nextMonth < months.count
+            }
             isLoading = false
         } catch is CancellationError {
         } catch {
-            guard isOpen(epoch) else { return }
+            guard isReading(epoch) else { return }
             isLoading = false
             if relockingOnFailure {
                 // An unlock that can't show the folder is undone, as before.
@@ -389,19 +435,20 @@ extension EnvironmentValues {
         }
     }
 
-    /// Reads the next month and adds its photos, unless the folder relocked meanwhile.
+    /// Reads the next month and adds its photos, unless the folder relocked or was read again
+    /// meanwhile. A failure leaves the month to read when the grid next reaches its end.
     private func readMore(epoch: UInt64) async {
-        guard nextMonth < months.count else { isLoading = false; return }
+        guard nextMonth < months.count else { hasMore = false; isLoading = false; return }
         do {
             let page = try await month(months[nextMonth])
-            guard isOpen(epoch) else { return }
+            guard isReading(epoch) else { return }
             photos.assets += page
             nextMonth += 1
             hasMore = nextMonth < months.count
             isLoading = false
         } catch is CancellationError {
         } catch {
-            guard isOpen(epoch) else { return }
+            guard isReading(epoch) else { return }
             isLoading = false
             failure = FeatureFailure(error)
         }
@@ -420,14 +467,14 @@ extension EnvironmentValues {
     private func reread(epoch: UInt64) async {
         do {
             let status = try await api.authStatus()
-            guard isOpen(epoch) else { return }
+            guard isReading(epoch) else { return }
             guard status.isElevated else { return relock(.expired) }
             self.status = status
             watchExpiry(status, epoch: epoch)
         } catch is CancellationError {
             return
         } catch {
-            if isOpen(epoch) { isLoading = false; failure = FeatureFailure(error) }
+            if isReading(epoch) { isLoading = false; failure = FeatureFailure(error) }
             return
         }
         await readMonths(epoch: epoch, relockingOnFailure: false)
@@ -444,15 +491,30 @@ extension EnvironmentValues {
 
     // MARK: The server
 
-    /// Asks the server to lock the folder, after any lock asked for before.
+    /// Asks the server to lock the folder, after any lock asked for before. Heard, with no unlock on
+    /// its way when it was asked for and none sent since, the server holds the folder locked;
+    /// otherwise a lock is still owed.
     private func lockServer(keepingAppAwake: Bool) {
         let api = api, previous = serverLock
-        let lock = Task {
+        let unlocksBefore = unlocksUnanswered == 0 ? unlocksSent : nil
+        locksPending += 1
+        let lock = Task { [weak self] in
             await previous?.value
-            try? await api.lock()
+            let heard = (try? await api.lock()) != nil
+            guard let self else { return }
+            self.locksPending -= 1
+            if heard, self.unlocksSent == unlocksBefore { self.serverMayBeUnlocked = false }
         }
         serverLock = lock
         if keepingAppAwake { BackgroundTime.hold("Lock the Locked Folder", until: lock) }
+    }
+
+    /// Asks the server again for a lock it may not have heard, as one the network lost, while the
+    /// folder is locked here and no lock is on its way. The folder's screen coming and going and
+    /// the app coming back or leaving ask, so a lost lock costs one request each time, never a loop.
+    private func lockIfOwed(keepingAppAwake: Bool) {
+        guard serverMayBeUnlocked, locksPending == 0, phase == .locked, !ended else { return }
+        lockServer(keepingAppAwake: keepingAppAwake)
     }
 }
 

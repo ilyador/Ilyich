@@ -82,9 +82,10 @@ VIDEO_ID = asset(5)['id']
 SESSION_TOKEN = 'ui-test-session'
 EXPIRED_TOKEN = 'ui-test-expired'
 
-# The Locked Folder (REBUILD_ROADMAP.md N5): a PIN is set, 123456, and any password stands in for
-# it. Unlocking elevates only the token that asked, until that token locks again, as Immich elevates
-# a session; the folder's timeline and its photos answer only an elevated token.
+# The Locked Folder (REBUILD_ROADMAP.md N5): a PIN is set, 123456, and only the PIN unlocks, as in
+# Immich, whose account password resets the PIN and never unlocks. Unlocking elevates only the token
+# that asked, until that token locks again, as Immich elevates a session; the folder's timeline and
+# its photos answer only an elevated token.
 LOCKED_PIN = '123456'
 LOCKED_DATE = '2026-11-01'
 LOCKED_COUNT = 3
@@ -298,14 +299,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else: self.send(locked_asset(LOCKED_IDS[path.split('/')[2]]))
         return True
     def locked_post(self,path,body):
-        # Unlocking with the PIN, or any password, elevates the token that asked; locking ends it.
+        # Unlocking with the PIN elevates the token that asked; locking ends it. As Immich's
+        # unlockSession, a password is not read: without a PIN the answer is Immich's own 400.
         token=self.token()
         if path=='/auth/session/unlock':
-            pin=body.get('pinCode');password=body.get('password')
-            if pin==LOCKED_PIN or (pin is None and isinstance(password,str) and password):
+            pin=body.get('pinCode')
+            if pin==LOCKED_PIN:
                 with ELEVATED_LOCK: ELEVATED.add(token)
                 self.send_empty();return True
-            self.send_immich_error(400,'Wrong PIN code' if pin is not None else 'Wrong password');return True
+            self.send_immich_error(400,'Wrong PIN code' if pin else 'Either password or pinCode is required');return True
         if path=='/auth/session/lock':
             with ELEVATED_LOCK: ELEVATED.discard(token)
             self.send_empty();return True

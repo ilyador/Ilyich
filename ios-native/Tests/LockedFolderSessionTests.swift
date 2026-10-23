@@ -4,9 +4,10 @@ import UIKit
 import XCTest
 @testable import Ilyich
 
-/// N5: the Locked Folder's session. It unlocks by PIN or password, relocks synchronously on the
-/// way to the background, purging locked media, and drops whatever answer comes after a relock.
-/// Locked photos never reach a library cache, and moving one to the timeline reaches the feed.
+/// N5: the Locked Folder's session. It unlocks by PIN, relocks synchronously on the way to the
+/// background, purging locked media, and drops whatever answer comes after a relock. The server
+/// hears locks and unlocks in order, and a lock it may not have heard is asked for again. Locked
+/// photos never reach a library cache, and moving one to the timeline reaches the feed.
 @MainActor final class LockedFolderSessionTests: XCTestCase {
     private let png = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).pngData { context in
         UIColor.systemPurple.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
@@ -229,9 +230,10 @@ import XCTest
 
     // MARK: - Unlocking
 
-    /// A first PIN is set, then unlocks; the password unlocks too; a wrong PIN shows the server's
-    /// words and leaves the folder locked.
-    func testPINSetUpPasswordAndAWrongPIN() async throws {
+    /// A first PIN is set, then unlocks; once set, the PIN alone unlocks, Immich's only way (its
+    /// account password resets the PIN and never unlocks); a wrong PIN shows the server's words and
+    /// leaves the folder locked.
+    func testPINSetUpAndAWrongPIN() async throws {
         let server = lockedServer([("2026-03-01", ["a"])])
         server.route("GET", "auth/status", Self.status(pinCode: false, elevated: false), Self.status(elevated: true))
         server.route("POST", "auth/pin-code", .empty(201))
@@ -256,13 +258,13 @@ import XCTest
         server.route("GET", "auth/status", Self.status(elevated: false), Self.status(elevated: true))
         await session.appear()
         XCTAssertFalse(session.settingUp)
-        session.entry.usePassword = true
-        XCTAssertFalse(session.canUnlock)
-        session.entry.password = "secret"
+        session.entry.pin = "654321"
+        XCTAssertTrue(session.canUnlock, "A PIN set needs no confirming.")
         session.unlock()
         await session.unlocking?.value
         XCTAssertEqual(session.phase, .unlocked)
-        XCTAssertEqual(try body(server.requests("POST", "auth/session/unlock").last), ["password": "secret"])
+        XCTAssertEqual(try body(server.requests("POST", "auth/session/unlock").last), ["pinCode": "654321"])
+        XCTAssertEqual(server.requests("POST", "auth/pin-code").count, 1, "A PIN set is not set again.")
 
         session.lock()
         server.route("GET", "auth/status", Self.status(elevated: false))
@@ -277,6 +279,98 @@ import XCTest
         XCTAssertFalse(folder.authorization.snapshot.lockedFolderUnlocked)
         session.entry.pin = "12345"
         XCTAssertFalse(session.canUnlock, "A PIN has six digits.")
+    }
+
+    /// An unlock waits for the lock asked for before it, which a slow network can hold back: the
+    /// server hears the lock first, so it can't land after the unlock and lock the folder again
+    /// under it.
+    func testAnUnlockWaitsForTheLockAskedForBeforeIt() async throws {
+        let server = lockedServer([("2026-03-01", ["a"])])
+        let lockGate = StubServer.Gate()
+        server.route("POST", "auth/session/lock", StubServer.Response.empty(204).waiting(for: lockGate))
+        let folder = try makeFolder(server)
+        let session = folder.session
+        await unlock(session)
+        XCTAssertEqual(session.phase, .unlocked)
+
+        session.lock()
+        try await until("The lock was not sent.") { server.requests("POST", "auth/session/lock").count == 1 }
+        session.entry.pin = "123456"
+        XCTAssertTrue(session.canUnlock, "The PIN can be sent at once.")
+        session.unlock()
+        XCTAssertEqual(session.phase, .unlocking)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(server.requests("POST", "auth/session/unlock").count, 1, "The unlock waits for the lock before it.")
+
+        lockGate.open()
+        await session.unlocking?.value
+        XCTAssertEqual(session.phase, .unlocked)
+        XCTAssertEqual(server.requests.map(\.path).filter { $0.hasPrefix("auth/session/") },
+                       ["auth/session/unlock", "auth/session/lock", "auth/session/unlock"], "The server hears the lock, then the unlock.")
+    }
+
+    /// A lock the server may not have heard is asked for again: one that failed, when the folder's
+    /// screen goes and when the app comes back, and, when the folder's screen appears, a server
+    /// still unlocked though the folder is locked here, as after the app was killed with it open.
+    /// Once a lock is heard, nothing more is asked.
+    func testALockTheServerMayNotHaveHeardIsAskedForAgain() async throws {
+        let server = lockedServer([("2026-03-01", ["a"])])
+        let refused = StubServer.Response.immichError(500, message: "Internal server error")
+        server.route("POST", "auth/session/lock", refused, refused, .empty(204))
+        let folder = try makeFolder(server)
+        let session = folder.session
+        func locks() -> Int { server.requests("POST", "auth/session/lock").count }
+        await unlock(session)
+
+        session.lock()
+        await session.serverLock?.value
+        XCTAssertEqual(locks(), 1)
+        session.disappear()
+        await session.serverLock?.value
+        XCTAssertEqual(locks(), 2, "Leaving the folder asks again for the lock that failed.")
+        session.sceneChanged(.inactive)
+        session.sceneChanged(.active)
+        await session.serverLock?.value
+        XCTAssertEqual(locks(), 3, "So does the app coming back.")
+
+        // The last one was heard.
+        session.sceneChanged(.active)
+        session.disappear()
+        session.sceneChanged(.background)
+        await session.serverLock?.value
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(locks(), 3, "A lock heard is not asked for again.")
+
+        server.route("GET", "auth/status", Self.status(elevated: true))
+        await session.appear()
+        await session.serverLock?.value
+        XCTAssertEqual(session.phase, .locked)
+        XCTAssertEqual(locks(), 4, "A server that says the folder is unlocked while it is locked here is locked.")
+        server.route("GET", "auth/status", Self.status(elevated: false))
+        await session.appear()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(locks(), 4)
+
+        // An unlock on its way when the app goes to the background may reach the server after the
+        // relock's lock: that lock, though heard, settles nothing, and when the one asked for after
+        // the late unlock fails, leaving the folder asks again.
+        let unlockGate = StubServer.Gate()
+        server.route("POST", "auth/session/unlock", StubServer.Response.empty(204).waiting(for: unlockGate))
+        server.route("POST", "auth/session/lock", .empty(204), refused, .empty(204))
+        session.entry.pin = "123456"
+        session.unlock()
+        try await until("The unlock was not sent.") { server.requests("POST", "auth/session/unlock").count == 2 }
+        session.sceneChanged(.background)
+        await session.serverLock?.value
+        XCTAssertEqual(locks(), 5)
+        unlockGate.open()
+        await session.unlocking?.value
+        await session.serverLock?.value
+        XCTAssertEqual(locks(), 6, "The late unlock has the server lock again.")
+        session.disappear()
+        await session.serverLock?.value
+        XCTAssertEqual(locks(), 7, "That lock failed, so leaving the folder asks again.")
+        XCTAssertEqual(session.phase, .locked)
     }
 
     /// The folder pages as its grid scrolls, with no Load more button: months are read until the
@@ -310,6 +404,61 @@ import XCTest
         XCTAssertTrue(session.photos.assets.allSatisfy { $0.visibility == .locked })
     }
 
+    /// A read of the folder again, as after a loss in its viewer, that fails on its newest month
+    /// leaves what was shown and what is left to read as they were: the grid reads on from where
+    /// it was, never the newest month again, so no photo shows twice.
+    func testAReadAgainThatFailsOnItsNewestMonthLeavesThePagingAsItWas() async throws {
+        let first = Self.ids("a", LockedFolderSession.firstPage), second = Self.ids("b", 3)
+        let server = lockedServer([("2026-03-01", first), ("2026-02-01", second)])
+        let folder = try makeFolder(server)
+        let session = folder.session
+        await unlock(session)
+        XCTAssertTrue(session.hasMore)
+
+        server.route("GET", "timeline/bucket", .immichError(500, message: "Internal server error"))
+        session.photos.lose(first[0])
+        try await until("The folder was not read again.") { session.failure != nil }
+        XCTAssertFalse(session.isLoading)
+        XCTAssertEqual(session.photos.assets.map(\.id), Array(first.dropFirst()), "What was shown stays.")
+        XCTAssertTrue(session.hasMore)
+
+        session.failure = nil
+        server.route("GET", "timeline/bucket", Self.month("2026-02-01", second))
+        session.photoAppeared(try XCTUnwrap(session.photos.assets.last).id)
+        try await until("The next month was not read.") { session.photos.assets.count == first.count - 1 + second.count }
+        let asked = server.requests("GET", "timeline/bucket").last?.query.first { $0.name == "timeBucket" }?.value
+        XCTAssertEqual(asked.map { String($0.prefix(10)) }, "2026-02-01", "The month after those shown, not the newest again.")
+        let ids = session.photos.assets.map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count, "No photo shows twice.")
+        XCTAssertFalse(session.hasMore)
+    }
+
+    /// A read of the folder again that fails after its newest month leaves the months after it to
+    /// read as the grid scrolls, though the folder had been read to its end before.
+    func testAReadAgainThatFailsPartWayReadsTheRestAsTheGridScrolls() async throws {
+        let server = lockedServer([("2026-03-01", ["a", "b"]), ("2026-02-01", ["c"]), ("2026-01-01", ["d"])])
+        let folder = try makeFolder(server)
+        let session = folder.session
+        await unlock(session)
+        XCTAssertEqual(session.photos.assets.map(\.id), ["a", "b", "c", "d"], "A small folder is read to its end at once.")
+        XCTAssertFalse(session.hasMore)
+
+        server.route("GET", "timeline/bucket", Self.month("2026-03-01", ["a", "b"]), .immichError(500, message: "Internal server error"))
+        session.photos.lose("d")
+        try await until("The folder was not read again.") { session.failure != nil }
+        XCTAssertFalse(session.isLoading)
+        XCTAssertEqual(session.photos.assets.map(\.id), ["a", "b"], "The newest month shows.")
+        XCTAssertTrue(session.hasMore, "The months after it are left to read.")
+
+        session.failure = nil
+        server.route("GET", "timeline/bucket", Self.month("2026-02-01", ["c"]), Self.month("2026-01-01", []))
+        session.photoAppeared("b")
+        try await until("The next month was not read.") { session.photos.assets.map(\.id) == ["a", "b", "c"] }
+        session.photoAppeared("c")
+        try await until("The last month was not read.") { !session.hasMore && !session.isLoading }
+        XCTAssertEqual(session.photos.assets.map(\.id), ["a", "b", "c"], "The photo gone stays gone.")
+    }
+
     /// A photo moved to the timeline or put in Trash leaves the folder in place, whichever screen
     /// moved it; a favorite stays, with its new record.
     func testAPhotoMovedOutLeavesTheFolderInPlace() async throws {
@@ -327,6 +476,46 @@ import XCTest
         _ = try await folder.mutations.start(.trash(["b"]), on: [trashed]).result
         try await until("The photo put in Trash stayed.") { session.photos.assets.map(\.id) == ["c"] }
         XCTAssertEqual(server.requests("GET", "timeline/bucket").count, 1, "Nothing is read again.")
+    }
+
+    // MARK: - The viewer
+
+    /// The folder's viewer reads its photo from the server alone, wherever it reads one: on
+    /// showing it and before the editor opens here, and for its details, tags and faces through
+    /// the same read. The offline library never stands in: its row may not know yet that the photo
+    /// was locked, and as a library photo its media would go through the library's caches.
+    func testTheFolderViewerNeverReadsTheOfflineLibrary() async throws {
+        let server = makeStubServer()
+        server.route("GET", "assets/p", .transportFailure(.notConnectedToInternet))
+        let api = try APIClient(baseURL: server.baseURL, accessToken: "locked", userID: "me", sessionConfiguration: server.configuration(),
+                                networkConfiguration: NetworkConfiguration())
+        addTeardownBlock { await api.shutdown() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LockedFolderSessionTests-" + UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let index = try LibraryIndex(scope: api.cacheScope, userID: "me", directory: directory)
+        await api.attachEntityStore(index)
+        // The sync left the photo in the timeline; it was locked since, elsewhere.
+        _ = try await index.apply([SyncEvents.asset("p", owner: "me")], epoch: await index.epoch())
+        let stale = try await api.asset(id: "p")
+        XCTAssertEqual(stale.visibility, .timeline, "The library's read stands in with the row the sync left.")
+
+        var photo = Asset(id: "p", ownerId: "me")
+        photo.visibility = .locked
+        let list = AssetList([photo], keeps: CollectionMembership.lockedFolder)
+        let model = ViewerModel(api: api, route: ViewerRoute(asset: photo, source: .locked, albumContext: nil), window: .locked(list),
+                                settleDelay: .zero)
+        model.start(mutations: nil, close: {})
+        do {
+            _ = try await model.readAsset("p")
+            XCTFail("The folder's viewer never reads the offline library.")
+        } catch {}
+        await model.refreshCurrentAsset()
+        XCTAssertTrue(model.capabilities[.edit].awaitsDetails, "The editor reads the photo's details first.")
+        model.openEditor()
+        try await until("The editor's read did not finish.") { !model.busy }
+        XCTAssertNil(model.cover, "The editor didn't open.")
+        XCTAssertEqual(model.current.visibility, .locked, "The photo keeps the folder's private path.")
+        XCTAssertEqual(list.assets.map(\.id), ["p"], "And stays in the folder.")
     }
 
     // MARK: - The account

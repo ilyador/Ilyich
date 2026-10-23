@@ -157,12 +157,12 @@ struct AssetInfoView: View {
         // Download original is for this sheet: closing it, or going on to a place, stops it.
         .onDisappear { exports.cancel() }
         .sheet(isPresented: $editingMetadata) { NavigationStack { MetadataEditor(api: api, asset: asset, onUpdated: show) } }
-        .sheet(isPresented: $editingFaces) { NavigationStack { FaceAssignmentView(api: api, pipeline: pipeline, asset: asset, onChanged: { Task { if let fresh = try? await api.asset(id: asset.id) { update(fresh) } } }) } }
+        .sheet(isPresented: $editingFaces) { NavigationStack { FaceAssignmentView(api: api, pipeline: pipeline, asset: asset, onChanged: { Task { if let fresh = try? await viewer.readAsset(asset.id) { update(fresh) } } }) } }
         .sheet(item: $collection) { selection in
             NavigationStack { InfoCollectionView(api: api, pipeline: pipeline, collection: selection) }
         }
         .sheet(item: $shared) { files in ShareSheet(urls: files.urls).onDisappear { files.remove() } }
-        .sheet(isPresented: $tagging) { NavigationStack { ViewerTagEditor(api: api, asset: asset, onUpdated: update) } }
+        .sheet(isPresented: $tagging) { NavigationStack { ViewerTagEditor(api: api, asset: asset, read: viewer.readAsset, onUpdated: update) } }
     }
     private func locationPreview(latitude: Double, longitude: Double, exif: ExifInfo) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -205,8 +205,9 @@ struct AssetInfoView: View {
     private func loadDetails() async {
         loading = true; error = nil
         defer { loading = false }
-        let api = api, id = asset.id
-        async let assetResult = Result { try await api.asset(id: id) }
+        // The photo as its viewer reads it: a Locked Folder photo from the server alone.
+        let api = api, id = asset.id, read = viewer.readAsset
+        async let assetResult = Result { try await read(id) }
         async let albumsResult = Result { try await api.assetAlbums(id: id) }
         async let textResult = Result { try await api.assetOCR(id: id) }
         switch await assetResult { case .success(let asset): update(asset); case .failure(let failure): error = failure.localizedDescription }
