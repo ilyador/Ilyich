@@ -329,12 +329,13 @@ extension FrozenFeed: DisplayedFeed {
 
     /// Without `places`, the feeds' places live in memory only, counted after `placesDelay`.
     init(source: any LibraryFeedSource, includesDevicePhotos: Bool = false, placesDelay: Duration = .seconds(3),
-         choices: SearchChoicesStorage? = nil, places: MonthPlacesService? = nil) {
+         choices: SearchChoicesStorage? = nil, places: MonthPlacesService? = nil,
+         residentPhotoBudget: Int = TimelineFeed.residentPhotoBudget) {
         self.source = source; self.includesDevicePhotos = includesDevicePhotos
         self.places = places ?? MonthPlacesService(source: source, delay: placesDelay)
         choicesStorage = choices
         searchChoices = choices?.load() ?? SearchChoices()
-        feed = TimelineFeed(source: source, viewport: feedViewport)
+        feed = TimelineFeed(source: source, viewport: feedViewport, residentPhotoBudget: residentPhotoBudget)
         send(.attach(self))
     }
     private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && feedQuery == .library }

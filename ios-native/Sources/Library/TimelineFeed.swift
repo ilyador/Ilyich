@@ -95,6 +95,10 @@ actor TimelineFeed {
     static let concurrentLimit = 3
     static let queueLimit = 6
     static let residentLimit = 12
+    /// Months are let go only while more photos than this are resident too, so a sparse feed (an
+    /// album with a photo or two a month) keeps the months it has read instead of reading them
+    /// again each time they scroll back.
+    static let residentPhotoBudget = 6_000
     static let retryBackoff: ClosedRange<Duration> = .seconds(1)...(.seconds(30))
 
     private struct Session { let ticket: Ticket; let query: LibraryQuery; let plan: QueryPlan }
@@ -113,6 +117,7 @@ actor TimelineFeed {
     }
 
     private let source: any TimelineSource
+    private let photoBudget: Int
     /// What the grid shows right now, ahead of the viewport command that follows it.
     private let onScreen: Viewport
     private weak var consumer: (any TimelineFeedConsumer)?
@@ -139,7 +144,9 @@ actor TimelineFeed {
     /// The sequence the next load begins with.
     private var nextLoad: UInt64 = 1
 
-    init(source: any TimelineSource, viewport: Viewport = Viewport()) { self.source = source; onScreen = viewport }
+    init(source: any TimelineSource, viewport: Viewport = Viewport(), residentPhotoBudget: Int = TimelineFeed.residentPhotoBudget) {
+        self.source = source; onScreen = viewport; photoBudget = residentPhotoBudget
+    }
 
     /// Commands in the order they were given.
     func handle(_ commands: [Command]) {
@@ -512,11 +519,17 @@ actor TimelineFeed {
         }
     }
 
-    /// Keeps the twelve most recently loaded months, and any on screen or being jumped to.
+    /// Keeps the twelve most recently loaded months, or more while they hold few photos, and every
+    /// month the grid wants: on screen, beside it, or being jumped to. Letting a wanted month go
+    /// had it read again at once, so the months at a sparse screen's top and bottom loaded and
+    /// unloaded in turn.
     private func evict() -> [MonthKey] {
         var evicted: [MonthKey] = []
-        while recent.count > Self.residentLimit, let index = recent.firstIndex(where: { !isProtected($0) }) {
+        var photos = resident.values.reduce(0) { $0 + $1.count }
+        while recent.count > Self.residentLimit, photos > photoBudget,
+              let index = recent.firstIndex(where: { !isWanted($0) }) {
             let month = recent.remove(at: index)
+            photos -= resident[month]?.count ?? 0
             resident[month] = nil; stale.remove(month)
             evicted.append(month)
         }
