@@ -9,6 +9,8 @@ import Synchronization
 enum MonthProjector {
     /// What one month is made from.
     struct Input: Sendable {
+        /// The month, and the ID of its section, as the grid names it.
+        let month: MonthKey
         let bucket: String
         /// The server's photos, in its order. A month only the phone has passes none.
         let remote: [Asset]
@@ -46,7 +48,7 @@ enum MonthProjector {
     }
 
     struct Result: Sendable {
-        let bucket: String
+        let month: MonthKey
         let projection: Projection
         /// Differs from the previous projection.
         let changed: Bool
@@ -72,7 +74,7 @@ enum MonthProjector {
         let rowsChanged = input.previous.map { previous in
             previous.entries.count != entries.count || !zip(previous.entries, entries).allSatisfy { $0.id == $1.id }
         } ?? true
-        return Result(bucket: input.bucket, projection: projection, changed: input.previous != projection, rowsChanged: rowsChanged)
+        return Result(month: input.month, projection: projection, changed: input.previous != projection, rowsChanged: rowsChanged)
     }
 
     /// A month's photos, the server's and the phone-only ones together, newest first by the time

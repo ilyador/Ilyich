@@ -2,10 +2,15 @@ import Foundation
 import UIKit
 import Observation
 
+/// A section of the grid: a month of the feed, or the search results.
 struct LibrarySection: Identifiable, Equatable {
+    /// The grid's name for it: the bucket its month's summary gave (YYYY-MM-01 for a month only
+    /// the phone has), or "results".
     let id: String
     let count: Int
     let title: String
+    /// The month it shows, by which the store and the feed know it (F6); nil for the results.
+    let month: MonthKey?
 }
 struct TimelineDayGroup: Equatable, Sendable {
     let startItem: Int
@@ -23,23 +28,38 @@ struct ScrollRequest: Equatable {
     let id = UUID()
     let position: GridPosition
 }
+/// One month of a feed's summary: the bucket the source reads it by, with its count, and the
+/// month it is, read from the bucket once, when the summary arrives (F6).
+private struct SummaryMonth: Equatable {
+    let bucket: TimeBucket
+    let month: MonthKey?
+    var id: String { bucket.id }
+    var count: Int { bucket.count }
+    /// The same month counting otherwise.
+    func counting(_ count: Int) -> SummaryMonth {
+        SummaryMonth(bucket: TimeBucket(timeBucket: bucket.timeBucket, count: count), month: month)
+    }
+}
+/// The feed shown while a new scope loads behind it (F4), frozen as it was. With the feed as it
+/// stands, it is what the grid displays, and both are read the same way (`DisplayedFeed`).
 private struct FrozenFeed {
     let sections: [LibrarySection]
-    let assets: [String: [Asset]]
-    /// Its months as projected: rows, days and places.
-    let projections: [String: MonthProjector.Projection]
-    let remoteToLocal: [String: LocalPhoto]
-    let showingResults: Bool
+    /// Its months' server photos, and the months as projected: rows, days and places.
+    let rows: [MonthKey: [Asset]]
+    let projections: [MonthKey: MonthProjector.Projection]
+    /// The search results it showed, when it showed results rather than months.
+    let results: [Asset]?
+    let matches: [String: LocalPhoto]
     let totalCount: Int
     /// The frozen feed's own month places, not those of the filter on its way.
     let places: [String: [PlaceTally]]
 }
 /// The unfiltered library as it was left, to come straight back when a filter or search clears.
 private struct SavedTimeline {
-    let buckets: [TimeBucket]
-    let assets: [String: [Asset]]
+    let summary: [SummaryMonth]
+    let rows: [MonthKey: [Asset]]
     /// Its months as projected, and the phone's photos they were projected with.
-    let projections: [String: MonthProjector.Projection]
+    let projections: [MonthKey: MonthProjector.Projection]
     let device: MergedTimeline
     let position: GridPosition?
     let title: String
@@ -47,40 +67,156 @@ private struct SavedTimeline {
     let plan: QueryPlan?
 }
 
-@MainActor @Observable final class LibraryStore {
+/// What the grid displays (F6): the feed as it stands or, while a new scope loads behind it, the
+/// frozen feed. The grid, the rail's lens, the month heading and the viewer read either one through
+/// the same code, so what they show of the frozen feed and of the live one can't drift apart.
+@MainActor private protocol DisplayedFeed {
+    var shownSections: [LibrarySection] { get }
+    /// The search results shown, when the feed shows results rather than months.
+    var shownResults: [Asset]? { get }
+    func shownRows(of month: MonthKey) -> [Asset]?
+    func shownProjection(of month: MonthKey) -> MonthProjector.Projection?
+    /// The phone's copy of a server photo, shown beside it.
+    func shownMatch(_ id: String) -> LocalPhoto?
+    /// The places the index counted in a month, by the month's section ID.
+    func shownPlaces(of section: String) -> [PlaceTally]?
+}
+
+private extension DisplayedFeed {
+    /// The month a section shows. Only for months: the results have none.
+    func month(at index: Int) -> MonthKey? {
+        let sections = shownSections
+        return sections.indices.contains(index) ? sections[index].month : nil
+    }
+
+    /// A row of the grid, from its month's projection. A loaded month whose projection has not
+    /// landed shows the server's rows in their order meanwhile.
+    func displayedEntry(section: Int, item: Int) -> LibraryEntry? {
+        if let results = shownResults {
+            guard results.indices.contains(item) else { return nil }
+            return .remote(results[item], local: shownMatch(results[item].id))
+        }
+        guard let month = month(at: section) else { return nil }
+        if let entries = shownProjection(of: month)?.entries { return entries.indices.contains(item) ? entries[item] : nil }
+        guard let rows = shownRows(of: month), rows.indices.contains(item) else { return nil }
+        return .remote(rows[item], local: shownMatch(rows[item].id))
+    }
+
+    func displayedAsset(section: Int, item: Int) -> Asset? {
+        if let results = shownResults { return results.indices.contains(item) ? results[item] : nil }
+        guard let month = month(at: section), let rows = shownRows(of: month), rows.indices.contains(item) else { return nil }
+        return rows[item]
+    }
+
+    func displayedDayGroups(section: Int) -> [TimelineDayGroup] {
+        guard shownResults == nil, let month = month(at: section) else { return [] }
+        return shownProjection(of: month)?.days ?? []
+    }
+
+    /// A month's places: its loaded photos' (computed in the projection), or else the index's
+    /// count of them.
+    func displayedPlaceSummary(section index: Int) -> String? {
+        guard shownResults == nil else { return nil }
+        let sections = shownSections
+        guard sections.indices.contains(index) else { return nil }
+        let section = sections[index]
+        return section.month.flatMap { shownProjection(of: $0)?.placeSummary } ?? MonthPlaces.summary(shownPlaces(of: section.id))
+    }
+
+    /// The results' places when showing them, otherwise the month at `section`'s.
+    func displayedPlaceSummary(around section: Int) -> String? {
+        if let results = shownResults { return MonthProjector.placeSummary(of: results) }
+        return displayedPlaceSummary(section: section)
+    }
+
+    /// Where a position is in the grid: the photo it names, wherever its month now puts it, or
+    /// else its section and item, kept within the section.
+    func displayedIndex(for position: GridPosition) -> (section: Int, item: Int)? {
+        let sections = shownSections
+        if let id = position.assetID {
+            if let results = shownResults {
+                if let item = results.firstIndex(where: { $0.id == id }) { return (0, item) }
+            } else {
+                for (index, section) in sections.enumerated() {
+                    guard let month = section.month else { continue }
+                    if let projection = shownProjection(of: month) {
+                        if let item = projection.entries.firstIndex(where: { $0.id == id }) { return (index, item) }
+                    } else if let item = shownRows(of: month)?.firstIndex(where: { $0.id == id }) {
+                        return (index, item)
+                    }
+                }
+            }
+        }
+        guard let index = sections.firstIndex(where: { $0.id == position.section }), sections[index].count > 0 else { return nil }
+        return (index, min(position.item, sections[index].count - 1))
+    }
+
+    /// The server photos of a photo's month and the months beside it, for swiping in the viewer;
+    /// the results, when showing them.
+    func displayedAssets(around asset: Asset) -> [Asset] {
+        if let results = shownResults { return results }
+        let months = shownSections.map(\.month)
+        guard let index = months.firstIndex(where: { month in
+            month.flatMap { shownRows(of: $0) }?.contains(where: { $0.id == asset.id }) == true
+        }) else { return [asset] }
+        return months[max(0, index - 1)...min(months.count - 1, index + 1)].flatMap { month in month.flatMap { shownRows(of: $0) } ?? [] }
+    }
+}
+
+extension FrozenFeed: DisplayedFeed {
+    var shownSections: [LibrarySection] { sections }
+    var shownResults: [Asset]? { results }
+    func shownRows(of month: MonthKey) -> [Asset]? { rows[month] }
+    func shownProjection(of month: MonthKey) -> MonthProjector.Projection? { projections[month] }
+    func shownMatch(_ id: String) -> LocalPhoto? { matches[id] }
+    func shownPlaces(of section: String) -> [PlaceTally]? { places[section] }
+}
+
+/// The library's feed (REBUILD_ROADMAP.md F6): what the grid displays, a new scope loading behind
+/// it, the scope and its title, the search's verification, the errors, the scroll request and the
+/// anchor to restore, the feeds' places, and the commands that change them. Its months come from
+/// the TimelineFeed, keyed by month as the feed keys them, and are projected off the main actor
+/// (MonthProjector); a search's pages come from its SearchFeed. What is selected is the
+/// selection's (FeedSelection), which reads a whole month through this feed.
+@MainActor @Observable final class LibraryFeedStore {
     /// Where the feed reads: the account's library repository.
     let source: any LibraryFeedSource
+    /// The feed's months as the grid and the rail show them: the server's, with the phone's own
+    /// months merged in for the library.
     var buckets: [TimeBucket] = []
-    var loaded: [String: [Asset]] = [:]
-    private var remoteBuckets: [TimeBucket] = []
+    /// The server's photos of each month the feed has delivered, by month.
+    var rows: [MonthKey: [Asset]] = [:]
+    /// The server's months and their counts, as the summary gave them.
+    private var summary: [SummaryMonth] = []
     /// The phone's photos as last published, for selection, the viewer and the next projection.
     private var deviceTimeline = MergedTimeline()
-    /// The grid's months as projected off the main actor (F3): each bucket's rows, days and
+    /// The grid's months as projected off the main actor (F3): each month's rows, days and
     /// places. A loaded month and its projection land together; a month only the phone has is
     /// projected as soon as the grid knows it.
-    private var projections: [String: MonthProjector.Projection] = [:]
+    private var projections: [MonthKey: MonthProjector.Projection] = [:]
     /// The phone's photos as the sections and projections reflect them.
     @ObservationIgnored private var projectedDevice = MergedTimeline()
     /// A snapshot arrived that the projections do not reflect yet.
     @ObservationIgnored private var deviceDirty = false
     /// Months to project again, and why.
-    @ObservationIgnored private var dirty: [String: ProjectionReason] = [:]
+    @ObservationIgnored private var dirty: [MonthKey: ProjectionReason] = [:]
     /// Months the feed delivered, shown with their rows once projected.
-    @ObservationIgnored private var pendingLoads: [String: PendingLoad] = [:]
+    @ObservationIgnored private var pendingLoads: [MonthKey: PendingLoad] = [:]
     /// The projection run on its way; one at a time, the next taking everything that changed meanwhile.
     @ObservationIgnored private var projecting: Task<Void, Never>?
     /// Moves whenever the months or the feed change under a run, which then applies nothing and starts over.
     @ObservationIgnored private var structureVersion = 0
-    /// The server's months by bucket, the bucket of each "YYYY-MM" shown, and each bucket's title, formatted once.
-    @ObservationIgnored private var remoteIDs: Set<String> = []
-    @ObservationIgnored private var bucketOfMonth: [String: String] = [:]
+    /// The months the server has in the feed shown.
+    @ObservationIgnored private(set) var remoteMonths: Set<MonthKey> = []
+    /// Each section's title, formatted once.
     @ObservationIgnored private var titles: [String: String] = [:]
     private let includesDevicePhotos: Bool
     var results: [Asset] = []
     var isLoading = false
     var isSearching = false
     var error: String?
-    var bucketErrors: [String: String] = [:]
+    /// The months that failed to load, for the banner and its Retry.
+    var failedMonths: [MonthKey: String] = [:]
     var title = "Library"
     /// Each feed's places, so a month has a name before its photos load (F5). They are kept per
     /// feed, so the places shown are always those of the feed shown, and clearing a filter brings
@@ -99,31 +235,19 @@ private struct SavedTimeline {
     var resetID = UUID()
     var scrollRequest: ScrollRequest?
     var restorePosition: GridPosition?
-    var selected: Set<String> = [] { didSet {
-        selectedRecords = selectedRecords.filter { selected.contains($0.key) }
-        selectedLocalRecords = selectedLocalRecords.filter { selected.contains("local:" + $0.key) }
-        selectedMatchedCopies = selectedMatchedCopies.filter { selected.contains($0.key) }
-    } }
-    private var selectedRecords: [String: Asset] = [:]
-    private var selectedLocalRecords: [String: LocalPhoto] = [:]
-    private var selectedMatchedCopies: [String: LocalPhoto] = [:]
-    var isSelecting = false {
-        didSet { if !isSelecting { groupSelectionTask?.cancel(); isSelectingGroup = false } }
-    }
-    private(set) var isSelectingGroup = false
-    @ObservationIgnored private var groupSelectionTask: Task<Void, Never>?
-    @ObservationIgnored private var groupSelectionID = UUID()
+    /// What is selected, and selecting a whole month through this feed (F6).
+    let selection = FeedSelection()
     let navigation = TimelinePosition()
     /// What the feed shows. Its plan, made when the feed loads, serves every month it reads.
     private(set) var feedQuery = LibraryQuery.library
     /// How the feed shown is served, as of its last load; nil before then.
     private(set) var feedPlan: QueryPlan?
     /// What a search inside the feed shown searches: its scope, trash, visibility and filters.
-    private(set) var searchScope = LibraryStore.librarySearch {
+    private(set) var searchScope = LibraryFeedStore.librarySearch {
         didSet { searchFilter = ServerSearchRequest.filter(for: searchScope) }
     }
     /// The search scope as Search options edit it.
-    private(set) var searchFilter = ServerSearchRequest.filter(for: LibraryStore.librarySearch)
+    private(set) var searchFilter = ServerSearchRequest.filter(for: LibraryFeedStore.librarySearch)
     /// The AI check, mode and filters chosen under the search bar. They persist until changed.
     private(set) var searchChoices: SearchChoices {
         didSet { if searchChoices != oldValue { choicesStorage?.save(searchChoices) } }
@@ -148,8 +272,9 @@ private struct SavedTimeline {
     @ObservationIgnored private var searchCanResume = false
     /// Results taken out while this search shows, kept out of every page that arrives after.
     @ObservationIgnored private var removedResultIDs: Set<String> = []
-    /// The feed's months, loaded off the main actor as the grid needs them (F2). `loaded` and
-    /// `bucketErrors` mirror what it delivers; the grid reads the mirror.
+    /// The feed's months, loaded off the main actor as the grid needs them (F2). `rows` and
+    /// `failedMonths` hold what it delivers, by month as it names them; the grid reads them
+    /// through its sections, each of which carries its month.
     @ObservationIgnored private let feed: TimelineFeed
     /// The months on screen, for the feed to read at once: the viewport command that follows
     /// them through the queue must not let a load that lands first evict a month just scrolled on.
@@ -163,20 +288,12 @@ private struct SavedTimeline {
     /// view: observing it made SwiftUI update the grid on every scrolled frame.
     @ObservationIgnored private var feedCommands: [TimelineFeed.Command] = []
     @ObservationIgnored private var feedCommandTask: Task<Void, Never>?
-    /// The section-to-MonthKey mapping (F2 -> F6): each section's month, and the bucket the
-    /// source reads for each month it has. Months are keyed by month, not section: a section's
-    /// index moves when the phone adds a newer month.
-    @ObservationIgnored private var monthKeys: [MonthKey?] = []
-    @ObservationIgnored private var monthBuckets: [MonthKey: String] = [:]
-    @ObservationIgnored private var monthKeyByBucket: [String: MonthKey] = [:]
-    /// What the feed was last told, so a scrolled frame or a repeated snapshot sends nothing.
-    @ObservationIgnored private var lastVisibleMonths: Set<MonthKey>?
-    /// The buckets of the months the grid last reported on screen (tests).
-    var visibleBucketIDs: Set<String> {
-        guard let months = lastVisibleMonths else { return [] }
-        return Set(months.compactMap { monthBuckets[$0] })
-    }
-    @ObservationIgnored private var sentMonths: (order: [MonthKey], buckets: [MonthKey: String])?
+    /// The months on screen as the feed was last told, so a scrolled frame or a repeated snapshot
+    /// sends nothing.
+    @ObservationIgnored private(set) var visibleMonths: Set<MonthKey>?
+    /// The feed's months in the grid's order and the bucket the source reads each server month
+    /// by, as the feed was last told.
+    @ObservationIgnored private var sentMonths: (order: [MonthKey], reads: [MonthKey: String])?
     private var queryTask: Task<Void, Never>?
     @ObservationIgnored private var navigationTask: Task<Void, Never>?
     private var generation = UUID()
@@ -217,11 +334,6 @@ private struct SavedTimeline {
         send(.attach(self))
     }
     private var mergesDevicePhotos: Bool { includesDevicePhotos && !isFiltered && !showingResults && feedQuery == .library }
-    var selectedLocalPhotos: [LocalPhoto] { Array(selectedLocalRecords.values) }
-    var selectedDevicePhotos: [LocalPhoto] {
-        var seen = Set<String>()
-        return (Array(selectedLocalRecords.values) + Array(selectedMatchedCopies.values)).filter { seen.insert($0.id).inserted }
-    }
     var matchingDevicePhotos: [String: LocalPhoto] { deviceTimeline.remoteToLocal }
     /// The phone's photos changed. The months they changed in are projected again off the main
     /// actor and land together with the sections, so nothing here costs the frame; an identical
@@ -237,128 +349,27 @@ private struct SavedTimeline {
         while let task = projecting { await task.value }
     }
 
+    // MARK: - What the grid displays
+
     func restoredIndex(for position: GridPosition) -> (section: Int, item: Int)? {
-        if let frozenFeed {
-            if let id = position.assetID {
-                for (section, bucket) in frozenFeed.sections.enumerated() {
-                    if let item = frozenFeed.assets[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
-                    if let item = frozenFeed.projections[bucket.id]?.entries.firstIndex(where: { $0.id == id }) { return (section, item) }
-                }
-            }
-            guard let section = frozenFeed.sections.firstIndex(where: { $0.id == position.section }),
-                  frozenFeed.sections[section].count > 0 else { return nil }
-            return (section, min(position.item, frozenFeed.sections[section].count - 1))
-        }
-        if let id = position.assetID {
-            if showingResults, let item = results.firstIndex(where: { $0.id == id }) { return (0, item) }
-            for (section, bucket) in buckets.enumerated() {
-                if let item = projections[bucket.id]?.entries.firstIndex(where: { $0.id == id }) { return (section, item) }
-                if projections[bucket.id] == nil, let item = loaded[bucket.id]?.firstIndex(where: { $0.id == id }) { return (section, item) }
-            }
-        }
-        guard let section = sections.firstIndex(where: { $0.id == position.section }), sections[section].count > 0 else { return nil }
-        return (section, min(position.item, sections[section].count - 1))
+        if let frozenFeed { return frozenFeed.displayedIndex(for: position) }
+        return displayedIndex(for: position)
     }
 
     private var liveSections: [LibrarySection] {
-        if showingResults { return [.init(id: "results", count: results.count, title: query.isEmpty ? filterTitle ?? "Library" : "Search")] }
+        if showingResults { return [.init(id: "results", count: results.count, title: query.isEmpty ? filterTitle ?? "Library" : "Search", month: nil)] }
         return timelineSections
     }
     var sections: [LibrarySection] { frozenFeed?.sections ?? liveSections }
     var totalCount: Int { frozenFeed?.totalCount ?? (showingResults ? results.count : buckets.reduce(0) { $0 + $1.count }) }
     var isReplacingFeed: Bool { frozenFeed != nil }
     var isFiltered: Bool { filterTitle != nil || !query.isEmpty }
-    var selectedAssets: [Asset] {
-        var seen = Set<String>()
-        return (Array(selectedRecords.values) + results + loaded.values.flatMap { $0 }).filter { selected.contains($0.id) && seen.insert($0.id).inserted }
-    }
-    func toggleSelection(_ asset: Asset) {
-        if selected.contains(asset.id) { selected.remove(asset.id) }
-        else { selected.insert(asset.id); selectedRecords[asset.id] = asset }
-    }
-    func select(_ asset: Asset) { selected.insert(asset.id); selectedRecords[asset.id] = asset }
-    func toggleSelection(_ entry: LibraryEntry) {
-        if let asset = entry.remote {
-            toggleSelection(asset)
-            if selected.contains(asset.id), let local = entry.local { selectedMatchedCopies[asset.id] = local }
-            return
-        }
-        guard let photo = entry.local else { return }
-        if selected.contains(entry.id) { selected.remove(entry.id) }
-        else { selected.insert(entry.id); selectedLocalRecords[photo.id] = photo }
-    }
-    func select(_ entry: LibraryEntry) {
-        if let asset = entry.remote { select(asset); if let local = entry.local { selectedMatchedCopies[asset.id] = local } }
-        else if let photo = entry.local { selected.insert(entry.id); selectedLocalRecords[photo.id] = photo }
-    }
-    /// One step of a drag across the grid, applied as a single change: the selection's records
-    /// are filtered once per step, not once per photo.
-    func changeSelection(adding: [LibraryEntry], removing: [LibraryEntry]) {
-        guard !adding.isEmpty || !removing.isEmpty else { return }
-        for entry in adding {
-            if let asset = entry.remote {
-                selectedRecords[asset.id] = asset
-                if let local = entry.local { selectedMatchedCopies[asset.id] = local }
-            } else if let photo = entry.local { selectedLocalRecords[photo.id] = photo }
-        }
-        var next = selected
-        next.subtract(removing.map(\.id))
-        next.formUnion(adding.map(\.id))
-        selected = next
-    }
-
-    /// Resolve the whole date group before changing selection. A virtualized
-    /// viewport or an evicted bucket must not silently select only visible cells.
-    func selectMonth(_ selecting: Bool) {
-        guard !isReplacingFeed, isSelecting, !showingResults, !isSelectingGroup,
-              buckets.indices.contains(navigation.section) else { return }
-        let bucket = buckets[navigation.section].id
-        let month = monthKeys[navigation.section]
-        let current = generation
-        let operation = UUID(); groupSelectionID = operation
-        isSelectingGroup = true
-        groupSelectionTask = Task {
-            defer { if generation == current && groupSelectionID == operation { isSelectingGroup = false } }
-            do {
-                // The feed's copy of the month, or the month read now; a month only the phone has needs no read.
-                var assets: [Asset] = []
-                if let month, monthBuckets[month] != nil { assets = try await self.assets(of: month) }
-                try Task.checkCancellation()
-                guard generation == current, isSelecting else { return }
-                let entries = await mergedEntries(remote: assets, bucket: bucket)
-                try Task.checkCancellation()
-                guard generation == current, isSelecting else { return }
-                let ids = Set(entries.map(\.id))
-                if !selecting { selected.subtract(ids) }
-                else {
-                    for entry in entries {
-                        if let asset = entry.remote {
-                            selectedRecords[asset.id] = asset
-                            if let local = entry.local { selectedMatchedCopies[asset.id] = local }
-                        }
-                        else if let photo = entry.local { selectedLocalRecords[photo.id] = photo }
-                    }
-                    selected.formUnion(ids)
-                }
-            } catch is CancellationError { }
-            catch { if generation == current { self.error = error.localizedDescription } }
-        }
-    }
-
-    var canSelectMonth: Bool { !showingResults && buckets.indices.contains(navigation.section) }
-    var canScrubTimeline: Bool { !isReplacingFeed && !showingResults && !buckets.isEmpty }
 
     /// Place summary for one month: its loaded photos' (computed in the projection), or else the
     /// local index's count of them.
     func placeSummary(section: Int) -> String? {
-        if let frozenFeed {
-            guard frozenFeed.sections.indices.contains(section) else { return nil }
-            let id = frozenFeed.sections[section].id
-            return frozenFeed.projections[id]?.placeSummary ?? MonthPlaces.summary(frozenFeed.places[id])
-        }
-        guard !showingResults, buckets.indices.contains(section) else { return nil }
-        let id = buckets[section].id
-        return projections[id]?.placeSummary ?? MonthPlaces.summary(monthPlaces[id])
+        if let frozenFeed { return frozenFeed.displayedPlaceSummary(section: section) }
+        return displayedPlaceSummary(section: section)
     }
 
     /// The places of a whole year, for the rail's year lens, worked out once per count.
@@ -369,56 +380,29 @@ private struct SavedTimeline {
     private func loadMonthPlaces(_ query: LibraryQuery, plan: QueryPlan) { places.show(query, plan: plan) }
     /// Search/filter results when showing them, otherwise the month under the viewport.
     var currentPlaceSummary: String? {
-        if let frozenFeed {
-            if frozenFeed.showingResults { return MonthProjector.placeSummary(of: frozenFeed.assets["results"] ?? []) }
-            return placeSummary(section: navigation.section)
-        }
-        return showingResults ? MonthProjector.placeSummary(of: results) : placeSummary(section: navigation.section)
+        if let frozenFeed { return frozenFeed.displayedPlaceSummary(around: navigation.section) }
+        return displayedPlaceSummary(around: navigation.section)
     }
 
     /// A row of the grid, from its month's projection. A loaded month whose projection has not
     /// landed shows the server's rows in its order meanwhile.
     func entry(section: Int, item: Int) -> LibraryEntry? {
-        if let frozenFeed {
-            guard frozenFeed.sections.indices.contains(section) else { return nil }
-            let key = frozenFeed.sections[section].id
-            if let entries = frozenFeed.projections[key]?.entries { return entries.indices.contains(item) ? entries[item] : nil }
-            guard let assets = frozenFeed.assets[key], assets.indices.contains(item) else { return nil }
-            return .remote(assets[item], local: frozenFeed.remoteToLocal[assets[item].id])
-        }
-        if showingResults { return asset(section: section, item: item).map { .remote($0, local: deviceTimeline.remoteToLocal[$0.id]) } }
-        guard buckets.indices.contains(section) else { return nil }
-        if let entries = projections[buckets[section].id]?.entries { return entries.indices.contains(item) ? entries[item] : nil }
-        return asset(section: section, item: item).map { .remote($0, local: deviceTimeline.remoteToLocal[$0.id]) }
+        if let frozenFeed { return frozenFeed.displayedEntry(section: section, item: item) }
+        return displayedEntry(section: section, item: item)
     }
 
     func dayGroups(section: Int) -> [TimelineDayGroup] {
-        if let frozenFeed {
-            guard frozenFeed.sections.indices.contains(section) else { return [] }
-            return frozenFeed.projections[frozenFeed.sections[section].id]?.days ?? []
-        }
-        guard !showingResults, buckets.indices.contains(section) else { return [] }
-        return projections[buckets[section].id]?.days ?? []
+        if let frozenFeed { return frozenFeed.displayedDayGroups(section: section) }
+        return displayedDayGroups(section: section)
     }
 
     func asset(section: Int, item: Int) -> Asset? {
-        if let frozenFeed {
-            guard frozenFeed.sections.indices.contains(section) else { return nil }
-            return frozenFeed.assets[frozenFeed.sections[section].id].flatMap { $0.indices.contains(item) ? $0[item] : nil }
-        }
-        if showingResults { return results.indices.contains(item) ? results[item] : nil }
-        guard buckets.indices.contains(section), let assets = loaded[buckets[section].id], assets.indices.contains(item) else { return nil }
-        return assets[item]
+        if let frozenFeed { return frozenFeed.displayedAsset(section: section, item: item) }
+        return displayedAsset(section: section, item: item)
     }
     func availableAssets(around asset: Asset) -> [Asset] {
-        if let frozenFeed {
-            if frozenFeed.showingResults { return frozenFeed.assets["results"] ?? [] }
-            guard let i = frozenFeed.sections.firstIndex(where: { frozenFeed.assets[$0.id]?.contains(where: { $0.id == asset.id }) == true }) else { return [asset] }
-            return frozenFeed.sections[max(0, i - 1)...min(frozenFeed.sections.count - 1, i + 1)].flatMap { frozenFeed.assets[$0.id] ?? [] }
-        }
-        if showingResults { return results }
-        guard let i = buckets.firstIndex(where: { loaded[$0.id]?.contains(where: { $0.id == asset.id }) == true }) else { return [asset] }
-        return buckets[max(0, i - 1)...min(buckets.count - 1, i + 1)].flatMap { loaded[$0.id] ?? [] }
+        if let frozenFeed { return frozenFeed.displayedAssets(around: asset) }
+        return displayedAssets(around: asset)
     }
 
     /// Everything on this phone in the photo's month and the months beside it, in the order the grid
@@ -430,18 +414,73 @@ private struct SavedTimeline {
         return (max(0, i - 1)...min(sections.count - 1, i + 1)).flatMap(phonePhotos)
     }
 
+    // MARK: - Selection
+
+    // The selection's, for the grid, the selection bar and the month menu.
+    var selected: Set<String> {
+        get { selection.selected }
+        set { selection.selected = newValue }
+    }
+    var isSelecting: Bool {
+        get { selection.isSelecting }
+        set { selection.isSelecting = newValue }
+    }
+    /// A whole month is being read to be selected or deselected.
+    var isSelectingGroup: Bool { selection.isSelectingMonth }
+    var selectedAssets: [Asset] { selection.assets(among: { results + rows.values.joined() }) }
+    var selectedLocalPhotos: [LocalPhoto] { selection.localPhotos }
+    var selectedDevicePhotos: [LocalPhoto] { selection.devicePhotos }
+    func toggleSelection(_ asset: Asset) { selection.toggle(asset) }
+    func select(_ asset: Asset) { selection.select(asset) }
+    func toggleSelection(_ entry: LibraryEntry) { selection.toggle(entry) }
+    func select(_ entry: LibraryEntry) { selection.select(entry) }
+    func changeSelection(adding: [LibraryEntry], removing: [LibraryEntry]) { selection.change(adding: adding, removing: removing) }
+
+    /// Selects or deselects the month under the viewport, whole: the selection reads it through
+    /// the feed, so a virtualized grid or a month the feed let go never selects only the photos at
+    /// hand.
+    func selectMonth(_ selecting: Bool) {
+        guard !isReplacingFeed, !showingResults, timelineSections.indices.contains(navigation.section) else { return }
+        let section = timelineSections[navigation.section], current = generation
+        selection.selectMonth(selecting, reading: { [weak self] in
+            try await self?.entries(of: section, generation: current)
+        }, failed: { [weak self] error in
+            guard let self, generation == current else { return }
+            self.error = error.localizedDescription
+        })
+    }
+
+    /// Every photo of a section's month, for selecting it whole: the feed's copy of its server
+    /// photos, or the month read now (a month only the phone has needs no read), merged with the
+    /// phone's photos off the main actor. Nil once the feed has moved on.
+    private func entries(of section: LibrarySection, generation current: UUID) async throws -> [LibraryEntry]? {
+        var assets: [Asset] = []
+        if let month = section.month, remoteMonths.contains(month) { assets = try await self.assets(of: month) }
+        try Task.checkCancellation()
+        guard generation == current else { return nil }
+        let entries = await mergedEntries(remote: assets, bucket: section.id)
+        try Task.checkCancellation()
+        guard generation == current else { return nil }
+        return entries
+    }
+
+    var canSelectMonth: Bool { !showingResults && timelineSections.indices.contains(navigation.section) }
+    var canScrubTimeline: Bool { !isReplacingFeed && !showingResults && !buckets.isEmpty }
+
+    // MARK: - Loading the feed
+
     /// Reads the feed shown again. `preservingPosition` is a sync's or a refresh's reload: the grid
     /// keeps its place and, while the query and plan stand, the feed keeps its session and the
     /// months on their way. `invalidating` names the months it reads again when the grid wants
     /// them, every month when nil; a typed change names only those it touched (F4).
     func reload(preservingPosition: Bool = false, invalidating months: Set<MonthKey>? = nil) async {
-        groupSelectionTask?.cancel(); groupSelectionID = UUID(); isSelectingGroup = false
+        selection.cancelMonthSelection()
         queryTask?.cancel()
         searchGeneration = UUID(); isSearching = false
         generation = UUID(); let current = generation
         // The banner goes, so the months it named are asked for again with the rest (F2).
-        let failed = Set(bucketErrors.keys.compactMap { monthKey($0) })
-        isLoading = true; error = nil; bucketErrors = [:]
+        let failed = Set(failedMonths.keys)
+        isLoading = true; error = nil; failedMonths = [:]
         if preservingPosition {
             // A feed pending behind a frozen one opens at its top: the position is the frozen feed's.
             restorePosition = frozenFeed == nil ? position : nil
@@ -451,7 +490,7 @@ private struct SavedTimeline {
             // The feed starts over: its months are dropped and a new one opens once planned. With
             // nothing projected yet, the phone's latest photos place the months.
             cancelRequests()
-            remoteBuckets = []; buckets = []; loaded = [:]; projections = [:]; dirty = [:]
+            summary = []; buckets = []; rows = [:]; projections = [:]; dirty = [:]
             projectedDevice = deviceTimeline; deviceDirty = false
             refreshStructure(); project()
             if frozenFeed == nil { resetID = UUID() }
@@ -487,12 +526,12 @@ private struct SavedTimeline {
             let response = try await source.summary(query, plan: plan)
             guard generation == current else { return }
             let previousSections = timelineSections
-            remoteBuckets = response
+            summary = summaryMonths(response)
             if let told {
                 // A month the summary counts otherwise than its rows, which no change named, is
                 // read again too, so no placeholder stays (FEED-5).
-                let counts = Dictionary(response.map { ($0.id, $0.count) }, uniquingKeysWith: { first, _ in first })
-                let miscounted = Set(loaded.compactMap { id, rows in counts[id] == rows.count ? nil : monthKey(id) }).subtracting(told)
+                let counts = Dictionary(summary.compactMap { entry in entry.month.map { ($0, entry.count) } }, uniquingKeysWith: { first, _ in first })
+                let miscounted = Set(rows.compactMap { month, assets in counts[month] == assets.count ? nil : month }).subtracting(told)
                 if !miscounted.isEmpty { markStale(miscounted) }
             }
             loadMonthPlaces(query, plan: plan)
@@ -503,11 +542,11 @@ private struct SavedTimeline {
             // publishes a new visible month if the returned sections move it.
             if !preservingPosition && frozenFeed == nil { title = Self.monthTitle(buckets.first?.date) }
             revision += 1
-            if preservingPosition, let anchor = restorePosition, let index = buckets.firstIndex(where: { $0.id == anchor.section }) {
+            if preservingPosition, let anchor = restorePosition, let index = timelineSections.firstIndex(where: { $0.id == anchor.section }) {
                 requestBucket(index)
-                if index + 1 < buckets.count { requestBucket(index + 1) }
+                if index + 1 < timelineSections.count { requestBucket(index + 1) }
             }
-            for index in 0..<min(FeedSession.firstMonths, buckets.count) { requestBucket(index) }
+            for index in 0..<min(FeedSession.firstMonths, timelineSections.count) { requestBucket(index) }
             if frozenFeed != nil, let readiness = await settlePendingFeed(current) {
                 if case .failed(let message) = readiness {
                     // The feed shown stays, with Retry and Clear.
@@ -520,41 +559,49 @@ private struct SavedTimeline {
         } catch is CancellationError {} catch { if generation == current { self.error = error.localizedDescription } }
     }
 
+    /// A summary's months, each read from its bucket once: a month the summary shown already had
+    /// keeps the month read then, so a sync's summary reads none of them again.
+    private func summaryMonths(_ buckets: [TimeBucket]) -> [SummaryMonth] {
+        let known = Dictionary(summary.map { ($0.id, $0.month) }, uniquingKeysWith: { first, _ in first })
+        return buckets.map { SummaryMonth(bucket: $0, month: known[$0.id] ?? MonthKey(bucketID: $0.id)) }
+    }
+
     /// Asks the feed for a month by name, behind what the grid shows. The grid itself never asks:
     /// its months come from the viewport.
     func requestBucket(_ section: Int) {
-        guard !showingResults, monthKeys.indices.contains(section), let month = monthKeys[section],
-              monthBuckets[month] != nil else { return }
+        guard !showingResults, timelineSections.indices.contains(section), let month = timelineSections[section].month,
+              remoteMonths.contains(month) else { return }
         send(.request([month]))
     }
 
     /// Actual viewport membership, including months that share the same visible row. The feed
     /// hears of it only when the months on screen change, not on every scrolled frame.
     func visibleSections(_ indices: Set<Int>) {
-        let months = Set(indices.compactMap { monthKeys.indices.contains($0) ? monthKeys[$0] : nil })
-        guard months != lastVisibleMonths else { return }
-        lastVisibleMonths = months
+        let sections = timelineSections
+        let months = Set(indices.compactMap { sections.indices.contains($0) ? sections[$0].month : nil })
+        guard months != visibleMonths else { return }
+        visibleMonths = months
         feedViewport.show(months)
         send(.viewport(visible: months))
     }
 
     func visibleSection(_ index: Int, visible: Set<Int>? = nil) {
         if isReplacingFeed || showingResults { return }
-        guard buckets.indices.contains(index) else { return }
         // This runs on every scrolled frame; the sections already carry each month's title.
-        let next = timelineSections.indices.contains(index) && timelineSections[index].id == buckets[index].id
-            ? timelineSections[index].title : Self.monthTitle(buckets[index].date)
+        guard timelineSections.indices.contains(index) else { return }
+        let next = timelineSections[index].title
         if title != next { title = next }
         visibleSections(visible ?? [index])
     }
 
     /// Rail jump: the section already exists, so only its data and a fresh scroll request are needed.
     func scrollToBucket(_ index: Int, item: Int = 0) {
-        guard !isReplacingFeed, !showingResults, buckets.indices.contains(index) else { return }
+        guard !isReplacingFeed, !showingResults, timelineSections.indices.contains(index) else { return }
         cancelPendingNavigation()
-        if let month = monthKeys[index] { send(.target(month)) }
-        let item = min(max(0, item), max(0, buckets[index].count - 1))
-        scrollRequest = ScrollRequest(position: GridPosition(section: buckets[index].id, item: item, offset: 0))
+        let section = timelineSections[index]
+        if let month = section.month { send(.target(month)) }
+        let item = min(max(0, item), max(0, section.count - 1))
+        scrollRequest = ScrollRequest(position: GridPosition(section: section.id, item: item, offset: 0))
     }
 
     func cancelPendingNavigation() {
@@ -573,7 +620,7 @@ private struct SavedTimeline {
         feedQuery = .library; searchScope = Self.librarySearch
         filterTitle = nil; query = ""; results = []; showingResults = false; usesMetadata = false; choiceBrowse = nil
         originalTimeline = nil; scrollRequest = nil
-        let restoreSaved = !reuseTimeline && saved?.buckets.isEmpty == false && saved?.plan != nil
+        let restoreSaved = !reuseTimeline && saved?.summary.isEmpty == false && saved?.plan != nil
         if restoreSaved, let saved, let plan = saved.plan { restoreTimeline(saved, plan: plan); revision += 1 }
         if reuseTimeline || restoreSaved { commitFrozenFeed() }
         let date = asset.localDateTime ?? asset.fileCreatedAt
@@ -583,14 +630,14 @@ private struct SavedTimeline {
             // The restored library has its months even when checking it against the source failed.
             guard !Task.isCancelled, restoreSaved || error == nil else { return }
             let current = generation
-            guard let date, let index = nearestBucket(to: date) else {
+            guard let date, let index = nearestBucket(to: date), timelineSections.indices.contains(index) else {
                 error = "Couldn't find this photo's date in the timeline."; return
             }
-            let bucket = buckets[index].id
+            let section = timelineSections[index]
             // The month is the feed's target, protected and first in line; its load is joined,
             // not polled for. A month only the phone has needs no load.
             var assets: [Asset] = []
-            if let month = monthKeys[index], monthBuckets[month] != nil {
+            if let month = section.month, remoteMonths.contains(month) {
                 send(.target(month))
                 do { assets = try await self.assets(of: month) }
                 catch is CancellationError { return }
@@ -600,14 +647,14 @@ private struct SavedTimeline {
                 }
             }
             guard !Task.isCancelled, generation == current else { return }
-            let entries = await mergedEntries(remote: assets, bucket: bucket)
+            let entries = await mergedEntries(remote: assets, bucket: section.id)
             guard !Task.isCancelled, generation == current else { return }
             let distance = { (entry: LibraryEntry) in abs(entry.date.timeIntervalSince(date)) }
             guard let target = entries.first(where: { $0.id == asset.id }) ?? entries.min(by: { distance($0) < distance($1) }),
                   let item = entries.firstIndex(where: { $0.id == target.id }) else {
                 error = "Couldn't load photos for that date."; return
             }
-            scrollRequest = ScrollRequest(position: GridPosition(section: bucket, item: item, offset: 0, assetID: target.id))
+            scrollRequest = ScrollRequest(position: GridPosition(section: section.id, item: item, offset: 0, assetID: target.id))
         }
     }
 
@@ -623,9 +670,11 @@ private struct SavedTimeline {
     /// so it replaces the frozen feed once its first months are in (F4).
     func retryFailedBuckets() {
         if frozenFeed != nil, !showingResults, query.isEmpty { scheduleReload(); return }
-        bucketErrors = [:]; revision += 1
+        failedMonths = [:]; revision += 1
         send(.retryFailed)
     }
+
+    // MARK: - Scope
 
     func setPerson(_ person: Person) {
         rememberOriginal()
@@ -707,7 +756,7 @@ private struct SavedTimeline {
     func clearFilters() {
         beginScopeChange(); feedQuery = .library; searchScope = Self.librarySearch; choiceBrowse = nil
         filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false
-        selected = []; isSelecting = false
+        selection.clear()
         if let saved = originalTimeline, let plan = saved.plan {
             cancelRequests(); generation = UUID(); searchGeneration = UUID()
             restoreTimeline(saved, plan: plan)
@@ -728,6 +777,8 @@ private struct SavedTimeline {
             scheduleReload()
         }
     }
+
+    // MARK: - Search
 
     func search(_ text: String) {
         rememberOriginal()
@@ -927,6 +978,8 @@ private struct SavedTimeline {
         updateVisibleResultsTitle()
     }
 
+    // MARK: - Changes
+
     /// A photo's fresh record, from the viewer or its details (F4). The saved library keeps its
     /// place: it takes the record, or loses the photo when the record takes it out of the library
     /// (archived, locked, put in Trash). In the feed shown the record decides the same way
@@ -954,11 +1007,11 @@ private struct SavedTimeline {
             if let feed = searchFeed { Task { await feed.replace(asset) } }
         }
         // Only the photo's month is projected again, off the main actor; the record shows at once.
-        for key in Array(loaded.keys) {
-            if let i = loaded[key]?.firstIndex(where: { $0.id == asset.id }) { loaded[key]?[i] = asset; markDirty(key, .edit) }
+        for month in Array(rows.keys) {
+            if let i = rows[month]?.firstIndex(where: { $0.id == asset.id }) { rows[month]?[i] = asset; markDirty(month, .edit) }
         }
-        for key in Array(pendingLoads.keys) {
-            if let i = pendingLoads[key]?.assets.firstIndex(where: { $0.id == asset.id }) { pendingLoads[key]?.assets[i] = asset; markDirty(key, .edit) }
+        for month in Array(pendingLoads.keys) {
+            if let i = pendingLoads[month]?.assets.firstIndex(where: { $0.id == asset.id }) { pendingLoads[month]?.assets[i] = asset; markDirty(month, .edit) }
         }
         send(.replace(asset))
         revision += 1
@@ -992,30 +1045,30 @@ private struct SavedTimeline {
         }
         results.removeAll { ids.contains($0.id) }
         send(.remove(ids))
-        var removed: [String: Int] = [:]
-        for key in Array(loaded.keys) {
-            let before = loaded[key]?.count ?? 0
-            loaded[key]?.removeAll { ids.contains($0.id) }
-            let gone = before - (loaded[key]?.count ?? 0)
+        var removed: [MonthKey: Int] = [:]
+        for month in Array(rows.keys) {
+            let before = rows[month]?.count ?? 0
+            rows[month]?.removeAll { ids.contains($0.id) }
+            let gone = before - (rows[month]?.count ?? 0)
             guard gone > 0 else { continue }
-            removed[key] = gone
+            removed[month] = gone
             // The rows go at once; the month's days are redone off the main actor.
-            projections[key] = projections[key]?.removing(ids)
-            markDirty(key, .edit)
+            projections[month] = projections[month]?.removing(ids)
+            markDirty(month, .edit)
         }
-        for key in Array(pendingLoads.keys) {
-            let before = pendingLoads[key]?.assets.count ?? 0
-            pendingLoads[key]?.assets.removeAll { ids.contains($0.id) }
-            if before != pendingLoads[key]?.assets.count { markDirty(key, .edit) }
+        for month in Array(pendingLoads.keys) {
+            let before = pendingLoads[month]?.assets.count ?? 0
+            pendingLoads[month]?.assets.removeAll { ids.contains($0.id) }
+            if before != pendingLoads[month]?.assets.count { markDirty(month, .edit) }
         }
         if !removed.isEmpty {
-            remoteBuckets = remoteBuckets.compactMap { bucket in
-                guard let gone = removed[bucket.id] else { return bucket }
-                return bucket.count > gone ? TimeBucket(timeBucket: bucket.timeBucket, count: bucket.count - gone) : nil
+            summary = summary.compactMap { entry in
+                guard let month = entry.month, let gone = removed[month] else { return entry }
+                return entry.count > gone ? entry.counting(entry.count - gone) : nil
             }
             // A month with nothing left goes whole.
-            let kept = Set(remoteBuckets.map(\.id))
-            for key in removed.keys where !kept.contains(key) { loaded[key] = nil }
+            let kept = Set(summary.compactMap(\.month))
+            for month in removed.keys where !kept.contains(month) { rows[month] = nil }
             refreshStructure()
         }
         revision += 1
@@ -1065,7 +1118,7 @@ private struct SavedTimeline {
         } else if originalTimeline != nil {
             if !gone.isEmpty { originalTimeline = originalTimeline?.removing(gone) }
             if everything { savedStaleMonths = nil }
-            else { savedStaleMonths?.formUnion(Self.months(touchedBy: change, in: originalTimeline?.assets ?? [:])) }
+            else { savedStaleMonths?.formUnion(Self.months(touchedBy: change, in: originalTimeline?.rows ?? [:])) }
         }
         guard query.isEmpty else { return }
         if showingResults {
@@ -1078,26 +1131,26 @@ private struct SavedTimeline {
         // person deleted, faces merged): such a feed reads all its months again.
         let scoped = !feedQuery.predicates.albums.isDisjoint(with: change.albums) || !feedQuery.predicates.people.isDisjoint(with: change.people)
         if everything || scoped { await reload(preservingPosition: true); return }
-        let months = Self.months(touchedBy: change, in: loaded)
+        let months = Self.months(touchedBy: change, in: rows)
         if !change.upserted.isEmpty || !gone.isEmpty { await reload(preservingPosition: true, invalidating: months) }
         else if !months.isEmpty { markStale(months) }
     }
 
     /// The months a change touched among those `rows` hold: those its photos left and joined, and
     /// those holding a photo whose media changed.
-    private static func months(touchedBy change: LibraryChange, in rows: [String: [Asset]]) -> Set<MonthKey> {
+    private static func months(touchedBy change: LibraryChange, in rows: [MonthKey: [Asset]]) -> Set<MonthKey> {
         var months = Set<MonthKey>()
         for move in change.upserted.values {
             if let from = move.from { months.insert(from) }
             if let to = move.to { months.insert(to) }
         }
         if !change.mediaRevisions.isEmpty {
-            for (bucket, assets) in rows where assets.contains(where: { change.mediaRevisions[$0.id] != nil }) {
-                if let month = MonthKey(bucketID: bucket) { months.insert(month) }
-            }
+            for (month, assets) in rows where assets.contains(where: { change.mediaRevisions[$0.id] != nil }) { months.insert(month) }
         }
         return months
     }
+
+    // MARK: - Feed sessions (F4)
 
     /// Waits until the pending feed's first months have come to something (F4): each server month
     /// is joined, queued or not (FEED-3), and its rows land with their projection; a month only
@@ -1121,19 +1174,20 @@ private struct SavedTimeline {
 
     /// The first months of the feed being loaded, and for each one still loading, the month to join.
     private func firstMonths() -> [(state: FeedSession.Month, join: MonthKey?)] {
-        (0..<min(FeedSession.firstMonths, buckets.count)).map { index in
-            let id = buckets[index].id
-            if let message = bucketErrors[id] { return (.failed(message), nil) }
-            guard remoteIDs.contains(id) else { return (.phoneOnly, nil) }
-            if loaded[id] != nil { return (.loaded, nil) }
-            return (.loading, monthKeys[index])
+        timelineSections.prefix(FeedSession.firstMonths).map { section in
+            guard let month = section.month else { return (.loading, nil) }
+            // A month that failed while the server had it, and is the phone's alone now, has nothing to wait for.
+            guard remoteMonths.contains(month) else { return (.phoneOnly, nil) }
+            if let message = failedMonths[month] { return (.failed(message), nil) }
+            if rows[month] != nil { return (.loaded, nil) }
+            return (.loading, month)
         }
     }
 
     /// Closes the feed: its loads stop and nothing it delivers after is shown. Commands still
     /// queued go first, in order; they belong to the feed being closed, and `close` undoes them.
     private func cancelRequests() {
-        feedSession = nil; lastVisibleMonths = nil; sentMonths = nil; feedViewport.show([])
+        feedSession = nil; visibleMonths = nil; sentMonths = nil; feedViewport.show([])
         pendingLoads = [:]; structureVersion += 1
         unsentStale = []; feedStale = []
         send(.close)
@@ -1144,7 +1198,7 @@ private struct SavedTimeline {
     private func openFeed(_ query: LibraryQuery, plan: QueryPlan) {
         let session = FeedSession(query, plan: plan)
         feedSession = session
-        lastVisibleMonths = nil; sentMonths = nil; feedViewport.show([])
+        visibleMonths = nil; sentMonths = nil; feedViewport.show([])
         unsentStale = []; feedStale = []
         send(.open(session.ticket, query, plan))
     }
@@ -1166,7 +1220,7 @@ private struct SavedTimeline {
     /// wants them, shown meanwhile. The store keeps them as the feed does, until each is delivered
     /// fresh, so a filter opened meanwhile carries them into the saved library (F4).
     private func markStale(_ months: Set<MonthKey>?) {
-        feedStale.formUnion(months ?? Set(Set(loaded.keys).union(pendingLoads.keys).compactMap { monthKey($0) }))
+        feedStale.formUnion(months ?? Set(rows.keys).union(pendingLoads.keys))
         send(.invalidate(months))
     }
 
@@ -1178,35 +1232,35 @@ private struct SavedTimeline {
         // it was left, are owed to the feed: the check that follows tells it, or a reload that
         // takes over first, or the saved library again should a filter open before either.
         unsentStale = savedStaleMonths; savedStaleMonths = []
-        remoteBuckets = saved.buckets; title = saved.title
-        loaded = Self.resident(saved.assets, buckets: saved.buckets, around: saved.position?.section)
+        summary = saved.summary; title = saved.title
+        rows = Self.resident(saved.rows, summary: saved.summary, around: saved.position?.section)
         // Its months come back projected as they were left, with the phone's photos of that time;
         // the photos the phone has now are merged in off the main actor, once it is on screen.
-        let remote = Set(saved.buckets.map(\.id))
-        projections = saved.projections.filter { loaded[$0.key] != nil || !remote.contains($0.key) }
+        let remote = Set(saved.summary.compactMap(\.month))
+        projections = saved.projections.filter { rows[$0.key] != nil || !remote.contains($0.key) }
         dirty = [:]
         // A month that lost photos while it was saved has its rows but not yet its days.
-        for (id, projection) in projections where projection.days.reduce(0, { $0 + $1.count }) != projection.entries.count {
-            markDirty(id, .edit)
+        for (month, projection) in projections where projection.days.reduce(0, { $0 + $1.count }) != projection.entries.count {
+            markDirty(month, .edit)
         }
         projectedDevice = saved.device; deviceDirty = true
         // Where the grid is going back to, so a row the phone's photos move meanwhile anchors there.
         position = saved.position
+        // Its projections are its own summary's: none of its months left the server meanwhile.
+        remoteMonths = remote
         refreshStructure()
-        var months: [MonthKey: [Asset]] = [:]
-        for (id, assets) in loaded { if let month = monthKey(id) { months[month] = assets } }
-        send(.restore(months))
+        send(.restore(rows))
         project()
     }
 
     /// Up to twelve of a saved feed's months, those nearest the anchor first.
-    private static func resident(_ assets: [String: [Asset]], buckets: [TimeBucket], around anchor: String?) -> [String: [Asset]] {
-        guard assets.count > TimelineFeed.residentLimit else { return assets }
-        let index = buckets.firstIndex { $0.id == anchor } ?? 0
+    private static func resident(_ rows: [MonthKey: [Asset]], summary: [SummaryMonth], around anchor: String?) -> [MonthKey: [Asset]] {
+        guard rows.count > TimelineFeed.residentLimit else { return rows }
+        let index = summary.firstIndex { $0.id == anchor } ?? 0
         // Nearest first; at the same distance the newer month.
-        let nearest = buckets.indices.sorted { (abs($0 - index), $0) < (abs($1 - index), $1) }.map { buckets[$0].id }.filter { assets[$0] != nil }
-        var kept: [String: [Asset]] = [:]
-        for id in nearest.prefix(TimelineFeed.residentLimit) { kept[id] = assets[id] }
+        let nearest = summary.indices.sorted { (abs($0 - index), $0) < (abs($1 - index), $1) }.compactMap { summary[$0].month }.filter { rows[$0] != nil }
+        var kept: [MonthKey: [Asset]] = [:]
+        for month in nearest.prefix(TimelineFeed.residentLimit) { kept[month] = rows[month] }
         return kept
     }
 
@@ -1237,19 +1291,13 @@ private struct SavedTimeline {
         return try await feed.assets(of: month, ticket: session.ticket, after: commands)
     }
 
-    private func monthKey(_ bucket: String) -> MonthKey? {
-        if let month = monthKeyByBucket[bucket] { return month }
-        guard let month = MonthKey(bucketID: bucket) else { return nil }
-        monthKeyByBucket[bucket] = month
-        return month
-    }
     /// Stops everything on its way. `keepingFeed` leaves the feed and its loads alone, for a
     /// change that keeps the months shown.
     func stop(keepingFeed: Bool = false) {
         if !keepingFeed { cancelRequests() }
         // A reload stopped here can no longer tell the feed kept what it owes it.
         else if unsentStale != [] { tellUnsentStale() }
-        queryTask?.cancel(); cancelPendingNavigation(); groupSelectionTask?.cancel(); isSelectingGroup = false
+        queryTask?.cancel(); cancelPendingNavigation(); selection.cancelMonthSelection()
         generation = UUID(); searchGeneration = UUID()
         places.cancel()
     }
@@ -1259,7 +1307,7 @@ private struct SavedTimeline {
         // search's results kept here would show under the next results view while it loads, when
         // the feed it replaces had nothing on screen to freeze.
         results = []
-        stop(keepingFeed: keepingFeed); selected = []; isSelecting = false; isSearching = false; isLoading = false
+        stop(keepingFeed: keepingFeed); selection.clear(); isSearching = false; isLoading = false
         verification = nil; hasMore = false
         searchFeed = nil; searchCanResume = false; removedResultIDs = []
         similarAssetID = nil
@@ -1271,9 +1319,8 @@ private struct SavedTimeline {
         guard frozenFeed == nil else { return }
         let currentSections = liveSections
         guard currentSections.contains(where: { $0.count > 0 }) else { return }
-        let visibleAssets = showingResults ? ["results": results] : loaded
-        frozenFeed = FrozenFeed(sections: currentSections, assets: visibleAssets, projections: projections,
-                                remoteToLocal: projectedDevice.remoteToLocal, showingResults: showingResults,
+        frozenFeed = FrozenFeed(sections: currentSections, rows: rows, projections: projections,
+                                results: showingResults ? results : nil, matches: projectedDevice.remoteToLocal,
                                 totalCount: showingResults ? results.count : buckets.reduce(0) { $0 + $1.count },
                                 places: monthPlaces)
     }
@@ -1317,7 +1364,7 @@ private struct SavedTimeline {
     }
     private func rememberOriginal() {
         if originalTimeline == nil && !isFiltered && !showingResults {
-            originalTimeline = SavedTimeline(buckets: remoteBuckets, assets: loaded, projections: projections, device: projectedDevice,
+            originalTimeline = SavedTimeline(summary: summary, rows: rows, projections: projections, device: projectedDevice,
                                              position: position, title: title, plan: feedPlan)
             // The months the library was yet to read again are read again once it is back.
             savedStaleMonths = unsentStale.map { $0.union(feedStale) }
@@ -1326,36 +1373,45 @@ private struct SavedTimeline {
 
     // MARK: - Sections and projections (F3)
 
-    /// The grid's months from the server's and the phone's as projected: the sections, each one's
-    /// month, the bucket the source reads for each month it has, and the feed's order, which it
-    /// hears once per change. Projections of months no longer shown go; a month only the phone
-    /// has that is new to the grid is projected. Cheap: nothing here reads a photo.
+    /// The grid's months from the server's and the phone's as projected: the sections, each
+    /// carrying its month, and the feed's order and the bucket it reads each server month by,
+    /// which it hears once per change. The server's photos of a month it no longer has go;
+    /// projections of months no longer shown go, and a month only the phone has that is new to
+    /// the grid is projected. Cheap: nothing here reads a photo or a date.
     private func refreshStructure() {
         let merging = mergesDevicePhotos
-        buckets = merging ? projectedDevice.buckets(remote: remoteBuckets) : remoteBuckets
-        remoteIDs = Set(remoteBuckets.map(\.id))
-        monthKeys = buckets.map { monthKey($0.id) }
-        monthBuckets = Dictionary(remoteBuckets.compactMap { bucket in monthKey(bucket.id).map { ($0, bucket.id) } },
-                                  uniquingKeysWith: { first, _ in first })
-        bucketOfMonth = Dictionary(buckets.map { (String($0.id.prefix(7)), $0.id) }, uniquingKeysWith: { first, _ in first })
-        timelineSections = buckets.map { .init(id: $0.id, count: $0.count, title: title(of: $0)) }
-        let shown = Set(buckets.map(\.id))
-        for id in projections.keys where !shown.contains(id) { projections[id] = nil }
-        for id in pendingLoads.keys where !shown.contains(id) { pendingLoads[id] = nil }
-        for id in dirty.keys where !shown.contains(id) { dirty[id] = nil }
+        let server = Dictionary(summary.map { ($0.id, $0.month) }, uniquingKeysWith: { first, _ in first })
+        buckets = merging ? projectedDevice.buckets(remote: summary.map(\.bucket)) : summary.map(\.bucket)
+        let wasRemote = remoteMonths
+        remoteMonths = Set(summary.compactMap(\.month))
+        // A month only the phone has is named YYYY-MM-01, which reads without a date.
+        timelineSections = buckets.map { .init(id: $0.id, count: $0.count, title: title(of: $0), month: server[$0.id] ?? MonthKey(bucketID: $0.id)) }
+        let shown = Set(timelineSections.compactMap(\.month))
+        // A month the server no longer has loses its photos, and a projection made with them; the
+        // phone's own photos there are projected again. A month the server gained keeps showing
+        // the phone's photos until its own rows land.
+        for month in wasRemote.subtracting(remoteMonths) {
+            pendingLoads[month] = nil
+            if projections[month]?.entries.contains(where: { $0.remote != nil }) == true { projections[month] = nil }
+        }
+        for month in Array(rows.keys) where !remoteMonths.contains(month) { rows[month] = nil }
+        for month in Array(projections.keys) where !shown.contains(month) { projections[month] = nil }
+        for month in Array(pendingLoads.keys) where !shown.contains(month) { pendingLoads[month] = nil }
+        for month in Array(dirty.keys) where !shown.contains(month) { dirty[month] = nil }
         if merging {
-            for bucket in buckets where !remoteIDs.contains(bucket.id) && projections[bucket.id] == nil { markDirty(bucket.id, .device) }
+            for month in shown where !remoteMonths.contains(month) && projections[month] == nil { markDirty(month, .device) }
         }
         structureVersion += 1
-        let order = monthKeys.compactMap { $0 }
-        if sentMonths?.order != order || sentMonths?.buckets != monthBuckets {
-            sentMonths = (order, monthBuckets)
-            send(.months(order, buckets: monthBuckets))
+        let order = timelineSections.compactMap(\.month)
+        let reads = Dictionary(summary.compactMap { entry in entry.month.map { ($0, entry.id) } }, uniquingKeysWith: { first, _ in first })
+        if sentMonths?.order != order || sentMonths?.reads != reads {
+            sentMonths = (order, reads)
+            send(.months(order, buckets: reads))
         }
     }
 
-    private func markDirty(_ bucket: String, _ reason: ProjectionReason) {
-        dirty[bucket, default: []].formUnion(reason)
+    private func markDirty(_ month: MonthKey, _ reason: ProjectionReason) {
+        dirty[month, default: []].formUnion(reason)
     }
 
     /// Projects what changed, off the main actor: the months delivered or edited, and, after a
@@ -1366,18 +1422,18 @@ private struct SavedTimeline {
         guard projecting == nil else { return }
         var months = dirty
         // The months shown, and those the snapshot adds: a month only the phone has, new to the grid.
-        var shown = Set(buckets.map(\.id))
+        var shown = Set(timelineSections.compactMap(\.month))
         let device: MergedTimeline? = deviceDirty && frozenFeed == nil ? deviceTimeline : nil
         if let device {
             deviceDirty = false
             if mergesDevicePhotos {
                 for key in device.changedMonths(since: projectedDevice) {
-                    let bucket = bucketOfMonth[key] ?? key + "-01"
-                    months[bucket, default: []].insert(.device); shown.insert(bucket)
+                    guard let month = MonthKey(bucketID: key + "-01") else { continue }
+                    months[month, default: []].insert(.device); shown.insert(month)
                 }
             }
             if device.matchesDigest != projectedDevice.matchesDigest {
-                for id in Set(loaded.keys).union(pendingLoads.keys) { months[id, default: []].insert(.device) }
+                for month in Set(rows.keys).union(pendingLoads.keys) { months[month, default: []].insert(.device) }
             }
         }
         months = months.filter { shown.contains($0.key) }
@@ -1389,14 +1445,18 @@ private struct SavedTimeline {
         }
         dirty = [:]
         let phone = device ?? projectedDevice, merging = mergesDevicePhotos
-        var inputs: [MonthProjector.Input] = [], unprojected: [String] = []
-        for bucket in months.keys {
-            let remote = pendingLoads[bucket]?.assets ?? loaded[bucket]
+        // The grid's name for each month projected: the bucket its section shows.
+        var ids: [MonthKey: String] = [:]
+        for section in timelineSections { if let month = section.month, months[month] != nil, ids[month] == nil { ids[month] = section.id } }
+        var inputs: [MonthProjector.Input] = [], unprojected: [MonthKey] = []
+        for month in months.keys {
+            let remote = pendingLoads[month]?.assets ?? rows[month]
+            let bucket = ids[month] ?? month.bucketID
             let phoneOnly = merging ? phone.phoneOnly(in: bucket) : []
             // A server month not loaded has no rows to show; a month only the phone has always does.
-            guard remote != nil || (!remoteIDs.contains(bucket) && !phoneOnly.isEmpty) else { unprojected.append(bucket); continue }
-            inputs.append(.init(bucket: bucket, remote: remote ?? [], phoneOnly: phoneOnly, matches: phone.remoteToLocal, merges: merging,
-                                previous: projections[bucket]))
+            guard remote != nil || (!remoteMonths.contains(month) && !phoneOnly.isEmpty) else { unprojected.append(month); continue }
+            inputs.append(.init(month: month, bucket: bucket, remote: remote ?? [], phoneOnly: phoneOnly, matches: phone.remoteToLocal,
+                                merges: merging, previous: projections[month]))
         }
         let version = structureVersion
         projecting = Task { [inputs, unprojected, months, device, version] in
@@ -1409,44 +1469,46 @@ private struct SavedTimeline {
     /// places, then the sections after a snapshot. A month changed again meanwhile is left to the
     /// next run, with this run's reasons for it; a server month the feed let go meanwhile stays
     /// gone. The phone's photos moving a row the grid shows restore its anchor, as before.
-    private func apply(_ results: [MonthProjector.Result], unprojected: [String], reasons: [String: ProjectionReason],
+    private func apply(_ results: [MonthProjector.Result], unprojected: [MonthKey], reasons: [MonthKey: ProjectionReason],
                        device: MergedTimeline?, version: Int) {
         projecting = nil
         defer { project() }
         guard version == structureVersion else {
             // The feed or its months changed under the run: everything it took is asked again.
-            for (bucket, reason) in reasons { markDirty(bucket, reason) }
+            for (month, reason) in reasons { markDirty(month, reason) }
             if device != nil { deviceDirty = true }
             return
         }
         // A month changed again during the run is the next run's, for this run's reasons as well:
         // a phone change this run carried still restores the anchor when that month's rows move.
-        for (bucket, reason) in reasons where dirty[bucket] != nil { markDirty(bucket, reason) }
+        for (month, reason) in reasons where dirty[month] != nil { markDirty(month, reason) }
         var changed = false, rowsMoved = false, structureChanged = false, committed = 0
-        for result in results where dirty[result.bucket] == nil {
-            let id = result.bucket
-            if let pending = pendingLoads[id] {
-                pendingLoads[id] = nil
-                guard pending.ticket == feedSession?.ticket, remoteIDs.contains(id) else { continue }
-                loaded[id] = pending.assets; bucketErrors[id] = nil
+        for result in results where dirty[result.month] == nil {
+            let month = result.month
+            if let pending = pendingLoads[month] {
+                pendingLoads[month] = nil
+                guard pending.ticket == feedSession?.ticket, remoteMonths.contains(month) else { continue }
+                rows[month] = pending.assets
+                // Only when there was one: the banner's observers needn't redraw for every month.
+                if failedMonths[month] != nil { failedMonths[month] = nil }
                 committed += 1
-                if pending.fresh, let index = remoteBuckets.firstIndex(where: { $0.id == id }), remoteBuckets[index].count != pending.assets.count {
+                if pending.fresh, let index = summary.firstIndex(where: { $0.month == month }), summary[index].count != pending.assets.count {
                     // FEED-5: the month's own count stands over the summary's, so a month smaller
                     // than its summary leaves no placeholder, and a larger one shows every photo.
                     structureChanged = true
-                    if pending.assets.isEmpty { remoteBuckets.remove(at: index); loaded[id] = nil; projections[id] = nil; continue }
-                    remoteBuckets[index] = TimeBucket(timeBucket: id, count: pending.assets.count)
+                    if pending.assets.isEmpty { summary.remove(at: index); rows[month] = nil; projections[month] = nil; continue }
+                    summary[index] = summary[index].counting(pending.assets.count)
                 }
             }
             // A server month the feed let go during the run has no rows: its projection stays gone,
             // or it would outlive the twelve resident months, out of reach of removals and edits.
-            guard loaded[id] != nil || !remoteIDs.contains(id) else { continue }
-            if result.changed || projections[id] == nil {
-                if result.rowsChanged, projections[id] != nil, reasons[id]?.contains(.device) == true { rowsMoved = true }
-                projections[id] = result.projection; changed = true
+            guard rows[month] != nil || !remoteMonths.contains(month) else { continue }
+            if result.changed || projections[month] == nil {
+                if result.rowsChanged, projections[month] != nil, reasons[month]?.contains(.device) == true { rowsMoved = true }
+                projections[month] = result.projection; changed = true
             }
         }
-        for id in unprojected where dirty[id] == nil && projections[id] != nil { projections[id] = nil; changed = true }
+        for month in unprojected where dirty[month] == nil && projections[month] != nil { projections[month] = nil; changed = true }
         if let device { projectedDevice = device }
         if device != nil || structureChanged {
             let before = timelineSections
@@ -1455,7 +1517,7 @@ private struct SavedTimeline {
         }
         if rowsMoved {
             // The grid keeps the photo it shows; a phone photo matched meanwhile is its server record now.
-            if let anchor = position, buckets.contains(where: { $0.id == anchor.section }) {
+            if let anchor = position, timelineSections.contains(where: { $0.id == anchor.section }) {
                 restorePosition = anchor
                 if let id = anchor.assetID, id.hasPrefix("local:"), let remote = projectedDevice.localToRemote[String(id.dropFirst(6))] {
                     restorePosition?.assetID = remote
@@ -1510,60 +1572,69 @@ private extension SavedTimeline {
     /// Without these photos: their rows go, their months count fewer, and a month left with none
     /// of the server's photos goes from the summary. A month's days are redone once it is back.
     func removing(_ ids: Set<String>) -> SavedTimeline {
-        var assets = self.assets, projections = self.projections, removed: [String: Int] = [:]
-        for (bucket, rows) in self.assets {
-            let kept = rows.filter { !ids.contains($0.id) }
-            guard kept.count != rows.count else { continue }
-            removed[bucket] = rows.count - kept.count
-            assets[bucket] = kept
-            projections[bucket] = projections[bucket]?.removing(ids)
+        var rows = self.rows, projections = self.projections, removed: [MonthKey: Int] = [:]
+        for (month, assets) in self.rows {
+            let kept = assets.filter { !ids.contains($0.id) }
+            guard kept.count != assets.count else { continue }
+            removed[month] = assets.count - kept.count
+            rows[month] = kept
+            projections[month] = projections[month]?.removing(ids)
         }
         guard !removed.isEmpty else { return self }
-        let buckets = self.buckets.compactMap { bucket -> TimeBucket? in
-            guard let gone = removed[bucket.id] else { return bucket }
-            return bucket.count > gone ? TimeBucket(timeBucket: bucket.timeBucket, count: bucket.count - gone) : nil
+        let summary = self.summary.compactMap { entry -> SummaryMonth? in
+            guard let month = entry.month, let gone = removed[month] else { return entry }
+            return entry.count > gone ? entry.counting(entry.count - gone) : nil
         }
-        let kept = Set(buckets.map(\.id))
-        for bucket in removed.keys where !kept.contains(bucket) { assets[bucket] = nil }
-        return SavedTimeline(buckets: buckets, assets: assets, projections: projections, device: device, position: position,
+        let kept = Set(summary.compactMap(\.month))
+        for month in removed.keys where !kept.contains(month) { rows[month] = nil }
+        return SavedTimeline(summary: summary, rows: rows, projections: projections, device: device, position: position,
                              title: title, plan: plan)
     }
 
     /// With a photo's newer record, its phone copy kept beside it.
     func replacing(_ asset: Asset) -> SavedTimeline {
-        var assets = self.assets, projections = self.projections, changed = false
-        for (bucket, rows) in self.assets {
-            guard let index = rows.firstIndex(where: { $0.id == asset.id }) else { continue }
-            assets[bucket]?[index] = asset
-            projections[bucket] = projections[bucket]?.replacing(asset)
+        var rows = self.rows, projections = self.projections, changed = false
+        for (month, assets) in self.rows {
+            guard let index = assets.firstIndex(where: { $0.id == asset.id }) else { continue }
+            rows[month]?[index] = asset
+            projections[month] = projections[month]?.replacing(asset)
             changed = true
         }
         guard changed else { return self }
-        return SavedTimeline(buckets: buckets, assets: assets, projections: projections, device: device, position: position,
+        return SavedTimeline(summary: summary, rows: rows, projections: projections, device: device, position: position,
                              title: title, plan: plan)
     }
 }
 
-extension LibraryStore: TimelineFeedConsumer {
+extension LibraryFeedStore: DisplayedFeed {
+    fileprivate var shownSections: [LibrarySection] { liveSections }
+    fileprivate var shownResults: [Asset]? { showingResults ? results : nil }
+    fileprivate func shownRows(of month: MonthKey) -> [Asset]? { rows[month] }
+    fileprivate func shownProjection(of month: MonthKey) -> MonthProjector.Projection? { projections[month] }
+    fileprivate func shownMatch(_ id: String) -> LocalPhoto? { deviceTimeline.remoteToLocal[id] }
+    fileprivate func shownPlaces(of section: String) -> [PlaceTally]? { monthPlaces[section] }
+}
+
+extension LibraryFeedStore: TimelineFeedConsumer {
     /// A month arrived. It is projected off the main actor and shown with its rows; the months
     /// let go to make room go now, as the grid cannot be on them.
     func monthLoaded(_ ticket: TimelineFeed.Ticket, month: MonthKey, assets: [Asset], fresh: Bool, evicting: [MonthKey]) {
-        guard ticket == feedSession?.ticket, let id = monthBuckets[month] else { return }
+        guard ticket == feedSession?.ticket, remoteMonths.contains(month) else { return }
         // A load begun before the month was made stale leaves it stale, as the feed keeps it.
         if fresh { feedStale.remove(month) } else { feedStale.insert(month) }
         for evicted in evicting {
             feedStale.remove(evicted)
-            guard let gone = monthBuckets[evicted], loaded[gone] != nil || pendingLoads[gone] != nil else { continue }
-            loaded[gone] = nil; pendingLoads[gone] = nil; projections[gone] = nil; dirty[gone] = nil
+            guard remoteMonths.contains(evicted), rows[evicted] != nil || pendingLoads[evicted] != nil else { continue }
+            rows[evicted] = nil; pendingLoads[evicted] = nil; projections[evicted] = nil; dirty[evicted] = nil
         }
-        pendingLoads[id] = PendingLoad(ticket: ticket, assets: assets, fresh: fresh)
-        markDirty(id, .load)
+        pendingLoads[month] = PendingLoad(ticket: ticket, assets: assets, fresh: fresh)
+        markDirty(month, .load)
         project()
     }
 
     func monthFailed(_ ticket: TimelineFeed.Ticket, month: MonthKey, message: String) {
-        guard ticket == feedSession?.ticket, let id = monthBuckets[month] else { return }
-        bucketErrors[id] = message
+        guard ticket == feedSession?.ticket, remoteMonths.contains(month) else { return }
+        failedMonths[month] = message
         revision += 1
     }
 }

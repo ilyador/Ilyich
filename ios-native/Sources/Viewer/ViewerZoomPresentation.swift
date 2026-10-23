@@ -224,7 +224,7 @@ extension GridScrollController {
     /// The grid cell showing a photo of `store`'s feed, for the viewer's zoom. A cell scrolled out
     /// of sight is brought into view first, so closing lands on it; without a cell the viewer
     /// closes plainly.
-    func zoomSourceView(for assetID: String, in store: LibraryStore) -> UIView? {
+    func zoomSourceView(for assetID: String, in store: LibraryFeedStore) -> UIView? {
         guard let collection,
               let index = store.restoredIndex(for: GridPosition(section: "", item: 0, offset: 0, assetID: assetID)),
               index.section < collection.numberOfSections, index.item < collection.numberOfItems(inSection: index.section) else { return nil }

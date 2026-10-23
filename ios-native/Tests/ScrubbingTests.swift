@@ -253,7 +253,7 @@ import XCTest
                               Asset(id: "c\(index)", localDateTime: second)]
         }
         let api = MonthLibrary(months: library)
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         MonthProjector.Probe.start()
         defer { MonthProjector.Probe.stop() }
@@ -358,11 +358,11 @@ import XCTest
 
     /// Thirty months, one a year, whose loads take a second; a dropped load ends as a dropped
     /// URLSession request does.
-    private func scrubbableLibrary() async -> (LibraryStore, MonthLibrary) {
+    private func scrubbableLibrary() async -> (LibraryFeedStore, MonthLibrary) {
         let months = (0..<30).map { String(format: "%04d-06-01T00:00:00Z", 2000 + $0) }
         let api = MonthLibrary(months: Dictionary(uniqueKeysWithValues: months.map { ($0, [Asset(id: "photo-\($0)")]) }),
                                delay: .seconds(1), cancelled: URLError(.cancelled))
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         await store.reload()
         return (store, api)
     }

@@ -12,7 +12,7 @@ import SwiftUI
 /// itself keeps reading it while it melts away, so the controller holds the finger and the month
 /// until the closing rail's lens and line have gone.
 struct TimeRail: View {
-    let store: LibraryStore
+    let store: LibraryFeedStore
     let rail: TimeRailController
     let pipeline: MediaPipeline
     let viewportWidth: CGFloat
@@ -205,7 +205,7 @@ private struct TimeRailFollowsFinger: ViewModifier {
 
 /// The month or year under the finger: its name, places, count and four of its photos.
 private struct TimeRailLens: View {
-    let store: LibraryStore
+    let store: LibraryFeedStore
     let rail: TimeRailController
     let pipeline: MediaPipeline
     let index: Int
@@ -251,7 +251,7 @@ private struct TimeRailLens: View {
 /// Trips marked on the tape, kept clear of the lens and of each other. They move aside as the
 /// lens passes, so they follow the finger too.
 private struct TimeRailTripMarks: View {
-    let store: LibraryStore
+    let store: LibraryFeedStore
     let rail: TimeRailController
     let height: CGFloat
 

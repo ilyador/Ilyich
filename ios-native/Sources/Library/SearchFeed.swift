@@ -1,7 +1,7 @@
 import Foundation
 
-/// One search's results, read page by page through the server's cursors. LibraryStore asks it for
-/// the first pages, more, a retry or a refresh, and shows the State each one returns.
+/// One search's results, read page by page through the server's cursors. LibraryFeedStore asks it
+/// for the first pages, more, a retry or a refresh, and shows the State each one returns.
 ///
 /// - Smart search reads pages of 10 (SearchQuery's size); metadata search pages of 100, or 500
 ///   when the phone filters what the server returns (owner or developed).

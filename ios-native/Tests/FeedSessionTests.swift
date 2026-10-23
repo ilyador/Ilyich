@@ -11,7 +11,7 @@ import XCTest
 
     func testArchivingFromTheViewerRemovesThePhotoFromTheTimeline() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10"), photo("f1", "2026-02-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The months did not load.") { store.loaded[Self.march] != nil && store.loaded[Self.february] != nil }
@@ -48,7 +48,7 @@ import XCTest
     func testUnfavoritingInFavoritesRemovesThePhoto() async throws {
         let api = try ChangingLibrary([photo("a", "2026-03-20", favorite: true), photo("b", "2026-03-10", favorite: true),
                                        photo("c", "2026-03-05")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The library did not load.") { store.loaded[Self.march]?.count == 3 }
@@ -78,7 +78,7 @@ import XCTest
     func testLockedUpdateKeepsTheTimelinePosition() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10"), photo("f1", "2026-02-12"),
                                        photo("f2", "2026-02-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The months did not load.") { store.loaded[Self.march] != nil && store.loaded[Self.february] != nil }
@@ -101,7 +101,7 @@ import XCTest
 
     func testClearingRevalidatesTheRestoredLibrarySummary() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10", favorite: true)])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The library did not load.") { store.loaded[Self.march]?.count == 2 }
@@ -127,7 +127,7 @@ import XCTest
 
     func testDeviceSnapshotDuringReplacementIsShownAfterCommit() async throws {
         let api = try ChangingLibrary([photo("server", "2026-01-15", favorite: true)])
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         defer { store.stop() }
         // The app opened on a filter, so there is no saved library: clearing loads it, frozen.
         store.setFeed(.favorites, title: "Favorites")
@@ -154,7 +154,7 @@ import XCTest
     /// phone has, commits once the server's first month is in.
     func testAPendingLibraryLedByAMonthOnlyThePhoneHasCommits() async throws {
         let api = try ChangingLibrary([photo("server", "2026-01-15", favorite: true)])
-        let store = LibraryStore(source: api, includesDevicePhotos: true)
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
         defer { store.stop() }
         let taken = try XCTUnwrap(APIDate.parse("2026-02-10T12:00:00Z"))
         store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone", date: taken)]))
@@ -176,7 +176,7 @@ import XCTest
     func testADeletedPhotoStaysOutOfTheFilterAndTheLibraryItClearsBackTo() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10"), photo("f1", "2026-02-10")],
                                       people: ["maya": ["m1", "m2"]])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The months did not load.") { store.loaded[Self.march]?.count == 2 && store.loaded[Self.february] != nil }
@@ -226,7 +226,7 @@ import XCTest
     /// reaches the feed the way a deletion does, comes back once the sync that follows has run.
     func testAPhotoTakenOutThatIsStillThereComesBackAfterTheSync() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("March did not load.") { store.loaded[Self.march]?.count == 2 }
@@ -243,7 +243,7 @@ import XCTest
     func testASyncChangeReadsAgainOnlyTheMonthsItTouches() async throws {
         let api = try ChangingLibrary([photo("a1", "2026-04-20"), photo("m1", "2026-03-20"), photo("m2", "2026-03-10"),
                                        photo("f1", "2026-02-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         store.visibleSections([0, 1, 2])
@@ -283,7 +283,7 @@ import XCTest
     func testAPendingFeedWhoseFirstMonthEmptiesStillReplacesTheFrozenFeed() async throws {
         let api = try ChangingLibrary([photo("a", "2026-04-10", favorite: true), photo("m", "2026-03-10", favorite: true),
                                        photo("f", "2026-02-10", favorite: true), photo("plain", "2026-01-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The library did not load.") { store.loaded[Self.april] != nil }
@@ -299,7 +299,7 @@ import XCTest
     /// rather than at the place the frozen feed had.
     func testASyncDuringAReplacementOpensTheNewFeedAtItsTop() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20", favorite: true), photo("f1", "2026-02-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The library did not load.") { store.loaded[Self.february] != nil }
@@ -323,7 +323,7 @@ import XCTest
     func testArchivingInsideAFilterKeepsThePhotoOutOfTheLibraryItClearsBackTo() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10"), photo("f1", "2026-02-10")],
                                       people: ["maya": ["m1", "m2"]])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The months did not load.") { store.loaded[Self.march]?.count == 2 && store.loaded[Self.february] != nil }
@@ -352,7 +352,7 @@ import XCTest
     /// the grid comes to them.
     func testAReloadThatTakesOverStillReadsTheMonthsTheOneBeforeNamed() async throws {
         let api = try ChangingLibrary([photo("a1", "2026-04-20"), photo("m1", "2026-03-20"), photo("f1", "2026-02-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         store.visibleSections([0, 1, 2])
@@ -385,7 +385,7 @@ import XCTest
     /// the deletion: neither brings the photo back.
     func testASyncBegunBeforeADeletionDoesNotBringThePhotoBack() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("March did not load.") { store.loaded[Self.march]?.count == 2 }
@@ -424,7 +424,7 @@ import XCTest
     /// other photos.
     func testAPhotoTakenOutWhoseRefreshFailedComesBackWithTheNextSync() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10"), photo("f1", "2026-02-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The months did not load.") { store.loaded[Self.march]?.count == 2 && store.loaded[Self.february] != nil }
@@ -450,7 +450,7 @@ import XCTest
     /// the frozen one.
     func testRetryingAPendingFeedsFailedMonthReplacesTheFrozenFeed() async throws {
         let api = try ChangingLibrary([photo("m1", "2026-03-20", favorite: true), photo("f1", "2026-02-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         try await until("The library did not load.") { store.loaded[Self.march] != nil && store.loaded[Self.february] != nil }
@@ -473,7 +473,7 @@ import XCTest
     /// read again when the grid comes to it, not shown as it was left.
     func testAMonthLeftStaleWhenAFilterOpensIsReadAgainOnceItClears() async throws {
         let api = try ChangingLibrary([photo("a1", "2026-04-20"), photo("m1", "2026-03-20"), photo("f1", "2026-02-10")])
-        let store = LibraryStore(source: api)
+        let store = LibraryFeedStore(source: api)
         defer { store.stop() }
         await store.reload()
         store.visibleSections([0, 1, 2])

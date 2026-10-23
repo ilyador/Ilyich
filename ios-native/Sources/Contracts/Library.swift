@@ -20,7 +20,11 @@ struct MonthKey: Hashable, Comparable, Sendable, CustomStringConvertible {
         }
         guard text.count >= 10, let year = number(0..<4), text[4] == UInt8(ascii: "-"), let month = number(5..<7),
               text[7] == UInt8(ascii: "-"), number(8..<10) == 1 else { return nil }
-        guard text.count > 10 else { self.init(year: year, month: month); return }
+        // A date alone, or midnight in UTC as the server writes its buckets, is in the month the
+        // date names: no date parsing, which costs a format style and a calendar per bucket.
+        if text.count == 10 || Self.midnightUTC.contains(where: { $0.elementsEqual(text[10...]) }) {
+            self.init(year: year, month: month); return
+        }
         guard text[10] == UInt8(ascii: "T") || text[10] == UInt8(ascii: " "), let instant = APIDate.parse(bucketID) else { return nil }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -28,6 +32,9 @@ struct MonthKey: Hashable, Comparable, Sendable, CustomStringConvertible {
         guard let utcYear = parts.year, let utcMonth = parts.month else { return nil }
         self.init(year: utcYear, month: utcMonth)
     }
+
+    /// The times after YYYY-MM-01 that APIDate reads as midnight UTC.
+    private static let midnightUTC: [[UInt8]] = ["T00:00:00Z", "T00:00:00.000Z", "T00:00:00", " 00:00:00"].map { Array($0.utf8) }
 
     /// YYYY-MM-01.
     var bucketID: String { String(format: "%04d-%02d-01", year, month) }

@@ -8,8 +8,8 @@ import Observation
     var item = 0
 }
 
-/// The grid's scroll position, and moving it directly (REBUILD_ROADMAP.md T4, moved out of
-/// LibraryStore). The rail scrubs through it at the finger's pace, so scrubbing is one continuous
+/// The grid's scroll position, and moving it directly (REBUILD_ROADMAP.md T4, moved out of the
+/// feed store). The rail scrubs through it at the finger's pace, so scrubbing is one continuous
 /// movement instead of jumps from row to row through view updates; the rail marks the months
 /// where the grid's own layout puts them; and the viewer finds the cell it zooms back into.
 @MainActor final class GridScrollController {

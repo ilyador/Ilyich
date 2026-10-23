@@ -4,7 +4,7 @@ import SwiftUI
 /// still finds it at the top as a heading. A separate view, so only this, not the whole library,
 /// observes the timeline position.
 private struct FeedMonthHeading: View {
-    let store: LibraryStore
+    let store: LibraryFeedStore
     var body: some View {
         Text(store.query.isEmpty || store.isSearching ? store.title : "\(store.totalCount.formatted()) matches")
             .font(.caption).foregroundStyle(.clear)
@@ -19,7 +19,7 @@ struct LibraryView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let session: AccountSession
-    @State private var store: LibraryStore
+    @State private var store: LibraryFeedStore
     /// What is presented over the library, following links, shared files and the Earth's warm-up.
     @State private var model: LibraryScreenModel
     @State private var searchText = ""
@@ -69,8 +69,8 @@ struct LibraryView: View {
         // the files an earlier build kept are imported once (F5).
         let places = MonthPlacesService(source: repository, store: session.entities, authorization: session.runtime?.authorization,
                                         legacy: session.entities.map { LegacyPlacesImport.live(scope: api.cacheScope, index: $0) })
-        let store = LibraryStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos,
-                                 choices: SearchChoicesStorage(scope: api.cacheScope), places: places)
+        let store = LibraryFeedStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos,
+                                     choices: SearchChoicesStorage(scope: api.cacheScope), places: places)
         _store = State(initialValue: store)
         let viewport = GridViewport()
         _viewport = State(initialValue: viewport)
@@ -132,7 +132,7 @@ struct LibraryView: View {
                             .padding(.horizontal, 16).padding(.top, 8)
                             .environment(\.colorScheme, .dark).foregroundStyle(.white)
                         if let error = store.error { errorBanner(error, retry: store.retryCurrent) }
-                        if !store.bucketErrors.isEmpty {
+                        if !store.failedMonths.isEmpty {
                             errorBanner("Some photos couldn’t load.", retry: store.retryFailedBuckets)
                         }
                         Spacer(minLength: 0)

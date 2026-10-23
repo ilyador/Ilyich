@@ -133,13 +133,13 @@ struct SplitMix64 {
     private let watchdog: HangWatchdog
     /// The library's grid: its feed, how it moves and its rail.
     private struct Grid {
-        let store: LibraryStore
+        let store: LibraryFeedStore
         let viewport: GridViewport
         let rail: TimeRailController
         var scroller: GridScrollController { viewport.scroller }
     }
 
-    private weak var store: LibraryStore?
+    private weak var store: LibraryFeedStore?
     private weak var session: AccountSession?
     private weak var viewport: GridViewport?
     private weak var rail: TimeRailController?
@@ -162,7 +162,7 @@ struct SplitMix64 {
     static func arm() { shared?.start() }
 
     /// The library's store, session, grid motion and rail, once the library is on screen.
-    func attach(store: LibraryStore, session: AccountSession, viewport: GridViewport, rail: TimeRailController) {
+    func attach(store: LibraryFeedStore, session: AccountSession, viewport: GridViewport, rail: TimeRailController) {
         self.store = store
         self.session = session
         self.viewport = viewport
