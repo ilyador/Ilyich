@@ -149,6 +149,9 @@ actor APIClient {
         }
     }
     func syncStatistics() async throws -> EntityStoreStatistics? { try await entityStore?.statistics() }
+    /// One asset from the server alone, never the offline library: for photos it never holds, such
+    /// as the Locked Folder's.
+    func serverAsset(id: String) async throws -> Asset { try await request(.get, path: "assets/\(id)") }
     func asset(id: String) async throws -> Asset {
         do { return try await request(.get, path: "assets/\(id)") }
         catch {

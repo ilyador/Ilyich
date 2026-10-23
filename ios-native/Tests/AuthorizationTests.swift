@@ -153,6 +153,41 @@ final class AuthorizationTests: XCTestCase {
         XCTAssertTrue(state.isCurrent(after.epoch))
     }
 
+    /// A Locked Folder unlock or relock moves only the private epoch (N5): library reads, writes
+    /// and the mirror the extensions read stay as they were, and locked media is allowed only in
+    /// between. Ending the session locks the folder.
+    func testTheLockedFolderMovesOnlyThePrivateEpoch() async {
+        let mirror = makeMirror()
+        let state = state(mirror: mirror)
+        let before = state.snapshot
+        let published = mirror.read()
+        XCTAssertFalse(before.allows(.lockedMedia))
+        var updates = state.updates().makeAsyncIterator()
+        _ = await updates.next()
+
+        let unlocked = state.setLockedFolderUnlocked(true)
+        XCTAssertTrue(unlocked.allows(.lockedMedia))
+        XCTAssertGreaterThan(unlocked.privateEpoch, before.privateEpoch)
+        XCTAssertEqual(unlocked.epoch, before.epoch, "Unlocking never discards a library read.")
+        XCTAssertEqual(unlocked.writeGeneration, before.writeGeneration)
+        XCTAssertTrue(state.isCurrent(before.epoch))
+        XCTAssertEqual(mirror.read(), published, "The extensions see nothing of it.")
+        let heard = await updates.next()
+        XCTAssertEqual(heard, unlocked, "The screens hear of it.")
+
+        let relocked = state.setLockedFolderUnlocked(false)
+        XCTAssertFalse(relocked.allows(.lockedMedia))
+        XCTAssertGreaterThan(relocked.privateEpoch, unlocked.privateEpoch, "Relocking moves it again: what was asked for while open is stale.")
+        XCTAssertEqual(relocked.epoch, before.epoch)
+        XCTAssertEqual(relocked.writeGeneration, before.writeGeneration)
+        XCTAssertEqual(mirror.read(), published)
+
+        state.setLockedFolderUnlocked(true)
+        state.end()
+        XCTAssertFalse(state.snapshot.allows(.lockedMedia), "Signing out locks the folder.")
+        XCTAssertGreaterThan(state.snapshot.privateEpoch, relocked.privateEpoch)
+    }
+
     /// Ending the session fences everything made under it and finishes its updates.
     func testSignOutEndsTheSessionAndItsUpdates() async {
         let state = state(mirror: makeMirror())

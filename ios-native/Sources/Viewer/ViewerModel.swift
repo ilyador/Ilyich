@@ -356,7 +356,9 @@ enum ViewerConfirmation: Hashable {
         let accessMustBeConfirmed = accessRefreshRevision >= 0 && accessRefreshRevision <= revision
         do {
             if revision > 0 { try await Task.sleep(for: .milliseconds(250)) }
-            let asset = try await api.asset(id: id)
+            // A Locked Folder photo is read from the server alone: no library cache holds it (N5).
+            let asset: Asset
+            if window.isPrivate { asset = try await api.serverAsset(id: id) } else { asset = try await api.asset(id: id) }
             try Task.checkCancellation()
             guard selectedID == id, refreshRevision == revision, showDetails(asset, over: previous) else { return }
             accessRefreshRevision = -1

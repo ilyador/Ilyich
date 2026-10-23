@@ -12,6 +12,9 @@ import Foundation
     /// Which photos the screen shows, by their own record: a fresher record that no longer
     /// belongs takes its photo out.
     @ObservationIgnored private let keeps: (Asset) -> Bool
+    /// Told after each loss, for an owner that reads the list again itself whether or not its
+    /// screen is being drawn, as the Locked Folder's session does (N5).
+    @ObservationIgnored var onLoss: (() -> Void)?
 
     init(_ assets: [Asset] = [], keeps: @escaping (Asset) -> Bool = { _ in true }) {
         self.assets = assets
@@ -28,6 +31,7 @@ import Foundation
     func lose(_ id: String) {
         assets.removeAll { $0.id == id }
         losses += 1
+        onLoss?()
     }
 }
 
@@ -49,6 +53,12 @@ import Foundation
     case single(Asset)
     /// The Locked Folder's photos.
     case locked(AssetList)
+
+    /// The Locked Folder's photos, which no library cache holds (N5): the viewer reads them from
+    /// the server alone.
+    var isPrivate: Bool {
+        if case .locked = self { true } else { false }
+    }
 
     /// The photos to page through around the photo `id`, in their order: empty when the source
     /// doesn't hold it.

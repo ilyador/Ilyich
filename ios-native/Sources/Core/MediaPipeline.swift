@@ -121,12 +121,93 @@ private final class MediaMemory: @unchecked Sendable {
     }
 }
 
+/// The Locked Folder's images, apart from every other cache (REBUILD_ROADMAP.md N5). Only a locked
+/// photo's media is kept here, only while the account's Locked Folder is unlocked, and a relock
+/// empties it at once from any thread. Each image is asked for under a ticket: emptying, or the
+/// account's private epoch moving, makes every earlier ticket stale, so a download that ends after
+/// the folder relocked is never kept. Writes and emptying happen under one lock, so nothing lands
+/// once `purge` has returned. NSCache is thread-safe and has no delegate here.
+private final class PrivateMediaMemory: @unchecked Sendable {
+    struct Ticket: Hashable, Sendable {
+        let generation: UInt64
+        /// The account's private epoch the folder was unlocked under; nil for a client without an
+        /// account, whose locked media needs no unlocking.
+        let privateEpoch: UInt64?
+    }
+
+    private let images = NSCache<NSString, CachedImage>()
+    private struct State {
+        var generation: UInt64 = 0
+        /// The keys of the images kept, some of which NSCache may have evicted.
+        var keys: Set<String> = []
+    }
+    private let state = Mutex(State())
+    private let authorization: AuthorizationState?
+
+    init(authorization: AuthorizationState?) {
+        self.authorization = authorization
+        images.totalCostLimit = 48 * 1024 * 1024
+        images.countLimit = 400
+    }
+
+    /// A ticket for media asked for now, or nil while the account's Locked Folder is locked.
+    func ticket() -> Ticket? { state.withLock { ticket(generation: $0.generation) } }
+
+    /// The ticket that is current, given the memory's generation. Reads the account's snapshot,
+    /// which takes its own lock but never this one.
+    private func ticket(generation: UInt64) -> Ticket? {
+        guard let authorization else { return Ticket(generation: generation, privateEpoch: nil) }
+        let snapshot = authorization.snapshot
+        guard snapshot.allows(.lockedMedia) else { return nil }
+        return Ticket(generation: generation, privateEpoch: snapshot.privateEpoch)
+    }
+
+    func isCurrent(_ ticket: Ticket) -> Bool { state.withLock { self.ticket(generation: $0.generation) == ticket } }
+
+    func image(_ key: String, ticket: Ticket) -> PreparedImage? {
+        state.withLock { state in
+            guard self.ticket(generation: state.generation) == ticket else { return nil }
+            return images.object(forKey: key as NSString)?.image
+        }
+    }
+
+    /// Keeps `image` unless its ticket went stale meanwhile. Says whether it was kept.
+    func remember(_ image: PreparedImage, as key: String, ticket: Ticket) -> Bool {
+        state.withLock { state in
+            guard self.ticket(generation: state.generation) == ticket else { return false }
+            images.setObject(CachedImage(image), forKey: key as NSString, cost: image.byteCost)
+            state.keys.insert(key)
+            return true
+        }
+    }
+
+    /// Every image goes, and every ticket given out before is stale.
+    func purge() {
+        state.withLock { state in
+            state.generation &+= 1
+            state.keys.removeAll()
+            images.removeAllObjects()
+        }
+    }
+
+    /// A memory warning: the images go; downloads still under way are kept when they land.
+    func trim() {
+        state.withLock { state in
+            state.keys.removeAll()
+            images.removeAllObjects()
+        }
+    }
+
+    var isEmpty: Bool { state.withLock { state in !state.keys.contains { images.object(forKey: $0 as NSString) != nil } } }
+}
+
 actor MediaPipeline {
     private struct Flight {
         let task: Task<PreparedImage, Error>
         var waiters: Set<UUID>
         let generation: UUID
-        let privateGeneration: UUID?
+        /// The Locked Folder ticket of a locked photo's download; nil for every other.
+        let privateTicket: PrivateMediaMemory.Ticket?
         /// The media fence's token when the download began.
         let token: UInt64
     }
@@ -166,8 +247,8 @@ actor MediaPipeline {
     private var faceFlights: [MediaCacheIdentity: Task<PreparedImage, Error>] = [:]
     private let faceLimiter = ImageWorkLimiter(limit: 6)
     private var generation = UUID()
-    private var privateGeneration = UUID()
-    private var privateKeys = Set<MediaCacheIdentity>()
+    /// Locked Folder photos' images, which no other cache ever holds (REBUILD_ROADMAP.md N5).
+    private nonisolated let privateMedia: PrivateMediaMemory
 
     /// Names a server photo from the offline library, with its revision, so a tile that knows only
     /// an ID needs no round trip to the server. Set once the account's index is open.
@@ -203,6 +284,8 @@ actor MediaPipeline {
         self.memory = memory
         let thumbs = DecodedThumbnailCache()
         self.thumbs = thumbs
+        // Locked media needs the account's Locked Folder unlocked, as its authorization says.
+        privateMedia = PrivateMediaMemory(authorization: client.authorization)
         scheduler = ThumbnailScheduler(store: thumbnails, memory: thumbs,
                                        fetcher: ThumbnailFetcher(client: client, protocolClasses: protocolClasses),
                                        device: device, watchesNetwork: true)
@@ -273,16 +356,25 @@ actor MediaPipeline {
     /// then is neither downloaded, stored nor remembered.
     func image(for asset: Asset, size: MediaSize = .thumbnail, pixelSize: Int, edited: Bool = true, token: UInt64) async throws -> PreparedImage {
         guard fence.admits(asset.id, since: token) else { throw CancellationError() }
-        if size == .thumbnail, edited, asset.visibility != .locked {
+        if asset.visibility == .locked {
+            // A Locked Folder photo, only while the folder is unlocked: over the session that keeps
+            // nothing, into the folder's own memory alone. Never the thumbnail scheduler, its
+            // caches, the disk or the URL cache (N5).
+            guard let ticket = privateMedia.ticket() else { throw CancellationError() }
+            let identity = MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: size, pixelSize: pixelSize, edited: edited)
+            if let image = privateMedia.image(identity.stableKey, ticket: ticket) { return image }
+            let request = try await mediaRequest(asset, size: size, edited: edited)
+            guard privateMedia.isCurrent(ticket) else { throw CancellationError() }
+            return try await load(identity, request: request, privately: ticket, token: token)
+        }
+        if size == .thumbnail, edited {
             guard let image = try await scheduler.image(assetID: asset.id, revision: asset.cacheRevision, shortSide: pixelSize,
                                                         band: .explicit, network: true, token: token) else { throw CancellationError() }
             return image
         }
-        let privacyToken = privateGeneration
         let identity = MediaCacheIdentity(scope: client.cacheScope, asset: asset, size: size, pixelSize: pixelSize, edited: edited)
         let request = try await mediaRequest(asset, size: size, edited: edited)
-        guard asset.visibility != .locked || privacyToken == privateGeneration else { throw CancellationError() }
-        return try await load(identity, request: request, isPrivate: asset.visibility == .locked, token: token)
+        return try await load(identity, request: request, token: token)
     }
 
     /// The media fence's token now, for work that will store or remember a photo's media later.
@@ -336,11 +428,14 @@ actor MediaPipeline {
 
     func animation(for asset: Asset, pixelSize: Int) async throws -> AnimatedImageSource {
         guard asset.hasKnownEditState, asset.isAnimatedImage, !asset.isDeveloped, !asset.isEdited else { throw APIError.invalidResponse("Use this photo’s processed preview until its edit information is available.") }
-        let epoch = generation, privateEpoch = privateGeneration
+        let epoch = generation
+        // A locked photo's animation plays only while the folder is unlocked, and not after it relocks.
+        let ticket = asset.visibility == .locked ? privateMedia.ticket() : nil
+        if asset.visibility == .locked, ticket == nil { throw CancellationError() }
         let file = try await client.download(asset: asset, original: true)
         do {
             try Task.checkCancellation()
-            guard epoch == generation, asset.visibility != .locked || privateEpoch == privateGeneration else { throw CancellationError() }
+            guard epoch == generation, ticket.map(privateMedia.isCurrent) ?? true else { throw CancellationError() }
             return try AnimatedImageSource(file: file, pixelSize: pixelSize)
         } catch { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()); throw error }
     }
@@ -394,12 +489,15 @@ actor MediaPipeline {
 
     /// `token` is the media fence's from when the image was asked for. A photo forgotten since is
     /// not downloaded, or, if its download was already under way, not remembered or left in the
-    /// URL cache.
-    private func load(_ key: MediaCacheIdentity, request: URLRequest, isPrivate: Bool = false, token: UInt64) async throws -> PreparedImage {
+    /// URL cache. A locked photo's image (`privately` its Locked Folder ticket) is downloaded over
+    /// the session that keeps nothing and kept only in the folder's own memory, and only if the
+    /// folder hasn't relocked meanwhile.
+    private func load(_ key: MediaCacheIdentity, request: URLRequest, privately ticket: PrivateMediaMemory.Ticket? = nil,
+                      token: UInt64) async throws -> PreparedImage {
         let assetID = key.resource.hasPrefix("assets/") ? String(key.resource.dropFirst(7)) : nil
         if let assetID, !fence.admits(assetID, since: token) { throw CancellationError() }
-        if isPrivate {
-            privateKeys.insert(key)
+        if ticket != nil {
+            // Should the photo's media be in the URL cache from before it was locked, it goes.
             byteCache.removeCachedResponse(for: request)
         } else if let assetID {
             cachedRequests[assetID, default: []].insert(request)
@@ -407,12 +505,16 @@ actor MediaPipeline {
         let waiter = UUID()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            if let image = decoded.object(forKey: key.stableKey as NSString) { return image.image }
+            if let ticket {
+                if let image = privateMedia.image(key.stableKey, ticket: ticket) { return image }
+            } else if let image = decoded.object(forKey: key.stableKey as NSString) { return image.image }
             let flight: Flight
-            if var existing = flights[key] {
+            // A download from before the folder relocked is never joined: it is dropped when it lands.
+            if var existing = flights[key], existing.privateTicket == ticket {
                 existing.waiters.insert(waiter); flights[key] = existing; flight = existing
             } else {
-                let session = isPrivate ? self.privateSession : self.session
+                flights.removeValue(forKey: key)?.task.cancel()
+                let session = ticket != nil ? self.privateSession : self.session
                 let limiter = key.size.hasPrefix(MediaSize.thumbnail.rawValue) ? self.thumbnailLimiter : self.limiter
                 let task = Task.detached(priority: .userInitiated) {
                     try await limiter.acquire()
@@ -430,21 +532,24 @@ actor MediaPipeline {
                         throw error
                     }
                 }
-                flight = Flight(task: task, waiters: [waiter], generation: generation, privateGeneration: isPrivate ? privateGeneration : nil,
-                                token: token)
+                flight = Flight(task: task, waiters: [waiter], generation: generation, privateTicket: ticket, token: token)
                 flights[key] = flight
             }
             defer { release(key, waiter: waiter) }
             let image = try await flight.task.value
             try Task.checkCancellation()
-            guard flight.generation == generation, flight.privateGeneration == nil || flight.privateGeneration == privateGeneration else { throw CancellationError() }
+            guard flight.generation == generation else { throw CancellationError() }
             // A joined flight may have begun after this caller's token, or before it.
             let admitted = min(token, flight.token)
             if let assetID, !fence.admits(assetID, since: admitted) {
                 byteCache.removeCachedResponse(for: request)
                 throw CancellationError()
             }
-            memory.remember(image, as: key, token: admitted, latestToo: !isPrivate)
+            if let ticket {
+                guard privateMedia.remember(image, as: key.stableKey, ticket: ticket) else { throw CancellationError() }
+                return image
+            }
+            memory.remember(image, as: key, token: admitted)
             return image
         } onCancel: {
             Task { await self.release(key, waiter: waiter) }
@@ -461,13 +566,24 @@ actor MediaPipeline {
         }
     }
 
-    func removePrivate() {
-        privateGeneration = UUID()
-        for key in privateKeys {
-            flights.removeValue(forKey: key)?.task.cancel()
-            decoded.removeObject(forKey: key.stableKey as NSString)
+    /// The Locked Folder relocked (REBUILD_ROADMAP.md N5): every locked photo's image leaves memory
+    /// at once, from any thread, and nothing downloading for the folder is kept when it lands.
+    /// Those downloads are cancelled on the pipeline's own executor soon after.
+    nonisolated func purgePrivateMedia() {
+        privateMedia.purge()
+        Task { await self.cancelPrivateFlights() }
+    }
+
+    /// Whether any locked photo's image is in memory.
+    nonisolated var holdsPrivateMedia: Bool { !privateMedia.isEmpty }
+
+    /// Locked photos' downloads asked for before the folder last relocked.
+    private func cancelPrivateFlights() {
+        for (key, flight) in flights {
+            guard let ticket = flight.privateTicket, !privateMedia.isCurrent(ticket) else { continue }
+            flight.task.cancel()
+            flights.removeValue(forKey: key)
         }
-        privateKeys.removeAll()
     }
 
     /// Sign-out and Clear browsing cache only: every image of the account, on disk too.
@@ -480,7 +596,7 @@ actor MediaPipeline {
     /// on disk stay. For a sync reset, whose sweep then removes the files the index no longer
     /// vouches for.
     func removeAllButStoredThumbnails() {
-        removePrivate()
+        privateMedia.purge()
         generation = UUID()
         fence.forgetAll()
         scheduler.reset()
@@ -576,9 +692,10 @@ actor MediaPipeline {
                         pendingLoads: flights.count + scheduler.pendingCount + scheduler.downloadsRunning,
                         decodedMemoryLimit: decoded.totalCostLimit + thumbs.budget)
     }
-    /// A memory warning: previews go, and every grid thumbnail not on screen.
+    /// A memory warning: previews go, the Locked Folder's images, and every grid thumbnail not on screen.
     func trimMemory() {
         memory.removeAll()
+        privateMedia.trim()
         thumbs.trimUnpinned()
     }
 
