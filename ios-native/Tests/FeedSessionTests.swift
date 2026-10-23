@@ -170,6 +170,40 @@ import XCTest
         XCTAssertEqual(store.entry(section: 0, item: 0)?.local?.id, "phone")
     }
 
+    /// F6: the viewer closing over a merged library frozen behind a new scope on its way (a person
+    /// chosen from the viewer's info; Favorites here) zooms back to the photo's own cell. The
+    /// frozen feed finds the photo where its month as projected puts it, the phone's photos merged
+    /// in, as the live feed does; the server's rows alone put it a cell early, on the phone's photo.
+    func testClosingTheViewerOverAFrozenMergedLibraryZoomsBackToThePhotosCell() async throws {
+        let api = try ChangingLibrary([photo("a", "2026-03-10"), photo("f1", "2026-02-10", favorite: true)])
+        let store = LibraryFeedStore(source: api, includesDevicePhotos: true)
+        defer { store.stop() }
+        await store.reload()
+        try await until("March did not load.") { store.loaded[Self.march] != nil }
+        // The phone took a photo in March after the server's, so it leads the month.
+        let taken = try XCTUnwrap(APIDate.parse("2026-03-20T12:00:00Z"))
+        store.updateDeviceTimeline(MergedTimeline(photos: [LocalPhoto(id: "phone", date: taken)]))
+        await store.settleProjections()
+        let marchCells = { (0..<2).compactMap { store.entry(section: 0, item: $0)?.id } }
+        XCTAssertEqual(marchCells(), ["local:phone", "a"])
+        XCTAssertEqual(store.loaded[Self.march]?.map(\.id), ["a"])
+        // What the zoom presenter asks for when the viewer closes on a.
+        let closing = GridPosition(section: "", item: 0, offset: 0, assetID: "a")
+        XCTAssertEqual(store.restoredIndex(for: closing).map { [$0.section, $0.item] }, [0, 1])
+
+        await api.holdSummaries()
+        let summaries = await api.summaryCalls
+        store.setFeed(.favorites, title: "Favorites")
+        try await until("Favorites were never asked for.") { await api.summaryCalls > summaries }
+        XCTAssertTrue(store.isReplacingFeed, "The library stays, frozen, while Favorites load.")
+        XCTAssertEqual(marchCells(), ["local:phone", "a"], "The frozen library shows March as it did.")
+        let index = try XCTUnwrap(store.restoredIndex(for: closing))
+        XCTAssertEqual([index.section, index.item], [0, 1], "The viewer zooms back to a's cell, not the phone's photo's.")
+        XCTAssertEqual(store.entry(section: index.section, item: index.item)?.id, "a")
+        await api.releaseSummaries()
+        try await until("Favorites did not replace the library.") { !store.isReplacingFeed }
+    }
+
     /// The owner saw a photo deleted inside a filter linger. The photo leaves the filter at once,
     /// and neither a read of its month from before the server's change, nor the library the
     /// filter clears back to, brings it back; the library keeps its place.
