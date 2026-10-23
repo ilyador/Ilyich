@@ -109,7 +109,7 @@ struct LockedFolderView: View {
             AssetViewer(api: api, pipeline: pipeline, assets: assets, initial: asset, onUpdated: { updated in
                 if updated.visibility != .locked { assets.removeAll { $0.id == updated.id } }
                 else if let index = assets.firstIndex(where: { $0.id == updated.id }) { assets[index] = updated }
-            }, onDeleted: { viewing = nil; Task { do { try await loadUnlocked() } catch { failure = .init(error) } } })
+            }, onDeleted: { _ in viewing = nil; Task { do { try await loadUnlocked() } catch { failure = .init(error) } } })
         }
         .task(id: unlocked) {
             guard unlocked, let expires = status?.pinExpiresAt ?? status?.expiresAt else { return }

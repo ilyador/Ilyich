@@ -16,15 +16,20 @@ import XCTest
         let published = await harness.engine.changes()
         let library = LibraryRepository(client: harness.api, index: harness.entities, sync: harness.engine)
 
+        let asked = ContinuousClock.now
         let refreshed = try await library.refresh()
 
         let returned = try XCTUnwrap(refreshed, "LibraryRepository.refresh returns the change.")
         XCTAssertEqual(returned.upserted, ["fresh": .init(from: nil, to: february)], "The refresh says what it changed.")
         XCTAssertEqual(returned.account, harness.authorization.account)
         XCTAssertEqual(returned.origin, .sync)
+        // The pass began reading the server after the refresh was asked for, and read it all (F4).
+        let synced = try XCTUnwrap(returned.syncedThrough, "A pass that read its whole stream says when it began.")
+        XCTAssertGreaterThanOrEqual(synced, asked)
         var changes = published.makeAsyncIterator()
         let first = await changes.next()
         XCTAssertEqual(first?.upserted, returned.upserted, "The same change was published.")
+        XCTAssertEqual(first?.syncedThrough, synced)
         XCTAssertEqual(harness.notifications.all, [["collections": false, "accessChanged": false]],
                        "The screens heard of it once, as a change to photos alone.")
         let settled = await becomesTrue { !harness.status.status.isSyncing && harness.status.status.lastSyncDate != nil }
@@ -285,6 +290,7 @@ import XCTest
         try await harness.primeIndex()
         // The stream breaks off before its completion marker.
         harness.server.route("POST", "sync/stream", responses: [SyncEvents.stream([SyncEvents.asset("committed")]), SyncHarness.completeStream])
+        let published = await harness.engine.changes()
 
         do {
             _ = try await harness.engine.refresh()
@@ -292,6 +298,10 @@ import XCTest
         } catch {}
 
         XCTAssertEqual(harness.notifications.count, 1, "What the pass committed was published.")
+        var changes = published.makeAsyncIterator()
+        let partial = await changes.next()
+        XCTAssertEqual(partial?.upserted.keys.sorted(), ["committed"])
+        XCTAssertNil(partial?.syncedThrough, "A pass that stopped partway doesn't say the index has what the server had (F4).")
         let explained = await becomesTrue { harness.status.status.error != nil && !harness.status.status.isSyncing }
         XCTAssertTrue(explained, "\(harness.status.status)")
         await harness.engine.syncNow()

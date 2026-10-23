@@ -7,7 +7,8 @@ struct AssetViewer: View {
     let pipeline: MediaPipeline
     let assets: [Asset]
     let onUpdated: (Asset) -> Void
-    let onDeleted: () -> Void
+    /// The photo with this ID left the list: deleted, locked, restored, or no longer visible.
+    let onDeleted: (String) -> Void
     let onExploreLocation: ((PlaceFocus) -> Void)?
     let albumID: String?
     let matchedLocalPhotos: [String: LocalPhoto]
@@ -68,7 +69,7 @@ struct AssetViewer: View {
     @Environment(\.openURL) private var openURL
 
     init(api: APIClient, pipeline: MediaPipeline, assets: [Asset], initial: Asset,
-         onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping () -> Void, albumID: String? = nil,
+         onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping (String) -> Void, albumID: String? = nil,
          matchedLocalPhotos: [String: LocalPhoto] = [:], onExploreLocation: ((PlaceFocus) -> Void)? = nil,
          transition: ViewerTransitionState? = nil, onClose: (() -> Void)? = nil) {
         self.api = api; self.pipeline = pipeline
@@ -271,7 +272,7 @@ struct AssetViewer: View {
         .fullScreenCover(isPresented: $slideshow) { SlideshowView(api: api, pipeline: pipeline, assets: assets.map { replacements[$0.id] ?? $0 }, initial: current) }
         .sheet(isPresented: $sharedLink) { NavigationStack { SharedLinkEditor(api: api, album: nil, assetIDs: [current.id]) } }
         .sheet(isPresented: $showStack) {
-            if let stack = current.stack { NavigationStack { ViewerStackView(api: api, pipeline: pipeline, stackID: stack.id, onUpdated: update, onChanged: onDeleted) } }
+            if let stack = current.stack { NavigationStack { ViewerStackView(api: api, pipeline: pipeline, stackID: stack.id, onUpdated: update, onChanged: { onDeleted(selectedID) }) } }
         }
         .sheet(isPresented: $albumActivity) {
             if let albumID { NavigationStack { AlbumActivityView(api: api, albumID: albumID, assetID: current.id) } }
@@ -560,7 +561,7 @@ struct AssetViewer: View {
             let updated = try await api.updateAsset(id: id, update: .init(visibility: visibility))
             if visibility == .locked {
                 await pipeline.forget(assetIDs: [id], revoked: true)
-                onDeleted(); close()
+                onDeleted(id); close()
             } else { update(updated) }
         }
     }
@@ -577,12 +578,12 @@ struct AssetViewer: View {
     private func deleteAsset() {
         guard let asset = deletionTarget, asset.ownerId != nil, asset.ownerId == api.userID else { return }
         let permanently = deletePermanently
-        run { try await api.trashAssets(ids: [asset.id], permanently: permanently); onDeleted(); close() }
+        run { try await api.trashAssets(ids: [asset.id], permanently: permanently); onDeleted(asset.id); close() }
     }
     private func restoreAsset() {
         guard capabilities.offers(.restore) else { return }
         let id = current.id
-        run { _ = try await api.restoreAssets(ids: [id]); onDeleted(); close() }
+        run { _ = try await api.restoreAssets(ids: [id]); onDeleted(id); close() }
     }
     private func refreshCurrentAsset() async {
         let id = selectedID, revision = refreshRevision
@@ -599,14 +600,14 @@ struct AssetViewer: View {
             guard selectedID == id, refreshRevision == revision, !Task.isCancelled else { return }
             switch error {
             case ServerFailure.forbidden, ServerFailure.notFound:
-                onDeleted(); close()
+                onDeleted(id); close()
             case ServerFailure.sessionExpired, ServerFailure.proxyRejected:
                 // Not a deletion: the photo is most likely still there, and only the session check
                 // signs out. A photo whose access must be confirmed still closes.
                 if accessMustBeConfirmed { close() }
                 else if revision == 0 { self.error = error.localizedDescription }
             default:
-                if accessMustBeConfirmed { onDeleted(); close() }
+                if accessMustBeConfirmed { onDeleted(id); close() }
                 else if revision == 0 { self.error = error.localizedDescription }
             }
         }
@@ -615,7 +616,7 @@ struct AssetViewer: View {
     /// Trash since `previous` was shown. Says whether the viewer stays.
     private func showDetails(_ asset: Asset, over previous: Asset) -> Bool {
         if (asset.visibility == .locked && previous.visibility != .locked) || (asset.isTrashed && !previous.isTrashed) {
-            onDeleted(); close(); return false
+            onDeleted(asset.id); close(); return false
         }
         replacements[asset.id] = asset
         if asset != previous { onUpdated(asset) }

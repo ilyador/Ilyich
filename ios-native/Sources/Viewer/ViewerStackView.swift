@@ -62,7 +62,7 @@ struct ViewerStackView: View {
             } message: { Text("All photos are kept and will appear separately in the timeline.") }
             .task { await load() }
             .fullScreenCover(item: $viewing) { asset in
-                AssetViewer(api: api, pipeline: pipeline, assets: stack?.assets ?? [asset], initial: asset, onUpdated: onUpdated, onDeleted: { onChanged(); Task { await load() } })
+                AssetViewer(api: api, pipeline: pipeline, assets: stack?.assets ?? [asset], initial: asset, onUpdated: onUpdated, onDeleted: { _ in onChanged(); Task { await load() } })
             }
     }
     private func load() async {

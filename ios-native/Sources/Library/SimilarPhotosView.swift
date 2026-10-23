@@ -29,7 +29,7 @@ struct SimilarPhotosView: View {
             .onDisappear { store.stop() }
             .fullScreenCover(item: $viewing) { asset in
                 AssetViewer(api: api, pipeline: pipeline, assets: store.results, initial: asset,
-                            onUpdated: store.update, onDeleted: { store.findSimilar(to: reference) })
+                            onUpdated: store.update, onDeleted: { _ in store.findSimilar(to: reference) })
             }
         }
     }

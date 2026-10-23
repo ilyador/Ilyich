@@ -295,7 +295,7 @@ struct LibraryView: View {
     private func assetViewer(_ asset: Asset, transition: ViewerTransitionState, close: @escaping () -> Void) -> some View {
         // Exploring the photo's place closes the viewer, then raises the Earth turned to it.
         AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
-                    onUpdated: store.update, onDeleted: { store.removeLocally([transition.currentID]); Task { await store.refreshAfterMutation() } },
+                    onUpdated: store.update, onDeleted: { id in store.removeLocally([id]); Task { await store.refreshAfterMutation() } },
                     albumID: navigator.viewerRoute?.albumContext ?? store.feedQuery.predicates.albums.first,
                     matchedLocalPhotos: store.matchingDevicePhotos, onExploreLocation: { navigator.send(.exploreLocation($0)) },
                     transition: transition, onClose: close)

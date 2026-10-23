@@ -317,6 +317,188 @@ import XCTest
         XCTAssertEqual(store.sections.map(\.id), [Self.march])
     }
 
+    /// Archiving inside a filter takes the photo out of the filter and of the library the filter
+    /// clears back to. The library's month, counted again after the clear and read from an offline
+    /// library that hasn't synced the change yet, still leaves it out.
+    func testArchivingInsideAFilterKeepsThePhotoOutOfTheLibraryItClearsBackTo() async throws {
+        let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10"), photo("f1", "2026-02-10")],
+                                      people: ["maya": ["m1", "m2"]])
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        try await until("The months did not load.") { store.loaded[Self.march]?.count == 2 && store.loaded[Self.february] != nil }
+        store.setPerson(Self.maya)
+        try await until("Maya's photos did not replace the library.") { !store.isReplacingFeed && store.title != "Library" && store.totalCount == 2 }
+
+        // The viewer archives m2 and shows the server's record; the offline library is yet to sync it.
+        var archived = try XCTUnwrap(store.loaded[Self.march]?.first { $0.id == "m2" })
+        archived.visibility = .archive
+        store.update(archived)
+        XCTAssertEqual(store.sections.map(\.count), [1], "The photo leaves Maya's photos at once.")
+
+        let reads = await api.monthReads.count
+        store.clearFilters()
+        XCTAssertEqual(store.sections.map(\.count), [1, 1], "The library comes back without it.")
+        // Counted again, March has a photo more than its rows, so it is read again.
+        try await until("The library's March was not read again.") { await api.monthReads.count > reads }
+        try await Task.sleep(for: .milliseconds(100))
+        await store.settleProjections()
+        XCTAssertEqual(store.loaded[Self.march]?.map(\.id), ["m1"], "A read from before the sync leaves it out of the library too.")
+        XCTAssertEqual(store.sections.map(\.count), [1, 1])
+    }
+
+    /// A sync's reload names the months its change touched. When another change's reload takes
+    /// over before the first has its plan, the months the first named are still read again once
+    /// the grid comes to them.
+    func testAReloadThatTakesOverStillReadsTheMonthsTheOneBeforeNamed() async throws {
+        let api = try ChangingLibrary([photo("a1", "2026-04-20"), photo("m1", "2026-03-20"), photo("f1", "2026-02-10")])
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        store.visibleSections([0, 1, 2])
+        try await until("The months did not load.") { [Self.april, Self.march, Self.february].allSatisfy { store.loaded[$0] != nil } }
+        store.visibleSections([0])
+        await store.settleProjections()
+
+        // f1 is renamed on the web while February is off screen; before its change's reload has a
+        // plan, a change to m1 starts a reload of its own.
+        var renamed = try photo("f1", "2026-02-10")
+        renamed.originalFileName = "renamed.jpg"
+        await api.set(renamed)
+        await api.holdPlans()
+        let plans = await api.planCalls
+        let first = Task { await store.apply(change(upserted: ["f1": move(Self.february, Self.february)])) }
+        try await until("The first reload never asked for its plan.") { await api.planCalls > plans }
+        let second = Task { await store.apply(change(upserted: ["m1": move(Self.march, Self.march)])) }
+        try await until("The second reload never asked for its plan.") { await api.planCalls > plans + 1 }
+        await api.releasePlans()
+        await first.value
+        await second.value
+
+        store.visibleSections([2])
+        try await until("February was not read again.") { store.loaded[Self.february]?.first?.originalFileName == "renamed.jpg" }
+    }
+
+    /// A photo deleted here stays out until a sync that began reading the server after the
+    /// deletion has run. A pass already on its way, whose change names the photo (favorited a
+    /// moment before), and a refresh asked for before the deletion, read the server before it had
+    /// the deletion: neither brings the photo back.
+    func testASyncBegunBeforeADeletionDoesNotBringThePhotoBack() async throws {
+        let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10")])
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        try await until("March did not load.") { store.loaded[Self.march]?.count == 2 }
+
+        // A refresh asked for after another change, and a pass reading the server, are on their way.
+        await api.holdRefreshes()
+        let refreshes = await api.refreshCalls
+        let refresh = Task { await store.refreshAfterMutation() }
+        try await until("The refresh was never asked for.") { await api.refreshCalls > refreshes }
+        let passBegan = ContinuousClock.now - .milliseconds(10)
+        // The viewer deletes m2; the offline library those syncs leave still has it.
+        store.removeLocally(["m2"])
+        XCTAssertEqual(store.loaded[Self.march]?.map(\.id), ["m1"])
+
+        // The pass publishes m2, favorited before the deletion, and March is read again.
+        var reads = await api.monthReads.count
+        await store.apply(change(upserted: ["m2": move(Self.march, Self.march)], syncedThrough: passBegan))
+        try await until("March was not read again.") { await api.monthReads.count > reads }
+        try await Task.sleep(for: .milliseconds(100))
+        await store.settleProjections()
+        XCTAssertEqual(store.loaded[Self.march]?.map(\.id), ["m1"], "A pass begun before the deletion doesn't bring it back.")
+
+        // The refresh asked for before the deletion ends, and the feed is read again.
+        reads = await api.monthReads.count
+        await api.releaseRefreshes()
+        await refresh.value
+        try await until("March was not read again after the refresh.") { await api.monthReads.count > reads }
+        try await Task.sleep(for: .milliseconds(100))
+        await store.settleProjections()
+        XCTAssertEqual(store.loaded[Self.march]?.map(\.id), ["m1"], "Nor does a refresh asked for before it.")
+        XCTAssertEqual(store.sections.map(\.count), [1])
+    }
+
+    /// A photo taken out only as a precaution, whose access couldn't be checked, comes back with
+    /// the next change a sync publishes when the refresh after it failed, though that change names
+    /// other photos.
+    func testAPhotoTakenOutWhoseRefreshFailedComesBackWithTheNextSync() async throws {
+        let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10"), photo("f1", "2026-02-10")])
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        try await until("The months did not load.") { store.loaded[Self.march]?.count == 2 && store.loaded[Self.february] != nil }
+
+        await api.failRefreshes()
+        store.removeLocally(["m1"])
+        await store.refreshAfterMutation()
+        XCTAssertNotNil(store.error, "The refresh failed.")
+        XCTAssertEqual(store.loaded[Self.march]?.map(\.id), ["m2"])
+
+        // The network is back, and a sync publishes a change to another photo.
+        var renamed = try photo("f1", "2026-02-10")
+        renamed.originalFileName = "renamed.jpg"
+        await api.set(renamed)
+        await store.apply(change(upserted: ["f1": move(Self.february, Self.february)], syncedThrough: .now))
+        try await until("The photo did not come back.") { store.loaded[Self.march]?.map(\.id) == ["m1", "m2"] }
+        await store.settleProjections()
+        XCTAssertEqual(store.sections.map(\.count), [2, 1])
+    }
+
+    /// A new feed whose first month fails leaves the feed shown frozen with the error, and the
+    /// failed month's banner shows too. Its Retry loads the new feed again, which then replaces
+    /// the frozen one.
+    func testRetryingAPendingFeedsFailedMonthReplacesTheFrozenFeed() async throws {
+        let api = try ChangingLibrary([photo("m1", "2026-03-20", favorite: true), photo("f1", "2026-02-10")])
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        try await until("The library did not load.") { store.loaded[Self.march] != nil && store.loaded[Self.february] != nil }
+        await api.fail(Self.march)
+        store.setFeed(.favorites, title: "Favorites")
+        try await until("The failure was not shown.") { store.error != nil }
+        XCTAssertTrue(store.isReplacingFeed, "The library stays, frozen, with the error.")
+        XCTAssertFalse(store.bucketErrors.isEmpty)
+
+        await api.heal(Self.march)
+        store.retryFailedBuckets()
+        let committed = await eventually { !store.isReplacingFeed }
+        XCTAssertTrue(committed, "Favorites replace the frozen library once their month is in.")
+        XCTAssertEqual(store.sections.map(\.id), [Self.march])
+        XCTAssertNil(store.error)
+    }
+
+    /// A change read again only the months the grid wanted, leaving one off screen to be read when
+    /// the grid comes to it. A filter opened meanwhile keeps that: once it clears, the month is
+    /// read again when the grid comes to it, not shown as it was left.
+    func testAMonthLeftStaleWhenAFilterOpensIsReadAgainOnceItClears() async throws {
+        let api = try ChangingLibrary([photo("a1", "2026-04-20"), photo("m1", "2026-03-20"), photo("f1", "2026-02-10")])
+        let store = LibraryStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        store.visibleSections([0, 1, 2])
+        try await until("The months did not load.") { [Self.april, Self.march, Self.february].allSatisfy { store.loaded[$0] != nil } }
+        store.visibleSections([0])
+        await store.settleProjections()
+
+        // f1 is favorited on the web while February is off screen.
+        await api.set(try photo("f1", "2026-02-10", favorite: true))
+        let reads = await api.monthReads.count
+        await store.apply(change(upserted: ["f1": move(Self.february, Self.february)]))
+        try await Task.sleep(for: .milliseconds(100))
+        let reread = await api.monthReads.dropFirst(reads)
+        XCTAssertFalse(reread.contains(Self.february), "February waits for the grid.")
+
+        store.setFeed(.favorites, title: "Favorites")
+        try await until("Favorites did not replace the library.") { !store.isReplacingFeed && store.filterTitle == "Favorites" }
+        let summaries = await api.summaryCalls
+        store.clearFilters()
+        XCTAssertEqual(store.loaded[Self.february]?.first?.isFavorite, false, "The library comes back as it was left.")
+        try await until("The restored library was not counted again.") { await api.summaryCalls > summaries }
+        store.visibleSections([2])
+        try await until("February was not read again.") { store.loaded[Self.february]?.first?.isFavorite == true }
+    }
+
     // MARK: - Support
 
     private func photo(_ id: String, _ day: String, favorite: Bool = false) throws -> Asset {
@@ -328,12 +510,17 @@ import XCTest
         LibraryChange.MonthMove(from: MonthKey(bucketID: from), to: MonthKey(bucketID: to))
     }
 
-    private func change(upserted: [String: LibraryChange.MonthMove] = [:], removed: Set<String> = []) -> LibraryChange {
+    /// `syncedThrough` is when the pass behind it began reading the server; nil for a change that
+    /// doesn't say.
+    private func change(upserted: [String: LibraryChange.MonthMove] = [:], removed: Set<String> = [],
+                        syncedThrough: ContinuousClock.Instant? = nil) -> LibraryChange {
         var change = LibraryChange(account: LegacyGoldens.account, authorization: AuthorizationEpoch(account: LegacyGoldens.account, value: 1),
                                    indexRevision: 2, origin: .sync)
-        change.upserted = upserted; change.removed = removed
+        change.upserted = upserted; change.removed = removed; change.syncedThrough = syncedThrough
         return change
     }
+
+    private static let maya = Person(id: "maya", name: "Maya", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: nil, isFavorite: nil)
 
     /// Polls until the condition holds or the time runs out, and says whether it held.
     private func eventually(within timeout: Duration = .seconds(3), _ condition: () async -> Bool) async -> Bool {
@@ -354,16 +541,23 @@ import XCTest
 
 /// A library whose photos change under the store, as the server's do. Every feed reads from the
 /// one list: the photos that belong to its query, by month, newest first and then by ID. A
-/// summary can be held while a test arranges a race, and a month can come back empty while the
-/// summary still counts it, as when its photos go between the two reads.
+/// summary, a plan or a refresh can be held while a test arranges a race, a refresh can fail as
+/// with no network, and a month can fail, or come back empty while the summary still counts it,
+/// as when its photos go between the two reads.
 private actor ChangingLibrary: FakeFeedSource {
     nonisolated let cacheScope = "test-feed-session-" + UUID().uuidString
     nonisolated var userID: String? { "alice" }
     private var photos: [String: Asset] = [:]
     private let people: [String: Set<String>]
     private var emptied: Set<String> = []
+    private var failing: Set<String> = []
     private var summaryGate: StubServer.Gate?
+    private var planGate: StubServer.Gate?
+    private var refreshGate: StubServer.Gate?
+    private var refreshesFail = false
     private(set) var summaryCalls = 0
+    private(set) var planCalls = 0
+    private(set) var refreshCalls = 0
     private(set) var monthReads: [String] = []
 
     init(_ photos: [Asset], people: [String: Set<String>] = [:]) throws {
@@ -374,9 +568,33 @@ private actor ChangingLibrary: FakeFeedSource {
     func set(_ asset: Asset) { photos[asset.id] = asset }
     func delete(_ id: String) { photos[id] = nil }
     func empty(_ bucket: String) { emptied.insert(bucket) }
+    /// The month fails as a busy server does, until healed.
+    func fail(_ bucket: String) { failing.insert(bucket) }
+    func heal(_ bucket: String) { failing.remove(bucket) }
     /// Summaries asked for from now on wait until releaseSummaries.
     func holdSummaries() { summaryGate = StubServer.Gate() }
     func releaseSummaries() { summaryGate?.open(); summaryGate = nil }
+    /// Plans asked for from now on wait until releasePlans.
+    func holdPlans() { planGate = StubServer.Gate() }
+    func releasePlans() { planGate?.open(); planGate = nil }
+    /// Refreshes asked for from now on wait until releaseRefreshes.
+    func holdRefreshes() { refreshGate = StubServer.Gate() }
+    func releaseRefreshes() { refreshGate?.open(); refreshGate = nil }
+    /// Refreshes from now on fail, as with no network.
+    func failRefreshes() { refreshesFail = true }
+
+    func plan(_ query: LibraryQuery) async throws -> QueryPlan {
+        planCalls += 1
+        if let planGate { await planGate.wait() }
+        return try QueryPlanner.plan(query, context: PlannerContext(indexReadable: false))
+    }
+
+    func refresh() async throws -> LibraryChange? {
+        refreshCalls += 1
+        if let refreshGate { await refreshGate.wait() }
+        if refreshesFail { throw URLError(.notConnectedToInternet) }
+        return nil
+    }
 
     func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] {
         summaryCalls += 1
@@ -388,6 +606,7 @@ private actor ChangingLibrary: FakeFeedSource {
 
     func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] {
         monthReads.append(bucket)
+        if failing.contains(bucket) { throw ServerFailure.http(500, nil) }
         guard !emptied.contains(bucket) else { return [] }
         return photos.values.filter { belongs($0, to: query) && Self.bucket(of: $0) == bucket }.sorted { a, b in
             let left = a.localDateTime ?? .distantPast, right = b.localDateTime ?? .distantPast

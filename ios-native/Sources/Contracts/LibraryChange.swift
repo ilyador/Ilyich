@@ -27,6 +27,11 @@ struct LibraryChange: Sendable {
     var authorization: AuthorizationEpoch
     var indexRevision: UInt64
     var origin: Origin
+    /// The index holds every change the server had at this instant: the sync pass behind this
+    /// change began reading the server then and read its whole stream, so a photo this phone took
+    /// out of its feeds before then is as the index has it (F4). Nil when nothing says so, as for
+    /// a pass that failed partway, a repair or a reset.
+    var syncedThrough: ContinuousClock.Instant?
 
     // Assets
     var upserted: [String: MonthMove] = [:]
@@ -87,6 +92,8 @@ struct LibraryChange: Sendable {
         authorization = later.authorization
         indexRevision = later.indexRevision
         origin = later.origin
+        // The index only moves forward: it holds what the newest full pass read.
+        if let synced = later.syncedThrough { syncedThrough = max(syncedThrough ?? synced, synced) }
         for (id, move) in later.upserted {
             upserted[id] = MonthMove(from: upserted[id].map { $0.from } ?? move.from, to: move.to)
             removed.remove(id)
