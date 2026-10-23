@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SharedLinksView: View {
     let api: APIClient
+    @Environment(\.collectionsService) private var collections
     @State private var links: [SharedLink] = []
     @State private var failure: FeatureFailure?
     @State private var deleting: SharedLink?
@@ -26,10 +27,12 @@ struct SharedLinksView: View {
     }
     private func load() async {
         defer { loading = false }
-        do { links = try await api.sharedLinks() } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { links = try await collections.sharedLinks() } catch { failure = .init(error) }
     }
     private func remove(_ link: SharedLink) async {
-        do { try await api.deleteSharedLink(id: link.id); links.removeAll { $0.id == link.id }; deleting = nil } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { try await collections.deleteLink(link.id); links.removeAll { $0.id == link.id }; deleting = nil } catch { failure = .init(error) }
     }
 }
 
@@ -60,6 +63,7 @@ struct SharedLinkEditor: View {
     var link: SharedLink?
     var onSaved: () -> Void = { }
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.collectionsService) private var collections
     @State private var description = ""
     @State private var password = ""
     @State private var slug = ""
@@ -105,32 +109,18 @@ struct SharedLinkEditor: View {
         } message: { Text(failure?.message ?? "") }
     }
     private func save() async {
+        guard let collections else { failure = .init(APIError.signedOut); return }
         saving = true; defer { saving = false }
         do {
             if let link {
-                let body = SharedLinkUpdate(description: description, slug: slug.isEmpty ? nil : slug, expiresAt: expiryEnabled ? expiry : nil, password: password.isEmpty ? nil : password, changePassword: passwordChange, allowDownload: download, allowUpload: upload, showMetadata: metadata)
-                let updated: SharedLink = try await api.request(.patch, path: "shared-links/\(link.id)", body: body)
-                result = updated
+                let update = SharedLinkUpdate(description: description, slug: slug.isEmpty ? nil : slug, expiresAt: expiryEnabled ? expiry : nil, password: password.isEmpty ? nil : password, changePassword: passwordChange, allowDownload: download, allowUpload: upload, showMetadata: metadata)
+                result = try await collections.updateLink(link.id, update)
             } else {
                 guard album != nil || !assetIDs.isEmpty else { throw APIError.invalidResponse("Choose some photos or an album to share.") }
-                result = try await api.request(.post, path: "shared-links", body: AlbumLinkCreation(type: album == nil ? "INDIVIDUAL" : "ALBUM", albumId: album?.id, assetIds: album == nil ? assetIDs : nil, description: description, slug: slug.isEmpty ? nil : slug, expiresAt: expiryEnabled ? expiry : nil, password: password.isEmpty ? nil : password, allowDownload: download, allowUpload: upload, showMetadata: metadata))
+                result = try await collections.createLink(SharedLinkDraft(type: album == nil ? "INDIVIDUAL" : "ALBUM", albumId: album?.id, assetIds: album == nil ? assetIDs : nil, description: description, slug: slug.isEmpty ? nil : slug, expiresAt: expiryEnabled ? expiry : nil, password: password.isEmpty ? nil : password, allowDownload: download, allowUpload: upload, showMetadata: metadata))
             }
             onSaved()
         } catch { failure = .init(error) }
-    }
-}
-
-private struct SharedLinkUpdate: Encodable, Sendable {
-    let description: String; let slug: String?; let expiresAt: Date?; let password: String?; let changePassword: Bool
-    let allowDownload: Bool; let allowUpload: Bool; let showMetadata: Bool
-    enum CodingKeys: String, CodingKey { case description, slug, expiresAt, password, allowDownload, allowUpload, showMetadata }
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(description, forKey: .description)
-        if let slug { try c.encode(slug, forKey: .slug) } else { try c.encodeNil(forKey: .slug) }
-        if let expiresAt { try c.encode(expiresAt, forKey: .expiresAt) } else { try c.encodeNil(forKey: .expiresAt) }
-        if changePassword { if let password { try c.encode(password, forKey: .password) } else { try c.encodeNil(forKey: .password) } }
-        try c.encode(allowDownload, forKey: .allowDownload); try c.encode(allowUpload, forKey: .allowUpload); try c.encode(showMetadata, forKey: .showMetadata)
     }
 }
 
@@ -139,15 +129,3 @@ private func sharedURL(link: SharedLink, api: APIClient) -> URL? {
     return base.appendingPathComponent(link.slug == nil ? "share" : "s").appendingPathComponent(link.slug ?? link.key)
 }
 
-private struct AlbumLinkCreation: Encodable, Sendable {
-    let type: String
-    let albumId: String?
-    let assetIds: [String]?
-    let description: String
-    let slug: String?
-    let expiresAt: Date?
-    let password: String?
-    let allowDownload: Bool
-    let allowUpload: Bool
-    let showMetadata: Bool
-}

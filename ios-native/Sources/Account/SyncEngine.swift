@@ -86,7 +86,8 @@ actor SyncEngine {
     /// Where the engine's changes go: media first, then the screens and every subscriber.
     let hub: LibraryChangeHub
 
-    /// `connect` opens the live connection, the client's own by default.
+    /// `connect` opens the live connection, the client's own by default. `hub` takes the engine's
+    /// changes to the screens and the account's services; one that tells no screen by default.
     init(client: APIClient, entities: LibraryIndex, native: NativeSync, pipeline: MediaPipeline,
          presence: AppPresence, check: SessionCheck, authorization: AuthorizationState, device: any AccountDevice,
          status: SyncStatusBoard, connect: (@Sendable () async throws -> ServerEventConnection)? = nil,
@@ -104,7 +105,7 @@ actor SyncEngine {
         self.connect = connect ?? { try await client.serverEvents() }
         self.debounce = debounce
         scope = client.cacheScope
-        self.hub = hub ?? LibraryChangeHub(pipeline: pipeline, scope: client.cacheScope)
+        self.hub = hub ?? LibraryChangeHub(pipeline: pipeline)
     }
 
     // MARK: Commands

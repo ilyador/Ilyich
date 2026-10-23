@@ -56,6 +56,15 @@ struct AccountEnvironment: Sendable {
     static let fixtureServer = URL(string: "http://127.0.0.1:18091/api")!
     static let fixtureUserID = "00000000-0000-4000-8000-000000000001"
 
+    /// The fixture server a launch uses: the shared one, or one of its own that
+    /// `--ui-testing-fixture-port <port>` names, so a change to the fixture can be tried without
+    /// restarting the server every test run shares.
+    static func fixtureServer(in arguments: [String]) -> URL {
+        guard let index = arguments.firstIndex(of: "--ui-testing-fixture-port"), arguments.indices.contains(index + 1),
+              let port = Int(arguments[index + 1]), (1024...65535).contains(port) else { return fixtureServer }
+        return URL(string: "http://127.0.0.1:\(port)/api")!
+    }
+
     /// The environment a UI test launch asks for, or nil for any other launch. Nothing reaches the
     /// Keychain, the App Group mirror, the phone's photos, backup or its state. `--ui-testing-library` starts
     /// signed in to the fixture, with the long People shelf for `--ui-testing-many-people`, and with
@@ -73,14 +82,15 @@ struct AccountEnvironment: Sendable {
         // The fixture server is shared by every test run, so a launch that wants its media
         // offline fails the requests in the app instead; the library itself still loads.
         if arguments.contains("--ui-testing-offline-media") { environment.mediaProtocolClasses = [OfflineMediaProtocol.self] }
-        environment.fixtureAccount = AccountID(server: fixtureServer, userID: fixtureUserID)
+        let server = fixtureServer(in: arguments)
+        environment.fixtureAccount = AccountID(server: server, userID: fixtureUserID)
         if arguments.contains("--ui-testing-library") {
             // The fixture serves a long People shelf to this session's own token. A mutable
             // session's token is new each launch: the fixture keeps its changes for it alone, so
             // no other test, and no later launch, sees them.
             let token = arguments.contains("--ui-testing-many-people") ? "ui-test-many-people"
                 : arguments.contains("--ui-testing-mutable-library") ? "ui-test-mutable-" + UUID().uuidString.lowercased() : "ui-test-session"
-            environment.fixtureCredential = StoredCredential(server: fixtureServer, token: token, userID: fixtureUserID, name: "Test library")
+            environment.fixtureCredential = StoredCredential(server: server, token: token, userID: fixtureUserID, name: "Test library")
         }
         return environment
     }

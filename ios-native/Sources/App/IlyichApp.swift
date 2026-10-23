@@ -42,9 +42,13 @@ import SwiftUI
                 }
             }
             // Every control that changes something reads what the account may do from here, and
-            // every screen that changes or shows photos reaches the account's mutations.
+            // every screen that changes or shows photos reaches the account's mutations, its bus,
+            // its collections and its own settings.
             .environment(\.authorization, session.authorization)
             .environment(\.mutations, session.mutations)
+            .environment(\.libraryBus, session.bus)
+            .environment(\.collectionsService, session.collections)
+            .environment(\.accountSettings, session.settings)
             .environment(\.freeUpSpace, session.freeUpSpace)
             .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
             .task { await session.restore() }

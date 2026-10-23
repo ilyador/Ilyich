@@ -184,8 +184,11 @@ private struct ViewerSettingsView: View {
     }
 }
 
+/// The account's name, storage and the screens for its photo, password and Locked Folder PIN.
+/// Changes go through the account's settings (the critic's correction to N4).
 private struct AccountSettingsView: View {
     let api: APIClient
+    @Environment(\.accountSettings) private var settings
     @State private var name = ""
     @State private var email = ""
     @State private var loading = true
@@ -207,16 +210,18 @@ private struct AccountSettingsView: View {
         }.navigationTitle("Account").disabled(loading || saving)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await save() } }.disabled(loading || saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).requiresWriteAccess() } }
         .task {
-            do { let user = try await api.currentUser(); account = user; name = user.name; email = user.email ?? "" } catch { failure = .init(error) }
-            loading = false
+            defer { loading = false }
+            guard let settings else { failure = .init(APIError.signedOut); return }
+            do { let user = try await settings.currentUser(); account = user; name = user.name; email = user.email ?? "" } catch { failure = .init(error) }
         }
         .alert("Couldn’t update account", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
     }
     private func save() async {
+        guard let settings else { failure = .init(APIError.signedOut); return }
         saving = true; saved = false; defer { saving = false }
-        do { let _: User = try await api.request(.put, path: "users/me", body: ["name": name]); saved = true } catch { failure = .init(error) }
+        do { _ = try await settings.rename(to: name); saved = true } catch { failure = .init(error) }
     }
 }
 
@@ -224,6 +229,7 @@ struct ChangePasswordView: View {
     let api: APIClient
     var onChanged: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accountSettings) private var settings
     @State private var current = ""
     @State private var password = ""
     @State private var confirmation = ""
@@ -245,10 +251,10 @@ struct ChangePasswordView: View {
         } message: { Text(failure?.message ?? "") }
     }
     private func save() async {
-        struct Body: Encodable, Sendable { let password: String; let newPassword: String; let invalidateSessions: Bool }
+        guard let settings else { failure = .init(APIError.signedOut); return }
         saving = true; defer { saving = false }
         do {
-            try await api.requestVoid(.post, path: "auth/change-password", body: Body(password: current, newPassword: password, invalidateSessions: invalidate))
+            try await settings.changePassword(from: current, to: password, signingOutOtherDevices: invalidate)
             current = ""; password = ""; confirmation = ""
             if let onChanged { onChanged() } else { dismiss() }
         } catch { failure = .init(error) }

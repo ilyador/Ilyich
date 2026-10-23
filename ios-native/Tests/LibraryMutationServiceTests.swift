@@ -212,7 +212,7 @@ import XCTest
             XCTAssertNotNil(followUp.syncedThrough, "A full pass, which confirms what the feeds took out.")
         }
         XCTAssertEqual(harness.streamRequests.count, 1, "One pass follows.")
-        XCTAssertFalse(harness.notifications.all.isEmpty, "The pass published its change to the screens as every pass does.")
+        XCTAssertFalse(harness.busChanges.all.isEmpty, "The pass published its change to the screens as every pass does.")
         let settled = await becomesTrue { service.runningCount == 0 }
         XCTAssertTrue(settled, "The mutation ends with its follow-up.")
     }

@@ -1011,6 +1011,70 @@ import XCTest
         store.stop()
     }
 
+    /// N4: a feed showing an album that is deleted or left, here or anywhere else the account's
+    /// collections hear of it, clears back to the library, and through the account's bus the
+    /// search text goes with it. A change to another album leaves the filter; a rename of the
+    /// album shown names the filter anew, and a rename of a person shown names theirs.
+    func testDeletingOrLeavingTheFilteredAlbumClearsTheFilter() async throws {
+        let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "a")])
+        let store = LibraryFeedStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        let coast = Album(id: "coast", albumName: "Coast", assetCount: 1, shared: false, albumUsers: nil, startDate: nil, endDate: nil,
+                          updatedAt: nil, order: "desc")
+        var renamed = coast
+        renamed.albumName = "Coast at dusk"
+
+        for removal in [CollectionChange.albumDeleted("coast"), .albumLeft("coast")] {
+            store.setAlbum(coast)
+            XCTAssertEqual(store.filterTitle, "Coast")
+            XCTAssertFalse(store.apply(.albumDeleted("harbor")), "Another album's deletion leaves the filter.")
+            XCTAssertFalse(store.apply(.albumLeft("harbor")))
+            XCTAssertEqual(store.feedQuery.predicates.albums, ["coast"])
+            XCTAssertFalse(store.apply(.albumUpdated(renamed)))
+            XCTAssertEqual(store.filterTitle, "Coast at dusk", "A rename names the filter anew.")
+            XCTAssertTrue(store.apply(removal), "\(removal) clears the filter.")
+            XCTAssertFalse(store.isFiltered)
+            XCTAssertNil(store.filterTitle)
+            XCTAssertEqual(store.feedQuery, .library)
+        }
+
+        // On the bus, as the library follows it: the search text goes with the filter.
+        store.setAlbum(coast)
+        let cleared = await FeedEventApplier.apply(.collection(.albumLeft("coast")), to: store, refreshes: false)
+        XCTAssertTrue(cleared, "The search text goes with the filter.")
+        XCTAssertFalse(store.isFiltered)
+        let kept = await FeedEventApplier.apply(.collection(.albumDeleted("coast")), to: store, refreshes: false)
+        XCTAssertFalse(kept, "With no filter there is nothing to clear.")
+
+        let maya = Person(id: "maya", name: "Maya", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: false, isFavorite: nil)
+        store.setPerson(maya)
+        var renamedMaya = maya
+        renamedMaya.name = "Maya R."
+        store.apply(.personUpdated(renamedMaya))
+        XCTAssertEqual(store.filterTitle, "Maya R.")
+        XCTAssertFalse(store.apply(.albumDeleted("coast")), "An album's deletion leaves a person's filter.")
+        XCTAssertTrue(store.isFiltered)
+    }
+
+    /// N4: a partner shown in the timeline, added or removed reads the feed again, as a sync's
+    /// partner change does.
+    func testAPartnerChangeReadsTheFeedAgain() async throws {
+        let api = LibraryAPIFixture([], timelineAssets: [Asset(id: "a")])
+        let store = LibraryFeedStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        let before = await api.summaryCalls
+        XCTAssertFalse(store.apply(.partnersChanged))
+        try await until("The feed was not read again.") { await api.summaryCalls == before + 1 }
+        store.apply(.memorySaved("memory", saved: true))
+        store.apply(.albumCreated(Album(id: "reef", albumName: "Reef", assetCount: 1, shared: false, albumUsers: nil, startDate: nil,
+                                        endDate: nil, updatedAt: nil, order: nil)))
+        try await Task.sleep(for: .milliseconds(100))
+        let after = await api.summaryCalls
+        XCTAssertEqual(after, before + 1, "A memory saved or an album made reads nothing again.")
+    }
+
     private func settleSelection(_ store: LibraryFeedStore) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while store.isSelectingGroup && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }

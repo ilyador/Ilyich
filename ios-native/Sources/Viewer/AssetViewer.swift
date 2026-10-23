@@ -31,6 +31,8 @@ struct AssetViewer: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.mutations) private var mutations
+    /// The account's bus, where the sync's changes reach the viewer as its mutations' results do.
+    @Environment(\.libraryBus) private var bus
 
     /// `route` names the photo the viewer opens on and where its photos come from, and `window` is
     /// that source. `matchedLocalPhotos` are the phone's copies of server photos, by server ID.
@@ -97,10 +99,6 @@ struct AssetViewer: View {
         }
         .task(id: model.refreshKey) { await model.refreshCurrentAsset() }
         .task(id: model.settledID) { if model.settledID != nil { await prefetchNeighbors() } }
-        .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { note in
-            guard note.userInfo?["scope"] as? String == api.cacheScope else { return }
-            model.libraryChanged(accessChanged: note.userInfo?["accessChanged"] as? Bool == true)
-        }
     }
 
     private static let pageGap: CGFloat = 20
@@ -193,7 +191,7 @@ struct AssetViewer: View {
             .onAppear {
                 // The close handed over holds only what closing needs, not this view.
                 let onClose = onClose, dismiss = dismiss
-                model.start(mutations: mutations, close: { if let onClose { onClose() } else { dismiss() } })
+                model.start(mutations: mutations, bus: bus, close: { if let onClose { onClose() } else { dismiss() } })
             }
             .alert("Couldn’t complete action", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
                 Button("OK", role: .cancel) { }

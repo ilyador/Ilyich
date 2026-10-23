@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// Reusable at album and photo level; photo activity must keep the containing album ID.
+/// Reusable at album and photo level; photo activity must keep the containing album ID. Reads and
+/// changes go through the account's collections (the critic's correction to N4).
 struct AlbumActivityView: View {
     let api: APIClient
     let albumID: String
     var assetID: String? = nil
+    @Environment(\.collectionsService) private var collections
     @State private var activities: [AlbumActivity] = []
     @State private var comment = ""
     @State private var enabled = true
@@ -52,46 +54,37 @@ struct AlbumActivityView: View {
         .alert("Couldn’t update activity", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
     private func load() async {
-        struct ActivityState: Decodable, Sendable { let isActivityEnabled: Bool; let albumUsers: [AlbumUser] }
         defer { loading = false }
+        guard let collections else { failure = .init(APIError.signedOut); return }
         do {
-            let state: ActivityState = try await api.request(.get, path: "albums/\(albumID)")
-            enabled = state.isActivityEnabled; owner = state.albumUsers.contains { $0.user.id == api.userID && $0.role == "owner" }
-            if enabled {
-                var query = [URLQueryItem(name: "albumId", value: albumID), .init(name: "level", value: assetID == nil ? "album" : "asset")]
-                if let assetID { query.append(.init(name: "assetId", value: assetID)) }
-                activities = try await api.request(.get, path: "activities", query: query)
-            }
+            let state = try await collections.activity(album: albumID, asset: assetID)
+            enabled = state.enabled; owner = state.owner
+            if state.enabled { activities = state.activities }
         } catch { failure = .init(error) }
     }
     private func postComment() async {
+        guard let collections else { failure = .init(APIError.signedOut); return }
         saving = true; defer { saving = false }
         do {
-            let activity: AlbumActivity = try await api.request(.post, path: "activities", body: ActivityCreation(albumId: albumID, assetId: assetID, type: "comment", comment: comment.trimmingCharacters(in: .whitespacesAndNewlines)))
+            let activity = try await collections.comment(comment.trimmingCharacters(in: .whitespacesAndNewlines), album: albumID, asset: assetID)
             activities.append(activity); comment = ""
         } catch { failure = .init(error) }
     }
     private func toggleLike() async {
+        guard let collections else { failure = .init(APIError.signedOut); return }
         saving = true; defer { saving = false }
         do {
-            if let like = ownLike { try await api.requestVoid(.delete, path: "activities/\(like.id)"); activities.removeAll { $0.id == like.id } }
-            else { let activity: AlbumActivity = try await api.request(.post, path: "activities", body: ActivityCreation(albumId: albumID, assetId: assetID, type: "like", comment: nil)); activities.append(activity) }
+            if let like = ownLike { try await collections.deleteActivity(like.id); activities.removeAll { $0.id == like.id } }
+            else { activities.append(try await collections.like(album: albumID, asset: assetID)) }
         } catch { failure = .init(error) }
     }
     private func remove(_ activity: AlbumActivity) async {
-        do { try await api.requestVoid(.delete, path: "activities/\(activity.id)"); activities.removeAll { $0.id == activity.id }; pendingDelete = nil } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { try await collections.deleteActivity(activity.id); activities.removeAll { $0.id == activity.id }; pendingDelete = nil } catch { failure = .init(error) }
     }
     private func setEnabled(_ value: Bool) async {
+        guard let collections else { failure = .init(APIError.signedOut); return }
         saving = true; defer { saving = false }
-        do { try await api.requestVoid(.patch, path: "albums/\(albumID)", body: ["isActivityEnabled": value]); enabled = value; if value { await load() } } catch { failure = .init(error) }
+        do { try await collections.setActivityEnabled(value, album: albumID); enabled = value; if value { await load() } } catch { failure = .init(error) }
     }
 }
-private struct AlbumActivity: Decodable, Identifiable, Sendable {
-    let id: String
-    let assetId: String?
-    let comment: String?
-    let createdAt: Date
-    let type: String
-    let user: User
-}
-private struct ActivityCreation: Encodable, Sendable { let albumId: String; let assetId: String?; let type: String; let comment: String? }

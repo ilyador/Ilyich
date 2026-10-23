@@ -29,7 +29,7 @@ struct LibraryView: View {
     /// The time rail's finger, month and lens, which the edge pan drives in its own callback.
     @State private var rail: TimeRailController
     @State private var librarySize: CGSize = .zero
-    @State private var shelf: Shelf = .root
+    @State private var shelf: ShelfLevel = .root
     /// The people, albums, features and shelf order the shelves show.
     @State private var collections: CollectionsStore
     @State private var backupStore = BackupStore.shared
@@ -46,8 +46,10 @@ struct LibraryView: View {
     /// A newer open or close makes a pending close stale.
     @State private var closeGeneration = 0
     @State private var selectionBusy = false
-    /// Applies the account's mutations to the feed, made here or on any screen over it (N2).
-    @State private var mutationFollower = MutationFollower()
+    /// Hands the feed what happens to the account's library (N4): its sync's changes, its
+    /// mutations' results, made here or on any screen over it, its collections' changes and a
+    /// cleared cache.
+    @State private var follower = LibraryFollower()
     /// Height of the chips floating at the top: filter, uploads, search checking, selection.
     @State private var chromeHeight: CGFloat = 0
     @State private var shareInbox = ShareInboxStore.shared
@@ -62,8 +64,9 @@ struct LibraryView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.authorization) private var authorization
     @Environment(\.mutations) private var mutations
-
-    private enum Shelf { case root, people, albums, more, settings }
+    @Environment(\.libraryBus) private var bus
+    @Environment(\.collectionsService) private var collectionsService
+    @Environment(\.accountSettings) private var accountSettings
 
     init(api: APIClient, pipeline: MediaPipeline, session: AccountSession) {
         self.api = api; self.pipeline = pipeline; self.session = session
@@ -165,6 +168,7 @@ struct LibraryView: View {
                                         onClose: { if !edgeInteraction.consumeScrollCatch() { closeShelves() } },
                                         onDrag: { driveShelf(from: $0.startLocation, to: $0.location) },
                                         onDragEnd: { releaseShelf(at: $0.location, velocity: $0.velocity) },
+                                        onSelect: perform,
                                         api: api, pipeline: pipeline,
                                         onReorder: canReorder ? { startReordering() } : nil,
                                         reorderTitle: shelf == .people ? "Reorder people" : "Reorder albums",
@@ -219,7 +223,8 @@ struct LibraryView: View {
             // The viewer zooms out of its grid cell and back into the cell of the photo it closes on.
             .background {
                 ViewerZoomPresenter(item: viewerItem, sourceView: { viewport.scroller.zoomSourceView(for: $0, in: store) }, authorization: authorization,
-                                    mutations: mutations, onDismiss: { navigator.layerDidDismiss(level: 0) }) { route, transition, close in
+                                    mutations: mutations, bus: bus, collections: collectionsService, settings: accountSettings,
+                                    onDismiss: { navigator.layerDidDismiss(level: 0) }) { route, transition, close in
                     AnyView(assetViewer(route, transition: transition, close: close))
                 }
             }
@@ -238,10 +243,10 @@ struct LibraryView: View {
             .alert("New album", isPresented: alertShown { $0 == .newAlbumFromSelection }) {
                 TextField("Album name", text: $albumName)
                 Button("Create") {
+                    // The album reaches the shelves from the account's collections; the name is
+                    // used, so the next album starts blank.
                     let name = albumName
-                    changeSelection({ .createAlbum(name: name, assets: $0) }) { result in
-                        if let album = result.album { collections.albumCreated(album) }
-                    }
+                    changeSelection({ .createAlbum(name: name, assets: $0) }) { _ in albumName = "" }
                 }.disabled(albumName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Cancel", role: .cancel) { }
             }
@@ -255,28 +260,14 @@ struct LibraryView: View {
         .onAppear {
             connectNavigator()
             model.start()
-            // A mutation's result reaches the feed in place. The sync pass after it reaches the
-            // feed as every pass does; without an offline library the feed reads its months again.
-            let store = store, refreshes = !(mutations?.followsUp ?? true)
-            mutationFollower.follow(mutations) { event in await FeedMutationApplier.apply(event, to: store, refreshes: refreshes) }
+            followLibrary()
+            // The shelves follow the account's collections: changes apply in place, and a sync
+            // change to what they show loads them again.
+            collections.follow(bus)
             // A link closes whatever is open, then opens its photo, filter or screen.
             model.takeLinks(from: session) { [collections] in (collections.albums, collections.people) }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in Task { await pipeline.trimMemory() } }
-        .onReceive(NotificationCenter.default.publisher(for: .ilyichCachesReset)) { notification in
-            if notification.userInfo?["scope"] as? String == api.cacheScope { Task { await store.refreshAfterMutation() } }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { notification in
-            guard notification.userInfo?["scope"] as? String == api.cacheScope else { return }
-            let change = notification.userInfo?["change"] as? LibraryChange
-            Task {
-                // The feed applies the change in place: what it removed leaves at once and only the
-                // months it touched are read again. A search with text is not read again.
-                if let change { await store.apply(change) }
-                else if store.query.isEmpty { await store.reload(preservingPosition: true) }
-                if notification.userInfo?["collections"] as? Bool == true { await collections.load() }
-            }
-        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 model.refreshSharedFiles()
@@ -302,6 +293,18 @@ struct LibraryView: View {
         }
     }
 
+
+    /// Hands the feed what happens to the account's library (N4), in the order the bus carries it
+    /// (FeedEventApplier). A mutation's result reaches the feed in place; the sync pass after it
+    /// reaches the feed as every pass does, and without an offline library the feed reads its
+    /// months again. A filter cleared because its album went takes the search text with it. Only
+    /// the store, the search text and the feed's refresh rule are held, not this view.
+    private func followLibrary() {
+        let store = store, refreshes = !(mutations?.followsUp ?? true), searchText = $searchText
+        follower.follow(bus) { event in
+            if await FeedEventApplier.apply(event, to: store, refreshes: refreshes) { searchText.wrappedValue = "" }
+        }
+    }
 
     /// The side of one photo at the current density.
     private func photoSide(width: CGFloat) -> CGFloat {
@@ -485,15 +488,15 @@ struct LibraryView: View {
             let symbol = store.feedQuery.predicates.people.first != nil ? "person.crop.circle"
                 : store.feedQuery.predicates.albums.first != nil ? "rectangle.stack"
                 : !store.query.isEmpty ? "magnifyingglass"
-                : shelfItems(for: .more).first(where: \.isSelected)?.symbol ?? "line.3.horizontal.decrease"
+                : catalog.rows(.more).first(where: \.isSelected)?.symbol ?? "line.3.horizontal.decrease"
             Image(systemName: symbol).font(.body.weight(.semibold))
         }
     }
 
-    private var filterShelf: Shelf {
+    private var filterShelf: ShelfLevel {
         if store.feedQuery.predicates.people.first != nil { return .people }
         if store.feedQuery.predicates.albums.first != nil { return .albums }
-        return shelfItems(for: .more).contains(where: \.isSelected) ? .more : .root
+        return catalog.rows(.more).contains(where: \.isSelected) ? .more : .root
     }
 
     private var searchBar: some View {
@@ -646,90 +649,38 @@ struct LibraryView: View {
         }.padding(.horizontal, 14).padding(.vertical, 6).glassEffect().disabled(store.selected.isEmpty || selectionBusy)
     }
 
-    private var shelfTitle: String {
-        switch shelf {
-        case .root: "Shelves"
-        case .people: "People"
-        case .albums: "Albums"
-        case .more: "More"
-        case .settings: "Settings"
-        }
+    /// The shelves' rows (ShelfCatalog): the account's people and albums in the owner's order, what
+    /// the server offers, and what the feed shows.
+    private var catalog: ShelfCatalog {
+        ShelfCatalog(features: features, people: orderedPeople, albums: orderedAlbums, selection: store.shelfSelection,
+                     sharedFiles: !shareInbox.batches.isEmpty)
     }
 
-    private var shelfItems: [LibraryShelfItem] { shelfItems(for: shelf) }
+    private var shelfItems: [LibraryShelfItem] { catalog.rows(shelf) }
 
-    /// Group rows open their shelf in place. Filters apply and keep the shelves open, so another
-    /// can be tried without lifting; rows that open a screen or the Earth put the shelves away.
-    private func shelfItems(for shelf: Shelf) -> [LibraryShelfItem] {
-        var items: [LibraryShelfItem] = []
-        func add(_ id: String, _ title: String, _ symbol: String, detail: String? = nil, person: Person? = nil, assetID: String? = nil, selected: Bool = false, opens group: Shelf? = nil, filters: Bool = false, action: @escaping () -> Void = {}) {
-            let run: () -> Void = group.map { group in { openShelf(group) } } ?? {
-                Haptics.itemChosen()
-                if !filters { closeShelves(feedback: false); action(); return }
-                // A filter applies at once, so the feed shows it while the finger stays down. The
-                // tag stays hidden until the finger lifts; a tap closes now. Either way a person
-                // or album then rises into the tag.
-                action()
-                if edgeInteraction.isShelfDragging { chosenThisStroke = id } else { closeIntoTag(id) }
-            }
-            items.append(.init(id: id, title: title, symbol: symbol, detail: detail, person: person, assetID: assetID, isSelected: selected, action: run))
+    /// Runs a row as its action says. A group opens its shelf in place. A collection shows in the
+    /// feed at once and keeps the shelves open, so another can be tried without lifting; a tap
+    /// closes them now, and either way a person or an album then rises into the filter tag. Rows
+    /// that open a screen, the Earth or a question put the shelves away first.
+    private func perform(_ item: LibraryShelfItem) {
+        switch item.action {
+        case .open(let group):
+            openShelf(group)
+        case .show(let collection):
+            Haptics.itemChosen()
+            // The tag stays hidden until the finger lifts.
+            store.show(collection); searchText = ""
+            if edgeInteraction.isShelfDragging { chosenThisStroke = item.id } else { closeIntoTag(item.id) }
+        case .places:
+            Haptics.itemChosen(); closeShelves(feedback: false)
+            if showPlaces { navigator.lowerEarth() } else { openPlaces() }
+        case .present(let route):
+            Haptics.itemChosen(); closeShelves(feedback: false)
+            navigator.present(route)
+        case .confirm(let confirmation):
+            Haptics.itemChosen(); closeShelves(feedback: false)
+            navigator.show(.confirm(confirmation))
         }
-        switch shelf {
-        case .root:
-            if features?.facialRecognition != false {
-                add("people", "People", "person.2", detail: people.isEmpty ? nil : people.count.formatted(), opens: .people)
-            }
-            if features?.map != false {
-                add("places", "Places", "globe.europe.africa") { if showPlaces { navigator.lowerEarth() } else { openPlaces() } }
-            }
-            add("albums", "Albums", "rectangle.stack", detail: albums.isEmpty ? nil : albums.count.formatted(), opens: .albums)
-            add("more", "More", "ellipsis", opens: .more)
-            add("settings", "Settings", "gearshape", opens: .settings)
-        case .people:
-            for person in orderedPeople {
-                add("person-" + person.id, person.name.isEmpty ? "Unnamed person" : person.name, "person.crop.circle", person: person, selected: store.feedQuery.predicates.people.first == person.id, filters: true) {
-                    if store.feedQuery.predicates.people.first != person.id { store.setPerson(person) }; searchText = ""
-                }
-            }
-            add("all-people", "Manage people", "person.2") { navigator.present(.people) }
-        case .albums:
-            for album in orderedAlbums {
-                add("album-" + album.id, album.albumName, "rectangle.stack", detail: album.assetCount.formatted(), assetID: album.albumThumbnailAssetId, selected: store.feedQuery.predicates.albums.first == album.id, filters: true) {
-                    if store.feedQuery.predicates.albums.first != album.id { store.setAlbum(album) }; searchText = ""
-                }
-            }
-            add("new-album", "New album", "plus") { navigator.present(.newAlbum) }
-            add("all-albums", "Manage albums", "square.grid.2x2") { navigator.present(.albums) }
-        case .more:
-            add("recent-taken", "Recently taken", "camera", selected: store.filterTitle == "Recently taken", filters: true) { store.setFeed(.recentlyTaken, title: "Recently taken"); searchText = "" }
-            add("recent-added", "Recently added", "clock.badge.checkmark", selected: store.filterTitle == "Recently added", filters: true) { store.setFeed(.recentlyAdded, title: "Recently added"); searchText = "" }
-            add("videos", "Videos", "video", selected: store.filterTitle == "Videos" && store.searchFilter.type?.eq == "VIDEO", filters: true) {
-                store.setMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO"), visibility: StringFilter(eq: "timeline")), title: "Videos"); searchText = ""
-            }
-            add("motion", "Motion", "livephoto", selected: store.filterTitle == "Motion" && store.searchFilter.isMotion?.eq == true, filters: true) {
-                store.setMetadataFilter(SearchFilter(isMotion: BoolFilter(eq: true), visibility: StringFilter(eq: "timeline")), title: "Motion"); searchText = ""
-            }
-            add("lightroom", "Lightroom", "slider.horizontal.3", selected: store.filterTitle == "Lightroom", filters: true) {
-                store.setDeveloped(title: "Lightroom"); searchText = ""
-            }
-            add("favorites", "Favorites", "heart", selected: store.feedQuery.predicates.favorite == true, filters: true) { store.setFeed(.favorites, title: "Favorites"); searchText = "" }
-            add("archive", "Archive", "archivebox", selected: store.feedQuery.visibility == .archive, filters: true) { store.setFeed(.archive, title: "Archive"); searchText = "" }
-            if features?.trash != false {
-                add("trash", "Trash", "trash", selected: store.feedQuery.trash == .trashed, filters: true) { store.setFeed(.trash, title: "Trash"); searchText = "" }
-            }
-            add("browse-more", "Browse more", "square.grid.2x2") { navigator.present(.more) }
-            if !shareInbox.batches.isEmpty {
-                add("shared-files", "Shared files", "square.and.arrow.down") { navigator.present(.sharedFiles) }
-            }
-        case .settings:
-            for destination in SettingsDestination.allCases {
-                add("settings-" + destination.rawValue, destination.title, destination.symbol) {
-                    navigator.present(.settings(SettingsRoute(rawValue: destination.rawValue) ?? .root))
-                }
-            }
-            add("sign-out", "Sign out", "rectangle.portrait.and.arrow.right") { navigator.show(.confirm(.signOut)) }
-        }
-        return items
     }
 
     private func edgeBackdrop(size: CGSize, safeArea: EdgeInsets) -> some View {
@@ -784,7 +735,7 @@ struct LibraryView: View {
                              bottomInset: 100, rowStep: shelf == .root ? nil : 60)
     }
 
-    private func presentShelves(_ value: Shelf, at point: CGPoint) {
+    private func presentShelves(_ value: ShelfLevel, at point: CGPoint) {
         // People and albums that failed to load, say while the phone reconnected, load again.
         if store.started { collections.reloadIfFailed() }
         // Opening again stops a close still on its way.
@@ -837,10 +788,11 @@ struct LibraryView: View {
         case .back: openShelf(.root, under: point, armed: false, needsReturn: false)
         case .open(let index):
             guard items.indices.contains(index) else { return }
-            if shelf == .root, let group = rootShelf(for: items[index].id) {
+            // A group opened by a swipe opens under the finger, which keeps scrubbing it.
+            if case .open(let group) = items[index].action {
                 openShelf(group, under: point)
             } else {
-                items[index].action()
+                perform(items[index])
             }
         }
     }
@@ -950,9 +902,8 @@ struct LibraryView: View {
         case .albumSharing(let album, let sharing):
             AnyView(NavigationStack { albumSharing(album, sharing, level: level) })
         case .newAlbum:
-            AnyView(NavigationStack {
-                AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in collections.albumCreated(album) }
-            })
+            // The album reaches the shelves from the account's collections.
+            AnyView(NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: nil) })
         case .phoneViewer(let photo):
             AnyView(LocalPhotoViewer(photo: photo, photos: store.availableLocalPhotos(around: photo)))
         case .memoryPlayer(let playback):
@@ -1002,9 +953,9 @@ struct LibraryView: View {
         switch sharing {
         case .link: SharedLinkEditor(api: api, album: album)
         case .people:
-            AlbumMembersView(api: api, album: album, onLeft: {
-                collections.albumRemoved(album.id); store.clearFilters()
-            })
+            // Leaving closes Sharing. The shelves and the feed hear of it from the account's
+            // collections: the album goes from the shelves and the filter clears.
+            AlbumMembersView(api: api, album: album, onLeft: { navigator.dismiss(level: level) })
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { navigator.dismiss(level: level) } } }
         }
     }
@@ -1129,38 +1080,20 @@ struct LibraryView: View {
     /// A group opens with its choice or first row where the group's own row was; going back puts
     /// the group's row there. Mid-swipe both happen under the finger, which keeps scrubbing the new
     /// level without lifting.
-    private func openShelf(_ value: Shelf, under finger: CGPoint? = nil, armed: Bool = true, needsReturn: Bool = true) {
+    private func openShelf(_ value: ShelfLevel, under finger: CGPoint? = nil, armed: Bool = true, needsReturn: Bool = true) {
         edgeInteraction.carried = nil; edgeInteraction.isRearranging = false
         let left = shelf
         let items = shelfItems
         var layout = shelfLayout(count: items.count)
         layout.top = edgeInteraction.shelfTop
-        let groupRow = items.firstIndex { $0.id == rootShelfID(value) }
+        let groupRow = items.firstIndex { $0.id == value.rowID }
         let y = finger?.y ?? groupRow.map { layout.center($0) } ?? edgeInteraction.shelfFinger?.y ?? librarySize.height * 0.45
         if value == .root { Haptics.menuClosed() } else { Haptics.menuOpened() }
         animate {
             shelf = value
-            placeShelf(at: CGPoint(x: finger?.x ?? 0, y: y), anchorID: value == .root ? rootShelfID(left) : nil)
+            placeShelf(at: CGPoint(x: finger?.x ?? 0, y: y), anchorID: value == .root ? left.rowID : nil)
         }
         if let finger { edgeInteraction.rebase(at: finger, armed: armed, in: shelfLayout(count: shelfItems.count), needsReturn: needsReturn) }
-    }
-    private func rootShelf(for id: String) -> Shelf? {
-        switch id {
-        case "people": .people
-        case "albums": .albums
-        case "more": .more
-        case "settings": .settings
-        default: nil
-        }
-    }
-    private func rootShelfID(_ value: Shelf) -> String? {
-        switch value {
-        case .root: nil
-        case .people: "people"
-        case .albums: "albums"
-        case .more: "more"
-        case .settings: "settings"
-        }
     }
     private func animate(_ changes: () -> Void) { withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.88), changes) }
     /// The selection is deleted for good: the server keeps no Trash, or the photos are in it, as

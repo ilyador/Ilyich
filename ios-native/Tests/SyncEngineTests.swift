@@ -30,7 +30,7 @@ import XCTest
         let first = await changes.next()
         XCTAssertEqual(first?.upserted, returned.upserted, "The same change was published.")
         XCTAssertEqual(first?.syncedThrough, synced)
-        XCTAssertEqual(harness.notifications.all, [["collections": false, "accessChanged": false]],
+        XCTAssertEqual(harness.busChanges.all, [["collections": false, "accessChanged": false]],
                        "The screens heard of it once, as a change to photos alone.")
         let settled = await becomesTrue { !harness.status.status.isSyncing && harness.status.status.lastSyncDate != nil }
         XCTAssertTrue(settled, "The status shows the pass finished: \(harness.status.status)")
@@ -53,7 +53,7 @@ import XCTest
         XCTAssertEqual(harness.server.requests("POST", "sync/ack").count, 1, "The marker is acknowledged at the end of the stream.")
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(published.count, 0, "Nothing was published.")
-        XCTAssertTrue(harness.notifications.all.isEmpty, "Neither the feed nor the shelves reload.")
+        XCTAssertTrue(harness.busChanges.all.isEmpty, "Neither the feed nor the shelves reload.")
 
         let first = try makeSyncHarness()
         _ = try await first.entities.prepare(sessionFingerprint: first.api.syncSessionFingerprint())
@@ -61,7 +61,7 @@ import XCTest
         let completing = try await first.engine.refresh()
         XCTAssertTrue(completing.routingChanged, "The first completion moves the feeds to the offline library.")
         XCTAssertFalse(completing.reset)
-        XCTAssertEqual(first.notifications.count, 1)
+        XCTAssertEqual(first.busChanges.count, 1)
     }
 
     /// A pass can end in a cancellation nobody asked for: here the index refuses the pass's write
@@ -166,7 +166,7 @@ import XCTest
         let idle = await becomesTrue { !harness.status.status.isSyncing }
         XCTAssertTrue(idle)
         XCTAssertNil(harness.status.status.error)
-        XCTAssertEqual(harness.notifications.count, 1, "The pass was published.")
+        XCTAssertEqual(harness.busChanges.count, 1, "The pass was published.")
 
         let background = try makeSyncHarness(foreground: false)
         try await background.primeIndex()
@@ -197,7 +197,7 @@ import XCTest
         let ready = await harness.engine.prepareForBackgroundBackup()
         XCTAssertTrue(ready)
         XCTAssertEqual(harness.streamRequests.count, 1)
-        XCTAssertEqual(harness.notifications.count, 1)
+        XCTAssertEqual(harness.busChanges.count, 1)
         XCTAssertEqual(harness.live.connects, 0, "No live connection in the background.")
 
         let ended = try makeSyncHarness()
@@ -244,7 +244,7 @@ import XCTest
         try await Task.sleep(for: .milliseconds(150))
 
         XCTAssertEqual(harness.streamRequests.count, 4)
-        XCTAssertTrue(harness.notifications.all.isEmpty, "Nothing reloaded: \(harness.notifications.all)")
+        XCTAssertTrue(harness.busChanges.all.isEmpty, "Nothing reloaded: \(harness.busChanges.all)")
         XCTAssertNil(harness.status.status.error)
     }
 
@@ -271,7 +271,7 @@ import XCTest
         let arrived = await becomesTrue { published.count == 1 }
         XCTAssertTrue(arrived, "The edit was published.")
         XCTAssertEqual(published.all.first?.mediaRevisions, ["photo": "r2"])
-        XCTAssertEqual(harness.notifications.count, 1, "The feed and an open viewer reload.")
+        XCTAssertEqual(harness.busChanges.count, 1, "The feed and an open viewer reload.")
 
         harness.live.send(same)
         let passes = await becomesTrue { harness.streamRequests.count == 3 }
@@ -297,7 +297,7 @@ import XCTest
             XCTFail("A stream without its completion marker fails the pass.")
         } catch {}
 
-        XCTAssertEqual(harness.notifications.count, 1, "What the pass committed was published.")
+        XCTAssertEqual(harness.busChanges.count, 1, "What the pass committed was published.")
         var changes = published.makeAsyncIterator()
         let partial = await changes.next()
         XCTAssertEqual(partial?.upserted.keys.sorted(), ["committed"])

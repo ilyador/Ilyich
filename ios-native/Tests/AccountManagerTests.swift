@@ -420,10 +420,9 @@ import XCTest
         let late = Task { try await alice.api.albums() }
         try await until("Alice's requests did not start.") { albums.waiting == 1 && stream.waiting == 1 }
         let aliceChanges = Mutex(0)
-        let observer = NotificationCenter.default.addObserver(forName: .ilyichLibraryChanged, object: nil, queue: nil) { note in
-            if note.userInfo?["scope"] as? String == alice.api.cacheScope { aliceChanges.withLock { $0 += 1 } }
-        }
-        defer { NotificationCenter.default.removeObserver(observer) }
+        let aliceEvents = alice.bus.events()
+        let listening = Task { for await _ in aliceEvents { aliceChanges.withLock { $0 += 1 } } }
+        defer { listening.cancel() }
 
         await harness.manager.signOut(.user)
         try await harness.manager.completeSSO(login("bob"), server: second.baseURL)
@@ -438,6 +437,7 @@ import XCTest
         }
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(aliceChanges.withLock { $0 }, 0, "Alice's sync told no screen anything.")
+        XCTAssertFalse(alice.bus.isOpen, "Alice's bus closed with her account.")
         let bob = try await XCTUnwrapAsync(await harness.manager.runtime)
         XCTAssertEqual(bob.credential.userID, "bob")
         XCTAssertFalse(bob.api === alice.api)
@@ -576,11 +576,15 @@ import XCTest
         XCTAssertEqual(try JSONSerialization.jsonObject(with: body) as? [String: String], ["email": "carol@example.test", "password": "secret"])
         try await until("The password was kept.") { model.password.isEmpty }
 
-        // The browsing cache is cleared through the account, and the feed hears of it.
-        let scope = try XCTUnwrap(session.api?.cacheScope)
-        let reset = expectation(forNotification: .ilyichCachesReset, object: nil) { $0.userInfo?["scope"] as? String == scope }
+        // The browsing cache is cleared through the account, and the feed hears of it on the bus,
+        // recorded as the bus takes it.
+        let cleared = Recorded<Bool>()
+        _ = try XCTUnwrap(session.bus).subscribe { event -> Bool? in
+            if case .cachesCleared = event { cleared.append(true) }
+            return nil
+        }
         await session.clearBrowsingCache()
-        await fulfillment(of: [reset], timeout: 2)
+        XCTAssertEqual(cleared.count, 1, "The feed hears the cache was cleared.")
         await session.signOut()
     }
 
@@ -606,6 +610,10 @@ import XCTest
         XCTAssertNil(AccountEnvironment.live.transfersDirectory)
         XCTAssertNil(AccountEnvironment.live.backupContainer)
         XCTAssertEqual(try library?.credentialStore().load()?.userID, AccountEnvironment.fixtureUserID)
+        XCTAssertEqual(library?.fixtureCredential?.server, AccountEnvironment.fixtureServer)
+        let elsewhere = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-fixture-port", "18191"])
+        XCTAssertEqual(elsewhere?.fixtureCredential?.server, URL(string: "http://127.0.0.1:18191/api"), "A run can name a fixture server of its own.")
+        XCTAssertEqual(elsewhere?.fixtureAccount?.server, URL(string: "http://127.0.0.1:18191/api"))
         let people = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-many-people"])
         XCTAssertEqual(people?.fixtureCredential?.token, "ui-test-many-people")
     }

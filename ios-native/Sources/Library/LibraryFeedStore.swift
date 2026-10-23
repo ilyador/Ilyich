@@ -1138,6 +1138,37 @@ extension FrozenFeed: DisplayedFeed {
         else if !months.isEmpty { markStale(months) }
     }
 
+    /// A change to the account's collections (N4). A feed showing an album that was deleted or
+    /// left clears back to the library. An album or a person renamed while the feed shows it gives
+    /// the filter its new name, and an album whose photos' order changed is read again in that
+    /// order. A partner added or removed, or shown in the timeline or no longer, reads the feed
+    /// again, as a sync's partner change does, and the saved library once a filter clears back to
+    /// it. Returns whether the filter cleared.
+    @discardableResult
+    func apply(_ change: CollectionChange) -> Bool {
+        switch change {
+        case .albumDeleted(let id), .albumLeft(let id):
+            guard feedQuery.predicates.albums.first == id else { return false }
+            clearFilters()
+            return true
+        case .albumUpdated(let album):
+            guard feedQuery.predicates.albums.first == album.id else { return false }
+            if query.isEmpty, feedQuery.ranking != .chronological(.takenAt, ascending: album.order == "asc") { setAlbum(album) }
+            else { filterTitle = album.albumName }
+            return false
+        case .personUpdated(let person):
+            guard feedQuery.predicates.people.first == person.id else { return false }
+            filterTitle = person.name.isEmpty ? "Person" : person.name
+            return false
+        case .partnersChanged:
+            if originalTimeline != nil { savedStaleMonths = nil }
+            if query.isEmpty { Task { await reload(preservingPosition: true) } }
+            return false
+        case .albumCreated, .memorySaved:
+            return false
+        }
+    }
+
     /// The months a change touched among those `rows` hold: those its photos left and joined, and
     /// those holding a photo whose media changed.
     private static func months(touchedBy change: LibraryChange, in rows: [MonthKey: [Asset]]) -> Set<MonthKey> {

@@ -393,13 +393,12 @@ actor AccountManager {
         }
     }
 
-    /// Clears the account's downloaded previews; the library reloads from the index.
+    /// Clears the account's downloaded previews, for Diagnostics; the feed hears of it on the
+    /// account's bus and reads its months again.
     func clearBrowsingCache() async {
         await transition { manager in
             guard let runtime = manager.runtime else { return }
-            let scope = runtime.api.cacheScope
-            await runtime.pipeline.removeAll()
-            await LegacyNotificationBridge.cachesReset(scope: scope)
+            await runtime.clearBrowsingCache()
         }
     }
 

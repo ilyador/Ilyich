@@ -4,6 +4,7 @@ import ImageIO
 
 struct ProfilePhotoSettingsView: View {
     let api: APIClient
+    @Environment(\.accountSettings) private var settings
     @State private var avatar: UIImage?
     @State private var selected: PhotosPickerItem?
     @State private var chosen: UIImage?
@@ -43,8 +44,9 @@ struct ProfilePhotoSettingsView: View {
         .confirmationDialog("Remove your profile photo?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove profile photo", role: .destructive) {
                 Task {
+                    guard let settings else { failure = .init(APIError.signedOut); return }
                     loading = true; defer { loading = false }
-                    do { try await api.requestVoid(.delete, path: "users/profile-image"); avatar = nil } catch { failure = .init(error) }
+                    do { try await settings.removeProfilePhoto(); avatar = nil } catch { failure = .init(error) }
                 }
             }
         }
@@ -68,6 +70,7 @@ struct ProfilePhotoCropView: View {
     var sourceImage: UIImage? = nil
     var onSaved: () -> Void = { }
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accountSettings) private var settings
     @State private var controller = ProfileCropController()
     @State private var image: UIImage?
     @State private var loading = true
@@ -117,8 +120,9 @@ struct ProfilePhotoCropView: View {
         .alert("Couldn’t save profile photo", isPresented: Binding(get: { failure != nil && image != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
     private func save() async {
+        guard let settings else { failure = .init(APIError.signedOut); return }
         saving = true; defer { saving = false }
-        do { let data = try controller.jpeg(); try await api.uploadProfileImage(jpeg: data); onSaved(); dismiss() }
+        do { let data = try controller.jpeg(); try await settings.uploadProfilePhoto(jpeg: data); onSaved(); dismiss() }
         catch { failure = .init(error) }
     }
 }

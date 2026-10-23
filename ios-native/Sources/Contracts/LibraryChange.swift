@@ -118,14 +118,21 @@ struct LibraryChange: Sendable {
     }
 }
 
+/// One change to the account's collections on the server (REBUILD_ROADMAP.md N4). It carries the
+/// server's record where there is one, so every list applies it in place without asking again.
 enum CollectionChange: Hashable, Sendable {
-    case albumCreated(String)
-    case albumUpdated(String)
+    /// An album made here, from the album editor or the selected photos.
+    case albumCreated(Album)
+    /// An album's name, description, order, cover, photos or members changed.
+    case albumUpdated(Album)
     case albumDeleted(String)
+    /// The account left an album someone else shared with it.
     case albumLeft(String)
-    case personUpdated(String)
+    case personUpdated(Person)
+    /// A partner was added or removed, or shows in the timeline or stops.
     case partnersChanged
-    case memorySaved(String)
+    /// A memory was saved or unsaved.
+    case memorySaved(String, saved: Bool)
 }
 
 /// One user command that changes the library on the server. Asset IDs are server IDs.

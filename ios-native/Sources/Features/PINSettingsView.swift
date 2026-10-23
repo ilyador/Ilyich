@@ -1,7 +1,10 @@
 import SwiftUI
 
+/// The Locked Folder PIN, set, changed and removed through the account's settings (the critic's
+/// correction to N4). The PIN kept on this phone for biometric unlock is the Locked Folder's.
 struct PINSettingsView: View {
     let api: APIClient
+    @Environment(\.accountSettings) private var settings
     @State private var status: AuthStatus?
     @State private var currentPIN = ""
     @State private var password = ""
@@ -38,7 +41,10 @@ struct PINSettingsView: View {
                 if let message { Text(message).foregroundStyle(.secondary) }
             }
         }.navigationTitle("Locked folder PIN").disabled(busy)
-        .task { do { status = try await api.authStatus() } catch { failure = .init(error) } }
+        .task {
+            guard let settings else { failure = .init(APIError.signedOut); return }
+            do { status = try await settings.authStatus() } catch { failure = .init(error) }
+        }
         .onDisappear { clear() }
         .confirmationDialog("Remove your locked folder PIN?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Remove PIN", role: .destructive) { Task { await reset() } }.requiresWriteAccess()
@@ -46,22 +52,21 @@ struct PINSettingsView: View {
         .alert("Couldn’t update PIN", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
     private func save() async {
+        guard let settings else { failure = .init(APIError.signedOut); return }
         busy = true; message = nil; defer { busy = false }
         do {
-            if configured {
-                try await api.requestVoid(.put, path: "auth/pin-code", body: PINChange(newPinCode: newPIN, pinCode: usePassword ? nil : currentPIN, password: usePassword ? password : nil))
-            } else { try await api.requestVoid(.post, path: "auth/pin-code", body: ["pinCode": newPIN]) }
-            LockedPINStore.remove(for: api); clear(); status = try await api.authStatus(); message = "Your PIN has been saved."
+            if configured { try await settings.changePIN(to: newPIN, currentPIN: usePassword ? nil : currentPIN, password: usePassword ? password : nil) }
+            else { try await settings.setPIN(newPIN) }
+            LockedPINStore.remove(for: api); clear(); status = try await settings.authStatus(); message = "Your PIN has been saved."
         } catch { failure = .init(error) }
     }
     private func reset() async {
+        guard let settings else { failure = .init(APIError.signedOut); return }
         busy = true; message = nil; defer { busy = false }
         do {
-            try await api.requestVoid(.delete, path: "auth/pin-code", body: PINIdentity(pinCode: usePassword ? nil : currentPIN, password: usePassword ? password : nil))
-            LockedPINStore.remove(for: api); clear(); status = try await api.authStatus(); message = "Your PIN has been removed."
+            try await settings.removePIN(currentPIN: usePassword ? nil : currentPIN, password: usePassword ? password : nil)
+            LockedPINStore.remove(for: api); clear(); status = try await settings.authStatus(); message = "Your PIN has been removed."
         } catch { failure = .init(error) }
     }
     private func clear() { currentPIN = ""; newPIN = ""; confirmation = ""; password = "" }
 }
-private struct PINIdentity: Encodable, Sendable { let pinCode: String?; let password: String? }
-private struct PINChange: Encodable, Sendable { let newPinCode: String; let pinCode: String?; let password: String? }

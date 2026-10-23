@@ -32,6 +32,13 @@ HARBOR = {'id': '00000000-0000-4000-8000-000000000004', 'albumName': 'Harbor', '
 HARBOR_LINK = {'id': '00000000-0000-4000-8000-000000000005', 'key': 'fixture-harbor', 'slug': None, 'type': 'ALBUM',
                'description': 'Harbor for family', 'expiresAt': None, 'allowDownload': True, 'allowUpload': False,
                'showMetadata': False, 'assets': [], 'album': HARBOR}
+# An album someone else shares with the fixture's user, which a mutable session can leave
+# (REBUILD_ROADMAP.md N4). Only mutable sessions see it, so the shared answers stay as they were.
+FIXTURE_USER = {'id': OWNER, 'name': 'Test library', 'email': 'fixture@example.test', 'profileImagePath': ''}
+SHARER = {'id': '00000000-0000-4000-8000-000000000006', 'name': 'Sam', 'email': 'sam@example.test', 'profileImagePath': ''}
+LAGOON = {'id': '00000000-0000-4000-8000-000000000007', 'albumName': 'Lagoon', 'assetCount': 100, 'shared': True,
+          'albumUsers': [{'user': SHARER, 'role': 'owner'}, {'user': FIXTURE_USER, 'role': 'viewer'}],
+          'albumThumbnailAssetId': None, 'updatedAt': '2026-10-02T12:00:00Z'}
 
 def is_video(index, date):
     # One clip in the newest month, so the viewer's video page can be exercised.
@@ -137,6 +144,8 @@ class MutableLibrary:
         self.added = {}
         self.removed = {}
         self.album_fields = {}
+        # Shared albums the session left.
+        self.left = set()
 
 LIBRARIES = {}
 LIBRARIES_LOCK = threading.Lock()
@@ -211,7 +220,8 @@ def mutable_asset(library, identifier):
     return stated(library, value)
 
 def mutable_albums(library):
-    albums = [dict(ALBUM), dict(HARBOR)] + [dict(album) for album in library.created.values()]
+    albums = [dict(ALBUM), dict(HARBOR), dict(LAGOON)] + [dict(album) for album in library.created.values()]
+    albums = [album for album in albums if album['id'] not in library.left]
     for album in albums:
         album.update(library.album_fields.get(album['id'], {}))
         if album['id'] in library.created: album['assetCount'] = len(library.added.get(album['id'], set()))
@@ -315,6 +325,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 else: self.send(value)
                 return True
             if path=='/albums': self.send(mutable_albums(library)); return True
+            if path.startswith('/albums/') and path.count('/')==2:
+                found=[a for a in mutable_albums(library) if a['id']==path.split('/')[2]]
+                if not found: self.send_immich_error(400,'Not found or no album.read access'); return True
+                # An album's details name its owner first, as Immich's do: the session's user owns
+                # every album it wasn't shared.
+                album=dict(found[0])
+                if not album['albumUsers']: album['albumUsers']=[{'user': FIXTURE_USER, 'role': 'owner'}]
+                self.send(album); return True
         return False
     def mutable_change(self,library,method,path,body):
         # Changes to the session's library. Answers as Immich does; False for anything else.
@@ -362,6 +380,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     else: removed.add(i); added.discard(i)
                     results.append({'id':i,'success':True})
                 self.send(results); return True
+            # Leaving an album shared with the session's user.
+            if len(parts)==5 and parts[1]=='albums' and parts[3]=='user' and method=='DELETE' and parts[4] in (OWNER,'me'):
+                if parts[2]!=LAGOON['id'] or parts[2] in library.left: self.send_immich_error(400,'Not found or no album.share access')
+                else: library.left.add(parts[2]); self.send_empty()
+                return True
             if len(parts)==3 and parts[1]=='albums' and method=='PATCH':
                 fields=library.album_fields.setdefault(parts[2],{})
                 for key in ('albumName','albumThumbnailAssetId','description'):

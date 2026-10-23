@@ -62,6 +62,14 @@ import IlyichPlatform
     var deviceIndex: DeviceIndexService? { runtime?.deviceIndex }
     /// The account's changes to its library on the server, which the app puts in the environment.
     var mutations: LibraryMutationService? { runtime?.mutations }
+    /// The account's albums, people, partners and memories on the server, which the app puts in
+    /// the environment.
+    var collections: CollectionsService? { runtime?.collections }
+    /// Everything that happens to the account's library, in one order, which the app puts in the
+    /// environment.
+    var bus: LibraryBus? { runtime?.bus }
+    /// The account's own settings on the server, which the app puts in the environment.
+    var settings: AccountSettingsService? { runtime?.settings }
     var isSyncing: Bool { runtime?.library?.status.status.isSyncing ?? false }
     var syncError: String? { runtime?.library?.status.status.error ?? runtime?.libraryError }
     var lastSyncDate: Date? { runtime?.library?.status.status.lastSyncDate }
