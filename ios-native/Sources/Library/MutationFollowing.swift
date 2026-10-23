@@ -70,7 +70,7 @@ private struct MutationFollowing: ViewModifier {
     func refreshAfterMutation() async
 }
 
-extension LibraryStore: MutationFeed {
+extension LibraryFeedStore: MutationFeed {
     var showsTrash: Bool { feedQuery.trash == .trashed }
 }
 
