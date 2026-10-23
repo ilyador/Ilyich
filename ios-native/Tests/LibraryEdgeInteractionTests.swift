@@ -204,7 +204,8 @@ final class LibraryEdgeInteractionTests: XCTestCase {
 
     func testALongListScrollsOnlyNearTheBandsEndsAndFasterFurtherOut() {
         let people = LibraryShelfGeometry(count: 147, size: phone, topInset: 56, bottomInset: 100, rowStep: 60)
-        for y in stride(from: people.minCenter + people.step * 0.5, through: people.maxCenter - people.step * 0.5, by: 10) {
+        let inset = LibraryShelfGeometry.scrollZoneInset
+        for y in stride(from: people.minCenter + people.step * inset, through: people.maxCenter - people.step * inset, by: 10) {
             XCTAssertEqual(people.scrollVelocity(fingerY: y), 0, "Away from the ends the rows stand still.")
         }
         let shallow = people.scrollVelocity(fingerY: people.maxCenter)
@@ -215,8 +216,9 @@ final class LibraryEdgeInteractionTests: XCTestCase {
         XCTAssertEqual(people.scrollVelocity(fingerY: people.maxCenter + people.step * 5),
                        -LibraryShelfGeometry.scrollRates.upperBound * people.step, accuracy: 0.001, "Its speed tops out.")
         XCTAssertGreaterThan(people.scrollVelocity(fingerY: people.minCenter), 0, "Near the top it moves down, bringing the rows above.")
+        let depthOneRowOut = (1 + inset) / LibraryShelfGeometry.scrollZoneLength
         XCTAssertEqual(people.scrollVelocity(fingerY: people.maxCenter + people.step, bottomFloor: 0.4),
-                       -LibraryShelfGeometry.scrollRate(0.35) * people.step, accuracy: 0.001,
+                       -LibraryShelfGeometry.scrollRate(depthOneRowOut - 0.4) * people.step, accuracy: 0.001,
                        "A stroke that began deep in the zone counts only how much further it goes.")
         // Rows pass the finger at the same pace, whatever their height.
         let albums = LibraryShelfGeometry(count: 147, size: phone, topInset: 56, bottomInset: 100, rowStep: 44)
@@ -346,7 +348,9 @@ final class LibraryEdgeInteractionTests: XCTestCase {
     func testTheTipGlowBuildsWhileTheFingerStaysAndFallsAwayWhenItLeaves() {
         let tip: CGFloat = 244
         XCTAssertEqual(LibraryShelfGeometry.tipNearness(fingerX: 100, tip: tip), 0, "Away from the tip there is no glow.")
-        XCTAssertGreaterThan(LibraryShelfGeometry.tipNearness(fingerX: 130, tip: tip), 0, "The glow's zone reaches back past the row's middle.")
+        XCTAssertEqual(LibraryShelfGeometry.tipNearness(fingerX: tip * 0.52, tip: tip), 0,
+                       "The zone that opens a group begins just past the row's middle (the owner's setting).")
+        XCTAssertGreaterThan(LibraryShelfGeometry.tipNearness(fingerX: tip * 0.56, tip: tip), 0, "Past its start the glow builds.")
         XCTAssertEqual(LibraryShelfGeometry.tipNearness(fingerX: tip, tip: tip), 1)
         func timeToPeak(nearness: CGFloat) -> CGFloat {
             var glow: CGFloat = 0, time: CGFloat = 0

@@ -791,9 +791,10 @@ struct LibraryShelfGeometry {
     static let holdZoneStart: CGFloat = 0.38
     /// A held row lets go once the finger is this many rows from its center.
     static let holdReach: CGFloat = 1.0
-    /// A long list scrolls only while the finger stays near the band's top or bottom: from half a
-    /// row inside its end, reaching full speed two rows further out.
-    static let scrollZoneInset: CGFloat = 0.5
+    /// A long list scrolls only while the finger stays near the band's top or bottom: from 0.8 of
+    /// a row inside its end (the owner's setting, 60% more than the half row before), reaching full
+    /// speed two rows further out.
+    static let scrollZoneInset: CGFloat = 0.8
     static let scrollZoneLength: CGFloat = 2
     /// Rows per second where scrolling starts and at full speed, so rows pass the finger at the
     /// same pace whatever their height.
@@ -876,8 +877,9 @@ struct LibraryShelfGeometry {
     /// Rows all share this width while reordering.
     var rearrangeWidth: CGFloat { min(270, maximumWidth) }
 
-    /// Where along a row the glow's zone begins; it reaches full strength just short of the tip.
-    static let glowZoneStart: CGFloat = 0.46
+    /// Where along a row the glow's zone, which opens the row's group, begins; it reaches full
+    /// strength just short of the tip. The owner's setting: 15% shorter than from 0.46.
+    static let glowZoneStart: CGFloat = 0.54
 
     /// How near its tip the finger is along a row: nothing before the zone, full just short of
     /// the tip and beyond.
