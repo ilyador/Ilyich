@@ -50,6 +50,7 @@ import SwiftUI
             .environment(\.collectionsService, session.collections)
             .environment(\.accountSettings, session.settings)
             .environment(\.freeUpSpace, session.freeUpSpace)
+            .environment(\.lockedFolder, session.lockedFolder)
             .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }

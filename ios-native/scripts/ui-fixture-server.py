@@ -82,6 +82,39 @@ VIDEO_ID = asset(5)['id']
 SESSION_TOKEN = 'ui-test-session'
 EXPIRED_TOKEN = 'ui-test-expired'
 
+# The Locked Folder (REBUILD_ROADMAP.md N5): a PIN is set, 123456, and any password stands in for
+# it. Unlocking elevates only the token that asked, until that token locks again, as Immich elevates
+# a session; the folder's timeline and its photos answer only an elevated token.
+LOCKED_PIN = '123456'
+LOCKED_DATE = '2026-11-01'
+LOCKED_COUNT = 3
+ELEVATED = set()
+ELEVATED_LOCK = threading.Lock()
+
+def elevated(token):
+    with ELEVATED_LOCK: return token in ELEVATED
+
+def locked_asset(index):
+    value = asset(index, LOCKED_DATE)
+    value.update({'id': str(uuid.uuid5(uuid.NAMESPACE_URL, 'locked-folder' + str(index))), 'visibility': 'locked',
+                  'originalFileName': f'Private {index}.jpg', 'people': []})
+    return value
+
+LOCKED_IDS = {locked_asset(i)['id']: i for i in range(LOCKED_COUNT)}
+
+def locked_bucket(date):
+    assets = [locked_asset(i) for i in range(LOCKED_COUNT)] if date == LOCKED_DATE else []
+    n = len(assets)
+    return {key: [a.get(key) for a in assets] for key in ['id','ownerId','isFavorite','isTrashed','visibility','fileCreatedAt','duration','mediaRevision']} | {
+        'ratio': [1.5]*n, 'isImage': [True]*n, 'createdAt': [date+'T12:00:00Z']*n,
+        'localOffsetHours': [0]*n, 'thumbhash': ['HIcNXIyGh4d/eHh5eIWHcEf3dQ==']*n, 'livePhotoVideoId': [None]*n,
+    }
+
+def auth_status(token):
+    on = elevated(token)
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=15)
+    return {'pinCode': True, 'password': True, 'isElevated': on, 'expiresAt': None, 'pinExpiresAt': iso(expires) if on else None}
+
 @functools.lru_cache(maxsize=1)
 def test_clip():
     # A short synthetic clip, so the viewer shows a real player. Made in memory; nothing is kept.
@@ -252,8 +285,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def unsupported(self):
         # What the server answered before it took changes, for every session but a mutable one.
         self.send_error(http.HTTPStatus.NOT_IMPLEMENTED, "Unsupported method (%r)" % self.command)
+    def locked_get(self,path,q):
+        # The Locked Folder, for every token: its status, and, for an elevated token, its timeline
+        # and its photos. Nothing else asks for them, so every other answer is as before.
+        if path=='/auth/status': self.send(auth_status(self.token())); return True
+        timeline=path in ('/timeline/buckets','/timeline/bucket') and q.get('visibility',[None])[0]=='locked'
+        photo=path.startswith('/assets/') and path.count('/')==2 and path.split('/')[2] in LOCKED_IDS
+        if not (timeline or photo): return False
+        if not elevated(self.token()): self.send_immich_error(403,'Elevated permission is required'); return True
+        if path=='/timeline/buckets': self.send([{'timeBucket':LOCKED_DATE,'count':LOCKED_COUNT}])
+        elif path=='/timeline/bucket': self.send(locked_bucket(q.get('timeBucket',[''])[0][:10]))
+        else: self.send(locked_asset(LOCKED_IDS[path.split('/')[2]]))
+        return True
+    def locked_post(self,path,body):
+        # Unlocking with the PIN, or any password, elevates the token that asked; locking ends it.
+        token=self.token()
+        if path=='/auth/session/unlock':
+            pin=body.get('pinCode');password=body.get('password')
+            if pin==LOCKED_PIN or (pin is None and isinstance(password,str) and password):
+                with ELEVATED_LOCK: ELEVATED.add(token)
+                self.send_empty();return True
+            self.send_immich_error(400,'Wrong PIN code' if pin is not None else 'Wrong password');return True
+        if path=='/auth/session/lock':
+            with ELEVATED_LOCK: ELEVATED.discard(token)
+            self.send_empty();return True
+        return False
     def do_GET(self):
         url=urllib.parse.urlsplit(self.path);path=url.path.removeprefix('/api');q=urllib.parse.parse_qs(url.query)
+        if self.locked_get(path,q): return
         library=mutable_library(self.token())
         if library is not None and self.mutable_get(library,path,q): return
         if path.startswith('/assets/') and path.endswith('/original'):
@@ -404,6 +463,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self.mutable_change(library,self.command,path,self.read_body()): self.send({})
     def do_POST(self):
         size=int(self.headers.get('Content-Length','0'));body=json.loads(self.rfile.read(size) or b'{}');path=urllib.parse.urlsplit(self.path).path.removeprefix('/api')
+        if self.locked_post(path,body): return
         library=mutable_library(self.token())
         if library is not None and self.mutable_change(library,'POST',path,body): return
         if path=='/auth/login':

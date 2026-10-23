@@ -8,6 +8,8 @@ struct SelectableFeatureAssetGrid: View {
     let pipeline: MediaPipeline
     let assets: [Asset]
     let onOpenAsset: (Asset) -> Void
+    /// A photo's cell came on screen, for a grid that reads more as it scrolls.
+    var onAssetAppear: ((Asset) -> Void)? = nil
     @State private var selecting = false
     @State private var selected: [String: Asset] = [:]
     @State private var showActions = false
@@ -53,6 +55,7 @@ struct SelectableFeatureAssetGrid: View {
         .accessibilityLabel(asset.displayName)
         .accessibilityValue(selecting ? (isSelected ? "Selected" : "Not selected") : "")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .onAppear { onAssetAppear?(asset) }
     }
 
     private func badge(_ isSelected: Bool) -> some View {

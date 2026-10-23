@@ -11,8 +11,11 @@ import Synchronization
 ///   reads and what is kept of them, on disk too, so the mirror keeps it for the next launch;
 /// - the write generation moves on every read-only toggle. It fences writes and uploads, and the
 ///   mirror carries it;
-/// - both move when the session ends.
-/// A read-only toggle never moves the access epoch, so it never discards a library read.
+/// - the private epoch moves each time the Locked Folder unlocks or relocks. It fences locked
+///   media and the folder's pages, which are only ever held in memory;
+/// - all three move when the session ends.
+/// A read-only toggle never moves the access epoch, and a Locked Folder unlock or relock moves
+/// only the private epoch, so neither discards a library read.
 ///
 /// The account's AccountRuntime owns it, and ends it first when the runtime is torn down.
 final class AuthorizationState: Sendable {
@@ -95,8 +98,21 @@ final class AuthorizationState: Sendable {
         }
     }
 
-    /// Ends the session. Nothing made under it is current again, the mirror names no account,
-    /// and the updates streams finish.
+    /// The Locked Folder unlocked or relocked (REBUILD_ROADMAP.md N5). The private epoch moves
+    /// either way, so locked media and Locked Folder pages asked for before are never kept after.
+    /// The access epoch and the write generation stay, so no library read or write is discarded,
+    /// and the mirror stays: the extensions never see locked media.
+    @discardableResult
+    func setLockedFolderUnlocked(_ unlocked: Bool) -> AuthorizationSnapshot {
+        change(moving: .privateEpoch) { snapshot, next in
+            snapshot.lockedFolderUnlocked = unlocked
+            snapshot.privateEpoch = next
+            return true
+        }
+    }
+
+    /// Ends the session. Nothing made under it is current again, the Locked Folder is locked, the
+    /// mirror names no account, and the updates streams finish.
     func end() {
         changes.withLock { _ in
             let ended = state.withLock { state -> (generation: UInt64, observers: [AsyncStream<AuthorizationSnapshot>.Continuation])? in
@@ -105,6 +121,8 @@ final class AuthorizationState: Sendable {
                 state.counter &+= 1
                 state.snapshot.epoch = AuthorizationEpoch(account: account, value: state.counter)
                 state.snapshot.writeGeneration = state.counter
+                state.snapshot.privateEpoch = state.counter
+                state.snapshot.lockedFolderUnlocked = false
                 defer { state.observers = [:] }
                 return (state.counter, Array(state.observers.values))
             }
@@ -130,8 +148,9 @@ final class AuthorizationState: Sendable {
         return stream
     }
 
-    /// The generation a change moves, which the mirror then keeps.
-    private enum Moved { case writeGeneration, accessEpoch }
+    /// The generation a change moves. The mirror keeps the write generation and the access epoch;
+    /// the private epoch fences only what is held in memory.
+    private enum Moved { case writeGeneration, accessEpoch, privateEpoch }
 
     /// Applies `update` with the next generation, if it changes anything, and has the mirror keep
     /// the generation it moved.
@@ -147,6 +166,7 @@ final class AuthorizationState: Sendable {
             switch moved {
             case .writeGeneration: mirror?.publish(.init(digest: account.digest, epoch: snapshot.writeGeneration))
             case .accessEpoch: mirror?.keepAccessEpoch(snapshot.epoch.value)
+            case .privateEpoch: break
             }
             for observer in observers { observer.yield(snapshot) }
             return snapshot

@@ -20,6 +20,9 @@ import IlyichPlatform
     private(set) var isApplyingReadOnly = false
     /// The open account's Free up space, which the app puts in the environment.
     private(set) var freeUpSpace: FreeUpSpaceStore?
+    /// The open account's Locked Folder, which the app puts in the environment and which hears
+    /// every scene change here first (REBUILD_ROADMAP.md N5).
+    private(set) var lockedFolder: LockedFolderSession?
     @ObservationIgnored let manager: AccountManager
     @ObservationIgnored private let presence: AppPresence
     @ObservationIgnored private var readOnlyChange: UUID?
@@ -131,6 +134,9 @@ import IlyichPlatform
     }
 
     func sceneChanged(_ scene: ScenePhase) {
+        // The Locked Folder relocks before anything else hears the app left the foreground, and
+        // synchronously, whatever screen is up.
+        lockedFolder?.sceneChanged(scene)
         if scene == .active {
             let cameForward = !presence.isForeground
             presence.isForeground = true
@@ -163,6 +169,10 @@ import IlyichPlatform
             runtime = state.runtime
             freeUpSpace?.disappear()
             freeUpSpace = state.runtime.map { FreeUpSpaceStore(service: $0.cleanup) }
+            lockedFolder?.end()
+            lockedFolder = state.runtime.map {
+                LockedFolderSession(api: $0.api, pipeline: $0.pipeline, authorization: $0.authorization, mutations: $0.mutations)
+            }
             authorization = state.runtime?.authorization.snapshot
             if let runtime = state.runtime { follow(runtime.authorization) }
         }

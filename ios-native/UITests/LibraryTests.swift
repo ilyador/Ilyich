@@ -1405,6 +1405,46 @@ final class LibraryTests: XCTestCase {
         requireHittable(app.buttons["Close"], in: app); app.buttons["Close"].tap()
         requireHittable(app.textFields["library.search"], in: app)
 
+        try unlockLockedFolder(app)
+        // A timeline row carries no file name, so the folder's photos are just "Photo".
+        let locked = app.buttons["Photo"].firstMatch
+        XCTAssertTrue(locked.waitForExistence(timeout: 10), "The unlocked folder shows its photo.")
+        requireHittable(locked, in: app); locked.tap()
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        requireHittable(actions, in: app); actions.tap()
+        let moveOut = app.buttons["Move out of Locked Folder"]
+        XCTAssertTrue(moveOut.waitForExistence(timeout: 5), "A locked photo can leave the folder.")
+        for name in ["Slideshow", "Share displayed version", "Download original", "Save to Photos"] {
+            XCTAssertTrue(app.buttons[name].exists, "A locked photo keeps \(name).")
+        }
+        for name in hiddenWhenLocked { XCTAssertFalse(app.buttons[name].exists, "A locked photo has no \(name).") }
+        capture(app, "Locked Folder — viewer menu")
+    }
+    /// The app going to the background relocks the Locked Folder (N5): back in front it asks for
+    /// its PIN again and shows none of its photos, and the PIN opens it again.
+    @MainActor func testLockedFolderRelocksWhenTheAppGoesToTheBackground() throws {
+        let app = launch()
+        try unlockLockedFolder(app)
+        XCTAssertTrue(app.buttons["Photo"].firstMatch.waitForExistence(timeout: 10), "The unlocked folder shows its photos.")
+
+        XCUIDevice.shared.press(.home)
+        let away = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in app.state != .runningForeground }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [away], timeout: 10), .completed, "The app went to the background.")
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+        let pin = app.secureTextFields["6-digit PIN"]
+        XCTAssertTrue(pin.waitForExistence(timeout: 10), "Back in front, the folder asks for its PIN again.")
+        XCTAssertFalse(app.navigationBars["Locked folder"].buttons["Lock"].exists, "The folder relocked in the background.")
+        XCTAssertFalse(app.buttons["Photo"].exists, "None of its photos show.")
+        capture(app, "Locked Folder — relocked after the background")
+
+        pin.tap(); pin.typeText("123456")
+        app.buttons["Unlock"].tap()
+        XCTAssertTrue(app.buttons["Photo"].firstMatch.waitForExistence(timeout: 10), "The PIN opens it again.")
+    }
+    /// Opens More's Locked Folder and unlocks it with the fixture's PIN. Skips while the shared UI
+    /// fixture has no Locked Folder; against one that has it, a refusal is the app's.
+    @MainActor private func unlockLockedFolder(_ app: XCUIApplication) throws {
         openShelves(app); app.buttons["More"].tap()
         let browse = app.buttons["Browse more"]
         XCTAssertTrue(browse.waitForExistence(timeout: 10))
@@ -1418,28 +1458,13 @@ final class LibraryTests: XCTestCase {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in pin.exists || refused.exists }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed, "The Locked Folder asks for its PIN.")
         if refused.exists {
-            // Only a fixture without a Locked Folder excuses the refusal; against one that has it,
-            // the refusal is the app's.
             try XCTSkipUnless(fixtureServesLockedFolder(),
-                              "The shared UI fixture has no Locked Folder yet; rebuild milestone W1's report gives the fixture change that adds one.")
+                              "The shared UI fixture has no Locked Folder until it restarts with N5's scripts/ui-fixture-server.py.")
             return XCTFail("The Locked Folder refused to unlock, though the fixture serves one.")
         }
         pin.tap(); pin.typeText("123456")
         app.buttons["Unlock"].tap()
-        // A timeline row carries no file name, so the folder's one photo is just "Photo".
         XCTAssertTrue(app.navigationBars["Locked folder"].buttons["Lock"].waitForExistence(timeout: 10), "The folder unlocks.")
-        let locked = app.buttons["Photo"].firstMatch
-        XCTAssertTrue(locked.waitForExistence(timeout: 10), "The unlocked folder shows its photo.")
-        requireHittable(locked, in: app); locked.tap()
-        XCTAssertTrue(actions.waitForExistence(timeout: 10))
-        requireHittable(actions, in: app); actions.tap()
-        let moveOut = app.buttons["Move out of Locked Folder"]
-        XCTAssertTrue(moveOut.waitForExistence(timeout: 5), "A locked photo can leave the folder.")
-        for name in ["Slideshow", "Share displayed version", "Download original", "Save to Photos"] {
-            XCTAssertTrue(app.buttons[name].exists, "A locked photo keeps \(name).")
-        }
-        for name in hiddenWhenLocked { XCTAssertFalse(app.buttons[name].exists, "A locked photo has no \(name).") }
-        capture(app, "Locked Folder — viewer menu")
     }
     /// Whether the shared UI fixture serves a Locked Folder: its auth status says a PIN is set.
     private func fixtureServesLockedFolder() -> Bool {
