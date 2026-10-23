@@ -18,16 +18,19 @@ import XCTest
     let live: FakeLiveConnection
     /// The failures the engine took to the session check.
     let expiries: Recorded<String>
-    /// Library notifications the engine posted for this account.
-    let notifications: Recorded<[String: Bool]>
+    /// The changes the engine published on the account's bus, as the screens hear of them: whether
+    /// the shelves load again, and whether access may have been lost.
+    let busChanges: Recorded<[String: Bool]>
+    /// The account's bus, where the engine's changes reach the screens.
+    let bus: LibraryBus
     let pipeline: MediaPipeline
 
     fileprivate init(server: StubServer, api: APIClient, entities: LibraryIndex, engine: SyncEngine, status: SyncStatusBoard,
                      presence: AppPresence, authorization: AuthorizationState, live: FakeLiveConnection, expiries: Recorded<String>,
-                     notifications: Recorded<[String: Bool]>, pipeline: MediaPipeline) {
+                     busChanges: Recorded<[String: Bool]>, bus: LibraryBus, pipeline: MediaPipeline) {
         self.server = server; self.api = api; self.entities = entities; self.engine = engine; self.status = status
         self.presence = presence; self.authorization = authorization; self.live = live; self.expiries = expiries
-        self.notifications = notifications; self.pipeline = pipeline
+        self.busChanges = busChanges; self.bus = bus; self.pipeline = pipeline
     }
 
     static let completeStream = SyncEvents.stream([SyncEvents.complete()])
@@ -71,27 +74,29 @@ extension XCTestCase {
         let presence = AppPresence(isForeground: foreground)
         let status = SyncStatusBoard()
         let pipeline = MediaPipeline(client: api)
+        let bus = LibraryBus()
         let engine = SyncEngine(client: api, entities: entities, native: NativeSync(api: api, store: entities, acks: acks),
                                 pipeline: pipeline, presence: presence, check: check,
                                 authorization: authorization, device: FakeAccountDevice(log: AccountEventLog()), status: status,
-                                connect: connect ?? { live.connect() }, debounce: debounce)
-        let notifications = Recorded<[String: Bool]>()
-        let scope = api.cacheScope
-        let observer = NotificationCenter.default.addObserver(forName: .ilyichLibraryChanged, object: nil, queue: nil) { note in
-            guard note.userInfo?["scope"] as? String == scope else { return }
-            notifications.append(["collections": note.userInfo?["collections"] as? Bool ?? false,
-                                  "accessChanged": note.userInfo?["accessChanged"] as? Bool ?? false])
+                                connect: connect ?? { live.connect() }, debounce: debounce, hub: LibraryChangeHub(pipeline: pipeline, bus: bus))
+        let busChanges = Recorded<[String: Bool]>()
+        // Each change is recorded as the bus takes it, before the engine's publish returns: the
+        // subscription keeps none of them, so its stream never needs reading.
+        _ = bus.subscribe { event -> Bool? in
+            if case .changed(let change, let accessChanged) = event {
+                busChanges.append(["collections": change.reloadsCollections, "accessChanged": accessChanged])
+            }
+            return nil
         }
-        let registration = ObserverToken(observer)
         addTeardownBlock { @MainActor in
-            registration.remove()
+            bus.close()
             await engine.shutdown()
             await pipeline.removeAll()
             await api.shutdown()
             try? FileManager.default.removeItem(at: directory)
         }
         return SyncHarness(server: server, api: api, entities: entities, engine: engine, status: status, presence: presence,
-                           authorization: authorization, live: live, expiries: expiries, notifications: notifications,
+                           authorization: authorization, live: live, expiries: expiries, busChanges: busChanges, bus: bus,
                            pipeline: pipeline)
     }
 }
@@ -166,15 +171,6 @@ final class Recorded<Value: Sendable>: Sendable {
     func append(_ value: Value) { values.withLock { $0.append(value) } }
     var all: [Value] { values.withLock { $0 } }
     var count: Int { values.withLock { $0.count } }
-}
-
-/// A notification observer to remove when the test ends.
-private final class ObserverToken: @unchecked Sendable {
-    private let observer: any NSObjectProtocol
-
-    init(_ observer: any NSObjectProtocol) { self.observer = observer }
-
-    func remove() { NotificationCenter.default.removeObserver(observer) }
 }
 
 /// Polls until the condition holds or the time runs out, and says whether it held. It runs where

@@ -975,7 +975,8 @@ struct LibraryShelfStroke: Equatable {
     var bottomFloor: CGFloat?
 }
 
-@MainActor struct LibraryShelfItem: Identifiable {
+/// One shelf row (ShelfCatalog): what it shows, and what it does when it opens.
+struct LibraryShelfItem: Identifiable, Hashable, Sendable {
     let id: String
     let title: String
     let symbol: String
@@ -983,7 +984,7 @@ struct LibraryShelfStroke: Equatable {
     var person: Person? = nil
     var assetID: String? = nil
     var isSelected = false
-    let action: () -> Void
+    let action: ShelfAction
 }
 
 /// The feed stays sharp while the fan tracks the finger. Only its glass refracts it.
@@ -1012,6 +1013,8 @@ struct LibraryShelfFan: View {
     let onClose: () -> Void
     let onDrag: (DragGesture.Value) -> Void
     let onDragEnd: (DragGesture.Value) -> Void
+    /// A row tapped, or activated by VoiceOver.
+    let onSelect: (LibraryShelfItem) -> Void
     let api: APIClient
     let pipeline: MediaPipeline
     /// People and albums can be put in order; VoiceOver reaches it as a row action.
@@ -1122,7 +1125,7 @@ struct LibraryShelfFan: View {
 
     private func shelfButton(_ item: LibraryShelfItem, index: Int, width: CGFloat, height: CGFloat, highlighted: Bool,
                              glow: CGFloat, backGlow: CGFloat, rearranging: Bool) -> some View {
-        Button(action: rearranging ? {} : item.action) {
+        Button(action: rearranging ? {} : { onSelect(item) }) {
             LibraryShelfRowLabel(item: item, width: width, height: height, highlighted: highlighted, glow: glow, backGlow: backGlow,
                                  handle: rearranging, becomingTag: item.id == interaction.morphingID, api: api, pipeline: pipeline)
                 .glassEffectID(item.id, in: glass)

@@ -1,27 +1,28 @@
 import Foundation
 import Synchronization
 
-/// Where an account's library changes go, one per runtime. A change reaches media first, so a
-/// screen that reloads never draws what the change took away, then the screens through the
-/// legacy notifications, then every subscriber. Each subscriber has a mailbox that folds the
-/// changes it hasn't taken yet into one, so a slow subscriber still sees every effect and none is
-/// dropped.
+/// Where an account's sync changes go, one per runtime. A change reaches media first, so a screen
+/// that reloads never draws what the change took away, then the screens through the account's bus
+/// (N4), then every subscriber here: coverage, the device index and cleanup. Each subscriber has a
+/// mailbox that folds the changes it hasn't taken yet into one, so a slow subscriber still sees
+/// every effect and none is dropped.
 actor LibraryChangeHub {
     private let pipeline: MediaPipeline
-    private let scope: String
+    /// The account's bus, where the screens hear of each change. Nil where no screen listens.
+    private let bus: LibraryBus?
     private var mailboxes: [UUID: LibraryChangeMailbox] = [:]
     private var isOpen = true
 
-    init(pipeline: MediaPipeline, scope: String) {
+    init(pipeline: MediaPipeline, bus: LibraryBus? = nil) {
         self.pipeline = pipeline
-        self.scope = scope
+        self.bus = bus
     }
 
     func publish(_ change: LibraryChange, accessChanged: Bool) async {
         guard isOpen, !change.isEmpty else { return }
         await pipeline.apply(change)
         guard isOpen else { return }
-        await LegacyNotificationBridge.libraryChanged(change, scope: scope, accessChanged: accessChanged)
+        bus?.post(.changed(change, accessChanged: accessChanged))
         for mailbox in mailboxes.values { mailbox.put(change) }
     }
 

@@ -87,3 +87,31 @@ enum FeedMutationApplier {
         if refreshes, result.changedPhotos { await feed.refreshAfterMutation() }
     }
 }
+
+/// What the library's feed does with each event on the account's bus (REBUILD_ROADMAP.md N4). A
+/// sync's change applies in place: what it removed leaves at once, search results included, and
+/// only the months it touched are read again; a search with text is not read again. A mutation's
+/// result applies in place (FeedMutationApplier). An album deleted or left while the feed shows it
+/// clears the filter; a rename names the filter anew; a partner change reads the feed again. A
+/// cleared browsing cache reads the months again. The sync's change and the cleared cache are
+/// handled on their own, as the notifications they replace were, so a slow read never holds up
+/// the next event.
+enum FeedEventApplier {
+    /// Returns whether the filter cleared, which takes the search text with it.
+    @MainActor @discardableResult
+    static func apply(_ event: LibraryEvent, to store: LibraryFeedStore, refreshes: Bool) async -> Bool {
+        switch event {
+        case .changed(let change, _):
+            Task { await store.apply(change) }
+            return false
+        case .mutation(let mutation):
+            await FeedMutationApplier.apply(mutation, to: store, refreshes: refreshes)
+            return false
+        case .collection(let change):
+            return store.apply(change)
+        case .cachesCleared:
+            Task { await store.refreshAfterMutation() }
+            return false
+        }
+    }
+}

@@ -74,12 +74,11 @@ struct AlbumsView: View {
             ToolbarItem(placement: .topBarTrailing) { Button("Create album", systemImage: "plus") { creating = true }.requiresWriteAccess() }
         }
         .task { await load() }.refreshable { await load() }
-        .sheet(isPresented: $creating) { NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: nil) { album in albums.insert(album, at: 0) } } }
-        .sheet(item: $editing) { album in
-            NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: album, onSaved: { updated in
-                if let index = albums.firstIndex(where: { $0.id == updated.id }) { albums[index] = updated }
-            }, onDeleted: { albums.removeAll { $0.id == album.id } }) }
-        }
+        // An album made, changed, deleted or left anywhere, this screen's editors included, shows
+        // here at once (N4).
+        .onCollectionChange { change in albums = CollectionsStore.applying([change], to: albums) }
+        .sheet(isPresented: $creating) { NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: nil) } }
+        .sheet(item: $editing) { album in NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: album) } }
         .alert("Couldn’t load albums", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
@@ -101,13 +100,15 @@ struct AlbumsView: View {
     }
 }
 
+/// Makes an album, or shows and changes one: its name, description and order, its photos, members,
+/// links and activity. Every change goes through the account's collections, which every list
+/// showing the album applies (N4).
 struct AlbumEditor: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let album: Album?
-    let onSaved: (Album) -> Void
-    var onDeleted: () -> Void = { }
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.collectionsService) private var collections
     @State private var name = ""
     @State private var detail = ""
     @State private var order = "desc"
@@ -140,7 +141,7 @@ struct AlbumEditor: View {
                 Section {
                     LabeledContent("Photos and videos", value: album.assetCount.formatted())
                     if let dates = albumDateRange(album) { LabeledContent("Dates", value: dates) }
-                    NavigationLink("Members") { AlbumMembersView(api: api, album: album, onLeft: { onDeleted(); dismiss() }) }
+                    NavigationLink("Members") { AlbumMembersView(api: api, album: album, onLeft: { dismiss() }) }
                     NavigationLink("Comments and likes") { AlbumActivityView(api: api, albumID: album.id) }
                 }
                 if isOwner {
@@ -162,7 +163,7 @@ struct AlbumEditor: View {
         .task {
             guard !initialized else { return }
             initialized = true; name = album?.albumName ?? ""; detail = album?.description ?? ""; order = album?.order ?? "desc"
-            if let album { do { latest = try await api.album(id: album.id) } catch { failure = .init(error) } }
+            if album != nil { await refreshAlbum() }
         }
         .confirmationDialog("Delete this album?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete album", role: .destructive) { Task { await delete() } }.requiresWriteAccess()
@@ -172,30 +173,39 @@ struct AlbumEditor: View {
         } message: { Text(failure?.message ?? "") }
     }
     private func save() async {
+        guard let collections else { failure = .init(APIError.signedOut); return }
         busy = true; defer { busy = false }
-        struct Body: Encodable, Sendable { let albumName: String; let description: String; let order: String? }
+        let albumName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            let body = Body(albumName: name.trimmingCharacters(in: .whitespacesAndNewlines), description: detail, order: album == nil ? nil : order)
-            let updated: Album = try await api.request(album == nil ? .post : .patch, path: album.map { "albums/\($0.id)" } ?? "albums", body: body)
-            onSaved(updated); dismiss()
+            if let album { _ = try await collections.updateAlbum(album.id, name: albumName, description: detail, order: order) }
+            else { _ = try await collections.createAlbum(name: albumName, description: detail) }
+            dismiss()
         } catch { failure = .init(error) }
     }
-    private func didUpdate(_ updated: Album) { latest = updated; onSaved(updated) }
+    /// The album as its photos' screen left it. The lists hear of it from the account's collections.
+    private func didUpdate(_ updated: Album) { latest = updated }
+    /// The album read again, here and in every list showing it.
     private func refreshAlbum() async {
         guard let album else { return }
-        do { didUpdate(try await api.album(id: album.id)) } catch is CancellationError { } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { latest = try await collections.refreshAlbum(album.id) } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func delete() async {
         guard let album else { return }
+        guard let collections else { failure = .init(APIError.signedOut); return }
         busy = true; defer { busy = false }
-        do { try await api.deleteAlbum(id: album.id); onDeleted(); dismiss() } catch { failure = .init(error) }
+        do { try await collections.deleteAlbum(album.id); dismiss() } catch { failure = .init(error) }
     }
 }
 
+/// An album's members, their roles and its shared links, with leaving a shared album. Every change
+/// goes through the account's collections (N4).
 struct AlbumMembersView: View {
     let api: APIClient
     let album: Album
+    /// The account left the album; the screen that showed this one closes it.
     let onLeft: () -> Void
+    @Environment(\.collectionsService) private var collections
     @State private var confirmLeave = false
     @State private var members: [AlbumUser] = []
     @State private var users: [User] = []
@@ -253,7 +263,7 @@ struct AlbumMembersView: View {
             // An album from a list can arrive without its members.
             if members.isEmpty { try? await refresh() }
             await loadLinks()
-            if owner { do { users = try await api.request(.get, path: "users") } catch { failure = .init(error) } }
+            if owner, let collections { do { users = try await collections.users() } catch { failure = .init(error) } }
         }
         .sheet(item: $editingLink) { link in
             NavigationStack { SharedLinkEditor(api: api, album: link.album, link: link, onSaved: { Task { await loadLinks() } }) }
@@ -265,32 +275,40 @@ struct AlbumMembersView: View {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
     }
+    /// Leaving takes the album off the shelves, the albums list and the feed it filters, through
+    /// the account's collections; then the screen that showed this one closes it.
     private func leave() async {
-        guard let userID = api.userID, !owner else { return }
+        guard !owner else { return }
+        guard let collections else { failure = .init(APIError.signedOut); return }
         busy = true; defer { busy = false }
-        do { try await api.requestVoid(.delete, path: "albums/\(album.id)/user/\(userID)"); onLeft() }
+        do { try await collections.leaveAlbum(album.id); onLeft() }
         catch { failure = .init(error) }
     }
-    private func refresh() async throws { members = try await api.album(id: album.id).albumUsers ?? [] }
+    private func refresh() async throws {
+        guard let collections else { throw APIError.signedOut }
+        members = try await collections.refreshAlbum(album.id).albumUsers ?? []
+    }
     /// The members part still works when the links cannot load, so a failure only leaves them out.
-    private func loadLinks() async { links = (try? await api.sharedLinks(albumID: album.id)) ?? links }
+    private func loadLinks() async { links = (try? await collections?.sharedLinks(albumID: album.id)) ?? links }
     private func removeLink(_ link: SharedLink) async {
-        do { try await api.deleteSharedLink(id: link.id); links.removeAll { $0.id == link.id }; removingLink = nil }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { try await collections.deleteLink(link.id); links.removeAll { $0.id == link.id }; removingLink = nil }
         catch { failure = .init(error) }
     }
     private func update(_ member: AlbumUser, role: String) async {
-        busy = true; defer { busy = false }
-        do { try await api.requestVoid(.put, path: "albums/\(album.id)/user/\(member.user.id)", body: ["role": role]); try await refresh() } catch { failure = .init(error) }
+        await changeMembers { try await $0.setRole(role, of: member.user.id, in: album.id) }
     }
     private func remove(_ member: AlbumUser) async {
-        busy = true; defer { busy = false }
-        do { try await api.requestVoid(.delete, path: "albums/\(album.id)/user/\(member.user.id)"); try await refresh() } catch { failure = .init(error) }
+        await changeMembers { try await $0.removeMember(member.user.id, from: album.id) }
     }
     private func add(_ user: User, role: String) async {
-        struct Member: Encodable, Sendable { let userId: String; let role: String }
-        struct Body: Encodable, Sendable { let albumUsers: [Member] }
+        await changeMembers { try await $0.addMembers([user.id], role: role, to: album.id) }
+    }
+    /// A change to the members, which come back with the album as the server then has it.
+    private func changeMembers(_ change: (CollectionsService) async throws -> Album) async {
+        guard let collections else { failure = .init(APIError.signedOut); return }
         busy = true; defer { busy = false }
-        do { try await api.requestVoid(.put, path: "albums/\(album.id)/users", body: Body(albumUsers: [.init(userId: user.id, role: role)])); try await refresh() } catch { failure = .init(error) }
+        do { members = try await change(collections).albumUsers ?? [] } catch { failure = .init(error) }
     }
 }
 

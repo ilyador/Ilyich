@@ -47,6 +47,7 @@ struct MemoriesView: View {
     /// player goes through the library's navigator, which closes the player and this screen first.
     let onPlay: (MemoryPlayback) -> Void
     var initialID: String? = nil
+    @Environment(\.collectionsService) private var collections
     @State private var openedInitial = false
     @State private var memories: [Memory] = []
     @State private var savedOnly = false
@@ -82,25 +83,32 @@ struct MemoriesView: View {
     }
     private func load() async {
         loading = true; defer { loading = false }
+        guard let collections else { failure = .init(APIError.signedOut); return }
         do {
             if let initialID, !openedInitial {
-                let memory: Memory = try await api.request(.get, path: "memories/\(initialID)")
+                let memory = try await collections.memory(initialID)
                 try Task.checkCancellation()
                 memories = [memory]; openedInitial = true
                 onPlay(MemoryPlayback(memories: [memory], initialID: memory.id))
-            } else if savedOnly {
-                memories = try await api.request(.get, path: "memories", query: [.init(name: "isSaved", value: "true")])
-            } else { memories = try await api.memories() }
+            } else {
+                let loaded = try await collections.memories(savedOnly: savedOnly)
+                try Task.checkCancellation()
+                memories = loaded
+            }
         } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func toggleSaved(_ memory: Memory) async {
-        do { try await api.requestVoid(.put, path: "memories/\(memory.id)", body: ["isSaved": !memory.isSaved]); await load() } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { try await collections.setMemorySaved(memory.id, !memory.isSaved); await load() } catch { failure = .init(error) }
     }
 }
 
+/// Who shares their library with the account and whom it shares its own with. Every change goes
+/// through the account's collections (N4), and the feed reads itself again.
 struct PartnersView: View {
     let api: APIClient
     let onFilter: (LibraryQuery, String) -> Void
+    @Environment(\.collectionsService) private var collections
     @State private var incoming: [Partner] = []
     @State private var outgoing: [Partner] = []
     @State private var candidates: [User] = []
@@ -142,21 +150,23 @@ struct PartnersView: View {
     }
     private func load() async {
         defer { loading = false }
+        guard let collections else { failure = .init(APIError.signedOut); return }
         do {
-            async let received = api.partners(direction: "shared-with")
-            async let sent = api.partners(direction: "shared-by")
-            async let users: [User] = api.request(.get, path: "users")
-            (incoming, outgoing, candidates) = try await (received, sent, users)
+            let lists = try await collections.partners()
+            (incoming, outgoing, candidates) = (lists.incoming, lists.outgoing, lists.candidates)
         } catch { failure = .init(error) }
     }
     private func setTimeline(_ partner: Partner, value: Bool) async {
-        do { try await api.requestVoid(.put, path: "partners/\(partner.id)", body: ["inTimeline": value]); await load() } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { try await collections.showPartnerInTimeline(partner.id, value); await load() } catch { failure = .init(error) }
     }
     private func share(_ user: User) async {
-        do { try await api.requestVoid(.post, path: "partners", body: ["sharedWithId": user.id]); pendingShare = nil; await load() } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { try await collections.sharePartner(with: user.id); pendingShare = nil; await load() } catch { failure = .init(error) }
     }
     private func remove(_ partner: Partner) async {
-        do { try await api.requestVoid(.delete, path: "partners/\(partner.id)"); pendingRemoval = nil; await load() } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { try await collections.removePartner(partner.id); pendingRemoval = nil; await load() } catch { failure = .init(error) }
     }
 }
 

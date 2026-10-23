@@ -41,6 +41,16 @@ final class AccountRuntime: Sendable {
     /// The account's changes to its library on the server (REBUILD_ROADMAP.md N2), followed by a
     /// sync pass when the offline library syncs. Shut down first at teardown.
     let mutations: LibraryMutationService
+    /// The account's albums, members, links, people, partners, memories and album activity on the
+    /// server (REBUILD_ROADMAP.md N4). Shut down right after the mutations.
+    let collections: CollectionsService
+    /// The account's name, password, Locked Folder PIN and profile photo on the server (the
+    /// critic's correction to N4). Shut down with the collections.
+    let settings: AccountSettingsService
+    /// Where the screens hear of everything that happens to the account's library: its sync's
+    /// changes, its mutations' results, its collections' changes and a cleared cache, in one
+    /// order (REBUILD_ROADMAP.md N4). Closed first at teardown.
+    let bus: LibraryBus
     private let device: any AccountDevice
     private let presence: AppPresence
     private let usesDevicePhotos: Bool
@@ -79,8 +89,9 @@ final class AccountRuntime: Sendable {
 
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
-                 cleanup: CleanupService, deviceIndex: DeviceIndexService?, mutations: LibraryMutationService, device: any AccountDevice,
-                 presence: AppPresence, cutover: TransferCutoverState, backupContainer: URL?, usesDevicePhotos: Bool) {
+                 cleanup: CleanupService, deviceIndex: DeviceIndexService?, mutations: LibraryMutationService, collections: CollectionsService,
+                 settings: AccountSettingsService, bus: LibraryBus, device: any AccountDevice, presence: AppPresence,
+                 cutover: TransferCutoverState, backupContainer: URL?, usesDevicePhotos: Bool) {
         self.id = id
         self.credential = credential
         self.authorization = authorization
@@ -95,6 +106,9 @@ final class AccountRuntime: Sendable {
         self.cleanup = cleanup
         self.deviceIndex = deviceIndex
         self.mutations = mutations
+        self.collections = collections
+        self.settings = settings
+        self.bus = bus
         self.device = device
         self.presence = presence
         self.cutover = cutover
@@ -121,6 +135,7 @@ final class AccountRuntime: Sendable {
         let pipeline = MediaPipeline(client: api, protocolClasses: environment.mediaProtocolClasses,
                                      device: environment.usesDevicePhotos ? DeviceThumbnailSource(imaging: PhotoKitAdapter.thumbnails) : nil)
         let work = OwnedWork()
+        let bus = LibraryBus()
         let check = SessionCheck(api: api, work: work, enabled: environment.validatesSession) { error in await expired(id, error) }
         var library: LibraryServices?
         var libraryError: String?
@@ -134,8 +149,10 @@ final class AccountRuntime: Sendable {
                 let device = dependencies.device
                 // Only the boards the screens observe are made on the main actor.
                 let (status, board) = await MainActor.run { (SyncStatusBoard(), CoverageBoard()) }
+                // The sync's changes reach media first, then the screens on the account's bus.
                 let sync = SyncEngine(client: api, entities: entities, native: native, pipeline: pipeline,
-                                      presence: presence, check: check, authorization: authorization, device: device, status: status)
+                                      presence: presence, check: check, authorization: authorization, device: device, status: status,
+                                      hub: LibraryChangeHub(pipeline: pipeline, bus: bus))
                 let coverage = CoverageWorker(index: entities, store: pipeline.thumbnails, scheduler: pipeline.scheduler,
                                               conditions: CoverageConditions(followingSystemWithAppActive: presence.isForeground), board: board,
                                               changes: { await sync.changes() }, authorization: authorization)
@@ -167,12 +184,14 @@ final class AccountRuntime: Sendable {
         // A mutation's follow-up is a pass of the account's sync, which publishes its change like any.
         var followUp: (@Sendable () async throws -> LibraryChange?)?
         if let sync = library?.sync { followUp = { try await sync.refresh() } }
-        let mutations = LibraryMutationService(client: api, pipeline: pipeline, authorization: authorization, refresh: followUp)
+        let mutations = LibraryMutationService(client: api, pipeline: pipeline, authorization: authorization, refresh: followUp, bus: bus)
+        let collections = CollectionsService(client: api, authorization: authorization, bus: bus)
+        let settings = AccountSettingsService(client: api, authorization: authorization)
         return AccountRuntime(id: id, credential: credential, authorization: authorization, api: api, pipeline: pipeline,
                               library: library, libraryError: libraryError, transfers: transfers, check: check, work: work,
-                              cleanup: cleanup, deviceIndex: deviceIndex, mutations: mutations, device: dependencies.device,
-                              presence: presence, cutover: cutover, backupContainer: environment.backupContainer,
-                              usesDevicePhotos: environment.usesDevicePhotos)
+                              cleanup: cleanup, deviceIndex: deviceIndex, mutations: mutations, collections: collections,
+                              settings: settings, bus: bus, device: dependencies.device, presence: presence, cutover: cutover,
+                              backupContainer: environment.backupContainer, usesDevicePhotos: environment.usesDevicePhotos)
     }
 
     /// Starts the account's work once the screens show it: coverage, which waits for the offline
@@ -190,13 +209,18 @@ final class AccountRuntime: Sendable {
         check.validate()
     }
 
-    /// Cancels the account's work and waits for it to end: library mutations still running,
-    /// cleanup, coverage, sync and its live stream, the session check, read-only changes still on
-    /// their way, the import, which rolls back, and the transfer engine with everything beside it,
-    /// which gives its leases back. Then the transfers database closes. It stays on disk, whatever
-    /// the reason for ending, and so do the staged copies (the owner's decision).
+    /// Cancels the account's work and waits for it to end. The bus closes first, so nothing the
+    /// account's work does from here on reaches a screen. Then library mutations, collection and
+    /// settings changes still running, cleanup, coverage, sync and its live stream, the session
+    /// check, read-only changes still on their way, the import, which rolls back, and the transfer
+    /// engine with everything beside it, which gives its leases back. Then the transfers database
+    /// closes. It stays on disk, whatever the reason for ending, and so do the staged copies (the
+    /// owner's decision).
     func cancelAndJoin() async {
+        bus.close()
         await mutations.shutdown()
+        await collections.shutdown()
+        await settings.shutdown()
         await cleanup.shutdown()
         await deviceIndex?.shutdown()
         if let library {
@@ -307,6 +331,13 @@ final class AccountRuntime: Sendable {
     func compareBackupRecords() async {
         guard let transfers, case .engine = await prepareTransfers(), let report = await transfers.importer.run(comparing: true) else { return }
         await device.recordTransferImport(report)
+    }
+
+    /// Clears the account's downloaded previews, and tells the screens, whose feed reads its
+    /// months again.
+    func clearBrowsingCache() async {
+        await pipeline.removeAll()
+        bus.post(.cachesCleared)
     }
 
     /// Empties the offline library: entities, acknowledgements and metadata. The file stays.

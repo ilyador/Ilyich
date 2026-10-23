@@ -37,7 +37,9 @@ final class ContractsTests: XCTestCase {
         change.removed = ["back"]
         change.accessLost = ["locked"]
         change.albums = ["album-1"]
-        change.collections = [.albumCreated("album-1")]
+        let made = Album(id: "album-1", albumName: "Coast", assetCount: 2, shared: false, albumUsers: nil, startDate: nil, endDate: nil,
+                         updatedAt: nil, order: nil)
+        change.collections = [.albumCreated(made)]
         var later = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1), indexRevision: 11,
                                   origin: .mutation(OperationID()))
         later.upserted = ["moved": .init(from: april, to: march), "back": .init(from: nil, to: april), "locked": .init(from: nil, to: april)]
@@ -56,7 +58,7 @@ final class ContractsTests: XCTestCase {
         XCTAssertEqual(change.accessLost, ["locked"], "Lost access is never forgotten.")
         XCTAssertEqual(change.mediaRevisions, ["moved": "r2"])
         XCTAssertEqual(change.albums, ["album-1", "album-2"])
-        XCTAssertEqual(change.collections, [.albumCreated("album-1"), .albumDeleted("album-2")])
+        XCTAssertEqual(change.collections, [.albumCreated(made), .albumDeleted("album-2")])
         XCTAssertTrue(change.partnersChanged)
         XCTAssertFalse(change.reset)
 

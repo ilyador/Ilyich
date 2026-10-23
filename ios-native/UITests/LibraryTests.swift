@@ -8,6 +8,8 @@ final class LibraryTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-testing", "--ui-testing-library", "-appearance", appearance]
             + (shelvesStayOpen ? ["--ui-testing-shelves-stay-open"] : []) + extraArguments
+        // A run can try a fixture change on a server of its own (TEST_RUNNER_ILYICH_FIXTURE_PORT).
+        if let port = ProcessInfo.processInfo.environment["ILYICH_FIXTURE_PORT"] { app.launchArguments += ["--ui-testing-fixture-port", port] }
         app.launch()
         XCTAssertTrue(app.collectionViews["library.grid"].waitForExistence(timeout: 15))
         return app
@@ -521,6 +523,73 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Sharing"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Harbor for family"].waitForExistence(timeout: 5), "An album shared only by link shows its link.")
         capture(app, "Album — shared by link")
+    }
+    /// Leaving an album someone else shared with you, from Sharing over its feed, closes Sharing,
+    /// clears the filter back to the library and takes the album off the shelves (N4).
+    @MainActor func testLeavingASharedAlbumClosesSharingAndClearsTheFilter() throws {
+        let app = launch(extraArguments: ["--ui-testing-mutable-library"])
+        openShelves(app); app.buttons["Albums"].tap()
+        let lagoon = app.buttons["Lagoon"]
+        guard lagoon.waitForExistence(timeout: 10) else {
+            throw XCTSkip("Needs the N4 UI fixture, whose mutable sessions have an album shared with the fixture's user: restart scripts/ui-fixture-server.py.")
+        }
+        lagoon.tap()
+        XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "Tapping an album puts the shelves away.")
+        let tag = app.otherElements["library.filterShelf"]
+        XCTAssertTrue(tag.staticTexts["Lagoon"].waitForExistence(timeout: 5), "The feed shows the album.")
+        let share = app.buttons["library.shareAlbum"]
+        XCTAssertTrue(share.waitForExistence(timeout: 5)); share.tap()
+        app.buttons["Share with people"].tap()
+        let sharing = app.navigationBars["Sharing"]
+        XCTAssertTrue(sharing.waitForExistence(timeout: 5))
+        let leave = app.buttons["Leave album"]
+        XCTAssertTrue(leave.waitForExistence(timeout: 10), "A member who doesn't own the album can leave it.")
+        capture(app, "Sharing — an album shared with you")
+        leave.tap()
+        XCTAssertTrue(app.staticTexts["Leave this shared album?"].waitForExistence(timeout: 5), "Leaving asks first.")
+        let confirmations = app.buttons.matching(NSPredicate(format: "label == %@", "Leave album"))
+        let asked = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count >= 2"), object: confirmations)
+        if XCTWaiter.wait(for: [asked], timeout: 5) != .completed { capture(app, "Leave question") }
+        // The question's own button follows the list's.
+        confirmations.element(boundBy: confirmations.count - 1).tap()
+
+        XCTAssertTrue(sharing.waitForNonExistence(timeout: 10), "Leaving closes Sharing.")
+        XCTAssertTrue(tag.waitForNonExistence(timeout: 5), "The filter clears back to the library.")
+        XCTAssertTrue(app.textFields["library.search"].waitForExistence(timeout: 5))
+        capture(app, "Library — after leaving a shared album")
+        openShelves(app); app.buttons["Albums"].tap()
+        XCTAssertTrue(app.buttons["Coast"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Lagoon"].exists, "The album left goes from the shelves.")
+    }
+    /// An album renamed in Manage albums shows its new name on the Albums shelf at once (N4).
+    @MainActor func testRenamingAnAlbumShowsOnTheShelfAtOnce() throws {
+        let app = launch(extraArguments: ["--ui-testing-mutable-library"])
+        openShelves(app); app.buttons["Albums"].tap()
+        guard app.buttons["Lagoon"].waitForExistence(timeout: 10) else {
+            throw XCTSkip("Needs the N4 UI fixture, which answers an album's details in mutable sessions: restart scripts/ui-fixture-server.py.")
+        }
+        app.buttons["Manage albums"].tap()
+        XCTAssertTrue(app.navigationBars["Albums"].waitForExistence(timeout: 5))
+        let coast = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Coast")).firstMatch
+        XCTAssertTrue(coast.waitForExistence(timeout: 10))
+        coast.press(forDuration: 1.0)
+        let details = app.buttons["Album details"]
+        XCTAssertTrue(details.waitForExistence(timeout: 5), "An album's menu offers its details.")
+        details.tap()
+        let name = app.textFields["Name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap()
+        name.typeText(" at dusk")
+        app.navigationBars["Album details"].buttons["Save"].tap()
+        XCTAssertTrue(app.navigationBars["Album details"].waitForNonExistence(timeout: 10), "Saving closes the details.")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Coast at dusk")).firstMatch.waitForExistence(timeout: 5),
+                      "The albums list shows the new name.")
+        app.navigationBars["Albums"].buttons["Done"].tap()
+        XCTAssertTrue(app.navigationBars["Albums"].waitForNonExistence(timeout: 5))
+        openShelves(app); app.buttons["Albums"].tap()
+        XCTAssertTrue(app.buttons["Coast at dusk"].waitForExistence(timeout: 5), "The shelf shows the new name at once.")
+        XCTAssertFalse(app.buttons["Coast"].exists)
+        capture(app, "Shelf — an album renamed")
     }
     @MainActor func testScrubbingBackUpTheRailReturnsToTheNewestMonth() {
         let app = launch()

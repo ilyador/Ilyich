@@ -47,7 +47,8 @@ struct PeopleView: View {
         .task(id: query) { await pager.start(query: query, debounce: query.isEmpty ? .zero : .milliseconds(250), keepingPeople: true) }
         .refreshable { await pager.start(query: query, keepingPeople: true) }
         .sheet(item: $editing) { person in
-            NavigationStack { PersonEditor(api: api, person: person) { updated in pager.replace(updated) } }
+            // The shelves and the feed hear of the change from the account's collections.
+            NavigationStack { PersonEditor(person: person) { updated in pager.replace(updated) } }
         }
         .alert("Couldn’t load people", isPresented: Binding(get: { pager.failure != nil }, set: { if !$0 { pager.dismissFailure() } })) {
             Button("Retry") { Task { await pager.loadMore() } }; Button("Cancel", role: .cancel) { }
@@ -55,11 +56,12 @@ struct PeopleView: View {
     }
 }
 
+/// A person's name and birthday, saved through the account's collections (N4).
 private struct PersonEditor: View {
-    let api: APIClient
     let person: Person
     let onSaved: (Person) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.collectionsService) private var collections
     @State private var name = ""
     @State private var hasBirthday = false
     @State private var birthday = Date()
@@ -87,20 +89,10 @@ private struct PersonEditor: View {
         } message: { Text(failure?.message ?? "") }
     }
     private func save() async {
-        struct Update: Encodable, Sendable {
-            let name: String
-            let birthDate: String?
-            enum CodingKeys: String, CodingKey { case name, birthDate }
-            func encode(to encoder: Encoder) throws {
-                var values = encoder.container(keyedBy: CodingKeys.self)
-                try values.encode(name, forKey: .name)
-                if let birthDate { try values.encode(birthDate, forKey: .birthDate) }
-                else { try values.encodeNil(forKey: .birthDate) }
-            }
-        }
+        guard let collections else { failure = .init(APIError.signedOut); return }
         saving = true; defer { saving = false }
         do {
-            let updated: Person = try await api.request(.put, path: "people/\(person.id)", body: Update(name: name, birthDate: hasBirthday ? PersonBirthday.encode(birthday) : nil))
+            let updated = try await collections.updatePerson(person.id, name: name, birthDate: hasBirthday ? PersonBirthday.encode(birthday) : nil)
             onSaved(updated); dismiss()
         } catch { failure = .init(error) }
     }

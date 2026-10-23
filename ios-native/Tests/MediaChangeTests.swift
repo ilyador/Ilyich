@@ -255,7 +255,7 @@ import XCTest
     /// A subscriber that falls behind gets the changes it missed folded into one, never dropped.
     func testASlowSubscriberSeesEveryChange() async throws {
         let (api, pipeline) = try makePipeline()
-        let hub = LibraryChangeHub(pipeline: pipeline, scope: api.cacheScope)
+        let hub = LibraryChangeHub(pipeline: pipeline)
         let stream = await hub.subscribe()
         let account = AccountID(server: api.baseURL, userID: "media")
         for id in ["a", "b", "c"] {

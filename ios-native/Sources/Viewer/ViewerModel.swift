@@ -104,7 +104,8 @@ enum ViewerConfirmation: Hashable {
     /// The library's navigator, for its own viewer only.
     @ObservationIgnored private weak var navigator: LibraryNavigator?
     @ObservationIgnored private var mutations: LibraryMutationService?
-    @ObservationIgnored private let follower = MutationFollower()
+    /// The account's bus: the mutations' results and the sync's changes reach the viewer here.
+    @ObservationIgnored private let follower = LibraryFollower()
     @ObservationIgnored private var closeViewer: () -> Void = {}
     @ObservationIgnored private var started = false
     /// The pages are moving under a finger or an animation.
@@ -177,14 +178,26 @@ enum ViewerConfirmation: Hashable {
 
     // MARK: Following the source and the account
 
-    /// Starts following the source and the account's mutations, once. `close` closes the viewer.
-    func start(mutations: LibraryMutationService?, close: @escaping () -> Void) {
+    /// Starts following the source and the account's bus, once: the bus the mutations publish on
+    /// unless another is given. `close` closes the viewer.
+    func start(mutations: LibraryMutationService?, bus: LibraryBus? = nil, close: @escaping () -> Void) {
         closeViewer = close
         self.mutations = mutations
-        follower.follow(mutations, applying: { [weak self] result in self?.apply(result) })
+        follower.follow(bus ?? mutations?.bus) { [weak self] event in self?.libraryEvent(event) }
         guard !started else { return }
         started = true
         sourceChanged()
+    }
+
+    /// The account's library changed: a change the account made, here or on any screen, shows its
+    /// new records at once, and the photo on screen is read again after each change its sync
+    /// publishes.
+    private func libraryEvent(_ event: LibraryEvent) {
+        switch event {
+        case .mutation(.applied(let result)): apply(result)
+        case .changed(_, let accessChanged): libraryChanged(accessChanged: accessChanged)
+        case .mutation(.followedUp), .collection, .cachesCleared: break
+        }
     }
 
     /// The source changed, or is first watched: its window around the photo on screen shows,

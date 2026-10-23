@@ -9,6 +9,7 @@ struct AlbumAssetsManager: View {
     let onSaved: (Album) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.mutations) private var mutations
+    @Environment(\.collectionsService) private var collections
     @State private var assets: [Asset] = []
     @State private var buckets: [TimeBucket] = []
     @State private var nextBucket = 0
@@ -75,8 +76,10 @@ struct AlbumAssetsManager: View {
             Button("OK", role: .cancel) { }
         } message: { Text(failure?.message ?? "") }
     }
+    /// After an upload into the album: the album read again, here and in every list showing it.
     private func refreshAlbum() async {
-        do { onSaved(try await api.album(id: album.id)) } catch is CancellationError { } catch { failure = .init(error) }
+        guard let collections else { failure = .init(APIError.signedOut); return }
+        do { onSaved(try await collections.refreshAlbum(album.id)) } catch is CancellationError { } catch { failure = .init(error) }
     }
     private func select(_ id: String) {
         if mode == .cover { selection = selection.contains(id) ? [] : [id] }
@@ -105,7 +108,7 @@ struct AlbumAssetsManager: View {
         } catch is CancellationError { } catch { if generation == token { failure = .init(error) } }
     }
     /// The album's photos change through the account's mutations, whose sync reconciles the
-    /// album's feed and shelf.
+    /// album's feed; the account's collections read the album again for the shelves and lists.
     private func save() async {
         guard !selection.isEmpty, !busy else { return }
         guard let mutations else { failure = .init(APIError.signedOut); return }

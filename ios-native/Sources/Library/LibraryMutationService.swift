@@ -50,9 +50,9 @@ enum MutationError: LocalizedError, Equatable {
 /// request and gets a handle; the work belongs to the service, so it ends the same whether the
 /// screen waits, closes or is gone. Each request is refused in read-only mode and for photos the
 /// account may not change that way, makes one HTTP call, reads what a bulk call says of each
-/// photo, invalidates exactly the media the change makes stale, publishes the result, and then
-/// asks the account's sync for a pass and publishes the result again with that pass's change
-/// merged in. AccountRuntime owns it and shuts it down first at sign-out.
+/// photo, invalidates exactly the media the change makes stale, publishes the result on the
+/// account's bus (N4), and then asks the account's sync for a pass and publishes the result again
+/// with that pass's change merged in. AccountRuntime owns it and shuts it down first at sign-out.
 actor LibraryMutationService {
     /// How a saved edit's new preview is waited for: the server renders it after the edit is saved.
     struct EditPolling: Sendable {
@@ -64,18 +64,21 @@ actor LibraryMutationService {
     /// does, so a feed reads its months again itself only when none follows.
     nonisolated let followsUp: Bool
 
+    /// Where the results go: the account's bus, which every screen showing photos follows.
+    nonisolated let bus: LibraryBus
     private let client: APIClient
     private let pipeline: MediaPipeline?
     private let authorization: AuthorizationState?
     private let refresh: (@Sendable () async throws -> LibraryChange?)?
     private let polling: EditPolling
+    /// The service made its bus, so it closes it when it ends; the account closes its own.
+    private let ownsBus: Bool
     private nonisolated let state = Mutex(State())
 
     private struct State {
         var open = true
         /// Every mutation until its follow-up has been published.
         var running: [UUID: Running] = [:]
-        var subscribers: [UUID: AsyncStream<MutationEvent>.Continuation] = [:]
     }
 
     private struct Running {
@@ -85,14 +88,17 @@ actor LibraryMutationService {
 
     /// `refresh` runs a sync pass that starts after it is called and returns what it changed: the
     /// account's SyncEngine, or nil where nothing syncs. `authorization` says whether read-only
-    /// mode is on; without it, the client's account flag does.
+    /// mode is on; without it, the client's account flag does. `bus` is the account's; without
+    /// one the service publishes on a bus of its own, which ends with it.
     init(client: APIClient, pipeline: MediaPipeline?, authorization: AuthorizationState?,
-         refresh: (@Sendable () async throws -> LibraryChange?)?, polling: EditPolling = EditPolling()) {
+         refresh: (@Sendable () async throws -> LibraryChange?)?, polling: EditPolling = EditPolling(), bus: LibraryBus? = nil) {
         self.client = client
         self.pipeline = pipeline
         self.authorization = authorization
         self.refresh = refresh
         self.polling = polling
+        self.bus = bus ?? LibraryBus()
+        ownsBus = bus == nil
         followsUp = refresh != nil
     }
 
@@ -117,39 +123,33 @@ actor LibraryMutationService {
         return MutationHandle(operation: operation, request: request, answer: answer)
     }
 
-    /// Every result from now on, until the account closes, in the order the service publishes
-    /// them: each mutation's `applied` comes before its `followedUp`.
+    /// Every result from now on, until the bus closes, in the order the service publishes them:
+    /// each mutation's `applied` comes before its `followedUp`. The bus's other events are left
+    /// out.
     nonisolated func events() -> AsyncStream<MutationEvent> {
-        let (stream, continuation) = AsyncStream.makeStream(of: MutationEvent.self)
-        let id = UUID()
-        continuation.onTermination = { [weak self] _ in self?.unsubscribe(id) }
-        let subscribed = state.withLock { state -> Bool in
-            guard state.open else { return false }
-            state.subscribers[id] = continuation
-            return true
+        bus.subscribe { event in
+            if case .mutation(let mutation) = event { mutation } else { nil }
         }
-        if !subscribed { continuation.finish() }
-        return stream
     }
 
     /// Sign-out: nothing begun here changes anything any more. Mutations still running are
-    /// cancelled and waited for, and every subscriber's stream ends.
+    /// cancelled and waited for. A bus the service made ends with it, and every stream on it.
     func shutdown() async {
-        let (running, subscribers) = state.withLock { state -> ([Running], [AsyncStream<MutationEvent>.Continuation]) in
+        let running = state.withLock { state -> [Running] in
             state.open = false
-            defer { state.running = [:]; state.subscribers = [:] }
-            return (Array(state.running.values), Array(state.subscribers.values))
+            defer { state.running = [:] }
+            return Array(state.running.values)
         }
         for work in running { work.answer.cancel(); work.followUp.cancel() }
         for work in running { await work.followUp.value }
-        for subscriber in subscribers { subscriber.finish() }
+        if ownsBus { bus.close() }
     }
 
     /// How many mutations are running, their follow-ups included.
     nonisolated var runningCount: Int { state.withLock { $0.running.count } }
 
-    /// How many streams `events()` handed out are still open: one for each screen following.
-    nonisolated var subscriberCount: Int { state.withLock { $0.subscribers.count } }
+    /// How many streams are open on the service's bus: one for each screen following.
+    nonisolated var subscriberCount: Int { bus.subscriberCount }
 
     // MARK: A mutation
 
@@ -313,18 +313,15 @@ actor LibraryMutationService {
         publish(.followedUp(result))
     }
 
-    // MARK: Subscribers
+    // MARK: Publishing
 
-    /// Every subscriber hears every event in one order: they are handed over under the lock.
+    /// Every subscriber hears every event in one order. Under the lock, so nothing is published
+    /// once shutdown has begun.
     private nonisolated func publish(_ event: MutationEvent) {
         state.withLock { state in
             guard state.open else { return }
-            for subscriber in state.subscribers.values { subscriber.yield(event) }
+            bus.post(.mutation(event))
         }
-    }
-
-    private nonisolated func unsubscribe(_ id: UUID) {
-        _ = state.withLock { $0.subscribers.removeValue(forKey: id) }
     }
 }
 
