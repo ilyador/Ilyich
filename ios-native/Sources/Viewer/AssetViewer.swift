@@ -95,9 +95,13 @@ struct AssetViewer: View {
 
     private func matchedLocalCopy(for asset: Asset) -> LocalPhoto? { changedLocalCopies.contains(asset.id) ? nil : matchedLocalPhotos[asset.id] }
 
+    /// The bars, the strip, the video pill and the Live badge, put away while the viewer closes.
+    private var chromeShown: Bool { controls && !(transition?.dismissing ?? false) }
+
     private var canvas: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Under the zoom presenter the black is the presenter's, so it fades as the viewer closes.
+            if transition == nil { Color.black.ignoresSafeArea() }
             pager
             pageChrome
             if let progress = exports.progress, let request = exports.request {
@@ -110,9 +114,10 @@ struct AssetViewer: View {
             } else if working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
         }
         // The badge and the pill stay where the bars put them while the bars slide away.
-        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in if controls { chromeInsets = insets } }
+        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in if chromeShown { chromeInsets = insets } }
+        .containerBackground(transition == nil ? Color.black : Color.clear, for: .navigation)
         .toolbar { viewerToolbar }
-        .toolbarVisibility(controls ? .visible : .hidden, for: .navigationBar, .bottomBar)
+        .toolbarVisibility(chromeShown ? .visible : .hidden, for: .navigationBar, .bottomBar)
         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
         .navigationBarTitleDisplayMode(.inline)
         // Monochrome glyphs, as in Photos, whatever the app's accent.
@@ -447,19 +452,19 @@ struct AssetViewer: View {
     /// bottom bar a video's playback pill over the thumbnail strip.
     private var pageChrome: some View {
         VStack(spacing: 0) {
-            if current.livePhotoVideoId != nil {
+            if current.livePhotoVideoId != nil, !(transition?.dismissing ?? false) {
                 liveBadge.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.top, 6)
             }
             Spacer(minLength: 0)
             VStack(spacing: 12) {
                 if current.isVideo {
-                    ViewerVideoControls(playback: playback, visible: controls)
+                    ViewerVideoControls(playback: playback, visible: chromeShown)
                         .frame(maxWidth: 520).padding(.horizontal, 24)
                 }
                 if assets.count > 1 {
                     // The strip keeps its room while hidden, so nothing above it moves.
                     ZStack {
-                        if controls {
+                        if chromeShown {
                             ViewerFilmstrip(pipeline: pipeline, assets: assets, replacements: replacements, selectedID: selectedID,
                                             onSelect: jumpFromStrip, onScrubbingChange: { stripScrubbing = $0 })
                                 .transition(.opacity)
