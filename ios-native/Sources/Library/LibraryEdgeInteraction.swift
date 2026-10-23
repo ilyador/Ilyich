@@ -653,9 +653,12 @@ struct LibraryShelfGeometry {
     var top: CGFloat
     let maximumWidth: CGFloat
     let restingWidth: CGFloat
+    /// The height of the screen the shelves span, for the scroll areas measured from its edges.
+    let height: CGFloat
 
     init(count: Int, size: CGSize, topInset: CGFloat, bottomInset: CGFloat, top: CGFloat? = nil, rowStep: CGFloat? = nil) {
         self.count = count
+        height = size.height
         let available = max(44, size.height - topInset - bottomInset)
         step = rowStep ?? min(60, max(44, available / CGFloat(max(1, count))))
         minCenter = topInset + 28
@@ -791,11 +794,16 @@ struct LibraryShelfGeometry {
     static let holdZoneStart: CGFloat = 0.38
     /// A held row lets go once the finger is this many rows from its center.
     static let holdReach: CGFloat = 1.0
-    /// A long list scrolls only while the finger stays near the band's top or bottom: from 0.8 of
-    /// a row inside its end (the owner's setting, 60% more than the half row before), reaching full
-    /// speed two rows further out.
-    static let scrollZoneInset: CGFloat = 0.8
+    /// A long list scrolls only while the finger stays near the band's top or bottom: from half a
+    /// row inside its end, reaching full speed two rows further out.
+    static let scrollZoneInset: CGFloat = 0.5
     static let scrollZoneLength: CGFloat = 2
+    /// The owner's setting: the area at the top and the bottom of the screen where a long list
+    /// scrolls, from the screen's edge to where scrolling starts, is 60% larger than that zone.
+    /// The added part scrolls at the zone's starting speed, so nowhere scrolls faster than before.
+    static let scrollAreaGrowth: CGFloat = 1.6
+    /// The depth that stands for the added area: the zone's starting speed.
+    static let startingDepth: CGFloat = 0.001
     /// Rows per second where scrolling starts and at full speed, so rows pass the finger at the
     /// same pace whatever their height.
     static let scrollRates: ClosedRange<CGFloat> = 1.5...28
@@ -804,10 +812,16 @@ struct LibraryShelfGeometry {
 
     var indices: Range<Int> { 0..<count }
 
-    /// How far into the top and bottom scroll zones `y` is: 0 outside them, 1 at full speed.
+    /// How far into the top and bottom scroll zones `y` is: 0 outside them, 1 at full speed. In
+    /// the added area outside a zone, the depth of the zone's starting speed.
     func scrollDepth(fingerY y: CGFloat) -> (top: CGFloat, bottom: CGFloat) {
         let inset = Self.scrollZoneInset * step, length = Self.scrollZoneLength * step
-        return (max(0, (minCenter + inset - y) / length), max(0, (y - (maxCenter - inset)) / length))
+        let topStart = minCenter + inset, bottomStart = maxCenter - inset
+        let top = (topStart - y) / length, bottom = (y - bottomStart) / length
+        let inTopArea = y < topStart * Self.scrollAreaGrowth
+        let inBottomArea = y > height - (height - bottomStart) * Self.scrollAreaGrowth
+        return (top > 0 ? top : (inTopArea ? Self.startingDepth : 0),
+                bottom > 0 ? bottom : (inBottomArea ? Self.startingDepth : 0))
     }
 
     /// The list's speed with the finger at `y`, in points per second: down near the band's top, up

@@ -204,8 +204,10 @@ final class LibraryEdgeInteractionTests: XCTestCase {
 
     func testALongListScrollsOnlyNearTheBandsEndsAndFasterFurtherOut() {
         let people = LibraryShelfGeometry(count: 147, size: phone, topInset: 56, bottomInset: 100, rowStep: 60)
-        let inset = LibraryShelfGeometry.scrollZoneInset
-        for y in stride(from: people.minCenter + people.step * inset, through: people.maxCenter - people.step * inset, by: 10) {
+        let inset = LibraryShelfGeometry.scrollZoneInset, growth = LibraryShelfGeometry.scrollAreaGrowth
+        let topArea = (people.minCenter + people.step * inset) * growth
+        let bottomArea = people.height - (people.height - (people.maxCenter - people.step * inset)) * growth
+        for y in stride(from: topArea + 1, through: bottomArea - 1, by: 10) {
             XCTAssertEqual(people.scrollVelocity(fingerY: y), 0, "Away from the ends the rows stand still.")
         }
         let shallow = people.scrollVelocity(fingerY: people.maxCenter)
@@ -224,6 +226,25 @@ final class LibraryEdgeInteractionTests: XCTestCase {
         let albums = LibraryShelfGeometry(count: 147, size: phone, topInset: 56, bottomInset: 100, rowStep: 44)
         XCTAssertEqual(albums.scrollVelocity(fingerY: albums.maxCenter + 44) / 44,
                        people.scrollVelocity(fingerY: people.maxCenter + 60) / 60, accuracy: 0.001)
+    }
+
+    /// The owner's setting: the areas at the top and bottom of the screen where a long list
+    /// scrolls are 60% larger, measured from the screen's edge. The added part scrolls at the
+    /// zone's starting speed, and nowhere scrolls faster than before.
+    func testTheScrollAreasAreLargerWithoutScrollingFaster() {
+        let people = LibraryShelfGeometry(count: 147, size: phone, topInset: 56, bottomInset: 100, rowStep: 60)
+        let inset = people.step * LibraryShelfGeometry.scrollZoneInset
+        let oldTop = people.minCenter + inset, oldBottom = people.maxCenter - inset
+        let starting = LibraryShelfGeometry.scrollRate(LibraryShelfGeometry.startingDepth) * people.step
+        let bottomArea = people.height - oldBottom
+        XCTAssertEqual(people.scrollVelocity(fingerY: people.height - bottomArea * 1.55), -starting, accuracy: 0.001,
+                       "The added area at the bottom scrolls at the starting speed.")
+        XCTAssertEqual(people.scrollVelocity(fingerY: people.height - bottomArea * 1.65), 0, "Past the larger area the rows stand still.")
+        XCTAssertEqual(people.scrollVelocity(fingerY: oldTop * 1.55), starting, accuracy: 0.001, "So does the added area at the top.")
+        XCTAssertEqual(people.scrollVelocity(fingerY: oldTop * 1.65), 0)
+        XCTAssertEqual(people.scrollVelocity(fingerY: oldBottom + people.step),
+                       -LibraryShelfGeometry.scrollRate(1 / LibraryShelfGeometry.scrollZoneLength) * people.step, accuracy: 0.001,
+                       "Inside the original zone the speed is what it was.")
     }
 
     @MainActor func testHoldingTheFingerNearTheBottomScrollsALongListUntilItMovesBack() async throws {
