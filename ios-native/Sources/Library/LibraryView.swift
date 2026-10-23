@@ -36,13 +36,22 @@ struct LibraryView: View {
     @State private var placesDrag: CGFloat = 0
     /// The name typed for an album made from the selection.
     @State private var albumName = ""
-    /// Where the filter tag sits at the top, which a chosen person or album rises into.
-    @State private var filterTagFrame: CGRect = .zero
-    /// The filter chosen during the current stroke. It applies at once; once the finger lifts, a
-    /// person or album rises into the filter tag.
+    /// Where each filter pill sits at the top (N6), by layer: a chosen row rises into its pill.
+    @State private var pillFrames: [String: CGRect] = [:]
+    /// The filter chosen during the current stroke. It applies at once; once the finger lifts, its
+    /// row rises into its pill.
     @State private var chosenThisStroke: String?
-    /// A row is rising into the tag, so the tag's content appears at once when it takes over.
-    @State private var tagHandoff = false
+    /// The pill a row is rising into: the other pills show as the shelves go, this one only once
+    /// the row hands over to it.
+    @State private var landingPill: String?
+    /// The pill a row last rose into, whose content appears at once when it takes over.
+    @State private var handedOffPill: String?
+    /// What narrows the shelves and the Earth under the filters stacked (N6).
+    @State private var narrowing: ShelfNarrowing
+    /// The narrowing the shelves show, and whether they offer Clear: taken as they open and as each
+    /// group opens, never while a level is under the finger, so no row moves beneath it.
+    @State private var shelfFacets: ShelfFacets?
+    @State private var shelfClearable = false
     /// A newer open or close makes a pending close stale.
     @State private var closeGeneration = 0
     @State private var selectionBusy = false
@@ -84,6 +93,7 @@ struct LibraryView: View {
         _collections = State(initialValue: CollectionsStore(api: api, people: PeopleDirectory(source: api),
                                                                order: ShelfOrder(scope: api.cacheScope), pipeline: pipeline))
         _model = State(initialValue: LibraryScreenModel(lookup: api, inbox: ShareInboxStore.shared))
+        _narrowing = State(initialValue: ShelfNarrowing(source: session.entities))
     }
 
     private var navigator: LibraryNavigator { model.navigator }
@@ -264,6 +274,7 @@ struct LibraryView: View {
             // The shelves follow the account's collections: changes apply in place, and a sync
             // change to what they show loads them again.
             collections.follow(bus)
+            narrowing.follow(bus)
             // A link closes whatever is open, then opens its photo, filter or screen.
             model.takeLinks(from: session) { [collections] in (collections.albums, collections.people) }
         }
@@ -281,6 +292,9 @@ struct LibraryView: View {
             for await snapshot in await index.snapshots() { store.updateDeviceTimeline(snapshot.timeline) }
         }
         .onChange(of: showPlaces) { _, shown in Haptics.earth(rising: shown) }
+        // The shelves and the Earth narrow to the filters stacked (N6).
+        .onChange(of: store.stack, initial: true) { _, stack in narrowing.show(stack) }
+        .onChange(of: showPlaces, initial: true) { _, shown in narrowing.earthShown(shown) }
         .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session, viewport: viewport, rail: rail) }
         // Everything presented has closed, so shared files that arrived meanwhile can show.
         .onChange(of: navigator.layers.isEmpty) { _, empty in if empty { model.refreshSharedFiles() } }
@@ -317,7 +331,7 @@ struct LibraryView: View {
     /// is an intent, which closes the viewer and then raises the Earth turned to it (N3).
     private func assetViewer(_ opened: ViewerRoute, transition: ViewerTransitionState, close: @escaping () -> Void) -> some View {
         let route = ViewerRoute(asset: opened.asset, source: opened.source,
-                                albumContext: opened.albumContext ?? store.feedQuery.predicates.albums.first)
+                                albumContext: opened.albumContext ?? filteredAlbumID)
         return AssetViewer(api: api, pipeline: pipeline, route: route, window: .feed(store), matchedLocalPhotos: store.matchingDevicePhotos,
                            navigator: navigator, transition: transition, onClose: close)
     }
@@ -379,19 +393,13 @@ struct LibraryView: View {
     private var topChips: some View {
         VStack(alignment: .leading, spacing: 10) {
             if store.isSelecting { selectionHeader }
-            if store.isFiltered {
-                HStack(spacing: 8) {
-                    filterTab
-                    clearFilterButton
-                    Spacer(minLength: 0)
+            if !pills.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    pillRow.frame(maxWidth: .infinity, alignment: .leading)
                     if let album = filteredAlbum { albumShareButton(album) }
                 }
-                // While the shelves are out the choice shows on them; the tag returns once they
-                // have closed, after a chosen row has risen into its place.
-                .opacity(shelves ? 0 : 1)
-                .allowsHitTesting(!shelves)
             }
-            if let albumID = store.feedQuery.predicates.albums.first {
+            if let albumID = filteredAlbumID {
                 AlbumUploadStatusView(albumID: albumID) { Task { await store.refreshAfterMutation() } }
             }
             // The store keeps a verification only for results a checked search returned.
@@ -401,57 +409,64 @@ struct LibraryView: View {
         }
     }
 
-    /// The active filter sits at the top as its own shelf. Dragging it brings back its shelves
-    /// with the current choice under the finger; tapping it opens them in place.
-    private var filterTab: some View {
-        let shape = UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0, bottomTrailingRadius: 25, topTrailingRadius: 25)
-        return HStack(spacing: 10) {
-            filterTabIcon.frame(width: 34, height: 34)
-            Text(store.filterTitle ?? store.query).font(.subheadline.weight(.semibold)).lineLimit(1)
-            if !store.query.isEmpty && !store.isSearching {
-                Text(store.totalCount.formatted()).font(.caption.monospacedDigit()).foregroundStyle(.cyan)
-                    .accessibilityLabel("\(store.totalCount.formatted()) matches")
+    /// The filters at the top, one pill per layer in the order chosen, then a search typed (N6).
+    private var pills: [FilterPill] {
+        FilterPill.pills(stack: store.stack, feedTitle: store.filterTitle, feedSymbol: feedSymbol, search: store.query,
+                         matches: store.isSearching ? nil : store.totalCount)
+    }
+
+    /// A feed that is no layer: a partner's, similar photos, More's filtered library.
+    private var feedSymbol: String {
+        if case .partner = store.feedQuery.scope { return "person.2" }
+        return "line.3.horizontal.decrease"
+    }
+
+    /// The pills wrap onto a second line rather than hide a layer. While the shelves are out they
+    /// are hidden, glass included; as a chosen row rises the others come back, and its own pill
+    /// shows once the row hands over to it. A small spinner follows them while the feed changes.
+    private var pillRow: some View {
+        FilterPillFlow(spacing: 8) {
+            ForEach(pills) { pill in
+                FilterPillView(pill: pill, hidden: shelves && (landingPill == nil || landingPill == pill.id),
+                               instant: reduceMotion || handedOffPill == pill.id, api: api, pipeline: pipeline,
+                               onRemove: { removePill(pill) },
+                               onOpen: { searchFocused = false; presentShelves(pill.shelf, at: CGPoint(x: 0, y: 34), anchorID: pill.id) },
+                               onDrag: { value in
+                                   if !shelves { searchFocused = false; presentShelves(pill.shelf, at: value.location, anchorID: pill.id) }
+                                   driveShelf(from: value.location, to: value.location)
+                               },
+                               onDragEnd: { releaseShelf(at: $0.location, velocity: $0.velocity) },
+                               onFrame: { pillFrames[pill.id] = $0 })
             }
-            if store.isReplacingFeed { ProgressView().controlSize(.small) }
+            if store.isReplacingFeed && !shelves {
+                ProgressView().controlSize(.small).frame(width: 28, height: FilterPillLabel.height)
+            }
         }
-        .modifier(TagContentFade(hidden: shelves, instant: tagHandoff || reduceMotion))
-        .padding(.leading, 16).padding(.trailing, 18).frame(minHeight: 50)
-        .glassEffect(tagGlass, in: shape)
-        .overlay(shape.strokeBorder(.cyan.opacity(0.85), lineWidth: 0.75))
-        // The glass itself, which a rising row matches exactly; the padding below pulls it to the edge.
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("library")) } action: { filterTagFrame = $0 }
-        .contentShape(shape)
-        .gesture(DragGesture(minimumDistance: 8, coordinateSpace: .named("library")).onChanged { value in
-            if !shelves { searchFocused = false; presentShelves(filterShelf, at: value.location) }
-            driveShelf(from: value.location, to: value.location)
-        }.onEnded { value in
-            releaseShelf(at: value.location, velocity: value.velocity)
-        })
-        .onTapGesture { searchFocused = false; presentShelves(filterShelf, at: CGPoint(x: 0, y: 34)) }
+        .animation(reduceMotion ? nil : .snappy(duration: 0.25), value: pills.map(\.id))
+        .onChange(of: pills.map(\.id)) { _, ids in
+            pillFrames = pillFrames.filter { ids.contains($0.key) }
+        }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("library.filterShelf")
-        .accessibilityAction(named: "Show shelves") { presentShelves(filterShelf, at: CGPoint(x: 0, y: 34)) }
-        .padding(.leading, -16)
-        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityIdentifier("library.filterPills")
     }
 
-    /// Clearing the filter is a round button of its own beside the tag.
-    private var clearFilterButton: some View {
-        Button { Haptics.itemChosen(); searchText = ""; store.clearFilters() } label: {
-            Image(systemName: "xmark").font(.body.weight(.semibold)).frame(width: 50, height: 50)
-                .modifier(TagContentFade(hidden: shelves, instant: reduceMotion))
+    /// A pill's X: a layer goes alone, the search typed ends and the layers stay, and a feed that
+    /// is no layer gives way to the library.
+    private func removePill(_ pill: FilterPill) {
+        Haptics.itemChosen()
+        switch pill.removal {
+        case .layer(let id): store.remove(id); if !store.isFiltered { searchText = "" }
+        case .search: searchText = ""; store.search("")
+        case .feed: searchText = ""; store.clearFilters()
         }
-        .glassEffect(tagGlass, in: .circle)
-        .accessibilityLabel("Clear filters")
     }
 
-    /// A glass view in the shared container, content included, ignores any opacity around it.
-    /// While the shelves are out the tag row therefore drops its glass and hides its content
-    /// inside it; otherwise the hidden tag and its buttons would still show.
+    /// A glass view in the shared container, content included, ignores any opacity around it, so
+    /// a hidden control drops its glass and hides its content inside it.
     private var tagGlass: Glass { shelves ? .identity : .clear.tint(.black.opacity(0.22)).interactive() }
 
-    /// The tag's content hides at once as the shelves come out, and fades in once they have gone.
-    /// After a row has risen into the tag it is there at once, as the row already showed it.
+    /// The share button's content hides at once as the shelves come out, and fades in once they
+    /// have gone.
     private struct TagContentFade: ViewModifier {
         let hidden: Bool
         let instant: Bool
@@ -461,8 +476,14 @@ struct LibraryView: View {
         }
     }
 
+    /// The album the feed shows when it is the one album among the filters.
+    private var filteredAlbumID: String? {
+        let albums = store.feedQuery.predicates.albums
+        return albums.count == 1 ? albums.first : nil
+    }
+
     private var filteredAlbum: Album? {
-        store.feedQuery.predicates.albums.first.flatMap { id in albums.first { $0.id == id } }
+        filteredAlbumID.flatMap { id in albums.first { $0.id == id } }
     }
 
     /// An album in the feed keeps its sharing at hand, across from its title.
@@ -475,28 +496,9 @@ struct LibraryView: View {
                 .modifier(TagContentFade(hidden: shelves, instant: reduceMotion))
         }
         .glassEffect(tagGlass, in: .circle)
+        .allowsHitTesting(!shelves)
         .accessibilityLabel("Share album")
         .accessibilityIdentifier("library.shareAlbum")
-    }
-
-    @ViewBuilder private var filterTabIcon: some View {
-        if let id = store.feedQuery.predicates.people.first, let person = people.first(where: { $0.id == id }) {
-            PersonThumbnail(pipeline: pipeline, person: person, pixelSize: PersonThumbnail.small)
-        } else if let id = store.feedQuery.predicates.albums.first, let assetID = albums.first(where: { $0.id == id })?.albumThumbnailAssetId {
-            FeatureThumbnail(api: api, pipeline: pipeline, assetID: assetID).clipShape(.circle)
-        } else {
-            let symbol = store.feedQuery.predicates.people.first != nil ? "person.crop.circle"
-                : store.feedQuery.predicates.albums.first != nil ? "rectangle.stack"
-                : !store.query.isEmpty ? "magnifyingglass"
-                : catalog.rows(.more).first(where: \.isSelected)?.symbol ?? "line.3.horizontal.decrease"
-            Image(systemName: symbol).font(.body.weight(.semibold))
-        }
-    }
-
-    private var filterShelf: ShelfLevel {
-        if store.feedQuery.predicates.people.first != nil { return .people }
-        if store.feedQuery.predicates.albums.first != nil { return .albums }
-        return catalog.rows(.more).contains(where: \.isSelected) ? .more : .root
     }
 
     private var searchBar: some View {
@@ -653,24 +655,29 @@ struct LibraryView: View {
     /// the server offers, and what the feed shows.
     private var catalog: ShelfCatalog {
         ShelfCatalog(features: features, people: orderedPeople, albums: orderedAlbums, selection: store.shelfSelection,
-                     sharedFiles: !shareInbox.batches.isEmpty)
+                     sharedFiles: !shareInbox.batches.isEmpty, clearable: shelfClearable, facets: shelfFacets)
     }
 
     private var shelfItems: [LibraryShelfItem] { catalog.rows(shelf) }
 
-    /// Runs a row as its action says. A group opens its shelf in place. A collection shows in the
-    /// feed at once and keeps the shelves open, so another can be tried without lifting; a tap
-    /// closes them now, and either way a person or an album then rises into the filter tag. Rows
-    /// that open a screen, the Earth or a question put the shelves away first.
+    /// Runs a row as its action says. A group opens its shelf in place. A collection joins the
+    /// filters shown at once and keeps the shelves open, so another can be stacked without lifting;
+    /// a tap closes them now, and either way the row then rises into its pill. Clear removes every
+    /// filter and lowers the Earth. Rows that open a screen, the Earth or a question put the
+    /// shelves away first.
     private func perform(_ item: LibraryShelfItem) {
         switch item.action {
         case .open(let group):
             openShelf(group)
         case .show(let collection):
             Haptics.itemChosen()
-            // The tag stays hidden until the finger lifts.
+            // The pill stays hidden until the finger lifts.
             store.show(collection); searchText = ""
             if edgeInteraction.isShelfDragging { chosenThisStroke = item.id } else { closeIntoTag(item.id) }
+        case .clear:
+            Haptics.itemChosen(); closeShelves(feedback: false)
+            searchText = ""; store.clearFilters()
+            if showPlaces { navigator.lowerEarth() }
         case .places:
             Haptics.itemChosen(); closeShelves(feedback: false)
             if showPlaces { navigator.lowerEarth() } else { openPlaces() }
@@ -735,15 +742,19 @@ struct LibraryView: View {
                              bottomInset: 100, rowStep: shelf == .root ? nil : 60)
     }
 
-    private func presentShelves(_ value: ShelfLevel, at point: CGPoint) {
+    /// `anchorID` names the row put under the finger, such as the pill's that brought them back.
+    private func presentShelves(_ value: ShelfLevel, at point: CGPoint, anchorID: String? = nil) {
         // People and albums that failed to load, say while the phone reconnected, load again.
         if store.started { collections.reloadIfFailed() }
         // Opening again stops a close still on its way.
         closeGeneration += 1
-        edgeInteraction.morphingID = nil; edgeInteraction.morphSize = nil
+        landingPill = nil
+        edgeInteraction.morphingID = nil; edgeInteraction.morphSize = nil; edgeInteraction.morphX = nil
         edgeInteraction.endStroke()
+        narrowing.shelvesOpened()
+        takeShelfNarrowing()
         shelf = value
-        placeShelf(at: point)
+        placeShelf(at: point, anchorID: anchorID)
         // A fan that is not on screen yet draws folded first; it unfolds once it appears.
         if shelves {
             withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.84)) { edgeInteraction.shelfReveal = 1 }
@@ -752,6 +763,13 @@ struct LibraryView: View {
         }
         shelves = true
         Haptics.menuOpened()
+    }
+
+    /// The shelves narrow to the filters stacked as they open and as each group opens, from the
+    /// counts in by then; a level under the finger never changes its rows.
+    private func takeShelfNarrowing() {
+        shelfFacets = narrowing.facets(for: store.stack)
+        shelfClearable = store.isFiltered
     }
 
     /// Puts the current choice, the shelf just left, or the first row under the finger.
@@ -778,8 +796,15 @@ struct LibraryView: View {
         if !edgeInteraction.isShelfDragging { chosenThisStroke = nil; edgeInteraction.beginStroke(at: start) }
         let items = shelfItems
         handleShelfEvent(edgeInteraction.moveStroke(to: point, in: shelfLayout(count: items.count), nested: shelf != .root,
-                                                    reorder: canReorder, selected: items.firstIndex(where: \.isSelected)),
+                                                    reorder: canReorder, selected: selectedRow(in: items)),
                          items: items, at: point)
+    }
+
+    /// The row already chosen, which never activates again. With several chosen (N6), the one
+    /// under the finger.
+    private func selectedRow(in items: [LibraryShelfItem]) -> Int? {
+        if let row = edgeInteraction.highlighted, items.indices.contains(row), items[row].isSelected { return row }
+        return items.firstIndex(where: \.isSelected)
     }
 
     private func handleShelfEvent(_ event: LibraryShelfEvent, items: [LibraryShelfItem], at point: CGPoint) {
@@ -811,9 +836,9 @@ struct LibraryView: View {
         }
     }
 
-    /// Lifting puts the shelves away, and a person or album chosen on the way rises into the
-    /// filter tag; over the reorder button it reorders instead. While reordering, lifting drops a
-    /// carried row or lets the list coast.
+    /// Lifting puts the shelves away, and a filter chosen on the way rises into its pill; over the
+    /// reorder button it reorders instead. While reordering, lifting drops a carried row or lets the
+    /// list coast.
     private func releaseShelf(at point: CGPoint, velocity: CGSize) {
         guard shelves else { return }
         if edgeInteraction.isRearranging {
@@ -830,11 +855,11 @@ struct LibraryView: View {
         }
         let items = shelfItems
         handleShelfEvent(edgeInteraction.moveStroke(to: point, in: shelfLayout(count: items.count), nested: shelf != .root,
-                                                    reorder: canReorder, selected: items.firstIndex(where: \.isSelected)),
+                                                    reorder: canReorder, selected: selectedRow(in: items)),
                          items: items, at: point)
         guard shelves else { return }
-        // Lifting the finger puts the shelves away, and a person or album chosen on the way rises
-        // into the filter tag; over the reorder button it reorders instead.
+        // Lifting the finger puts the shelves away, and a filter chosen on the way rises into its
+        // pill; over the reorder button it reorders instead.
         let reorder = canReorder && edgeInteraction.overReorder
         let folded = edgeInteraction.isCancelling
         let chosen = chosenThisStroke
@@ -850,7 +875,8 @@ struct LibraryView: View {
 
     private func placesPanel(height: CGFloat, bottomInset: CGFloat) -> some View {
         PlacesView(api: api, pipeline: pipeline, onSelect: selectPlace, focus: navigator.overlay.earthFocus, compact: true, bottomInset: bottomInset,
-                   closesPresentations: navigator.earthPresentationClosing, onPresentation: navigator.earthPresentationChanged)
+                   closesPresentations: navigator.earthPresentationClosing, onPresentation: navigator.earthPresentationChanged,
+                   narrowing: narrowing.earth)
             .frame(height: height)
             // Zoomed-in terrain fades out under the handle, so the handle always sits above the Earth's edge.
             .mask {
@@ -927,8 +953,9 @@ struct LibraryView: View {
             SearchOptionsView(api: api, mode: store.searchMode, filter: store.searchChoices.filter) { mode, filter in
                 store.applySearchOptions(mode: mode, filter: filter)
             }
-        case .people: PeopleView(api: api, pipeline: pipeline) { store.setPerson($0); navigator.dismiss(level: level); searchText = "" }
-        case .albums: AlbumsView(api: api, pipeline: pipeline) { store.setAlbum($0); navigator.dismiss(level: level); searchText = "" }
+        // Choosing from Manage people or Manage albums stacks the choice too (N6).
+        case .people: PeopleView(api: api, pipeline: pipeline) { store.show(.person($0)); navigator.dismiss(level: level); searchText = "" }
+        case .albums: AlbumsView(api: api, pipeline: pipeline) { store.show(.album($0)); navigator.dismiss(level: level); searchText = "" }
         case .settings(let route):
             if let destination = SettingsDestination(rawValue: route.rawValue) {
                 SettingsDestinationView(api: api, destination: destination, pipeline: pipeline, session: session)
@@ -937,13 +964,12 @@ struct LibraryView: View {
             }
         case .more:
             // A photo opened from More closes it first, then opens in the viewer.
+            // Its collections stack as the More shelf's do (N6); a partner's feed is no layer and
+            // replaces the filters.
             MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { navigator.send(.openAsset($0)) }, onFilter: { query, title in
-                store.setFeed(query, title: title); navigator.dismiss(level: level)
-            }, onPlayMemory: { navigator.present(.memoryPlayer($0), from: level + 1) }, onMetadataFilter: { filter, title in
-                store.setMetadataFilter(filter, title: title); searchText = ""; navigator.dismiss(level: level)
-            }, onDeveloped: { title in
-                store.setDeveloped(title: title); searchText = ""; navigator.dismiss(level: level)
-            })
+                if let collection = LibraryCollection.more(showing: query) { store.show(collection) } else { store.setFeed(query, title: title) }
+                searchText = ""; navigator.dismiss(level: level)
+            }, onPlayMemory: { navigator.present(.memoryPlayer($0), from: level + 1) })
         default:
             EmptyView()
         }
@@ -960,8 +986,9 @@ struct LibraryView: View {
         }
     }
 
+    /// A place chosen on the Earth joins the filters, taking the place of one already there (N6).
     private func selectPlace(_ place: PlaceCollection) {
-        store.setPlace(place.membership, title: place.title); searchText = ""
+        store.add(.place(place.membership, title: place.title)); searchText = ""
     }
 
     /// Hands the navigator what runs once everything over the library has closed: the timeline,
@@ -987,8 +1014,8 @@ struct LibraryView: View {
         searchFocused = false
         if shelves { closeShelves() } else { presentShelves(.root, at: CGPoint(x: 0, y: librarySize.height * 0.45)) }
     }
-    /// Closes once the tag has laid out a filter chosen by a tap, so a person or album can rise
-    /// into it.
+    /// Closes once the pills have laid out a filter chosen by a tap, so its row can rise into its
+    /// pill.
     private func closeIntoTag(_ id: String) {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(40))
@@ -996,9 +1023,10 @@ struct LibraryView: View {
         }
     }
 
-    /// The rows slide back into the edge, then the shelves go. A person or album chosen on the
-    /// way rises into the filter tag instead: the whole column scrolls up until that row sits
-    /// where the tag lives, while the other rows slide out completely.
+    /// The rows slide back into the edge, then the shelves go. A filter chosen on the way rises
+    /// into its pill instead (N6): the whole column scrolls up until that row is level with the
+    /// pill's place, the next one along the pills, while the other rows slide out completely and
+    /// the other pills come back; the row slides over into the place as it takes the pill's shape.
     private func closeShelves(feedback: Bool = true, into chosen: String? = nil) {
         guard shelves else { return }
         if feedback { Haptics.menuClosed() }
@@ -1007,25 +1035,30 @@ struct LibraryView: View {
         closeGeneration += 1
         let generation = closeGeneration
         let items = shelfItems
-        let rising = chosen.flatMap { id in (id.hasPrefix("person-") || id.hasPrefix("album-")) ? items.firstIndex { $0.id == id } : nil }
+        // Only a filter shown has a pill to rise into.
+        let target = chosen.flatMap { id in store.shelfSelection.rows.contains(id) ? pillFrames[id] : nil }
+        let rising = target == nil ? nil : chosen.flatMap { id in items.firstIndex { $0.id == id } }
         var layout = shelfLayout(count: items.count)
         layout.top = edgeInteraction.shelfTop
-        let morphing = rising != nil && filterTagFrame.height > 0
-        tagHandoff = morphing
+        let morphing = rising != nil && (target?.height ?? 0) > 0
+        if morphing { handedOffPill = chosen }
+        landingPill = morphing ? chosen : nil
         let finish = {
             guard generation == closeGeneration else { return }
-            // A row that rose into the tag already looks exactly like it, so the tag takes over
+            // A row that rose into its pill already looks exactly like it, so the pill takes over
             // in the same frame.
             withAnimation(reduceMotion || morphing ? nil : .easeOut(duration: 0.14)) { shelves = false; shelf = .root }
-            edgeInteraction.morphingID = nil; edgeInteraction.morphSize = nil
+            landingPill = nil
+            edgeInteraction.morphingID = nil; edgeInteraction.morphSize = nil; edgeInteraction.morphX = nil
         }
         // A rising row moves on a softer spring with a little give.
         let motion: Animation = morphing ? .spring(response: 0.5, dampingFraction: 0.8) : .spring(response: 0.3, dampingFraction: 0.9)
         withAnimation(reduceMotion ? nil : motion) {
-            if let rising, morphing {
+            if let rising, morphing, let target {
                 edgeInteraction.morphingID = items[rising].id
-                edgeInteraction.morphSize = filterTagFrame.size
-                edgeInteraction.shelfTop -= layout.center(rising) - filterTagFrame.midY
+                edgeInteraction.morphSize = target.size
+                edgeInteraction.morphX = target.minX
+                edgeInteraction.shelfTop -= layout.center(rising) - target.midY
             }
             edgeInteraction.shelfReveal = 0
         } completion: {
@@ -1090,6 +1123,7 @@ struct LibraryView: View {
         let y = finger?.y ?? groupRow.map { layout.center($0) } ?? edgeInteraction.shelfFinger?.y ?? librarySize.height * 0.45
         if value == .root { Haptics.menuClosed() } else { Haptics.menuOpened() }
         animate {
+            takeShelfNarrowing()
             shelf = value
             placeShelf(at: CGPoint(x: finger?.x ?? 0, y: y), anchorID: value == .root ? left.rowID : nil)
         }

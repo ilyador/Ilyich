@@ -4,11 +4,11 @@ struct MoreCollectionsView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
+    /// Shows a feed: one of More's collections, which the library stacks with its other filters
+    /// (REBUILD_ROADMAP.md N6), or a partner's.
     let onFilter: (LibraryQuery, String) -> Void
     /// Plays memories over More.
     let onPlayMemory: (MemoryPlayback) -> Void
-    let onMetadataFilter: (SearchFilter, String) -> Void
-    let onDeveloped: (String) -> Void
     var body: some View {
         List {
             Section("On your device") {
@@ -19,9 +19,9 @@ struct MoreCollectionsView: View {
                 Button { onFilter(.recentlyTaken, "Recently taken") } label: { Label("Recently taken", systemImage: "camera") }
                 Button { onFilter(.recentlyAdded, "Recently added") } label: { Label("Recently added", systemImage: "clock.badge.checkmark") }
                 Button { onFilter(.favorites, "Favorites") } label: { Label("Favorites", systemImage: "heart") }
-                Button { onMetadataFilter(SearchFilter(type: StringFilter(eq: "VIDEO"), visibility: StringFilter(eq: "timeline")), "Videos") } label: { Label("Videos", systemImage: "video") }
-                Button { onMetadataFilter(SearchFilter(isMotion: BoolFilter(eq: true), visibility: StringFilter(eq: "timeline")), "Motion") } label: { Label("Motion", systemImage: "livephoto") }
-                Button { onDeveloped("Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
+                Button { onFilter(.videos, "Videos") } label: { Label("Videos", systemImage: "video") }
+                Button { onFilter(.motion, "Motion") } label: { Label("Motion", systemImage: "livephoto") }
+                Button { onFilter(.lightroom, "Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
                 NavigationLink { MemoriesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset, onPlay: onPlayMemory) } label: { Label("On this day", systemImage: "clock.arrow.circlepath") }
             }
             Section("Shared") {

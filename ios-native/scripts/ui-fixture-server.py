@@ -55,7 +55,38 @@ def asset(index, date='2026-12-01'):
                 'city': 'Amsterdam', 'country': 'Netherlands', 'latitude': 52.3676, 'longitude': 4.9041,
                 'make': 'Test', 'model': 'Fixture camera', 'description': 'Synthetic UI test image',
                 'fileSizeInByte': 100000, 'iso': 100, 'fNumber': 4, 'focalLength': 35,
-            }, 'people': [PERSON]}
+            # Maya is in every photo but the clip, so a place holding both narrows by person (N6).
+            }, 'people': [] if video else [PERSON]}
+
+# The photos the map knows. Amsterdam holds a photo and the clip, so a place then a person shows
+# their intersection (REBUILD_ROADMAP.md N6).
+MARKERS = [{'id': asset(i)['id'], 'lat': lat, 'lon': lon, 'city': city, 'country': country}
+           for i, (lat, lon, city, country) in [(0, (52.3676, 4.9041, 'Amsterdam', 'Netherlands')), (1, (38.7223, -9.1393, 'Lisbon', 'Portugal')),
+                                               (2, (64.1466, -21.9426, 'Reykjavik', 'Iceland')), (3, (35.6762, 139.6503, 'Tokyo', 'Japan')),
+                                               (5, (52.3702, 4.8952, 'Amsterdam', 'Netherlands'))]]
+
+def listed_photos(body):
+    # A search naming its photos, as a place's feed is found before the offline library is readable
+    # (REBUILD_ROADMAP.md N6): exactly the photos named that match the filter's people, kind and
+    # favorites, newest first. None for any other search, which keeps the answer below.
+    search = body.get('filter') or {}
+    if isinstance(search.get('id'), dict) and search['id'].get('eq'): ids = [search['id']['eq']]
+    elif isinstance(search.get('or'), list): ids = [(alternative.get('id') or {}).get('eq') for alternative in search['or'] if isinstance(alternative, dict)]
+    else: return None
+    people = set((search.get('personIds') or {}).get('all') or [])
+    kind = (search.get('type') or {}).get('eq')
+    favorite = (search.get('isFavorite') or {}).get('eq')
+    found = []
+    for identifier in ids:
+        location = asset_locations().get(identifier)
+        if location is None: continue
+        value = asset(location[1], location[0])
+        if not people <= {person['id'] for person in value['people']}: continue
+        if kind is not None and value['type'] != kind: continue
+        if favorite is not None and value['isFavorite'] != favorite: continue
+        found.append(value)
+    found.sort(key=lambda value: (value['localDateTime'], value['id']), reverse=True)
+    return {'assets': {'items': found, 'count': len(found), 'nextCursor': None}}
 
 def iso(value):
     return value.astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
@@ -369,7 +400,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/users/me':return self.send({'id':OWNER,'name':'Test library','email':'fixture@example.test'})
         if path=='/users/me/preferences':return self.send({'memories':{'enabled':True,'duration':5},'people':{'enabled':True,'sidebarWeb':False}})
         if path=='/memories':return self.send(memories())
-        if path=='/map/markers':return self.send([{'id':asset(i)['id'],'lat':lat,'lon':lon,'city':city,'country':country} for i,(lat,lon,city,country) in enumerate([(52.3676,4.9041,'Amsterdam','Netherlands'),(38.7223,-9.1393,'Lisbon','Portugal'),(64.1466,-21.9426,'Reykjavik','Iceland'),(35.6762,139.6503,'Tokyo','Japan')])])
+        if path=='/map/markers':return self.send(MARKERS)
         if path=='/server/features':return self.send({k:True for k in ['passwordLogin','smartSearch','ocr','facialRecognition','map','trash','sidecar','realtimeTranscoding']}|{'oauth':False})
         if path=='/server/version':return self.send({'major':3,'minor':3,'patch':3})
         if path=='/assets/statistics':return self.send({'images':24000,'videos':0,'total':24000})
@@ -479,9 +510,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/auth/logout':return self.send({'successful':True,'redirectUri':'/auth/login?autoLaunch=0'})
         if path.startswith('/search/'):
             if 'unavailable' in body.get('query',''):return self.send({'error':'Fixture unavailable'},503)
+            listed=listed_photos(body) if path=='/search/metadata' else None
+            if listed is not None:return self.send(listed)
             cursor=body.get('cursor');items=[] if cursor is None else [asset(i) for i in range(9)]
             return self.send({'assets':{'items':items,'count':len(items),'nextCursor':'verified-page-2' if cursor is None else None},'verification':{'status':'complete','checked':10,'rejected':10-len(items)}})
         return self.send({})
 
 if __name__=='__main__':
-    FixtureHTTPServer(('127.0.0.1',18091),Handler).serve_forever()
+    # A port of its own, for trying a fixture change beside the shared server (--ui-testing-fixture-port).
+    import sys
+    FixtureHTTPServer(('127.0.0.1',int(sys.argv[1]) if len(sys.argv)>1 else 18091),Handler).serve_forever()

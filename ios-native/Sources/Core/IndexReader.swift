@@ -140,6 +140,38 @@ actor IndexReader {
         }
     }
 
+    // MARK: Facets (N6)
+
+    /// How many of a feed's photos each person and each album holds, for the shelves under a stack
+    /// of filters. A person or an album with none of them is left out.
+    func facets(_ filter: IndexFeedRequest) throws -> ShelfFacets {
+        let (whereSQL, arguments) = feedPredicate(filter)
+        var facets = ShelfFacets()
+        for row in try database.query("""
+        SELECT m.person_id,count(DISTINCT m.asset_id) FROM person_member m JOIN asset_index i ON i.id=m.asset_id
+        WHERE \(whereSQL) GROUP BY m.person_id
+        """, arguments) {
+            if let id = row[0], let count = row[1].flatMap(Int.init), count > 0 { facets.people[id] = count }
+        }
+        for row in try database.query("""
+        SELECT m.album_id,count(DISTINCT m.asset_id) FROM album_member m JOIN asset_index i ON i.id=m.asset_id
+        WHERE \(whereSQL) GROUP BY m.album_id
+        """, arguments) {
+            if let id = row[0], let count = row[1].flatMap(Int.init), count > 0 { facets.albums[id] = count }
+        }
+        return facets
+    }
+
+    /// Every photo of a feed, by ID, which the Earth keeps of its places under a stack of filters.
+    func feedIDs(_ filter: IndexFeedRequest) throws -> Set<String> {
+        let (whereSQL, arguments) = feedPredicate(filter)
+        var ids = Set<String>()
+        for row in try database.query("SELECT i.id FROM asset_index i WHERE \(whereSQL)", arguments) {
+            if let id = row[0] { ids.insert(id) }
+        }
+        return ids
+    }
+
     /// The month places kept for one feed by MonthPlacesService, or nil when none are (F5).
     func monthPlaces(forKey key: String) throws -> [MonthPlaceCount]? {
         let rows = try database.query("SELECT bucket,city,country,count FROM month_places WHERE query_key=? ORDER BY rowid", [key])
@@ -423,7 +455,9 @@ actor IndexReader {
         return asset
     }
     /// A feed's conditions on asset_index `i`. Membership comes from album_member and
-    /// person_member, each read once rather than per photo.
+    /// person_member, each read once rather than per photo; several albums or people are each a
+    /// condition, so a photo must be in all of them (N6). A kind and motion are on the photo's own
+    /// record, looked up by its key for the rows the other conditions keep.
     private func feedPredicate(_ filter: IndexFeedRequest) -> (String, [String?]) {
         var conditions = ["i.visibility!='locked'"]
         var values: [String?] = []
@@ -432,26 +466,36 @@ actor IndexReader {
         conditions.append("i.trashed=\(filter.trashed ? 1 : 0)")
         if let favorite = filter.favorite { conditions.append("i.favorite=CAST(? AS INTEGER)"); values.append(favorite ? "1" : "0") }
         if let developed = filter.developed { conditions.append("i.developed=CAST(? AS INTEGER)"); values.append(developed ? "1" : "0") }
-        if let album = filter.albumID {
+        for album in filter.albumIDs {
             conditions.append("i.id IN (SELECT asset_id FROM album_member WHERE album_id=?)"); values.append(album)
         }
-        if let person = filter.personID {
+        for person in filter.personIDs {
             conditions.append("i.id IN (SELECT asset_id FROM person_member WHERE person_id=?)"); values.append(person)
+        }
+        if let kind = filter.kind {
+            conditions.append("EXISTS(SELECT 1 FROM entities k WHERE k.kind='asset' AND k.id=i.id AND json_extract(k.payload,'$.type')=?)")
+            values.append(kind)
+        }
+        if let motion = filter.motion {
+            conditions.append("EXISTS(SELECT 1 FROM entities k WHERE k.kind='asset' AND k.id=i.id AND json_extract(k.payload,'$.livePhotoVideoId') IS \(motion ? "NOT " : "")NULL)")
         }
         if let place = filter.placeAssetIDs {
             // One parameter however many photos the place holds. They came from this account's
-            // own map, so they need no owner check.
+            // own map, so a place alone needs no owner check; stacked with the library's other
+            // filters it keeps to the library's photos as they do (N6).
             conditions.append("i.id IN (SELECT value FROM json_each(?))")
             values.append(String(decoding: (try? JSONEncoder().encode(place)) ?? Data("[]".utf8), as: UTF8.self))
         }
-        if (filter.albumID == nil && filter.placeAssetIDs == nil) || filter.ownerID != nil {
+        if (filter.albumIDs.isEmpty && !filter.placeAlone) || filter.ownerID != nil {
             var owners = ["i.owner_id=?"]
             values.append(filter.ownerID ?? userID)
             if filter.withPartners {
-                owners.append("i.owner_id IN (SELECT json_extract(p.payload,'$.sharedById') FROM entities p WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedWithId')=?\(filter.personID == nil ? " AND json_extract(p.payload,'$.inTimeline')=1" : ""))")
+                owners.append("i.owner_id IN (SELECT json_extract(p.payload,'$.sharedById') FROM entities p WHERE p.kind='partner' AND json_extract(p.payload,'$.sharedWithId')=?\(filter.personIDs.isEmpty ? " AND json_extract(p.payload,'$.inTimeline')=1" : ""))")
                 values.append(userID)
             }
-            if filter.personID != nil {
+            // A person in the library takes the albums shared with the account too, as the server's
+            // person timeline does; an owner named keeps to that owner's photos.
+            if !filter.personIDs.isEmpty, filter.ownerID == nil {
                 owners.append("i.id IN (SELECT m.asset_id FROM album_member m WHERE m.album_id IN (SELECT json_extract(u.payload,'$.albumId') FROM entities u WHERE u.kind='albumUser' AND json_extract(u.payload,'$.userId')=?))")
                 values.append(userID)
             }

@@ -2,6 +2,8 @@ import XCTest
 import UIKit
 
 final class LibraryTests: XCTestCase {
+    /// The fixture's Maya, as her filter pill is named (N6).
+    private static let mayaPill = "library.pill.person-00000000-0000-4000-8000-000000000002"
     /// Lifting the finger closes the shelves; most tests keep them out so they can tap rows.
     @MainActor private func launch(appearance: String = "light", extraArguments: [String] = [], shelvesStayOpen: Bool = true) -> XCUIApplication {
         continueAfterFailure = false
@@ -504,7 +506,7 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "Tapping an album puts the shelves away.")
         let share = app.buttons["library.shareAlbum"]
         XCTAssertTrue(share.waitForExistence(timeout: 5), "An album in the feed has a share button.")
-        let title = app.otherElements["library.filterShelf"].staticTexts["Coast"]
+        let title = app.otherElements["library.filterPills"].staticTexts["Coast"]
         XCTAssertGreaterThan(share.frame.midX, app.frame.width * 0.75, "Share sits at the top right, across from the album title.")
         XCTAssertEqual(share.frame.midY, title.frame.midY, accuracy: 14)
         share.tap()
@@ -535,7 +537,7 @@ final class LibraryTests: XCTestCase {
         }
         lagoon.tap()
         XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "Tapping an album puts the shelves away.")
-        let tag = app.otherElements["library.filterShelf"]
+        let tag = app.otherElements["library.filterPills"]
         XCTAssertTrue(tag.staticTexts["Lagoon"].waitForExistence(timeout: 5), "The feed shows the album.")
         let share = app.buttons["library.shareAlbum"]
         XCTAssertTrue(share.waitForExistence(timeout: 5)); share.tap()
@@ -662,10 +664,11 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.staticTexts["Visually checked"].waitForExistence(timeout: 5))
         let firstMatch = app.collectionViews["library.grid"].cells.element(boundBy: 0)
-        XCTAssertGreaterThanOrEqual(firstMatch.frame.minY, app.buttons["Clear filters"].frame.maxY,
+        // N6: the search typed is a pill of its own, its X ending it.
+        XCTAssertGreaterThanOrEqual(firstMatch.frame.minY, app.buttons["library.pill.search.remove"].frame.maxY,
                                     "The first result must start below the header, not under its blur.")
         capture(app, "Search — verified continuation")
-        app.buttons["Clear filters"].tap()
+        app.buttons["library.pill.search.remove"].tap()
         XCTAssertTrue(app.staticTexts["December 2026"].waitForExistence(timeout: 10))
     }
     /// F7: under the bar, the AI check and More; More's mode and filters show as chips that
@@ -763,15 +766,14 @@ final class LibraryTests: XCTestCase {
         requireHittable(maya, in: app)
         maya.tap()
         XCTAssertTrue(grid.exists)
-        let filterShelf = app.otherElements["library.filterShelf"]
+        let pills = app.otherElements["library.filterPills"]
         XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "Tapping a person puts the shelves away.")
-        XCTAssertTrue(filterShelf.waitForExistence(timeout: 10), "The chosen person should sit at the top as a shelf.")
-        XCTAssertTrue(app.buttons["Clear filters"].exists, "Clearing is its own round button beside the tag.")
-        filterShelf.staticTexts["Maya"].tap()
-        XCTAssertTrue(app.buttons["Manage people"].waitForExistence(timeout: 5), "The filter shelf brings back its people.")
+        XCTAssertTrue(app.buttons[Self.mayaPill + ".remove"].waitForExistence(timeout: 10), "The chosen person should sit at the top as a pill, with its own X.")
+        pills.staticTexts["Maya"].tap()
+        XCTAssertTrue(app.buttons["Manage people"].waitForExistence(timeout: 5), "The pill brings back its people.")
         XCTAssertTrue(app.buttons["Maya"].exists)
         tapBesideShelves(app)
-        let clearPeople = app.buttons["Clear filters"]
+        let clearPeople = app.buttons[Self.mayaPill + ".remove"]
         XCTAssertTrue(clearPeople.waitForExistence(timeout: 10))
         requireHittable(clearPeople, in: app)
         clearPeople.tap()
@@ -790,7 +792,8 @@ final class LibraryTests: XCTestCase {
         amsterdam.tap()
         XCTAssertTrue(grid.exists)
         XCTAssertTrue(earth.exists, "Choosing a location should filter the feed while keeping the globe open.")
-        let clearPlace = app.buttons["Clear filters"]
+        XCTAssertFalse(app.buttons[Self.mayaPill + ".remove"].exists, "The person's X removed the person.")
+        let clearPlace = app.buttons["library.pill.place.remove"]
         XCTAssertTrue(clearPlace.waitForExistence(timeout: 10))
         requireHittable(clearPlace, in: app)
         clearPlace.tap()
@@ -803,14 +806,126 @@ final class LibraryTests: XCTestCase {
         requireHittable(lightroom, in: app)
         lightroom.tap()
         XCTAssertTrue(grid.exists)
-        XCTAssertTrue(app.buttons["Clear filters"].waitForExistence(timeout: 10))
-        XCTAssertTrue(filterShelf.staticTexts["Lightroom"].exists)
+        XCTAssertTrue(app.buttons["library.pill.lightroom.remove"].waitForExistence(timeout: 10))
+        XCTAssertTrue(pills.staticTexts["Lightroom"].exists)
+        XCTAssertFalse(app.buttons["library.pill.place.remove"].exists, "The place's X removed the place.")
         XCTAssertTrue(app.descendants(matching: .any)["library.timeRail"].waitForExistence(timeout: 10),
                       "Lightroom is a timeline of every developed photo, with its rail, as a person is.")
         XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "Tapping a filter puts the shelves away.")
         XCTAssertEqual(app.collectionViews.matching(identifier: "library.grid").count, 1,
                        "Shelf filters must not open a second photo collection grid.")
     }
+    /// N6: a place then a person shows that person's photos in that place, and each pill's X
+    /// removes only its own layer.
+    @MainActor func testAPlaceThenAPersonShowsTheirIntersectionAndAPillRemovesOnlyItsLayer() throws {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 15))
+        openShelves(app); app.buttons["Places"].tap()
+        XCTAssertTrue(app.otherElements["Interactive Earth"].waitForExistence(timeout: 15))
+        let allLocations = app.buttons["All locations"]
+        requireHittable(allLocations, in: app); allLocations.tap()
+        let locations = app.descendants(matching: .any).matching(identifier: "places.list").firstMatch
+        let amsterdam = locations.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Amsterdam")).firstMatch
+        XCTAssertTrue(amsterdam.waitForExistence(timeout: 10))
+        guard amsterdam.label.contains("2 items") else {
+            throw XCTSkip("Needs the N6 UI fixture, whose Amsterdam holds a photo and a clip: restart scripts/ui-fixture-server.py.")
+        }
+        requireHittable(amsterdam, in: app); amsterdam.tap()
+        // A pill is found by its X, which spans its height at its trailing end.
+        let place = app.buttons["library.pill.place.remove"]
+        XCTAssertTrue(place.waitForExistence(timeout: 10), "The place sits at the top as a pill.")
+        XCTAssertTrue(waitForCells(grid, count: 2), "Amsterdam holds a photo and a clip.")
+        closeGlobe(app)
+
+        openShelves(app); app.buttons["People"].tap()
+        let maya = app.buttons["Maya"]
+        XCTAssertTrue(maya.waitForExistence(timeout: 10)); maya.tap()
+        let person = app.buttons[Self.mayaPill + ".remove"]
+        XCTAssertTrue(person.waitForExistence(timeout: 10), "The person joins the place as a second pill.")
+        XCTAssertTrue(place.exists, "Choosing a person keeps the place.")
+        XCTAssertTrue(waitForCells(grid, count: 1), "A place then a person shows only that person's photos there.")
+        XCTAssertEqual(person.frame.midY, place.frame.midY, accuracy: 2, "The pills share a line.")
+        XCTAssertGreaterThan(person.frame.minX, place.frame.maxX, "The person's pill follows the place's.")
+        capture(app, "Filters — a place then a person")
+
+        requireHittable(place, in: app); place.tap()
+        XCTAssertTrue(place.waitForNonExistence(timeout: 5), "The place's X removes only the place.")
+        XCTAssertTrue(person.exists, "The person stays.")
+        XCTAssertTrue(waitForCells(grid, atLeast: 8), "Maya's photos everywhere show again.")
+        requireHittable(person, in: app); person.tap()
+        XCTAssertTrue(person.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.otherElements["library.filterPills"].exists, "With no filter left there are no pills.")
+    }
+
+    /// N6: the Clear row at the top of the shelves, above People, removes every filter and lowers
+    /// the Earth.
+    @MainActor func testClearEmptiesTheFiltersAndLowersTheEarth() {
+        let app = launch()
+        openShelves(app)
+        XCTAssertFalse(app.buttons["Clear"].exists, "With no filter the shelves offer no Clear.")
+        app.buttons["More"].tap()
+        let favorites = app.buttons["Favorites"]
+        XCTAssertTrue(favorites.waitForExistence(timeout: 5)); favorites.tap()
+        XCTAssertTrue(app.buttons["library.pill.favorites.remove"].waitForExistence(timeout: 10))
+        openShelves(app); app.buttons["Places"].tap()
+        let earth = app.otherElements["Interactive Earth"]
+        XCTAssertTrue(earth.waitForExistence(timeout: 15))
+        let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch
+        XCTAssertTrue(amsterdam.waitForExistence(timeout: 10))
+        requireHittable(amsterdam, in: app); amsterdam.tap()
+        XCTAssertTrue(app.buttons["library.pill.place.remove"].waitForExistence(timeout: 10), "The place joins Favorites.")
+        XCTAssertTrue(app.buttons["library.pill.favorites.remove"].exists)
+        openShelves(app)
+        let clear = app.buttons["Clear"]
+        XCTAssertTrue(clear.waitForExistence(timeout: 5), "With filters the shelves start with Clear.")
+        XCTAssertLessThan(clear.frame.midY, app.buttons["People"].frame.midY, "Clear sits above People.")
+        capture(app, "Shelves — Clear above People")
+        clear.tap()
+        XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "Clear puts the shelves away.")
+        XCTAssertTrue(app.otherElements["library.filterPills"].waitForNonExistence(timeout: 5), "Clear removes every filter.")
+        XCTAssertTrue(earth.waitForNonExistence(timeout: 5), "Clear lowers the Earth.")
+        XCTAssertTrue(app.textFields["library.search"].waitForExistence(timeout: 5))
+    }
+
+    /// N6: a row chosen on the shelves rises into its pill, in the next place along the pills, and
+    /// becomes it. The rise itself is checked on a recording; here, where it lands.
+    @MainActor func testAChosenRowRisesIntoTheNextPill() {
+        let app = launch(appearance: "dark")
+        openShelves(app); app.buttons["People"].tap()
+        let maya = app.buttons["Maya"]
+        XCTAssertTrue(maya.waitForExistence(timeout: 10)); maya.tap()
+        let person = app.buttons[Self.mayaPill + ".remove"]
+        XCTAssertTrue(person.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5))
+        openShelves(app); app.buttons["More"].tap()
+        let favorites = app.buttons["Favorites"]
+        XCTAssertTrue(favorites.waitForExistence(timeout: 5))
+        favorites.tap()
+        // Frames while the row rises, beside the recording.
+        for step in 0..<5 {
+            let frame = XCTAttachment(screenshot: app.screenshot()); frame.name = "Rise \(step)"; frame.lifetime = .keepAlways; add(frame)
+        }
+        // A pill is found by its X, which spans its height at its trailing end.
+        let pill = app.buttons["library.pill.favorites.remove"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5), "The row becomes its pill.")
+        XCTAssertEqual(pill.frame.midY, person.frame.midY, accuracy: 2, "It lands in the next place along the pills.")
+        XCTAssertGreaterThan(pill.frame.minX, person.frame.maxX)
+        capture(app, "Rise — landed beside the person's pill")
+    }
+
+    /// Waits until the grid shows `count` photos, or at least `minimum`.
+    @MainActor private func waitForCells(_ grid: XCUIElement, count: Int? = nil, atLeast minimum: Int? = nil, timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let cells = grid.cells.count
+            if let count, cells == count { return true }
+            if let minimum, cells >= minimum { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return false
+    }
+
     @MainActor func testPhotoInfoLocationOpensFocusedInteractiveEarth() {
         let app = launch()
         tapPhoto(app.collectionViews["library.grid"].cells.element(boundBy: 0))
@@ -841,7 +956,7 @@ final class LibraryTests: XCTestCase {
         openShelves(app); app.buttons["Albums"].tap()
         let coast = app.buttons["Coast"]
         XCTAssertTrue(coast.waitForExistence(timeout: 5)); coast.tap()
-        let filter = app.otherElements["library.filterShelf"]
+        let filter = app.otherElements["library.filterPills"]
         XCTAssertTrue(filter.staticTexts["Coast"].waitForExistence(timeout: 10))
         // More sits under the search bar while typing.
         app.textFields["library.search"].tap()
@@ -874,11 +989,12 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Shared files"].waitForExistence(timeout: 10), "The share extension's link opens Shared files.")
         XCTAssertFalse(app.navigationBars["On this day"].exists, "Shared files replaced the memories.")
         openLink("immich://album?id=00000000-0000-4000-8000-000000000003")
-        let filter = app.otherElements["library.filterShelf"]
+        let filter = app.otherElements["library.filterPills"]
         XCTAssertTrue(filter.staticTexts["Coast"].waitForExistence(timeout: 10), "An album link shows the album in the feed.")
         XCTAssertFalse(app.navigationBars["Shared files"].exists, "Shared files closed first.")
         openLink("immich://person?id=00000000-0000-4000-8000-000000000002")
         XCTAssertTrue(filter.staticTexts["Maya"].waitForExistence(timeout: 10), "A person link shows the person in the feed.")
+        XCTAssertFalse(filter.staticTexts["Coast"].exists, "A link shows its person alone, as before.")
         // A photo linked inside an album keeps the album's actions, though the feed shows a person.
         let linked = "00000000-0000-4000-8000-00000000a1b2"
         openLink("immich://asset?id=\(linked)&albumId=00000000-0000-4000-8000-000000000003")
@@ -1481,7 +1597,7 @@ final class LibraryTests: XCTestCase {
         globe.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5))
             .press(forDuration: 0.05, thenDragTo: globe.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.55)))
         globe.pinch(withScale: 1.3, velocity: 0.6)
-        XCTAssertFalse(app.buttons["Clear filters"].exists,
+        XCTAssertFalse(app.buttons["library.pill.place.remove"].exists,
                        "Rotating and zooming the Earth must not accidentally select a location pin.")
         capture(app, "Places — dark Earth after drag and pinch")
         closeGlobe(app)
@@ -1498,7 +1614,7 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(amsterdam.waitForExistence(timeout: 10), "Photo pins must be accessible controls.")
         requireHittable(amsterdam, in: app)
         amsterdam.tap()
-        let clear = app.buttons["Clear filters"]
+        let clear = app.buttons["library.pill.place.remove"]
         XCTAssertTrue(clear.waitForExistence(timeout: 10), "Tapping the pin must filter the existing feed.")
         XCTAssertTrue(app.collectionViews["library.grid"].exists)
         XCTAssertTrue(earth.exists)

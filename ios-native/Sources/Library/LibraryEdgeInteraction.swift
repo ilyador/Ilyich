@@ -68,10 +68,11 @@ struct LibraryShelfCarry: Equatable {
     var isRearranging = false
     /// The finger is over the reorder button past the focused row's tip; lifting there reorders.
     var overReorder = false
-    /// The person or album row rising into the filter tag as the shelves close, and the tag's
-    /// size it takes on the way.
+    /// The row rising into its filter pill as the shelves close (N6), and the pill's size and
+    /// leading edge it takes on the way.
     var morphingID: String?
     var morphSize: CGSize?
+    var morphX: CGFloat?
     var carried: LibraryShelfCarry?
     @ObservationIgnored private var stroke: LibraryShelfStroke?
     @ObservationIgnored private var glowTask: Task<Void, Never>?
@@ -1047,7 +1048,7 @@ struct LibraryShelfFan: View {
         // Past the band's ends of a long list, the wave stays on the outermost row in view.
         let fingerY = interaction.shelfFinger.map { layout.pickY($0.y) }
         let morphing = interaction.morphingID
-        // While a chosen row rises into the filter tag, the wave settles and only it stays out.
+        // While a chosen row rises into its pill, the wave settles and only it stays out.
         // A row held by a sideways push keeps the wave while the finger drifts.
         let waveY: CGFloat? = rearranging || morphing != nil ? nil
             : interaction.selectionHold.map { layout.center($0) }
@@ -1090,7 +1091,8 @@ struct LibraryShelfFan: View {
                                 rearranging: rearranging)
                         .scaleEffect(carried == nil ? 1 : 1.04, anchor: .leading)
                         .shadow(color: .black.opacity(carried == nil ? 0 : 0.4), radius: 14, y: 6)
-                        .offset(x: rearranging || rising ? 0 : layout.horizontalOffset(index, fingerY: waveY, reveal: interaction.shelfReveal),
+                        // A rising row slides over to its pill's place in the line of pills.
+                        .offset(x: rising ? interaction.morphX ?? 0 : rearranging ? 0 : layout.horizontalOffset(index, fingerY: waveY, reveal: interaction.shelfReveal),
                                 y: (carried?.y ?? layout.center(slot(index)) + shift) - height / 2)
                         .opacity(carried == nil && !rising ? layout.visibility(slot(index)) : 1)
                         .allowsHitTesting(layout.visibility(slot(index)) > 0.5)
@@ -1184,15 +1186,18 @@ struct LibraryShelfRowLabel: View {
     var backGlow: CGFloat = 0
     /// A drag handle on the edge side of the row while reordering.
     var handle = false
-    /// Rising into the filter tag: on the way the row takes the tag's own layout, its face sliding
-    /// to the front and its title following, so it arrives as the tag.
+    /// Rising into its filter pill (N6): on the way the row takes the pill's own layout and capsule,
+    /// its face sliding to the front, its title following and the pill's X appearing at its end,
+    /// so it arrives as the pill.
     var becomingTag = false
     let api: APIClient
     let pipeline: MediaPipeline
     @Namespace private var morph
 
     var body: some View {
-        let shape = UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
+        // Flat on the screen edge, round at the tip; a capsule once it becomes a pill.
+        let edge = becomingTag ? height / 2 : 0
+        let shape = UnevenRoundedRectangle(topLeadingRadius: edge, bottomLeadingRadius: edge,
                                           bottomTrailingRadius: height / 2, topTrailingRadius: height / 2)
         Group {
             if becomingTag { tagContent } else { rowContent }
@@ -1223,7 +1228,8 @@ struct LibraryShelfRowLabel: View {
         }
         .clipShape(shape)
         .contentShape(.rect)
-        .glassEffect(.clear.tint(.black.opacity(becomingTag ? 0.22 : 0.18)).interactive(), in: shape)
+        // Becoming a pill, the row takes on the pill's cyan glass.
+        .glassEffect(becomingTag ? FilterPillView.glass : .clear.tint(.black.opacity(0.18)).interactive(), in: shape)
         .overlay(shape.strokeBorder(backGlow > 0 ? .orange.opacity(0.85) : item.isSelected || highlighted ? .cyan.opacity(0.85) : .white.opacity(0.22),
                                     lineWidth: 0.75))
         .shadow(color: (backGlow > glow ? Color.orange : .cyan).opacity(0.9 * max(glow, backGlow)), radius: 6 + 20 * max(glow, backGlow))
@@ -1256,27 +1262,13 @@ struct LibraryShelfRowLabel: View {
         .padding(.trailing, 12)
     }
 
-    /// The filter tag's own layout: face or cover, then title.
+    /// The filter pill's own layout (FilterPillLabel): face, cover or symbol, title, X. Worded as
+    /// the pill words it, so nothing changes when the pill takes over.
     private var tagContent: some View {
-        HStack(spacing: 10) {
-            Group {
-                if let person = item.person {
-                    PersonThumbnail(pipeline: pipeline, person: person, pixelSize: PersonThumbnail.small)
-                } else if let assetID = item.assetID {
-                    FeatureThumbnail(api: api, pipeline: pipeline, assetID: assetID).clipShape(.circle)
-                } else {
-                    Image(systemName: item.symbol).font(.body.weight(.semibold))
-                }
-            }
-            .frame(width: 34, height: 34)
-            .matchedGeometryEffect(id: "face", in: morph)
-            // Worded as the tag words it, so nothing changes when the tag takes over.
-            Text(item.person.map { $0.name.isEmpty ? "Person" : $0.name } ?? item.title)
-                .font(.subheadline.weight(.semibold)).lineLimit(1)
-                .matchedGeometryEffect(id: "title", in: morph, properties: .position)
-        }
-        .padding(.leading, 16).padding(.trailing, 18)
-        // No spacer, whose spacing would take room from the title; the tag has none either.
-        .frame(maxWidth: .infinity, alignment: .leading)
+        let icon: FilterPill.Icon = item.person.map { .person($0) } ?? item.assetID.map { .cover($0) } ?? .symbol(item.symbol)
+        return FilterPillLabel(icon: icon, title: item.person.map { $0.name.isEmpty ? "Person" : $0.name } ?? item.title,
+                               api: api, pipeline: pipeline, morph: morph)
+            // No spacer, whose spacing would take room from the title; the pill has none either.
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
