@@ -8,7 +8,9 @@ import SwiftUI
 /// What the rail does is TimeRailController's (T4); this draws its state. The finger moves on
 /// every frame of a scrub, so only what it places reads it: the lens and its bridge, the accent
 /// line and the trips kept clear of the lens. The tape, the years and what the lens shows are
-/// drawn again only when the month, or what is known of it, changes.
+/// drawn again only when the month, or what is known of it, changes. What reads the controller
+/// itself keeps reading it while it melts away, so the controller holds the finger and the month
+/// until the closing rail's lens and line have gone.
 struct TimeRail: View {
     let store: LibraryStore
     let rail: TimeRailController
@@ -288,7 +290,7 @@ private struct TimeRailTripMarks: View {
 
 /// A glass puck with arrows above and below a glowing line that marks the position. It follows the
 /// grid on every scrolled frame, so it watches the grid's position itself and the rest of the rail
-/// is left alone.
+/// is left alone. It slides out where it was when a finger lands on the rail.
 private struct TimeRailPuck: View {
     let rail: TimeRailController
     let height: CGFloat
@@ -302,6 +304,6 @@ private struct TimeRailPuck: View {
         .foregroundStyle(.white)
         .frame(width: 30, height: 58)
         .glassEffect(.clear.tint(.black.opacity(0.18)).interactive(), in: .capsule)
-        .position(x: 24, y: rail.fingerY ?? ((rail.chosenFraction ?? rail.gridFraction) * height + 24))
+        .position(x: 24, y: rail.puckY(height: height))
     }
 }

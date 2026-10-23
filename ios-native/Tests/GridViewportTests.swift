@@ -81,6 +81,16 @@ import XCTest
             }
         }
 
+        /// Moves the grid as the rail's finger does, through the viewport, a frame at a time.
+        func scrub(by points: CGFloat, over seconds: TimeInterval, frames count: Int) {
+            let height = viewport.scroller.scrollableHeight ?? 1
+            for _ in 0..<count {
+                viewport.scrub(toFraction: (viewport.scroller.fraction ?? 0) + points / CGFloat(count) / height)
+                viewport.didScroll()
+                tick(seconds / Double(count))
+            }
+        }
+
         /// Frames pass with the grid still.
         func hold(for seconds: TimeInterval, frames count: Int = 6) {
             for _ in 0..<count { tick(seconds / Double(count)) }
@@ -317,7 +327,7 @@ import XCTest
         XCTAssertFalse(try XCTUnwrap(h.windows.last).target.isEmpty, "The fling's landing screen is wanted while it coasts.")
 
         h.scrubbing = true
-        h.scroll(by: h.screen * 5, over: 0.1, frames: 6)
+        h.scrub(by: h.screen * 5, over: 0.1, frames: 6)
         let scrubbed = try XCTUnwrap(h.windows.last)
         XCTAssertEqual(scrubbed.motion, .scrubbing)
         XCTAssertTrue(scrubbed.target.isEmpty, "The fling's landing screen is not where the grid goes any more.")
@@ -396,9 +406,10 @@ import XCTest
 
     /// The phase stands in for the store's old isScrolling (T4): a drag and its coast are
     /// scrolling, for the rail's puck; a drag, a coast and the rail's finger are moving, for
-    /// coverage. A finger held still is still a drag. The rail taking a coasting grid ends the
-    /// coast, and a coast whose end UIKit never reports ends once the grid has stood still for
-    /// half a second.
+    /// coverage. A finger held still is still a drag. The rail's touch never reaches the grid, so
+    /// a coast its finger lands on and lifts from without moving the grid goes on until UIKit
+    /// reports its end; one the rail moves is over, with no end reported. A coast whose end UIKit
+    /// never reports ends once the grid has stood still for half a second.
     func testThePhaseFollowsTheDragTheCoastAndTheRail() {
         let h = Harness()
         var scrolling: [Bool] = [], moving: [Bool] = []
@@ -413,13 +424,28 @@ import XCTest
         h.viewport.didEndDragging(decelerate: true)
         XCTAssertEqual(h.viewport.phase, .decelerating)
         h.scroll(by: h.screen, over: 0.2, frames: 12)
-        // The rail takes the coasting grid, and lets go.
+        // The rail's finger lands on the coasting grid and lifts before the rail opens.
         h.scrubbing = true
         XCTAssertEqual(h.viewport.phase, .scrubbing)
         h.scrubbing = false
+        XCTAssertEqual(h.viewport.phase, .decelerating, "Nothing stopped the coast.")
+        h.scroll(by: h.screen / 2, over: 0.2, frames: 12)
+        XCTAssertEqual(moving, [true], "Coverage waits for the coast, as it did for isScrolling.")
+        h.viewport.didEndDecelerating()
         XCTAssertEqual(h.viewport.phase, .idle)
-        XCTAssertEqual(scrolling, [true, false])
+        XCTAssertEqual(scrolling, [true, false, true, false])
         XCTAssertEqual(moving, [true, false])
+
+        // The rail takes a coasting grid and moves it, and lets go.
+        h.viewport.willBeginDragging()
+        h.scroll(by: h.screen, over: 0.2, frames: 12)
+        h.viewport.didEndDragging(decelerate: true)
+        h.scrubbing = true
+        h.scrub(by: h.screen * 2, over: 0.1, frames: 6)
+        h.scrubbing = false
+        XCTAssertEqual(h.viewport.phase, .idle, "Moving the grid ended the coast.")
+        XCTAssertEqual(scrolling, [true, false, true, false, true, false])
+        XCTAssertEqual(moving, [true, false, true, false])
 
         // A coast a jump took the grid from: UIKit never reports its end.
         h.viewport.willBeginDragging()
@@ -430,8 +456,8 @@ import XCTest
         XCTAssertEqual(h.viewport.phase, .decelerating, "Still for under half a second, the coast may go on.")
         h.hold(for: 0.3, frames: 18)
         XCTAssertEqual(h.viewport.phase, .idle)
-        XCTAssertEqual(scrolling, [true, false, true, false])
-        XCTAssertEqual(moving, [true, false, true, false])
+        XCTAssertEqual(scrolling, [true, false, true, false, true, false, true, false])
+        XCTAssertEqual(moving, [true, false, true, false, true, false])
     }
 
     /// The month on screen becomes ready: its photos, and those ahead, are asked for at once,

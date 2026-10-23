@@ -2,7 +2,8 @@ import Foundation
 import os
 import UIKit
 
-/// The scenario named on the command line: -IlyichPerfScenario <name> [-IlyichPerfSeed <n>].
+/// The scenario named on the command line:
+/// -IlyichPerfScenario <name> [-IlyichPerfSeed <n>] [-IlyichPerfDrive baseline|finger].
 struct PerfScenarioConfiguration: Equatable, Sendable {
     enum Scenario: String, CaseIterable, Sendable {
         case railRandom = "rail-random"
@@ -14,26 +15,41 @@ struct PerfScenarioConfiguration: Equatable, Sendable {
         case backgroundLoad = "background-load"
     }
 
+    /// How the scenarios move the grid.
+    enum Drive: String, CaseIterable, Sendable {
+        /// As C4's driver did, so every build's numbers compare with the C4 baseline: a rail scrub
+        /// moves the grid with nothing drawn over it, and a fling's landing is not known ahead.
+        case baseline
+        /// As a finger does: the rail opens its lens and column, follows the month with its haptics
+        /// and shows the lens's photos, and a fling's landing is known as it lets go, as UIKit
+        /// reports it. It measures more than C4's baseline did, so compare it only with itself.
+        case finger
+    }
+
     static let scenarioArgument = "-IlyichPerfScenario"
     static let seedArgument = "-IlyichPerfSeed"
+    static let driveArgument = "-IlyichPerfDrive"
     static let defaultSeed: UInt64 = 7
 
     let scenario: Scenario
     let seed: UInt64
+    let drive: Drive
 
-    init(scenario: Scenario, seed: UInt64 = Self.defaultSeed) {
+    init(scenario: Scenario, seed: UInt64 = Self.defaultSeed, drive: Drive = .baseline) {
         self.scenario = scenario
         self.seed = seed
+        self.drive = drive
     }
 
     /// Nil, which leaves the app inert, unless the arguments name a known scenario. A missing or
-    /// unreadable seed is the default.
+    /// unreadable seed or drive is the default.
     init?(arguments: [String]) {
         func value(after flag: String) -> String? {
             arguments.firstIndex(of: flag).flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
         }
         guard let name = value(after: Self.scenarioArgument), let scenario = Scenario(rawValue: name) else { return nil }
-        self.init(scenario: scenario, seed: value(after: Self.seedArgument).flatMap { UInt64($0) } ?? Self.defaultSeed)
+        self.init(scenario: scenario, seed: value(after: Self.seedArgument).flatMap { UInt64($0) } ?? Self.defaultSeed,
+                  drive: value(after: Self.driveArgument).flatMap(Drive.init(rawValue:)) ?? .baseline)
     }
 }
 
@@ -75,10 +91,11 @@ struct SplitMix64 {
 /// Runs one perf scenario on the real grid and writes what the recorder measured to
 /// Library/Caches/IlyichPerf, where scripts/perf/record.sh fetches it. It ships in every build
 /// and does nothing unless the app was launched with -IlyichPerfScenario. It moves the grid only
-/// as the time rail and a scroll do: rail scrubs through the rail's controller, so the lens and
-/// the column follow as they do for a finger, and flings through the grid's viewport as UIKit
-/// reports a fling (T4). It never changes the library or the server: no backup, upload, deletion
-/// or edit.
+/// as the time rail and a scroll do, through the grid's viewport (T4): by default as C4's driver
+/// did, so the numbers compare with its baseline, and with -IlyichPerfDrive finger through the
+/// rail's controller as a finger scrubs, the lens and the column following, and with each fling's
+/// landing told as UIKit tells it. It never changes the library or the server: no backup, upload,
+/// deletion or edit.
 @MainActor final class PerfScenarioDriver {
     static let shared: PerfScenarioDriver? = PerfRecorder.shared.flatMap { recorder in
         PerfScenarioConfiguration(arguments: ProcessInfo.processInfo.arguments)
@@ -159,7 +176,7 @@ struct SplitMix64 {
         frames.start(); memory.start(); watchdog.start()
         let signposter = PerfSignpost.launch
         if signposter.isEnabled { launchInterval = signposter.beginInterval(PerfSignpost.launchFirstContent) }
-        say("PERF ARMED \(configuration.scenario.rawValue) seed \(configuration.seed)")
+        say("PERF ARMED \(configuration.scenario.rawValue) seed \(configuration.seed) drive \(configuration.drive.rawValue)")
         task = Task { await run() }
     }
 
@@ -237,15 +254,15 @@ struct SplitMix64 {
 
     /// The rail from the newest photos to the oldest at an even pace, a step every frame.
     private func railSweep(_ grid: Grid) async {
-        grid.rail.beginDrivenScrub(atFraction: 0)
+        beginScrub(grid, at: 0)
         let start = await frames.next()
         var progress = 0.0
         while progress < 1, !Task.isCancelled {
             let time = await frames.next()
             progress = min(1, (time - start) / Self.sweepSeconds)
-            grid.rail.drive(toFraction: CGFloat(progress))
+            scrub(grid, to: CGFloat(progress))
         }
-        grid.rail.endDrivenScrub()
+        endScrub(grid)
         try? await Task.sleep(for: Self.dwell)
     }
 
@@ -280,18 +297,51 @@ struct SplitMix64 {
     }
 
     /// What the rail does for a finger: it holds coverage, drops pending navigation and moves
-    /// the grid, the lens following.
+    /// the grid.
     private func jump(_ grid: Grid, to fraction: Double) async {
-        grid.rail.beginDrivenScrub(atFraction: CGFloat(fraction))
+        beginScrub(grid, at: CGFloat(fraction))
         _ = await frames.next()
-        grid.rail.endDrivenScrub()
+        endScrub(grid)
+    }
+
+    /// A rail scrub starts at `fraction` of the way down the library. With the finger drive the
+    /// rail's controller scrubs as a finger does once the rail is open, the lens following;
+    /// otherwise the grid alone moves, as C4's driver moved it, with nothing drawn over it.
+    private func beginScrub(_ grid: Grid, at fraction: CGFloat) {
+        switch configuration.drive {
+        case .finger:
+            grid.rail.beginDrivenScrub(atFraction: fraction)
+        case .baseline:
+            RailScrubProbe.began()
+            grid.viewport.beginScrub()
+            grid.store.cancelPendingNavigation()
+            grid.viewport.scrub(toFraction: fraction)
+        }
+    }
+
+    private func scrub(_ grid: Grid, to fraction: CGFloat) {
+        switch configuration.drive {
+        case .finger: grid.rail.drive(toFraction: fraction)
+        case .baseline: grid.viewport.scrub(toFraction: fraction)
+        }
+    }
+
+    private func endScrub(_ grid: Grid) {
+        switch configuration.drive {
+        case .finger:
+            grid.rail.endDrivenScrub()
+        case .baseline:
+            grid.viewport.endScrub()
+            RailScrubProbe.ended()
+        }
     }
 
     /// One fling, slowing as UIScrollView's normal deceleration does, moved through the same
     /// offset path the rail drives and told to the viewport as UIKit tells a fling: the drag
-    /// begins, ends with its velocity and landing, and the coast ends. A fling cut short by
-    /// `limit` is caught by the next drag, as a flick is, and returns true: it is still coasting.
-    /// Positive speeds go down the library, toward older photos.
+    /// begins, ends, and the coast ends. Only the finger drive tells its velocity and landing as
+    /// the drag ends, as UIKit does; C4's driver never did, so by default the landing screen is not
+    /// known ahead. A fling cut short by `limit` is caught by the next drag, as a flick is, and
+    /// returns true: it is still coasting. Positive speeds go down the library, toward older photos.
     @discardableResult
     private func fling(_ grid: Grid, screensPerSecond speed: Double, for limit: Double = .infinity) async -> Bool {
         let scroller = grid.scroller
@@ -304,11 +354,13 @@ struct SplitMix64 {
         // As a drag starting does.
         grid.store.cancelPendingNavigation()
         grid.viewport.willBeginDragging()
-        // Where the coast would end, as UIKit says when the finger lets go: velocity in points
-        // per millisecond times rate / (1 - rate).
-        let landing = min(1, max(0, fraction + velocity / 1_000 * Self.decelerationRate / (1 - Self.decelerationRate) / Double(height)))
-        grid.viewport.willEndDragging(velocity: CGPoint(x: 0, y: velocity / 1_000),
-                                      target: CGPoint(x: 0, y: scroller.offset(atFraction: CGFloat(landing)) ?? collection.contentOffset.y))
+        if configuration.drive == .finger {
+            // Where the coast would end, as UIKit says when the finger lets go: velocity in points
+            // per millisecond times rate / (1 - rate).
+            let landing = min(1, max(0, fraction + velocity / 1_000 * Self.decelerationRate / (1 - Self.decelerationRate) / Double(height)))
+            grid.viewport.willEndDragging(velocity: CGPoint(x: 0, y: velocity / 1_000),
+                                          target: CGPoint(x: 0, y: scroller.offset(atFraction: CGFloat(landing)) ?? collection.contentOffset.y))
+        }
         grid.viewport.didEndDragging(decelerate: true)
         let start = await frames.next()
         var last = start
@@ -358,7 +410,8 @@ struct SplitMix64 {
         let recorder = recorder
         let measurements = await Task.detached(priority: .utility) { recorder.measurements(at: end) }.value
         let summary = PerfSummary(
-            scenario: configuration.scenario.rawValue, seed: configuration.seed, status: status.rawValue,
+            scenario: configuration.scenario.rawValue, seed: configuration.seed,
+            drive: configuration.drive == .baseline ? nil : configuration.drive.rawValue, status: status.rawValue,
             startedAt: launchedAt.formatted(.iso8601), app: Self.app(), device: device(), library: library(),
             measurements: measurements, background: background.map { tally in
                 func share(_ count: Int) -> Double { tally.samples == 0 ? 0 : PerfSummary.rounded(Double(count) / Double(tally.samples)) }
