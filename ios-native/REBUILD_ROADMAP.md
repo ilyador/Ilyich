@@ -1140,6 +1140,12 @@ The viewer menu and footer, BulkActionsView, AssetInfoView and ViewerStackView r
   - Release performance runs on the phone
 - **Acceptance:**
   - Every measurement gate is met, or the owner accepts documented exceptions
+- **As built:**
+  - Measured on the phone with build 3040086 (PARITY 3040088). Met: rail-sweep, fling and reverse hitches under 5 ms/s with the longest hitch at most 50 ms; behind-band rows after a reversal from memory; rail-sweep disk-hit p95 23 ms; first content p50 395 ms and p95 401 ms; no network fetch for covered months; peak 251 MB and 160 MB two seconds after a trim; zero hangs.
+  - Decode lanes follow the phone's cores (`ThumbnailScheduler.lanes(cores:)`, three to five, four on the 15 Pro); a perf run may set them with `-IlyichDecodeLanes`. Rail-random disk-hit p95 went from 74 to 63 ms.
+  - Exceptions the owner accepted on 2026-10-23 ("scrubbing and shelves are good"): rail-random disk-hit p95 63 ms against 50, and rail-random and background-load hitches about 20 ms/s against 5 (about two dropped frames per far rail jump). No scrub tier was added. No month-scoped reload for phone publishes: background-load measured no extra cost (the backup queue was idle), so it stays a candidate only if flings stop short during large backups.
+  - Not measured over Wi-Fi: the airplane-mode run and Time Profiler's main-thread share.
+  - Also in 3040088, the owner's shelf settings: `scrollZoneInset` 0.8 rows (was 0.5) and `glowZoneStart` 0.54 (was 0.46), both confirmed on the phone.
 
 ### W2 — Cast with scoped, revocable grants
 
