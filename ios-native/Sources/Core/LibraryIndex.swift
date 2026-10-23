@@ -218,6 +218,17 @@ final class LibraryIndex: Sendable {
     func identities(after cursor: String?, limit: Int = 2_000) async throws -> [LocalAssetMatch] {
         try await mapped { try await aggregate.identities(after: cursor, limit: limit) }
     }
+    /// How many of a stacked feed's photos each person and each album holds, for the shelves (N6).
+    /// The library never takes partners in here, as the feed doesn't.
+    func facets(_ query: LibraryQuery) async throws -> ShelfFacets {
+        let feed = try feed(query, false)
+        return try await mapped { try await aggregate.facets(feed) }
+    }
+    /// A stacked feed's photos by ID, which the Earth keeps of its places (N6).
+    func feedIDs(_ query: LibraryQuery) async throws -> Set<String> {
+        let feed = try feed(query, false)
+        return try await mapped { try await aggregate.feedIDs(feed) }
+    }
     func albums() async throws -> [Album] { try await mapped { try await aggregate.albums() } }
     func people() async throws -> [Person] { try await mapped { try await aggregate.people() } }
     func mapMarkers(_ query: MapMarkerQuery) async throws -> [MapMarker] { try await mapped { try await aggregate.mapMarkers(query) } }

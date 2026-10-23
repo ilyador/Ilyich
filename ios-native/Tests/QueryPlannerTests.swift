@@ -29,8 +29,9 @@ final class QueryPlannerTests: XCTestCase {
             ("album, oldest first", .album(album, ascending: true), .init(backend: .index), .init(backend: .serverTimeline)),
             ("person", .person(person), .init(backend: .index), .init(backend: .serverTimeline)),
             ("place", .place(lisbon), .init(backend: .index), .init(backend: .serverSearch, limitations: searched)),
-            ("videos", .videos, .init(backend: .serverSearch, limitations: searched), .init(backend: .serverSearch, limitations: searched)),
-            ("motion", .motion, .init(backend: .serverSearch, limitations: searched), .init(backend: .serverSearch, limitations: searched)),
+            // N6: the index lays kinds out by month too, as every facet the shelves stack.
+            ("videos", .videos, .init(backend: .index), .init(backend: .serverSearch, limitations: searched)),
+            ("motion", .motion, .init(backend: .index), .init(backend: .serverSearch, limitations: searched)),
         ]
         for (name, query, withIndex, withoutIndex) in table {
             XCTAssertEqual(try QueryPlanner.plan(query, context: indexed), withIndex, name)
@@ -65,9 +66,11 @@ final class QueryPlannerTests: XCTestCase {
         // Favorites in an album, by a person, developed: still a timeline.
         var stacked = LibraryQuery.album(album); stacked.predicates.favorite = true; stacked.predicates.developed = true
         XCTAssertEqual(try QueryPlanner.plan(stacked, context: online).backend, .serverTimeline)
-        // Add a person or a kind and only search can serve it, with every filter kept.
+        // Add a person or a kind and the server serves it only by search, with every filter kept;
+        // the index lays it out by month (N6).
         stacked.predicates.people = [person]; stacked.predicates.kind = .video
-        let plan = try QueryPlanner.plan(stacked, context: indexed)
+        XCTAssertEqual(try QueryPlanner.plan(stacked, context: indexed).backend, .index)
+        let plan = try QueryPlanner.plan(stacked, context: online)
         XCTAssertEqual(plan.backend, .serverSearch)
         let filter = try ServerSearchRequest(stacked, userID: me).filter
         XCTAssertEqual(filter.albumIds, IDsFilter(all: [album]))
@@ -90,21 +93,18 @@ final class QueryPlannerTests: XCTestCase {
             ("album and partner", query(.partner(partner), albums: [album]), .index, .serverSearch),
             ("album and mine", query(.mine, albums: [album]), .index, .serverSearch),
             ("album and person", query(albums: [album], people: [person]), .index, .serverSearch),
-            ("person and partner", query(.partner(partner), people: [person]), .serverSearch, .serverSearch),
-            ("two albums", query(albums: [album, "other"]), .serverSearch, .serverSearch),
-            ("two people", query(people: [person, "other"]), .serverSearch, .serverSearch),
+            // N6: the index serves every stack of the shelves' facets.
+            ("person and partner", query(.partner(partner), people: [person]), .index, .serverSearch),
+            ("two albums", query(albums: [album, "other"]), .index, .serverSearch),
+            ("two people", query(people: [person, "other"]), .index, .serverSearch),
         ]
         for (name, stacked, withIndex, withoutIndex) in table {
             XCTAssertEqual(try QueryPlanner.plan(stacked, context: indexed).backend, withIndex, name)
             XCTAssertEqual(try QueryPlanner.plan(stacked, context: online).backend, withoutIndex, name)
-            if withIndex == .index {
-                let feed = try IndexFeedRequest(stacked, userID: me)
-                XCTAssertEqual(feed.albumID, stacked.predicates.albums.first, name)
-                XCTAssertEqual(feed.personID, stacked.predicates.people.first, name)
-                XCTAssertEqual(feed.placeAssetIDs, stacked.predicates.place?.assetIDs, name)
-            } else {
-                XCTAssertThrowsError(try IndexFeedRequest(stacked, userID: me), name)
-            }
+            let feed = try IndexFeedRequest(stacked, userID: me)
+            XCTAssertEqual(feed.albumIDs, stacked.predicates.albums.sorted(), name)
+            XCTAssertEqual(feed.personIDs, stacked.predicates.people.sorted(), name)
+            XCTAssertEqual(feed.placeAssetIDs, stacked.predicates.place?.assetIDs, name)
             XCTAssertThrowsError(try ServerTimelineRequest(stacked, userID: me), name)
             // Search keeps every facet.
             let search = try ServerSearchRequest(stacked, userID: me)
@@ -117,12 +117,80 @@ final class QueryPlannerTests: XCTestCase {
         XCTAssertFalse(placeAndAlbum.limitations.contains(.excludesSharedAlbumMembers), "An album search reaches the album.")
     }
 
-    func testDateAddedCantBeSearched() {
+    func testDateAddedCantBeSearched() throws {
+        // Recently added and Videos stacked (N6): search can't order it and the timeline can't
+        // filter it, so only the index serves it, and says so without one.
         var videosByAdded = LibraryQuery.recentlyAdded; videosByAdded.predicates.kind = .video
-        XCTAssertThrowsError(try QueryPlanner.plan(videosByAdded, context: indexed)) { XCTAssertEqual($0 as? Unsupported, .orderNotSearchable) }
+        XCTAssertEqual(try QueryPlanner.plan(videosByAdded, context: indexed).backend, .index)
+        XCTAssertThrowsError(try QueryPlanner.plan(videosByAdded, context: online)) { XCTAssertEqual($0 as? Unsupported, .needsIndex) }
+        // A filter only search knows, in date-added order, no backend can serve.
+        var taggedByAdded = LibraryQuery.recentlyAdded; taggedByAdded.predicates.tags = ["tag"]
+        XCTAssertThrowsError(try QueryPlanner.plan(taggedByAdded, context: indexed)) { XCTAssertEqual($0 as? Unsupported, .orderNotSearchable) }
         XCTAssertThrowsError(try ServerSearchRequest(.recentlyAdded, userID: me)) { XCTAssertEqual($0 as? Unsupported, .orderNotSearchable) }
         // A smart search ranks by relevance, so it doesn't care how the feed was ordered.
         XCTAssertNoThrow(try ServerSearchRequest(LibraryQuery.recentlyAdded.refined(text: "beach", mode: .context), userID: me))
+    }
+
+    /// N6: every stack the shelves and the Earth can make. The server serves it by month where the
+    /// timeline can (one owner, album or person, with favorites and Lightroom), as one list by
+    /// search where only search can, and nowhere when Recently added meets what the timeline can't
+    /// filter: those are index-only, Unsupported.needsIndex without a readable index. With one,
+    /// the index lays every stack out by month.
+    func testTheServerServesWhatItCanAndTheRestIsIndexOnly() throws {
+        let maya = Person(id: person, name: "Maya", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: false, isFavorite: nil)
+        let noah = Person(id: "noah", name: "Noah", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: false, isFavorite: nil)
+        let coast = Album(id: album, albumName: "Coast", assetCount: 1, shared: false, albumUsers: nil, startDate: nil, endDate: nil,
+                          updatedAt: nil, order: "desc")
+        let place = FilterLayer.place(lisbon, title: "Lisbon")
+        func layers(_ collections: [LibraryCollection], place: FilterLayer? = nil) -> FilterStack {
+            FilterStack(collections.map(FilterLayer.collection) + [place].compactMap { $0 })
+        }
+        enum Served: Equatable { case timeline, search, indexOnly }
+        let table: [(String, FilterStack, Served)] = [
+            ("person and favorites", layers([.person(maya), .favorites]), .timeline),
+            ("album and Lightroom", layers([.album(coast), .lightroom]), .timeline),
+            ("archive and trash", layers([.archive, .trash]), .timeline),
+            ("recently taken and favorites", layers([.recentlyTaken, .favorites]), .timeline),
+            ("recently added and archive", layers([.recentlyAdded, .archive]), .timeline),
+            ("place and person", layers([.person(maya)], place: place), .search),
+            ("two people", layers([.person(maya), .person(noah)]), .search),
+            ("person and album", layers([.person(maya), .album(coast)]), .search),
+            ("videos and favorites", layers([.videos, .favorites]), .search),
+            ("motion and person", layers([.motion, .person(maya)]), .search),
+            ("recently taken and person", layers([.recentlyTaken, .person(maya)]), .search),
+            ("recently added and person", layers([.recentlyAdded, .person(maya)]), .indexOnly),
+            ("recently added and album", layers([.recentlyAdded, .album(coast)]), .indexOnly),
+            ("recently added and place", layers([.recentlyAdded], place: place), .indexOnly),
+            ("recently added and videos", layers([.recentlyAdded, .videos]), .indexOnly),
+            ("recently added and motion", layers([.recentlyAdded, .motion]), .indexOnly),
+        ]
+        for (name, stack, served) in table {
+            let query = stack.query
+            XCTAssertEqual(try QueryPlanner.plan(query, context: indexed).backend, .index, "\(name): the index lays every stack out by month.")
+            XCTAssertEqual(QueryPlanner.needsIndex(query), served == .indexOnly, name)
+            switch served {
+            case .timeline:
+                XCTAssertEqual(try QueryPlanner.plan(query, context: online).backend, .serverTimeline, name)
+                XCTAssertNoThrow(try ServerTimelineRequest(query, userID: me), name)
+            case .search:
+                let plan = try QueryPlanner.plan(query, context: online)
+                XCTAssertEqual(plan.backend, .serverSearch, name)
+                XCTAssertTrue(plan.limitations.contains(.noMonths), name)
+                // Search keeps every layer in its filter.
+                let filter = try ServerSearchRequest(query, userID: me).filter
+                XCTAssertEqual(Set(filter.personIds?.all ?? []), query.predicates.people, name)
+                XCTAssertEqual(Set(filter.albumIds?.all ?? []), query.predicates.albums, name)
+                XCTAssertEqual(filter.type?.eq, query.predicates.kind?.rawValue, name)
+                XCTAssertEqual(filter.isMotion?.eq, query.predicates.motion, name)
+                XCTAssertEqual(filter.isFavorite?.eq, query.predicates.favorite, name)
+            case .indexOnly:
+                XCTAssertThrowsError(try QueryPlanner.plan(query, context: online), name) { XCTAssertEqual($0 as? Unsupported, .needsIndex) }
+                XCTAssertThrowsError(try ServerTimelineRequest(query, userID: me), name)
+                XCTAssertThrowsError(try ServerSearchRequest(query, userID: me), name) { XCTAssertEqual($0 as? Unsupported, .orderNotSearchable) }
+            }
+        }
+        // A stack is never the whole library, so none asks for the partners shown in the timeline.
+        for (name, stack, _) in table { XCTAssertFalse(ServerTimelineRequest.allowsPartners(stack.query), name) }
     }
 
     func testAnIndexServingOfflineSaysHowStaleItIs() throws {

@@ -488,7 +488,7 @@ final class IndexReadsTests: XCTestCase {
 
     /// A library of `photos` photos, every fourth one with a face of Maya, written as a build
     /// before Q2 left it and then filled by the backfill, as on the owner's phone.
-    private static func makeLargeLibrary(in root: URL, photos: Int) throws -> LibraryIndex {
+    static func makeLargeLibrary(in root: URL, photos: Int) throws -> LibraryIndex {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let scope = "server|large"
         let name = SHA256.hash(data: Data(scope.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -570,7 +570,7 @@ private struct ReferenceLibrary {
         if let album = filter.albumID, albums[album]?.contains(photo.id) != true { return false }
         if let person = filter.personID, person != "maya" || !maya.contains(photo.id) { return false }
         if let place = filter.placeAssetIDs, !place.contains(photo.id) { return false }
-        if (filter.albumID == nil && filter.placeAssetIDs == nil) || filter.ownerID != nil {
+        if (filter.albumID == nil && !filter.placeAlone) || filter.ownerID != nil {
             let owner = photo.owner == (filter.ownerID ?? me)
             // Bob shares with Alice and shows in her timeline; Carol only shares an album.
             let partner = filter.withPartners && photo.owner == "bob"

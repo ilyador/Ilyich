@@ -56,8 +56,21 @@ struct PlacesView: View {
     var closesPresentations = false
     /// Told when this view's own sheets and alert come up, and once they have all gone.
     var onPresentation: (Bool) -> Void = { _ in }
+    /// Under a stack of filters the Earth keeps only these photos of its places (REBUILD_ROADMAP.md
+    /// N6); nil keeps every one.
+    var narrowing: PlaceNarrowing? = nil
+    /// Every place, whole: a place chosen is always the whole place.
     @State private var places: [PlaceCollection] = []
+    /// The places shown and their lights: every one, or under a stack of filters only those holding
+    /// its photos, each counting only those.
+    @State private var shown: [PlaceCollection] = []
     @State private var lights: GlobePhotoLights?
+    @State private var markers: [MapMarker] = []
+    @State private var markerQuery = ""
+    /// Moves each time markers load, so what is shown is arranged again for the latest narrowing.
+    @State private var markersRevision = 0
+    /// The narrowing `shown` was arranged for.
+    @State private var arrangedFor: String?
     @State private var selected: PlaceCollection?
     @State private var loading = true
     @State private var failure: FeatureFailure?
@@ -79,11 +92,12 @@ struct PlacesView: View {
             if mapEnabled == false {
                 FeatureEmpty(title: "Maps are turned off", symbol: "globe", description: "Enable maps on your server to browse photo locations.")
             } else if compact {
-                PlacesGlobeView(places: places, lights: lights, focus: globeFocus, compact: true, api: api, pipeline: pipeline, onSelect: { selected = $0; onSelect($0) })
+                PlacesGlobeView(places: shown, lights: lights, focus: globeFocus, compact: true, api: api, pipeline: pipeline,
+                                onSelect: { selected = $0; onSelect(whole($0)) })
                     .overlay(alignment: .bottomTrailing) {
                         Button("All locations", systemImage: "list.bullet") { showingLocations = true }
                             .font(.subheadline).buttonStyle(.glass).foregroundStyle(.primary)
-                            .padding(16).padding(.bottom, bottomInset).disabled(loading || places.isEmpty)
+                            .padding(16).padding(.bottom, bottomInset).disabled(loading || shown.isEmpty)
                     }
                     .overlay { if loading { ProgressView() } }
             } else {
@@ -133,6 +147,8 @@ struct PlacesView: View {
             }
         }
         .task(id: "\(favoritesOnly)|\(includeArchived)|\(includePartners)|\(dateFilter)|\(startDate)|\(endDate)") { await load() }
+        // The filters stacked changed, or markers loaded under an older narrowing: shown again.
+        .task(id: "\(narrowing?.key ?? "")|\(markersRevision)") { await arrange() }
         .refreshable { await load() }
         .sheet(isPresented: $showingDates, onDismiss: sheetDismissed) {
             NavigationStack {
@@ -147,8 +163,8 @@ struct PlacesView: View {
         .sheet(item: $mapPlace, onDismiss: sheetDismissed) { place in NavigationStack { PlaceMapDetail(place: place, onSelect: onSelect) } }
         .sheet(isPresented: $showingLocations, onDismiss: sheetDismissed) {
             NavigationStack {
-                PlacesListView(places: places, api: api, pipeline: pipeline) { place in
-                    selected = place; showingLocations = false; onSelect(place)
+                PlacesListView(places: shown, api: api, pipeline: pipeline) { place in
+                    selected = place; showingLocations = false; onSelect(whole(place))
                 }
             }
             .presentationDetents([.height(300), .medium])
@@ -188,7 +204,7 @@ struct PlacesView: View {
             try Task.checkCancellation()
             guard generation == requestGeneration else { return }
             mapEnabled = features.map
-            guard features.map else { places = []; lights = nil; selected = nil; return }
+            guard features.map else { places = []; shown = []; lights = nil; markers = []; selected = nil; return }
             var fileCreatedAfter: Date?
             var fileCreatedBefore: Date?
             if dateFilter {
@@ -205,18 +221,47 @@ struct PlacesView: View {
             let markerQuery = query.queryItems.map { $0.name + "=" + ($0.value ?? "") }.joined(separator: "&")
             try Task.checkCancellation()
             guard generation == requestGeneration else { return }
-            let (grouped, glow) = await Task.detached(priority: .userInitiated) {
-                (PlaceCollection.group(markers, markerQuery: markerQuery), GlobePhotoLights(markers: markers))
+            let narrowing = self.narrowing
+            let arranged = await Task.detached(priority: .userInitiated) {
+                Self.arrange(markers, markerQuery: markerQuery, narrowing: narrowing)
             }.value
             try Task.checkCancellation(); guard generation == requestGeneration else { return }
-            places = grouped; lights = glow
+            places = arranged.all; shown = arranged.shown; lights = arranged.lights
+            self.markers = markers; self.markerQuery = markerQuery; arrangedFor = narrowing?.key; markersRevision += 1
             if let previous = selected { selected = places.first { $0.id == previous.id } }
             else if compact, let assetID = focus?.assetID, let place = places.first(where: { $0.assetIDs.contains(assetID) }) {
                 selected = place; onSelect(place)
             }
         } catch is CancellationError { } catch {
-            if generation == requestGeneration { places = []; lights = nil; selected = nil; failure = .init(error) }
+            if generation == requestGeneration { places = []; shown = []; lights = nil; markers = []; selected = nil; failure = .init(error) }
         }
+    }
+
+    /// Shows the places again for the latest narrowing, from the markers loaded, when they were
+    /// arranged for another.
+    private func arrange() async {
+        let narrowing = self.narrowing, markers = self.markers, markerQuery = self.markerQuery
+        guard !markers.isEmpty, narrowing?.key != arrangedFor else { return }
+        let arranged = await Task.detached(priority: .userInitiated) {
+            Self.arrange(markers, markerQuery: markerQuery, narrowing: narrowing)
+        }.value
+        guard !Task.isCancelled else { return }
+        shown = arranged.shown; lights = arranged.lights; arrangedFor = narrowing?.key
+    }
+
+    /// The whole place of one shown, which may count only the photos of a stack of filters.
+    private func whole(_ place: PlaceCollection) -> PlaceCollection {
+        places.first { $0.id == place.id } ?? place
+    }
+
+    /// Every place, and those shown with their lights: under a narrowing only its photos, so a
+    /// place without any is left out and the others count only theirs. Pure; off the main actor.
+    nonisolated static func arrange(_ markers: [MapMarker], markerQuery: String, narrowing: PlaceNarrowing?)
+        -> (all: [PlaceCollection], shown: [PlaceCollection], lights: GlobePhotoLights) {
+        let all = PlaceCollection.group(markers, markerQuery: markerQuery)
+        guard let narrowing else { return (all, all, GlobePhotoLights(markers: markers)) }
+        let kept = markers.filter { narrowing.ids.contains($0.id) }
+        return (all, PlaceCollection.group(kept, markerQuery: markerQuery), GlobePhotoLights(markers: kept))
     }
 }
 

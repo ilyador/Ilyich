@@ -265,6 +265,9 @@ enum Limitation: Hashable, Sendable {
 enum Unsupported: Error, Hashable, Sendable {
     /// Places are laid out by month only from a complete offline index.
     case placeNeedsIndex
+    /// Only the offline index serves this stack of filters (REBUILD_ROADMAP.md N6): the timeline
+    /// can't filter it and search can't order it, as with Recently added and a person.
+    case needsIndex
     /// Server search can't order this way, for example by date added.
     case orderNotSearchable
     /// A filter the chosen backend lacks, by name.

@@ -13,17 +13,20 @@ struct PlannerContext: Hashable, Sendable {
 ///
 /// The owner (the library, the account's own photos or a partner) and the predicates (albums,
 /// people, a place, favorite, developed, kinds and the rest) all combine by AND, so stacked shelf
-/// filters are one query. Which backend serves a stack:
+/// filters are one query (REBUILD_ROADMAP.md N6). Which backend serves a stack:
 ///
-/// - The index lays out by month any owner with at most one album, at most one person and a place,
-///   filtered by favorite and developed, whenever it is readable. A person stacks only with the
-///   library there: the index widens a person to the albums shared with the account, which an
-///   owner can't narrow.
+/// - The index lays out by month every stack of the shelves' facets whenever it is readable: any
+///   owner, any albums and people, a place, favorite, developed, a kind and motion. A person in the
+///   library also takes the albums shared with the account, as the server's person timeline does;
+///   with an owner named it keeps to that owner's photos.
 /// - The server timeline lays out by month the library, the account's own photos, a partner, an
-///   album or a person, one of them, with the same two filters. It never sees a place.
+///   album or a person, one of them, with favorite and developed. It never sees a place, a kind,
+///   motion or a second album or person.
 /// - Server search serves everything else, as one list: relevance, the other predicates, several
-///   albums or people, and any stack the timelines can't, places included before the index is
-///   readable. It can't order by date added.
+///   albums or people, kinds, and any stack the timeline can't, places included before the index is
+///   readable. It can't order by date added, so a stack in that order the timeline can't serve
+///   (Recently added with a person, an album, a place, a kind or motion) is index-only: without a
+///   readable index it is Unsupported.needsIndex (`needsIndex`).
 enum QueryPlanner {
     /// The photos the phone looks through when a filter runs after the server answered.
     static let postFilterScanBudget = 20_000
@@ -38,8 +41,20 @@ enum QueryPlanner {
             }
             if serverTimelineServes(query) { return QueryPlan(backend: .serverTimeline) }
         }
-        if case .chronological(.createdAt, _) = query.ranking { throw .orderNotSearchable }
+        if case .chronological(.createdAt, _) = query.ranking {
+            // Search can't order by the date added: what the index could lay out waits for it.
+            throw indexServes(query) ? .needsIndex : .orderNotSearchable
+        }
         return QueryPlan(backend: .serverSearch, limitations: searchLimitations(query))
+    }
+
+    /// Whether only the offline index can serve the query at all (REBUILD_ROADMAP.md N6): the
+    /// timeline can't filter it and search can't order it, as with Recently added stacked with a
+    /// person, an album, a place, a kind or motion. Every other stack the server serves, by month
+    /// or as one list.
+    static func needsIndex(_ query: LibraryQuery) -> Bool {
+        guard case .chronological(.createdAt, _) = query.ranking else { return false }
+        return indexServes(query) && !serverTimelineServes(query)
     }
 
     /// What server search can't do for the query.
@@ -57,20 +72,22 @@ enum QueryPlanner {
     }
 
     /// Whether the index can lay the query's filters out by month, as one IndexFeedRequest: any
-    /// owner, one album, one person (with the library only), a place, favorite and developed.
+    /// owner, any albums and people, a place, favorite, developed, a kind and motion: every facet
+    /// the shelves stack. Search options' filters (tags, dates, camera, text and the rest) are
+    /// search's alone.
     static func indexServes(_ query: LibraryQuery) -> Bool {
         var rest = query.predicates
-        guard rest.albums.count <= 1, rest.people.count <= 1 else { return false }
-        if !rest.people.isEmpty, query.scope != .library { return false }
         rest.favorite = nil; rest.developed = nil; rest.albums = []; rest.people = []; rest.place = nil
+        rest.kind = nil; rest.motion = nil
         return rest == LibraryQuery.Predicates()
     }
 
-    /// Whether the server timeline can: what the index can, without a place, and one of an owner
-    /// other than the library, an album or a person, as today's feeds ask it.
+    /// Whether the server timeline can: what the index can, without a place, a kind or motion, and
+    /// one of an owner other than the library, an album or a person, as today's feeds ask it.
     static func serverTimelineServes(_ query: LibraryQuery) -> Bool {
-        guard indexServes(query), query.predicates.place == nil else { return false }
-        return query.predicates.albums.count + query.predicates.people.count + (query.scope == .library ? 0 : 1) <= 1
+        let predicates = query.predicates
+        guard indexServes(query), predicates.place == nil, predicates.kind == nil, predicates.motion == nil else { return false }
+        return predicates.albums.count + predicates.people.count + (query.scope == .library ? 0 : 1) <= 1
     }
 }
 
@@ -191,23 +208,38 @@ struct ServerTimelineRequest: Hashable, Sendable {
     }
 }
 
-/// A query on the offline index: the same feeds the server timeline serves, and places, which
-/// only the index can lay out by month. IndexReader turns it into SQL.
+/// A query on the offline index: the feeds the server timeline serves, places, which only the index
+/// can lay out by month, and every stack of the shelves' facets (N6). IndexReader turns it into SQL.
 struct IndexFeedRequest: Sendable {
     /// Timeline or archive; nil for both. Locked and hidden photos are never read.
     let visibility: String?
-    let albumID: String?
-    let personID: String?
+    /// Photos in every one of these albums, by ID, sorted.
+    let albumIDs: [String]
+    /// Photos with every one of these people, by ID, sorted.
+    let personIDs: [String]
     /// One owner's photos; nil for the library, or for an album or place, which aren't narrowed.
     let ownerID: String?
     let favorite: Bool?
     let trashed: Bool
     let developed: Bool?
+    /// IMAGE or VIDEO, as the server names a kind.
+    let kind: String?
+    /// Live Photos and other photos with motion, or with false, those without.
+    let motion: Bool?
     let primaryOnly: Bool
     let withPartners: Bool
     let byCreated: Bool
     let ascending: Bool
     let placeAssetIDs: [String]?
+    /// A place with no other filter: the map's photos there, whoever's they are, as a place has
+    /// always shown. Stacked with the library's other filters it keeps to the library's photos as
+    /// they do (N6), so a partner's photo there never comes in with them.
+    let placeAlone: Bool
+
+    /// The album of a feed with one.
+    var albumID: String? { albumIDs.first }
+    /// The person of a feed with one.
+    var personID: String? { personIDs.first }
 
     /// `userID` is the account's, which the mine scope names.
     init(_ query: LibraryQuery, userID: String, includesPartners: Bool = false) throws(Unsupported) {
@@ -222,16 +254,22 @@ struct IndexFeedRequest: Sendable {
         case .mine: ownerID = userID
         case .partner(let id): ownerID = id
         }
-        albumID = query.predicates.albums.first
-        personID = query.predicates.people.first
+        albumIDs = query.predicates.albums.sorted()
+        personIDs = query.predicates.people.sorted()
         favorite = query.predicates.favorite
         trashed = query.trash == .trashed
         developed = query.predicates.developed
+        kind = query.predicates.kind?.rawValue
+        motion = query.predicates.motion
         primaryOnly = query.stacks == .primaryOnly
         withPartners = includesPartners && ServerTimelineRequest.allowsPartners(query)
         byCreated = field == .createdAt
         self.ascending = ascending
         placeAssetIDs = query.predicates.place?.assetIDs
+        var others = query.predicates
+        others.place = nil
+        placeAlone = query.predicates.place != nil && others == LibraryQuery.Predicates() && query.scope == .library
+            && query.trash == .active && query.visibility == .timeline
     }
 }
 
@@ -375,6 +413,7 @@ extension Unsupported: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .placeNeedsIndex: "This place's photos can be shown by month once the offline library has synced."
+        case .needsIndex: "These filters can be shown together once the offline library has synced."
         case .orderNotSearchable: "Search can't order photos by the date they were added."
         case .predicate: "Search can't filter photos this way."
         }

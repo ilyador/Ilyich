@@ -240,6 +240,10 @@ extension FrozenFeed: DisplayedFeed {
     let navigation = TimelinePosition()
     /// What the feed shows. Its plan, made when the feed loads, serves every month it reads.
     private(set) var feedQuery = LibraryQuery.library
+    /// The filters the feed shows, in the order chosen (N6): the feed is their AND. Empty for the
+    /// library, and for a feed that is no layer: a partner's, similar photos, More's filtered
+    /// library, or a feed given as a query of its own.
+    private(set) var stack = FilterStack()
     /// How the feed shown is served, as of its last load; nil before then.
     private(set) var feedPlan: QueryPlan?
     /// What a search inside the feed shown searches: its scope, trash, visibility and filters.
@@ -678,24 +682,63 @@ extension FrozenFeed: DisplayedFeed {
 
     // MARK: - Scope
 
+    /// Shows a person's photos alone, as a link or the viewer asks; the shelves add them instead.
     func setPerson(_ person: Person) {
-        rememberOriginal()
-        beginScopeChange(); choiceBrowse = nil
-        feedQuery = .person(person.id)
-        searchScope = Self.widened(.person(person.id))
-        filterTitle = person.name.isEmpty ? "Person" : person.name
-        query = ""; showingResults = false; usesMetadata = false
-        scheduleReload()
+        open(FilterStack([.collection(.person(person))]))
     }
 
+    /// Shows an album alone, in its own order, as a link or the viewer asks; the shelves add it instead.
     func setAlbum(_ album: Album) {
+        open(FilterStack([.collection(.album(album))]))
+    }
+
+    /// Adds a layer to the filters shown (N6): the feed narrows to it as well, by AND. A layer
+    /// already there stays as it is, and a new place takes the place of the one there. A feed that
+    /// is no layer (a partner's, similar photos, More's filtered library) gives way to it. A search
+    /// typed ends, as choosing a filter always ended it.
+    func add(_ layer: FilterLayer) {
+        if case .place(let membership, _) = layer, membership.assetIDs.isEmpty { return }
+        var next = stack
+        guard next.add(layer) else {
+            // Already shown: only a search typed ends.
+            if !query.isEmpty { search("") }
+            return
+        }
+        open(next)
+    }
+
+    /// Removes only one layer (N6). The others stay, and so does a search typed in them or More's
+    /// filtered view of them, which run again in what is left; the last layer gone brings the
+    /// library back, as Clear does, or keeps the search or the filtered view, now of the library.
+    func remove(_ id: String) {
+        var next = stack
+        guard next.remove(id) else { return }
+        open(next, keepingSearch: true)
+    }
+
+    /// Shows the feed `next` makes. The saved library is kept for Clear; the feed shown stays on
+    /// screen, frozen, until the new one is ready. `keepingSearch` runs a search typed, or More's
+    /// filtered view, again in it; with neither, no layer left brings the saved library back.
+    private func open(_ next: FilterStack, keepingSearch: Bool = false) {
+        let browsing = keepingSearch && choiceBrowse != nil
+        let searching = keepingSearch && (!query.isEmpty || browsing)
+        if next.isEmpty && !searching { return clearFilters() }
         rememberOriginal()
-        beginScopeChange(); choiceBrowse = nil
-        let ascending = album.order == "asc"
-        feedQuery = .album(album.id, ascending: ascending)
-        searchScope = Self.widened(.album(album.id, ascending: ascending))
-        filterTitle = album.albumName; query = ""; showingResults = false; usesMetadata = false
-        scheduleReload()
+        beginScopeChange()
+        stack = next
+        feedQuery = next.query; searchScope = next.searchScope; filterTitle = next.title
+        showingResults = false; usesMetadata = false
+        // More's filtered view comes back over the feed left, with no layer as the filtered library.
+        choiceBrowse = browsing ? (next.title, false) : nil
+        guard searching else {
+            query = ""
+            return scheduleReload()
+        }
+        if browsing && query.isEmpty {
+            if filterTitle == nil { filterTitle = "Filtered library" }
+            usesMetadata = true; showingResults = true
+        }
+        queryTask = Task { await loadResults(.first) }
     }
 
     /// A place's photos are laid out by month, as a person's are, so the rail, the months' places
@@ -706,15 +749,10 @@ extension FrozenFeed: DisplayedFeed {
         setPlace(PlaceMembership(placeID: id, assetIDs: assetIDs, markerQuery: ""), title: title)
     }
 
-    /// A place, known by its membership revision.
+    /// A place alone, known by its membership revision; the Earth adds one instead.
     func setPlace(_ place: PlaceMembership, title: String) {
         guard !place.assetIDs.isEmpty else { return }
-        rememberOriginal()
-        beginScopeChange(); choiceBrowse = nil
-        feedQuery = .place(place)
-        searchScope = Self.widened(.place(place))
-        filterTitle = title; query = ""; showingResults = false; usesMetadata = false
-        scheduleReload()
+        open(FilterStack([.place(place, title: title)]))
     }
 
     /// The library as it is searched: the timeline and the archive, active photos only.
@@ -727,9 +765,11 @@ extension FrozenFeed: DisplayedFeed {
         return query
     }
 
+    /// A search filter shown as one list of results, which is no layer of the stack.
     func setMetadataFilter(_ filter: SearchFilter, title: String, developedOnly: Bool = false) {
         rememberOriginal()
         beginScopeChange(); choiceBrowse = nil
+        stack = FilterStack()
         feedQuery = .library
         var scope = LibraryQuery(filter)
         if developedOnly { scope.predicates.developed = true }
@@ -745,18 +785,26 @@ extension FrozenFeed: DisplayedFeed {
         setFeed(.lightroom, title: title)
     }
 
-    /// A shelf's feed: Favorites, Archive, Trash, Recently taken or added, a partner, Lightroom.
+    /// A feed alone: one of More's collections (Favorites, Archive, Trash, Recently taken or added,
+    /// Lightroom, Videos, Motion) as a layer of its own, or a partner's feed, which is no layer.
     func setFeed(_ query: LibraryQuery, title: String) {
+        if let collection = LibraryCollection.more(showing: query), collection.title == title {
+            return open(FilterStack([.collection(collection)]))
+        }
         rememberOriginal()
         beginScopeChange(); choiceBrowse = nil
+        stack = FilterStack()
         feedQuery = query; filterTitle = title; self.query = ""; showingResults = false; usesMetadata = false
         // A search inside the feed keeps its scope, trash, visibility and filters.
         searchScope = query
         scheduleReload()
     }
 
+    /// Every filter goes (N6's Clear, and a pill's X on the last one): the library comes back where
+    /// it was left, and a search typed ends.
     func clearFilters() {
         beginScopeChange(); feedQuery = .library; searchScope = Self.librarySearch; choiceBrowse = nil
+        stack = FilterStack()
         filterTitle = nil; query = ""; verification = nil; showingResults = false; usesMetadata = false
         selection.clear()
         if let saved = originalTimeline, let plan = saved.plan {
@@ -853,6 +901,7 @@ extension FrozenFeed: DisplayedFeed {
 
     func findSimilar(to asset: Asset) {
         rememberOriginal(); beginScopeChange(); choiceBrowse = nil
+        stack = FilterStack()
         query = ""; searchScope = Self.librarySearch; similarAssetID = asset.id
         filterTitle = "Similar photos"; showingResults = true; usesMetadata = true
         queryTask = Task { await loadResults(.first) }
@@ -1138,27 +1187,31 @@ extension FrozenFeed: DisplayedFeed {
         else if !months.isEmpty { markStale(months) }
     }
 
-    /// A change to the account's collections (N4). A feed showing an album that was deleted or
-    /// left clears back to the library. An album or a person renamed while the feed shows it gives
-    /// the filter its new name, and an album whose photos' order changed is read again in that
-    /// order. A partner added or removed, or shown in the timeline or no longer, reads the feed
-    /// again, as a sync's partner change does, and the saved library once a filter clears back to
-    /// it. Returns whether the filter cleared.
+    /// A change to the account's collections (N4). An album that was deleted or left leaves the
+    /// filters (N6): alone, the filter clears back to the library; stacked, only its layer goes. An
+    /// album or a person renamed while the feed shows it gives its layer the new name, and an album
+    /// whose photos' order changed is read again in that order. A partner added or removed, or shown
+    /// in the timeline or no longer, reads the feed again, as a sync's partner change does, and the
+    /// saved library once a filter clears back to it. Returns whether the filter cleared.
     @discardableResult
     func apply(_ change: CollectionChange) -> Bool {
         switch change {
         case .albumDeleted(let id), .albumLeft(let id):
-            guard feedQuery.predicates.albums.first == id else { return false }
-            clearFilters()
-            return true
+            let layer = LibraryCollection.albumRowID(id)
+            guard stack.contains(layer) else { return false }
+            guard stack.layers.count > 1 else { clearFilters(); return true }
+            remove(layer)
+            return false
         case .albumUpdated(let album):
-            guard feedQuery.predicates.albums.first == album.id else { return false }
-            if query.isEmpty, feedQuery.ranking != .chronological(.takenAt, ascending: album.order == "asc") { setAlbum(album) }
-            else { filterTitle = album.albumName }
+            var next = stack
+            guard next.update(.collection(.album(album))) else { return false }
+            if query.isEmpty, next.query != feedQuery { open(next) }
+            else { stack = next; filterTitle = next.title; feedQuery = next.query; searchScope = next.searchScope }
             return false
         case .personUpdated(let person):
-            guard feedQuery.predicates.people.first == person.id else { return false }
-            filterTitle = person.name.isEmpty ? "Person" : person.name
+            var next = stack
+            guard next.update(.collection(.person(person))) else { return false }
+            stack = next; filterTitle = next.title
             return false
         case .partnersChanged:
             if originalTimeline != nil { savedStaleMonths = nil }
