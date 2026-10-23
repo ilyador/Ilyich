@@ -10,6 +10,7 @@
 #
 # Environment: ILYICH_PERF_TIMEOUT (seconds to wait for a summary, default 300),
 # ILYICH_PERF_DEVICE and ILYICH_PERF_BUNDLE to aim at another phone or build, and
+# ILYICH_PERF_LANES=<n> to run with n decode lanes instead of the phone's default, and
 # ILYICH_PERF_DRIVE=finger to drive the grid as a finger does (the rail's lens and haptics, a
 # fling's landing) instead of as C4's driver did; those numbers compare only with each other.
 set -euo pipefail
@@ -64,7 +65,8 @@ record_once() {
   before=$(summaries)
   echo "Launching $SCENARIO, seed $SEED, $DRIVE drive" >&2
   xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --timeout 120 \
-    "$BUNDLE" -- -IlyichPerfScenario "$SCENARIO" -IlyichPerfSeed "$SEED" -IlyichPerfDrive "$DRIVE" >&2
+    "$BUNDLE" -- -IlyichPerfScenario "$SCENARIO" -IlyichPerfSeed "$SEED" -IlyichPerfDrive "$DRIVE" \
+    ${ILYICH_PERF_LANES:+-IlyichDecodeLanes "$ILYICH_PERF_LANES"} >&2
   deadline=$((SECONDS + TIMEOUT))
   while [ -z "$name" ]; do
     if [ "$SECONDS" -ge "$deadline" ]; then

@@ -164,6 +164,20 @@ final class ThumbnailScheduler: Sendable {
     /// Phone photos' thumbnails, when the account browses the phone's photos too.
     private let device: (any DeviceThumbnailProviding)?
     private let lanes: Int
+
+    /// Decode lanes for this phone: one for each core the main thread and the system leave free,
+    /// three to five. A rail jump lands on a screen of some fifty-five photos at once, and three
+    /// lanes made the last of them wait about 85 ms on an iPhone 15 Pro (T7).
+    static func lanes(cores: Int) -> Int { min(5, max(3, cores - 2)) }
+
+    /// The lanes the app runs with. A perf run may set them with -IlyichDecodeLanes to compare.
+    static var deviceLanes: Int {
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: "IlyichPerfScenario") != nil, defaults.integer(forKey: "IlyichDecodeLanes") > 0 {
+            return min(8, defaults.integer(forKey: "IlyichDecodeLanes"))
+        }
+        return lanes(cores: ProcessInfo.processInfo.activeProcessorCount)
+    }
     private let queue = DispatchQueue(label: "ilyich.thumbnail-scheduler", qos: .userInitiated)
     private let decodeQueue = DispatchQueue(label: "ilyich.thumbnail-decode", qos: .userInitiated, attributes: .concurrent)
     private struct Listener {
