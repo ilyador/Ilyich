@@ -7,7 +7,8 @@ import XCTest
 /// N3: the viewer's model and its asset windows. The photos the viewer pages through are the
 /// source's window around the photo on screen, never around the one it opened on: a reload of
 /// the source keeps that photo, and a swipe or a scrub on its way finishes over the photos it
-/// started on. Deleting goes through the account's mutations and removes the photo on screen.
+/// started on. Deleting goes through the account's mutations and removes the photo on screen, the
+/// viewer staying on the photo beside it.
 @MainActor final class ViewerModelTests: XCTestCase {
     private static let features = #"{"passwordLogin":true,"oauth":false,"smartSearch":true,"ocr":true,"facialRecognition":true,"map":true,"trash":true,"sidecar":true,"realtimeTranscoding":true}"#
     private static let march = "2026-03-01T00:00:00Z", february = "2026-02-01T00:00:00Z"
@@ -15,7 +16,10 @@ import XCTest
     // MARK: - Deleting
 
     /// The owner opens a photo, swipes to the next and deletes it: the photo swiped to goes to
-    /// Trash, not the one opened, the viewer closes as it always has, and the feed loses that photo.
+    /// Trash, not the one opened, and the feed loses it. The viewer stays, as Photos and the
+    /// phone's own viewer do (P3), with the photo after it on screen in its place. Deleting the
+    /// last photo shows the one before it, once a swipe on its way has rested, and deleting the
+    /// only photo left closes the viewer.
     func testDeletingTheSwipedToPhotoRemovesThatPhoto() async throws {
         let library = ViewerLibrary([try photo("a", "2026-03-20"), try photo("b", "2026-03-15"), try photo("c", "2026-03-10")])
         let store = try await loadedStore(library, months: [Self.march])
@@ -29,23 +33,32 @@ import XCTest
         let model = ViewerModel(api: api, route: route(store, "a"), window: .feed(store), settleDelay: .zero)
         model.start(mutations: mutations, close: { closed = true })
         XCTAssertEqual(model.assets.map(\.id), ["a", "b", "c"])
+        await model.loadFeatures()
 
         swipe(model, to: "b")
         XCTAssertEqual(model.current.id, "b")
-        await model.loadFeatures()
-        model.requestDeletion()
-        try await until("The viewer did not ask before deleting.") { model.confirmation != nil }
-        XCTAssertEqual(model.confirmation, .delete(model.current, permanently: false), "It asks about the photo on screen.")
-        // The dialog goes as its button runs.
-        model.confirmation = nil
-        model.confirmDeletion()
-        try await until("The viewer did not close.") { closed }
-
-        let body = try XCTUnwrap(server.requests("DELETE", "assets").first?.body)
-        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(sent["ids"] as? [String], ["b"], "The photo swiped to goes, not the one opened.")
-        XCTAssertEqual(sent["force"] as? Bool, false, "To Trash.")
+        try await delete(model)
+        XCTAssertEqual(try deletions(on: server), [["b"]], "The photo swiped to goes, not the one opened.")
+        XCTAssertFalse(closed, "The viewer stays.")
+        XCTAssertEqual(model.assets.map(\.id), ["a", "c"])
+        XCTAssertEqual(model.current.id, "c", "The photo after it comes on screen in its place.")
+        XCTAssertEqual(model.pagePosition.viewID(type: String.self), "c")
+        XCTAssertEqual(model.windowShifts, 0, "The strip stays as it was, the next photo where the deleted one was.")
         try await until("The feed still shows the photo.") { store.availableAssets(around: "a").map(\.id) == ["a", "c"] }
+
+        // A finger lands on the photos before the server answers.
+        try await delete(model) { model.setPagerMoving(true) }
+        XCTAssertEqual(try deletions(on: server), [["b"], ["c"]])
+        XCTAssertEqual(model.assets.map(\.id), ["a", "c"], "Nothing moves under a swipe on its way.")
+        model.setPagerMoving(false)
+        XCTAssertEqual(model.assets.map(\.id), ["a"])
+        XCTAssertEqual(model.current.id, "a", "The last photo gone, the one before it comes on screen.")
+        XCTAssertEqual(model.pagePosition.viewID(type: String.self), "a")
+        XCTAssertFalse(closed)
+
+        try await delete(model)
+        XCTAssertEqual(try deletions(on: server), [["b"], ["c"], ["a"]])
+        XCTAssertTrue(closed, "With no photo left the viewer closes.")
     }
 
     // MARK: - The window
@@ -70,6 +83,8 @@ import XCTest
         await library.set(try photo("m0", "2026-03-25"))
         await store.reload(preservingPosition: true)
         try await until("March was not read again.") { store.loaded[Self.march]?.first?.id == "m0" }
+        // The model hears of the change in a task of its own, queued as March changed: it runs first.
+        try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(model.assets.map(\.id), ["m1", "m2", "m3", "f1"], "Nothing moves under a swipe on its way.")
         model.setPagerMoving(false)
         XCTAssertEqual(model.assets.map(\.id), ["m0", "m1", "m2", "m3", "f1"], "At rest the viewer takes the photo that arrived.")
@@ -196,6 +211,28 @@ import XCTest
         XCTAssertTrue(closed, "The viewer closes on a photo gone from the server.")
         XCTAssertEqual(list.assets.map(\.id), ["a", "c"], "The photo that left is the one swiped to.")
         XCTAssertEqual(list.losses, 1, "The screen hears of the loss.")
+    }
+
+    /// A photo deleted here stays out of the pages while its source still lists it, however often
+    /// the viewer reads the source again: here a list no screen updates, which never hears of it.
+    func testADeletedPhotoStaysOutOfASourceYetToHearOfIt() async throws {
+        let list = AssetList([try photo("a", "2026-03-20"), try photo("b", "2026-03-15"), try photo("c", "2026-03-10")])
+        let server = makeStubServer()
+        server.route("GET", "server/features", .json(Self.features))
+        server.route("DELETE", "assets", .empty(204))
+        let (api, mutations) = try makeAccount(server)
+        let model = ViewerModel(api: api, route: ViewerRoute(asset: list.assets[1], source: .collection("maya"), albumContext: nil),
+                                window: .collection(list), settleDelay: .zero)
+        model.start(mutations: mutations, close: { XCTFail("The viewer stays.") })
+        await model.loadFeatures()
+
+        try await delete(model)
+        XCTAssertEqual(model.assets.map(\.id), ["a", "c"], "Read again at rest, the list still holds it.")
+        XCTAssertEqual(list.assets.map(\.id), ["a", "b", "c"])
+        list.assets += [try photo("d", "2026-03-05")]
+        try await until("The viewer did not take the photo the list found.") { model.assets.contains { $0.id == "d" } }
+        XCTAssertEqual(model.assets.map(\.id), ["a", "c", "d"])
+        XCTAssertEqual(model.current.id, "c")
     }
 
     // MARK: - Fresher records
@@ -352,6 +389,28 @@ import XCTest
         model.setPagerMoving(true)
         model.select(id)
         model.setPagerMoving(false)
+    }
+
+    /// Deletes the photo on screen as the viewer's button and its question do, and waits for the
+    /// server's answer. `meanwhile` runs once the question has gone, before the change is sent.
+    private func delete(_ model: ViewerModel, meanwhile: () -> Void = {}) async throws {
+        model.requestDeletion()
+        try await until("The viewer did not ask before deleting.") { model.confirmation != nil }
+        XCTAssertEqual(model.confirmation, .delete(model.current, permanently: false), "It asks about the photo on screen.")
+        // The dialog goes as its button runs.
+        model.confirmation = nil
+        model.confirmDeletion()
+        meanwhile()
+        try await until("The deletion did not finish.") { !model.busy }
+    }
+
+    /// The photos each deletion sent to the server named, in order. Each went to Trash.
+    private func deletions(on server: StubServer) throws -> [[String]] {
+        try server.requests("DELETE", "assets").map { request in
+            let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.body)) as? [String: Any])
+            XCTAssertEqual(sent["force"] as? Bool, false, "To Trash.")
+            return try XCTUnwrap(sent["ids"] as? [String])
+        }
     }
 
     /// The server's answer with a photo's detailed record.

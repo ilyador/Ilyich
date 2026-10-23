@@ -68,7 +68,7 @@ enum ViewerConfirmation: Hashable {
     /// Share, Download original and Save to Photos.
     let exports: ExportTracker
     /// The photos the viewer pages through: the source's window around the photo on screen,
-    /// which always holds that photo.
+    /// which always holds that photo, less the photos deleted here.
     private(set) var assets: [Asset]
     /// The photo on screen.
     private(set) var selectedID: String
@@ -116,6 +116,9 @@ enum ViewerConfirmation: Hashable {
     /// An intent waiting for the sheet over the viewer to close, such as exploring a place from
     /// the details: the sheet goes first, then the viewer, as the navigator closes its own layers.
     @ObservationIgnored private var intentAfterSheet: NavigationIntent?
+    /// Photos deleted here. They leave the pages once the photos rest, and a source that still
+    /// lists one, not having applied the deletion yet, doesn't bring it back.
+    @ObservationIgnored private var deleted: Set<String> = []
 
     /// `matchedLocalPhotos` are the phone's copies of server photos, by server ID. Only the
     /// library's own viewer is handed the `navigator`: exploring a place there raises the
@@ -240,18 +243,45 @@ enum ViewerConfirmation: Hashable {
     }
 
     private func showSettledWindow() {
+        guard dropDeleted() else { return }
         show(Self.offered(by: window, around: selectedID, neighbors: neighborIDs))
     }
 
-    /// Shows the source's window with the photo on screen kept in it (AssetWindow.merged). The
-    /// pages move with the photos in the same change, so the photo on screen stays put.
+    /// Shows the source's window with the photo on screen kept in it (AssetWindow.merged), less
+    /// the photos deleted here.
     private func show(_ offered: [Asset]) {
-        let next = AssetWindow.merged(shown: assets, offered: offered, selected: selectedID)
-        guard next != assets else { return }
-        let moved = next.count != assets.count || zip(next, assets).contains { $0.id != $1.id }
-        let shifted = next.firstIndex { $0.id == selectedID } != assets.firstIndex { $0.id == selectedID }
+        let offered = deleted.isEmpty ? offered : offered.filter { !deleted.contains($0.id) }
+        place(AssetWindow.merged(shown: assets, offered: offered, selected: selectedID), selected: selectedID)
+    }
+
+    /// Takes the photos deleted here out of the pages. The photo after the one on screen, or else
+    /// the one before, comes on screen in its place, as in Photos and the phone's own viewer (P3);
+    /// the viewer closes when no photo is left. Says whether it stays.
+    private func dropDeleted() -> Bool {
+        guard !deleted.isEmpty, assets.contains(where: { deleted.contains($0.id) }) else { return true }
+        let remaining = assets.filter { !deleted.contains($0.id) }
+        guard !remaining.isEmpty else { close(); return false }
+        var selected = selectedID
+        if deleted.contains(selected), let index = assets.firstIndex(where: { $0.id == selected }) {
+            let after = assets[index...].first { !deleted.contains($0.id) }
+            let before = assets[..<index].last { !deleted.contains($0.id) }
+            selected = (after ?? before ?? remaining[0]).id
+        }
+        place(remaining, selected: selected)
+        return true
+    }
+
+    /// Puts `next` up as the photos paged through, `selected` on screen. The pages move with the
+    /// photos in the same change, so the photo on screen stays put, and the strip is laid out
+    /// afresh when the photo on screen lands at another place among them.
+    private func place(_ next: [Asset], selected: String) {
+        let reselects = selected != selectedID
+        guard reselects || next != assets else { return }
+        let moved = reselects || next.count != assets.count || zip(next, assets).contains { $0.id != $1.id }
+        let shifted = next.firstIndex { $0.id == selected } != assets.firstIndex { $0.id == selectedID }
         assets = next
-        if moved { pagePosition.scrollTo(id: selectedID, anchor: .leading) }
+        if reselects { selectedID = selected }
+        if moved { pagePosition.scrollTo(id: selected, anchor: .leading) }
         if shifted { windowShifts += 1 }
     }
 
@@ -403,12 +433,16 @@ enum ViewerConfirmation: Hashable {
     }
 
     /// Deletes the photo the question was asked about, which a swipe may have moved on from the
-    /// one opened, and closes the viewer, as it always has (P3 moved only the phone's viewer on).
+    /// one opened. The viewer stays, with the photo after it, or else the one before, on screen
+    /// in its place (dropDeleted); it closes when no photo is left.
     func confirmDeletion() {
         guard case .delete(let asset, let permanently) = lastConfirmation, asset.ownerId != nil, asset.ownerId == api.userID else { return }
         run {
             _ = try await self.mutate(permanently ? .deletePermanently([asset.id]) : .trash([asset.id]), on: asset)
-            self.close()
+            self.deleted.insert(asset.id)
+            // Mid-swipe the photo leaves once the photos rest.
+            guard !self.isMoving else { return }
+            if self.dropDeleted() { self.settle() }
         }
     }
 
