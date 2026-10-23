@@ -99,7 +99,9 @@ enum AssetSourceID: Hashable, Sendable {
     case locked
 }
 
-struct ViewerRoute: Hashable, Sendable {
+/// A viewer to present: the photo it opens on, and where the photos it pages through come from.
+/// The library's viewer and every viewer opened from another screen is presented by one (N3).
+struct ViewerRoute: Hashable, Sendable, Identifiable {
     /// The photo the viewer opens on.
     let asset: Asset
     let source: AssetSourceID
@@ -107,6 +109,7 @@ struct ViewerRoute: Hashable, Sendable {
     let albumContext: String?
 
     var initialAssetID: String { asset.id }
+    var id: String { asset.id }
 }
 
 /// Each settings screen, or the root list. The other raw values are SettingsDestination's.

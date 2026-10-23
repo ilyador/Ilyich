@@ -56,11 +56,12 @@ struct LockedFolderView: View {
     @State private var remember = false
     @State private var unlocked = false
     @State private var busy = false
-    @State private var assets: [Asset] = []
+    /// The folder's photos, which its viewer pages through.
+    @State private var list = AssetList(keeps: CollectionMembership.lockedFolder)
     @State private var buckets: [TimeBucket] = []
     @State private var nextBucket = 0
     @State private var failure: FeatureFailure?
-    @State private var viewing: Asset?
+    @State private var viewing: ViewerRoute?
     @State private var generation = UUID()
     @State private var biometricAvailable = false
     private var settingUp: Bool { status?.pinCode == false }
@@ -69,8 +70,10 @@ struct LockedFolderView: View {
         Group {
             if unlocked && scenePhase == .active {
                 ScrollView {
-                    SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: { viewing = $0 })
-                    if !busy && assets.isEmpty { FeatureEmpty(title: "Your locked folder is empty", symbol: "lock", description: "Move private photos here from your library.") }
+                    SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: list.assets, onOpenAsset: {
+                        viewing = ViewerRoute(asset: $0, source: .locked, albumContext: nil)
+                    })
+                    if !busy && list.assets.isEmpty { FeatureEmpty(title: "Your locked folder is empty", symbol: "lock", description: "Move private photos here from your library.") }
                     if busy { ProgressView().padding(24) }
                     if nextBucket < buckets.count { Button("Load more") { Task { await loadNext() } }.padding() }
                 }
@@ -105,22 +108,22 @@ struct LockedFolderView: View {
             biometricAvailable = LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
             do { status = try await api.authStatus() } catch { failure = .init(error) }
         }
-        .sheet(item: $viewing) { asset in
-            AssetViewer(api: api, pipeline: pipeline, assets: assets, initial: asset, onUpdated: { updated in
-                if updated.visibility != .locked { assets.removeAll { $0.id == updated.id } }
-                else if let index = assets.firstIndex(where: { $0.id == updated.id }) { assets[index] = updated }
-            }, onDeleted: { _ in viewing = nil; Task { do { try await loadUnlocked() } catch { failure = .init(error) } } })
+        // The viewer pages through the folder's photos. One moved out of the folder leaves it; one
+        // found gone, as when the folder relocked on the server, has the folder read again.
+        .sheet(item: $viewing) { route in
+            AssetViewer(api: api, pipeline: pipeline, route: route, window: .locked(list))
         }
+        .onChange(of: list.losses) { viewing = nil; Task { do { try await loadUnlocked() } catch { failure = .init(error) } } }
         // A photo moved to the timeline or put in Trash leaves the folder in place, from the grid's
         // actions or its viewer. Nothing is read again, so a change ending after the folder
         // relocked shows nothing: the folder then holds no photos to change.
-        .onMutationApplied { assets = $0.applied(to: assets, keeping: CollectionMembership.lockedFolder) }
+        .onMutationApplied { list.assets = $0.applied(to: list.assets, keeping: CollectionMembership.lockedFolder) }
         .task(id: unlocked) {
             guard unlocked, let expires = status?.pinExpiresAt ?? status?.expiresAt else { return }
             do { try await Task.sleep(for: .seconds(max(0, expires.timeIntervalSinceNow))); await relock() } catch { }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background { viewing = nil; unlocked = false; assets = []; generation = UUID(); Task { await relock() } }
+            if phase == .background { viewing = nil; unlocked = false; list.assets = []; generation = UUID(); Task { await relock() } }
         }
         .onDisappear { generation = UUID(); Task { await relock() } }
         .alert("Couldn’t unlock folder", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
@@ -157,11 +160,11 @@ struct LockedFolderView: View {
         guard status.isElevated else { throw ServerFailure.forbidden(nil) }
         let result = try await api.timeBuckets(timeline)
         guard requestGeneration == generation else { return }
-        self.status = status; buckets = result; nextBucket = 0; assets = []; unlocked = true
+        self.status = status; buckets = result; nextBucket = 0; list.assets = []; unlocked = true
         if !buckets.isEmpty {
             let page = try await api.timeBucket(buckets[0].timeBucket, of: timeline)
             guard requestGeneration == generation else { return }
-            assets = page; nextBucket = 1
+            list.assets = page; nextBucket = 1
         }
     }
     private func loadNext() async {
@@ -171,12 +174,12 @@ struct LockedFolderView: View {
         do {
             let page = try await api.timeBucket(buckets[nextBucket].timeBucket, of: timeline)
             guard requestGeneration == generation else { return }
-            assets += page; nextBucket += 1
+            list.assets += page; nextBucket += 1
         } catch { failure = .init(error) }
     }
     private func relock() async {
         let token = UUID(); generation = token
-        busy = true; viewing = nil; unlocked = false; assets = []; buckets = []; pin = ""; confirmation = ""; password = ""
+        busy = true; viewing = nil; unlocked = false; list.assets = []; buckets = []; pin = ""; confirmation = ""; password = ""
         defer { if generation == token { busy = false } }
         try? await api.lock()
         await pipeline.removePrivate()

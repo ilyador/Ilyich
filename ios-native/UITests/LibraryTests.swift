@@ -1094,6 +1094,58 @@ final class LibraryTests: XCTestCase {
         let back = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: app.textFields["library.search"])
         XCTAssertEqual(XCTWaiter.wait(for: [back], timeout: 5), .completed, "Dragging a photo down closes the viewer.")
     }
+    /// One swipe moves the viewer on by exactly one photo, the one after it in the grid, and one
+    /// swipe back by one. So it does across the end of a month, where the photos the viewer pages
+    /// through move on to the next month's once it rests there (N3).
+    @MainActor func testOneSwipeAdvancesExactlyOnePhoto() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 4).waitForExistence(timeout: 15))
+        let following = (2...4).compactMap { photoID(at: $0, in: grid, app) }
+        XCTAssertEqual(following.count, 3, "The grid's photos open.")
+        tapPhoto(grid.cells.element(boundBy: 1))
+        let strip = app.descendants(matching: .any)["viewer.strip"]
+        XCTAssertTrue(strip.waitForExistence(timeout: 10))
+        func position() -> Int? { (strip.value as? String)?.split(separator: " ").first.flatMap { Int($0) } }
+        func waitForPosition(_ expected: Int, _ message: String) {
+            let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in position() == expected }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 5), .completed, message)
+        }
+        guard let start = position() else { return XCTFail("The strip says which photo is shown.") }
+        for (step, expected) in following.enumerated() {
+            app.swipeLeft()
+            waitForPosition(start + step + 1, "One swipe moves on one photo.")
+            XCTAssertEqual(onScreenPhoto(app, where: { $0 == expected }), expected, "The photo after it in the grid.")
+        }
+        app.swipeRight()
+        waitForPosition(start + 2, "One swipe back moves back one photo.")
+        XCTAssertEqual(onScreenPhoto(app, where: { $0 == following[1] }), following[1])
+
+        // The strip jumps to the newest month's last photo, the hundredth: seven thumbnails right
+        // at a time (23 points apart, and 18 more past the wide current one), then the rest.
+        let middle = strip.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        var reached = start + 2
+        while reached < 100 {
+            let step = min(7, 100 - reached)
+            middle.withOffset(CGVector(dx: CGFloat(step) * 23 + 18, dy: 0)).tap()
+            reached += step
+            waitForPosition(reached, "The strip jumps \(step) photos.")
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+        guard let last = onScreenPhoto(app) else { return XCTFail("The viewer shows the month's last photo.") }
+        app.swipeLeft()
+        waitForPosition(101, "One swipe crosses into the next month by one photo.")
+        guard let first = onScreenPhoto(app, where: { $0 != last }), first != last else { return XCTFail("The next month's first photo shows.") }
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertEqual(position(), 101, "Resting there keeps it in place.")
+        XCTAssertEqual(onScreenPhoto(app), first, "The photo on screen stays as the window moves on.")
+        app.swipeRight()
+        waitForPosition(100, "One swipe back crosses back by one photo.")
+        XCTAssertEqual(onScreenPhoto(app, where: { $0 == last }), last, "Back on the month's last photo.")
+        app.swipeLeft()
+        waitForPosition(101, "And forward again.")
+        XCTAssertEqual(onScreenPhoto(app, where: { $0 == first }), first)
+    }
     /// The library stays upright when the phone turns. The viewer turns with it, keeps its photo,
     /// still swipes to the photo beside it, and closing it turns the app back upright.
     @MainActor func testOnlyTheViewerTurnsWithThePhoneAndKeepsItsPhoto() {

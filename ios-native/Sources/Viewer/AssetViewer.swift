@@ -1,64 +1,24 @@
 import Photos
 import SwiftUI
 
+/// The photo and video viewer. What it shows and does is its model's (ViewerModel): the photos it
+/// pages through come from the screen it opened from (AssetWindowProvider), and the photo on screen
+/// stays put however that source changes.
 @MainActor
 struct AssetViewer: View {
-    let api: APIClient
     let pipeline: MediaPipeline
-    let assets: [Asset]
-    /// A fresher record of a photo, read from the server. The viewer's own changes reach the
-    /// screens through the account's mutations instead (N2).
-    let onUpdated: (Asset) -> Void
-    /// The photo with this ID was found gone: deleted, locked or put in Trash elsewhere, or no
-    /// longer visible. A change made here reaches the screens through the account's mutations.
-    let onDeleted: (String) -> Void
-    let onExploreLocation: ((PlaceFocus) -> Void)?
-    let albumID: String?
-    let matchedLocalPhotos: [String: LocalPhoto]
     /// Set when the viewer zooms out of a grid cell: it hears which photo is on screen, and the
     /// system's drag to close replaces the viewer's own swipe down.
     let transition: ViewerTransitionState?
     /// Closes the viewer when it was presented outside SwiftUI.
     let onClose: (() -> Void)?
+    @State private var model: ViewerModel
     @ObservedObject private var cast = CastSessionService.shared
-    @State private var selectedID: String
-    @State private var replacements: [String: Asset] = [:]
     @State private var controls = true
-    @State private var info = false
-    @State private var editing = false
-    @State private var chooseAlbum = false
-    @State private var deleteConfirmation = false
-    @State private var deletePermanently = false
-    @State private var deletionTarget: Asset?
-    @State private var refreshRevision = 0
-    @State private var accessRefreshRevision = -1
-    @State private var locationPresented = false
-    @State private var pendingLocation: PlaceFocus?
-    @State private var locationCollection: InfoCollection?
-    @State private var error: String?
-    /// A change to the photo is running; exports keep their own state.
-    @State private var working = false
-    /// Share, Download original and Save to Photos.
-    @State private var exports: ExportTracker
-    @State private var shared: ExportedFiles?
     @State private var playingLive = false
-    @State private var slideshow = false
-    @State private var sharedLink = false
-    @State private var showStack = false
-    @State private var albumActivity = false
-    @State private var castPresented = false
-    @State private var ocrPresented = false
-    @State private var similarPresented = false
-    @State private var features: ServerFeatures?
-    @State private var profilePhoto = false
-    @State private var localPhotoActions = false
-    @State private var changedLocalCopies: Set<String> = []
     /// Where the bars leave room for the LIVE badge and the video pill, kept while the bars are hidden.
     @State private var chromeInsets = EdgeInsets()
     @State private var playback = VideoPlaybackState()
-    /// While the thumbnail strip is scrubbed, pages show what memory has and slow work waits.
-    @State private var stripScrubbing = false
-    @State private var pagePosition: ScrollPosition
     /// Only scrolling moves the selection; offsets that change at rest, such as on first showing
     /// the strip or turning the phone, say nothing about it.
     @State private var pagerPhase: ScrollPhase = .idle
@@ -72,33 +32,23 @@ struct AssetViewer: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.mutations) private var mutations
 
-    init(api: APIClient, pipeline: MediaPipeline, assets: [Asset], initial: Asset,
-         onUpdated: @escaping (Asset) -> Void, onDeleted: @escaping (String) -> Void, albumID: String? = nil,
-         matchedLocalPhotos: [String: LocalPhoto] = [:], onExploreLocation: ((PlaceFocus) -> Void)? = nil,
+    /// `route` names the photo the viewer opens on and where its photos come from, and `window` is
+    /// that source. `matchedLocalPhotos` are the phone's copies of server photos, by server ID.
+    /// Only the library's own viewer is handed the `navigator`: exploring a place there raises the
+    /// library's Earth, where any other viewer shows the place over itself.
+    init(api: APIClient, pipeline: MediaPipeline, route: ViewerRoute, window: AssetWindowProvider,
+         matchedLocalPhotos: [String: LocalPhoto] = [:], navigator: LibraryNavigator? = nil,
          transition: ViewerTransitionState? = nil, onClose: (() -> Void)? = nil) {
-        self.api = api; self.pipeline = pipeline
-        self.assets = assets.contains(where: { $0.id == initial.id }) ? assets : [initial] + assets
-        self.onUpdated = onUpdated; self.onDeleted = onDeleted
-        self.onExploreLocation = onExploreLocation
-        self.albumID = albumID
-        self.matchedLocalPhotos = matchedLocalPhotos
+        self.pipeline = pipeline
         self.transition = transition; self.onClose = onClose
-        _selectedID = State(initialValue: initial.id)
-        _pagePosition = State(initialValue: ScrollPosition(id: initial.id, anchor: .leading))
-        _replacements = State(initialValue: [initial.id: initial])
-        _exports = State(initialValue: ExportTracker(api: api))
+        _model = State(initialValue: ViewerModel(api: api, route: route, window: window, matchedLocalPhotos: matchedLocalPhotos,
+                                                 navigator: navigator))
     }
 
-    private var selectedIndex: Int { assets.firstIndex(where: { $0.id == selectedID }) ?? 0 }
-    private var current: Asset { replacements[selectedID] ?? assets[selectedIndex] }
+    private var api: APIClient { model.api }
+    private var current: Asset { model.current }
     /// What the photo on screen offers. Every button and menu item renders from it.
-    private var capabilities: AssetCapabilities {
-        AssetCapabilityPolicy.evaluate(current, context: CapabilityContext(api: api, features: features, album: albumID))
-    }
-    /// A change or an export is running, so the other actions wait.
-    private var busy: Bool { working || exports.isRunning }
-
-    private func matchedLocalCopy(for asset: Asset) -> LocalPhoto? { changedLocalCopies.contains(asset.id) ? nil : matchedLocalPhotos[asset.id] }
+    private var capabilities: AssetCapabilities { model.capabilities }
 
     /// The bars, the strip, the video pill and the Live badge, put away while the viewer closes.
     private var chromeShown: Bool { controls && !(transition?.dismissing ?? false) }
@@ -109,14 +59,14 @@ struct AssetViewer: View {
             if transition == nil { Color.black.ignoresSafeArea() }
             pager
             pageChrome
-            if let progress = exports.progress, let request = exports.request {
+            if let progress = model.exports.progress, let request = model.exports.request {
                 VStack(spacing: 12) {
                     if let fraction = progress.fraction { ProgressView(value: fraction) } else { ProgressView() }
                     Text(progress.committing ? "Saving to Photos…" : Self.exportLabel(request)).font(.subheadline)
-                    if !progress.committing { Button("Cancel") { exports.cancel() }.buttonStyle(.glass).accessibilityIdentifier("viewer.cancelTransfer") }
+                    if !progress.committing { Button("Cancel") { model.exports.cancel() }.buttonStyle(.glass).accessibilityIdentifier("viewer.cancelTransfer") }
                 }.frame(width: 220).padding(20).glassEffect(in: .rect(cornerRadius: 24))
                     .accessibilityElement(children: .contain)
-            } else if working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
+            } else if model.working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
         }
         // The badge and the pill stay where the bars put them while the bars slide away.
         .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in if chromeShown { chromeInsets = insets } }
@@ -128,53 +78,43 @@ struct AssetViewer: View {
         // Monochrome glyphs, as in Photos, whatever the app's accent.
         .tint(.primary)
         // An export is for the photo it started on; one already writing to Photos finishes.
-        .onChange(of: selectedID) { if !exports.isCommitting { exports.cancel() } }
-        .onDisappear { if !exports.isCommitting { exports.cancel() } }
+        .onChange(of: model.selectedID) { model.stopExport() }
+        .onDisappear { model.stopExport() }
         .preferredColorScheme(.dark)
         .statusBarHidden(!controls)
-        .task { features = try? await api.serverFeatures() }
-        .onChange(of: selectedID) { playingLive = false }
-        .onChange(of: selectedID, initial: true) {
+        .task { await model.loadFeatures() }
+        .onChange(of: model.selectedID) { playingLive = false }
+        .onChange(of: model.selectedID, initial: true) {
             // Closing zooms back into the cell of the photo on screen, lined up with the photo.
-            transition?.currentID = selectedID
+            transition?.currentID = model.selectedID
             transition?.aspectRatio = CGFloat(current.aspectRatio)
         }
         // Scrubbing the strip passes many photos; only the one it stops on is refreshed and cast.
         // A photo that can't be cast, such as a locked one, never reaches the TV.
-        .task(id: settledID) {
-            guard settledID != nil, capabilities.offers(.cast) else { return }
+        .task(id: model.settledID) {
+            guard model.settledID != nil, capabilities.offers(.cast) else { return }
             CastSessionService.shared.select(api: api, asset: current)
         }
-        .task(id: (settledID ?? "") + "|" + String(refreshRevision)) { if settledID != nil { await refreshCurrentAsset() } }
-        .task(id: settledID) { if settledID != nil { await prefetchNeighbors() } }
+        .task(id: model.refreshKey) { await model.refreshCurrentAsset() }
+        .task(id: model.settledID) { if model.settledID != nil { await prefetchNeighbors() } }
         .onReceive(NotificationCenter.default.publisher(for: .ilyichLibraryChanged)) { note in
             guard note.userInfo?["scope"] as? String == api.cacheScope else { return }
-            refreshRevision += 1
-            if note.userInfo?["accessChanged"] as? Bool == true { accessRefreshRevision = refreshRevision }
-        }
-        // A change to a photo here, from its details, its editor or its stack, shows at once. The
-        // records shown are the live ones; the list this closure was made with may be older. They
-        // change in one write, however many photos a bulk change names.
-        .onMutationApplied { result in
-            let changed = result.records(updating: { id in replacements[id] ?? assets.first(where: { $0.id == id }) })
-            if !changed.isEmpty { replacements.merge(changed) { _, new in new } }
+            model.libraryChanged(accessChanged: note.userInfo?["accessChanged"] as? Bool == true)
         }
     }
 
     private static let pageGap: CGFloat = 20
 
-    /// The selection once the strip lets go of it.
-    private var settledID: String? { stripScrubbing ? nil : selectedID }
-
     /// Photos lie side by side on one paging strip with a black gap between them, as in Photos.
     /// The strip is one gap wider than the screen, so each page is a photo plus the gap after it.
-    /// Pages keep their place while the selection changes, so a swipe never swaps photos mid-drag.
+    /// Pages keep their place while the selection changes, so a swipe never swaps photos mid-drag,
+    /// and the model moves them along with any change to the photos, so none slides under the viewer.
     private var pager: some View {
         GeometryReader { proxy in
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 0) {
-                    ForEach(Array(assets.enumerated()), id: \.element.id) { index, summary in
-                        page(index: index, asset: replacements[summary.id] ?? summary)
+                    ForEach(Array(model.assets.enumerated()), id: \.element.id) { index, summary in
+                        page(index: index, asset: model.record(summary))
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             .padding(.trailing, Self.pageGap)
                     }
@@ -185,45 +125,47 @@ struct AssetViewer: View {
             // The bars float over the photo; no soft edge is drawn under them.
             .scrollEdgeEffectHidden(true, for: .all)
             .scrollTargetBehavior(.paging)
-            .scrollPosition($pagePosition, anchor: .leading)
+            .scrollPosition($model.pagePosition, anchor: .leading)
             .onScrollGeometryChange(for: Int.self) { geometry in
                 Int((geometry.contentOffset.x / max(1, geometry.containerSize.width)).rounded())
             } action: { _, page in
-                guard pagerPhase != .idle, assets.indices.contains(page) else { return }
-                if assets[page].id != selectedID { selectedID = assets[page].id }
+                guard pagerPhase != .idle, model.assets.indices.contains(page) else { return }
+                model.select(model.assets[page].id)
             }
-            .onScrollPhaseChange { _, phase in pagerPhase = phase }
+            .onScrollPhaseChange { _, phase in
+                pagerPhase = phase
+                model.setPagerMoving(phase != .idle)
+            }
             // Turning the phone resizes every page while the offset stays, which would land on a
             // photo far away; the strip comes back to the selected photo instead.
             .onChange(of: proxy.size, initial: true) { _, size in
                 viewport = size
-                pagePosition.scrollTo(id: selectedID, anchor: .leading)
+                model.pagePosition.scrollTo(id: model.selectedID, anchor: .leading)
             }
         }
         .ignoresSafeArea()
-        // Photos added to or removed from the list must not slide another photo under the viewer.
-        .onChange(of: assets.map(\.id)) { pagePosition.scrollTo(id: selectedID, anchor: .leading) }
     }
 
     @ViewBuilder private func page(index: Int, asset: Asset) -> some View {
-        if abs(index - selectedIndex) <= 1 {
+        let selectedID = model.selectedID
+        if abs(index - model.index) <= 1 {
             if asset.isVideo {
-                videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !stripScrubbing && !(cast.connected && cast.currentAssetID == asset.id),
-                                             sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), playback: playback))
+                videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !model.stripScrubbing && !(cast.connected && cast.currentAssetID == asset.id),
+                                             sourceAsset: asset, matchedLocalPhoto: model.localCopy(of: asset), playback: playback))
             } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
                 videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false },
-                                             sourceAsset: asset, matchedLocalPhoto: matchedLocalCopy(for: asset), isLivePhotoMotion: true))
+                                             sourceAsset: asset, matchedLocalPhoto: model.localCopy(of: asset), isLivePhotoMotion: true))
             } else {
                 ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { if transition == nil { close() } },
-                            matchedLocalPhoto: matchedLocalCopy(for: asset), onSwipeUp: { info = true }, settled: !stripScrubbing)
+                            matchedLocalPhoto: model.localCopy(of: asset), onSwipeUp: { model.sheet = .info }, settled: !model.stripScrubbing)
             }
         } else { Color.black }
     }
 
     private func showPage(_ index: Int) {
-        guard assets.indices.contains(index) else { return }
+        guard model.assets.indices.contains(index) else { return }
         withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.3)) {
-            pagePosition.scrollTo(id: assets[index].id, anchor: .leading)
+            model.pagePosition.scrollTo(id: model.assets[index].id, anchor: .leading)
         }
     }
 
@@ -231,100 +173,90 @@ struct AssetViewer: View {
     private func prefetchNeighbors() async {
         let pixels = Int(max(viewport.width, viewport.height) * displayScale)
         guard pixels > 0 else { return }
-        let index = selectedIndex
+        let assets = model.assets, index = model.index
         for offset in [1, -1, 2] where assets.indices.contains(index + offset) {
-            let asset = replacements[assets[index + offset].id] ?? assets[index + offset]
+            let asset = model.record(assets[index + offset])
             guard !asset.isVideo else { continue }
             _ = try? await pipeline.image(for: asset, size: .preview, pixelSize: pixels)
             if Task.isCancelled { return }
         }
     }
 
-    private var mediaSheets: some View {
+    var body: some View {
         NavigationStack { canvas }
-        .sheet(isPresented: $locationPresented) {
-            if let focus = locationFocus {
-                NavigationStack {
-                    PlacesView(api: api, pipeline: pipeline, onSelect: { place in
-                        guard !place.assetIDs.isEmpty else { return }
-                        locationCollection = .init(title: place.title, filter: SearchFilter(or: place.assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) }))
-                    }, focus: focus)
-                    .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { locationPresented = false } } }
-                    .sheet(item: $locationCollection) { collection in NavigationStack { InfoCollectionView(api: api, pipeline: pipeline, collection: collection) } }
-                }
+            // One sheet and one cover at a time, as SwiftUI presents them.
+            .sheet(item: $model.sheet, onDismiss: { model.sheetDidDismiss() }) { sheet in sheetContent(sheet) }
+            .fullScreenCover(item: $model.cover) { cover in coverContent(cover) }
+            // Only the viewer turns with the phone; the rest of the app stays upright.
+            .onAppear { OrientationLock.viewerAppeared() }
+            .onDisappear { OrientationLock.viewerDisappeared() }
+            .onAppear {
+                // The close handed over holds only what closing needs, not this view.
+                let onClose = onClose, dismiss = dismiss
+                model.start(mutations: mutations, close: { if let onClose { onClose() } else { dismiss() } })
             }
-        }
-        .sheet(isPresented: $profilePhoto) { NavigationStack { ProfilePhotoCropView(api: api, pipeline: pipeline, asset: current) } }
-        .sheet(isPresented: $castPresented) { CastView(api: api, asset: current) }
-        .fullScreenCover(isPresented: $ocrPresented) { OCRPhotoReader(api: api, pipeline: pipeline, asset: current) }
-        .sheet(isPresented: $similarPresented) { SimilarPhotosView(api: api, pipeline: pipeline, reference: current) }
-        .sheet(isPresented: $localPhotoActions) {
-            if let photo = matchedLocalPhotos[current.id], !changedLocalCopies.contains(current.id) {
+            .alert("Couldn’t complete action", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
+                Button("OK", role: .cancel) { }
+            } message: { Text(model.error ?? "") }
+            .confirmationDialog(deletesPermanently ? "Delete permanently?" : "Move to Trash?",
+                                isPresented: Binding(get: { model.confirmation != nil }, set: { if !$0 { model.confirmation = nil } }),
+                                titleVisibility: .visible) {
+                Button(deletesPermanently ? "Delete permanently" : "Move to Trash", role: .destructive) { model.confirmDeletion() }
+            } message: {
+                Text(deletesPermanently ? "This cannot be undone. Photos on your phone are kept." : "You can restore this item from Trash. Photos on your phone are kept.")
+            }
+    }
+
+    /// The question shown, or the one going away.
+    private var deletesPermanently: Bool { (model.confirmation ?? model.lastConfirmation)?.permanently ?? false }
+
+    @ViewBuilder private func sheetContent(_ sheet: ViewerSheet) -> some View {
+        switch sheet {
+        case .info: infoSheet
+        case .location(let focus): ViewerPlaceSheet(api: api, pipeline: pipeline, focus: focus)
+        case .addToAlbum: NavigationStack { ViewerAlbumPicker(api: api, asset: current) }
+        case .sharedLink: NavigationStack { SharedLinkEditor(api: api, album: nil, assetIDs: [current.id]) }
+        case .stack:
+            if let stack = current.stack { NavigationStack { ViewerStackView(api: api, pipeline: pipeline, stackID: stack.id) } }
+        case .activity:
+            if let albumID = model.route.albumContext { NavigationStack { AlbumActivityView(api: api, albumID: albumID, assetID: current.id) } }
+        case .cast: CastView(api: api, asset: current)
+        case .similar: SimilarPhotosView(api: api, pipeline: pipeline, reference: current)
+        case .profilePhoto: NavigationStack { ProfilePhotoCropView(api: api, pipeline: pipeline, asset: current) }
+        case .phoneCopy:
+            if let photo = model.localCopy(of: current) {
                 NavigationStack {
                     LocalPhotoActionsView(photos: [photo]) { change in
                         // Only a removal ends the phone copy; a favorite leaves the photo as it was.
-                        if case .removed = change { changedLocalCopies.insert(current.id) }
-                        localPhotoActions = false
+                        if case .removed = change { model.localCopyRemoved(for: current.id) }
+                        model.sheet = nil
                     }
                 }
             }
+        case .share(let files): ShareSheet(urls: files.urls).onDisappear { files.remove() }
         }
     }
 
-    private var detailSheets: some View {
-        mediaSheets
-        .sheet(isPresented: $info, onDismiss: finishLocationNavigation) { infoSheet }
-        .fullScreenCover(isPresented: $editing) {
-            PhotoEditor(api: api, pipeline: pipeline, asset: current)
-        }
-        .sheet(isPresented: $chooseAlbum) {
-            NavigationStack { ViewerAlbumPicker(api: api, asset: current) }
-        }
-        .fullScreenCover(isPresented: $slideshow) { SlideshowView(api: api, pipeline: pipeline, assets: assets.map { replacements[$0.id] ?? $0 }, initial: current) }
-        .sheet(isPresented: $sharedLink) { NavigationStack { SharedLinkEditor(api: api, album: nil, assetIDs: [current.id]) } }
-        .sheet(isPresented: $showStack) {
-            if let stack = current.stack { NavigationStack { ViewerStackView(api: api, pipeline: pipeline, stackID: stack.id, onUpdated: update) } }
-        }
-        .sheet(isPresented: $albumActivity) {
-            if let albumID { NavigationStack { AlbumActivityView(api: api, albumID: albumID, assetID: current.id) } }
-        }
-        .sheet(item: $shared) { files in
-            ShareSheet(urls: files.urls).onDisappear { files.remove() }
+    @ViewBuilder private func coverContent(_ cover: ViewerCover) -> some View {
+        switch cover {
+        case .editor: PhotoEditor(api: api, pipeline: pipeline, asset: current)
+        case .selectText: OCRPhotoReader(api: api, pipeline: pipeline, asset: current)
+        case .slideshow: SlideshowView(api: api, pipeline: pipeline, assets: model.records, initial: current)
         }
     }
 
-    private var infoLocationAction: ((PlaceFocus) -> Void)? {
-        guard onExploreLocation != nil else { return nil }
-        return { focus in requestLocationNavigation(focus) }
-    }
     private var infoSheet: some View {
         NavigationStack {
-            AssetInfoView(api: api, pipeline: pipeline, asset: current, onUpdated: update,
-                          onExploreLocation: infoLocationAction)
-                .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { info = false } } }
+            AssetInfoView(api: api, pipeline: pipeline, asset: current, viewer: model)
+                .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { model.sheet = nil } } }
         }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
-    }
-
-    var body: some View {
-        detailSheets
-        // Only the viewer turns with the phone; the rest of the app stays upright.
-        .onAppear { OrientationLock.viewerAppeared() }
-        .onDisappear { OrientationLock.viewerDisappeared() }
-        .alert("Couldn’t complete action", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
-            Button("OK", role: .cancel) { }
-        } message: { Text(error ?? "") }
-        .confirmationDialog(deletePermanently ? "Delete permanently?" : "Move to Trash?", isPresented: $deleteConfirmation, titleVisibility: .visible) {
-            Button(deletePermanently ? "Delete permanently" : "Move to Trash", role: .destructive) { deleteAsset() }
-        } message: {
-            Text(deletePermanently ? "This cannot be undone. Photos on your phone are kept." : "You can restore this item from Trash. Photos on your phone are kept.")
-        }
     }
 
     /// The bars, laid out as in Photos: back, the title and the actions menu along the top; Share,
     /// a group of Favorite, Info and Edit, and Delete along the bottom. Glyphs only, in system glass.
     /// Favorite keeps its place for every photo, dimmed where it can't be used.
     @ToolbarContentBuilder private var viewerToolbar: some ToolbarContent {
-        let can = capabilities
+        let can = capabilities, busy = model.busy
         ToolbarItem(placement: .topBarLeading) {
             Button("Close", systemImage: "chevron.left") { close() }
         }
@@ -332,25 +264,25 @@ struct AssetViewer: View {
             .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .topBarTrailing) { actionsMenu(can) }
         ToolbarItem(placement: .bottomBar) {
-            Button("Share", systemImage: "square.and.arrow.up") { exportAsset(original: shareFileType != "preview") }
+            Button("Share", systemImage: "square.and.arrow.up") { model.share(original: shareFileType != "preview") }
                 .disabled(busy || !can.offers(.share))
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
         ToolbarItemGroup(placement: .bottomBar) {
-            Button(current.isFavorite ? "Remove favorite" : "Favorite", systemImage: current.isFavorite ? "heart.fill" : "heart") { toggleFavorite() }
+            Button(current.isFavorite ? "Remove favorite" : "Favorite", systemImage: current.isFavorite ? "heart.fill" : "heart") { model.toggleFavorite() }
                 .tint(current.isFavorite ? .red : .primary).disabled(!can.offers(.favorite) || busy)
-            Button("Info", systemImage: "info.circle") { info = true }.disabled(busy)
+            Button("Info", systemImage: "info.circle") { model.sheet = .info }.disabled(busy)
             if can.shows(.edit) {
                 // Until the photo's details arrive Edit stays lit, so the bar doesn't flicker as
                 // photos pass, and a tap reads them first.
-                Button("Edit", systemImage: "slider.horizontal.3") { openEditor() }
+                Button("Edit", systemImage: "slider.horizontal.3") { model.openEditor() }
                     .disabled(!(can.offers(.edit) || can[.edit].awaitsDetails) || busy)
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
         if can.shows(.trash) || can.shows(.deletePermanently) {
             ToolbarItem(placement: .bottomBar) {
-                Button("Delete", systemImage: "trash") { requestDeletion() }
+                Button("Delete", systemImage: "trash") { model.requestDeletion() }
                     .disabled(!(can.offers(.trash) || can.offers(.deletePermanently)) || busy)
             }
         }
@@ -360,50 +292,47 @@ struct AssetViewer: View {
     private func actionsMenu(_ can: AssetCapabilities) -> some View {
         Menu {
             Section {
-                menuItem(.addToAlbum, can, "Add to album", systemImage: "rectangle.stack.badge.plus") { chooseAlbum = true }
-                menuItem(.sharedLink, can, "Create shared link", systemImage: "link") { sharedLink = true }
-                if let albumID {
-                    menuItem(.albumCover, can, "Set album cover", systemImage: "photo.on.rectangle.angled") {
-                        let asset = current
-                        run { _ = try await mutate(.setAlbumCover(album: albumID, asset: asset.id), on: asset) }
-                    }
+                menuItem(.addToAlbum, can, "Add to album", systemImage: "rectangle.stack.badge.plus") { model.sheet = .addToAlbum }
+                menuItem(.sharedLink, can, "Create shared link", systemImage: "link") { model.sheet = .sharedLink }
+                if model.route.albumContext != nil {
+                    menuItem(.albumCover, can, "Set album cover", systemImage: "photo.on.rectangle.angled") { model.setAlbumCover() }
                 }
-                menuItem(.comments, can, "Comments and likes", systemImage: "bubble") { albumActivity = true }
+                menuItem(.comments, can, "Comments and likes", systemImage: "bubble") { model.sheet = .activity }
             }
             Section {
-                Button("Slideshow", systemImage: "play.rectangle") { slideshow = true }
-                menuItem(.cast, can, "Cast", systemImage: "tv") { castPresented = true }
-                menuItem(.selectText, can, "Select text", systemImage: "text.viewfinder") { ocrPresented = true }
-                menuItem(.findSimilar, can, "Find similar photos", systemImage: "photo.on.rectangle.angled") { similarPresented = true }
+                Button("Slideshow", systemImage: "play.rectangle") { model.cover = .slideshow }
+                menuItem(.cast, can, "Cast", systemImage: "tv") { model.sheet = .cast }
+                menuItem(.selectText, can, "Select text", systemImage: "text.viewfinder") { model.cover = .selectText }
+                menuItem(.findSimilar, can, "Find similar photos", systemImage: "photo.on.rectangle.angled") { model.sheet = .similar }
                 // Opening the stack only reads it; the stack's own screen disables what read-only
                 // mode stops.
                 if let stack = current.stack, can.shows(.stack) {
-                    Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { showStack = true }
+                    Button("Stack (\(stack.assetCount))", systemImage: "square.stack.3d.up") { model.sheet = .stack }
                 }
             }
             Section {
-                menuItem(.share, can, "Share displayed version", systemImage: "square.and.arrow.up") { exportAsset(original: false) }
-                menuItem(.download, can, "Download original", systemImage: "arrow.down.document") { exportAsset(original: true) }
-                menuItem(.saveToPhotos, can, "Save to Photos", systemImage: "square.and.arrow.down") { saveToPhotos() }
-                if matchedLocalPhotos[current.id] != nil, !changedLocalCopies.contains(current.id) {
-                    Button("On this phone", systemImage: "iphone") { localPhotoActions = true }
+                menuItem(.share, can, "Share displayed version", systemImage: "square.and.arrow.up") { model.share(original: false) }
+                menuItem(.download, can, "Download original", systemImage: "arrow.down.document") { model.share(original: true) }
+                menuItem(.saveToPhotos, can, "Save to Photos", systemImage: "square.and.arrow.down") { model.saveToPhotos() }
+                if model.localCopy(of: current) != nil {
+                    Button("On this phone", systemImage: "iphone") { model.sheet = .phoneCopy }
                 }
                 menuItem(.openInBrowser, can, "Open in browser", systemImage: "safari") { openURL(api.baseURL.deletingLastPathComponent().appendingPathComponent("photos/\(current.id)")) }
-                menuItem(.profilePhoto, can, "Set profile photo", systemImage: "person.crop.circle") { profilePhoto = true }
+                menuItem(.profilePhoto, can, "Set profile photo", systemImage: "person.crop.circle") { model.sheet = .profilePhoto }
             }
             if can.shows(.restore) || can.shows(.archive) || can.shows(.lock) {
                 Section {
-                    menuItem(.restore, can, "Restore from Trash", systemImage: "arrow.uturn.backward") { restoreAsset() }
+                    menuItem(.restore, can, "Restore from Trash", systemImage: "arrow.uturn.backward") { model.restore() }
                     menuItem(.archive, can, current.visibility == .archive ? "Unarchive" : "Archive", systemImage: "archivebox") {
-                        changeVisibility(current.visibility == .archive ? .timeline : .archive)
+                        model.changeVisibility(current.visibility == .archive ? .timeline : .archive)
                     }
                     menuItem(.lock, can, current.visibility == .locked ? "Move out of Locked Folder" : "Move to Locked Folder", systemImage: "lock") {
-                        changeVisibility(current.visibility == .locked ? .timeline : .locked)
+                        model.changeVisibility(current.visibility == .locked ? .timeline : .locked)
                     }
                 }
             }
         } label: { Label("Photo actions", systemImage: "ellipsis") }
-            .disabled(busy)
+            .disabled(model.busy)
     }
 
     /// A menu item for `action`: missing where the photo doesn't have it, dimmed where it can't be
@@ -422,8 +351,8 @@ struct AssetViewer: View {
             }
             .padding(.horizontal, 18).frame(minHeight: 44)
             .accessibilityElement(children: .combine)
-            if let focus = locationFocus {
-                Button { exploreLocation(focus) } label: { label.contentShape(.capsule) }
+            if let focus = model.locationFocus {
+                Button { model.exploreLocation(focus) } label: { label.contentShape(.capsule) }
                     .buttonStyle(.plain)
                     .accessibilityHint("Explore this location on the globe")
                     .glassEffect(.regular.interactive(), in: .capsule)
@@ -443,23 +372,6 @@ struct AssetViewer: View {
                 date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, timeZone: utc)))
     }
 
-    private func exploreLocation(_ focus: PlaceFocus) {
-        if let onExploreLocation { onExploreLocation(focus) } else { locationPresented = true }
-    }
-
-    private var locationFocus: PlaceFocus? {
-        guard let latitude = current.exifInfo?.latitude, let longitude = current.exifInfo?.longitude,
-              latitude.isFinite, longitude.isFinite, (-90...90).contains(latitude), (-180...180).contains(longitude) else { return nil }
-        return .init(latitude: latitude, longitude: longitude, assetID: current.id)
-    }
-    private func requestLocationNavigation(_ focus: PlaceFocus) {
-        pendingLocation = focus; info = false
-    }
-    private func finishLocationNavigation() {
-        guard let focus = pendingLocation else { return }
-        pendingLocation = nil; onExploreLocation?(focus)
-    }
-
     /// What floats over the photo besides the bars: the LIVE badge under the top bar, and above the
     /// bottom bar a video's playback pill over the thumbnail strip.
     private var pageChrome: some View {
@@ -473,13 +385,24 @@ struct AssetViewer: View {
                     ViewerVideoControls(playback: playback, visible: chromeShown)
                         .frame(maxWidth: 520).padding(.horizontal, 24)
                 }
-                if assets.count > 1 {
+                if model.assets.count > 1 {
                     // The strip keeps its room while hidden, so nothing above it moves.
                     ZStack {
                         if chromeShown {
-                            ViewerFilmstrip(pipeline: pipeline, assets: assets, replacements: replacements, selectedID: selectedID,
-                                            onSelect: jumpFromStrip, onScrubbingChange: { stripScrubbing = $0 })
-                                .transition(.opacity)
+                            ZStack {
+                                ViewerFilmstrip(pipeline: pipeline, assets: model.assets, replacements: model.replacements, selectedID: model.selectedID,
+                                                onSelect: { model.jump(to: $0) }, onScrubbingChange: { model.setStripScrubbing($0) })
+                                    // Laid out afresh around the photo on screen when a new window
+                                    // moves it. A new strip draws its first frame before it has
+                                    // scrolled to the photo, so it comes in under the old one,
+                                    // which fades away once the photos have rested and both show
+                                    // the same thumbnails.
+                                    .id(model.windowShifts)
+                                    .zIndex(-Double(model.windowShifts))
+                                    .transition(.asymmetric(insertion: .identity, removal: .opacity))
+                            }
+                            .animation(.easeOut(duration: 0.2), value: model.windowShifts)
+                            .transition(.opacity)
                         }
                     }
                     .frame(height: ViewerFilmstrip.height)
@@ -489,13 +412,6 @@ struct AssetViewer: View {
         }
         .padding(chromeInsets)
         .ignoresSafeArea()
-    }
-
-    /// The strip picked a photo: the pager jumps straight to it, as in Photos.
-    private func jumpFromStrip(_ id: String) {
-        guard id != selectedID, assets.contains(where: { $0.id == id }) else { return }
-        selectedID = id
-        pagePosition.scrollTo(id: id, anchor: .leading)
     }
 
     /// Plays the Live Photo's motion, from where Photos puts its LIVE badge. Glass ignores the
@@ -528,141 +444,43 @@ struct AssetViewer: View {
             .gesture(ViewerTap { toggleControls() })
             // A swipe down closes a video as it does a photo; a swipe up shows its details.
             .gesture(ViewerSwipe(direction: .down, enabled: transition == nil) { close() })
-            .gesture(ViewerSwipe(direction: .up) { info = true })
+            .gesture(ViewerSwipe(direction: .up) { model.sheet = .info })
     }
 
     private func toggleControls() {
         withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.25)) { controls.toggle() }
     }
-    private func update(_ asset: Asset) { replacements[asset.id] = asset; onUpdated(asset) }
-    /// Opens the editor. Before the photo's details say whether the server's editor takes it, the
-    /// tap reads them itself, as a change runs: the spinner shows, the other actions wait and a
-    /// failure is shown. The editor then opens only on the photo still on screen with nothing
-    /// opened over it, so a tap never opens it later on its own.
-    private func openEditor() {
-        if capabilities.offers(.edit) { editing = true; return }
-        guard capabilities[.edit].awaitsDetails else { return }
-        let id = selectedID
-        run {
-            let asset = try await api.asset(id: id)
-            guard selectedID == id, showDetails(asset, over: current) else { return }
-            if capabilities.offers(.edit), !info, !locationPresented { editing = true }
-        }
-    }
     private func close() { if let onClose { onClose() } else { dismiss() } }
     private func handlePhotoTap(_ horizontalFraction: Double) {
-        if tapToNavigate && horizontalFraction < 0.33 && selectedIndex > 0 { showPage(selectedIndex - 1) }
-        else if tapToNavigate && horizontalFraction > 0.67 && selectedIndex + 1 < assets.count { showPage(selectedIndex + 1) }
+        let index = model.index
+        if tapToNavigate && horizontalFraction < 0.33 && index > 0 { showPage(index - 1) }
+        else if tapToNavigate && horizontalFraction > 0.67 && index + 1 < model.assets.count { showPage(index + 1) }
         else { toggleControls() }
-    }
-    private func run(_ operation: @escaping @MainActor () async throws -> Void) {
-        guard !busy else { return }; working = true
-        Task { defer { working = false }; do { try await operation() } catch is CancellationError { } catch { self.error = error.localizedDescription } }
-    }
-    /// Has the account's mutations make the change to `asset`, and waits for the server's answer.
-    /// The viewer and every screen showing the photo take the result from the service, so the
-    /// change shows here and in the feed the same whether or not the viewer is still open.
-    private func mutate(_ request: MutationRequest, on asset: Asset) async throws -> MutationResult {
-        guard let mutations else { throw APIError.signedOut }
-        let result = try await mutations.start(request, on: [asset]).result
-        if let reason = result.failed.values.first { throw APIError.invalidResponse(reason) }
-        return result
-    }
-    private func toggleFavorite() {
-        guard capabilities.offers(.favorite) else { return }
-        let asset = current
-        run { _ = try await mutate(.favorite([asset.id], !asset.isFavorite), on: asset) }
-    }
-    private func changeVisibility(_ visibility: AssetVisibility) {
-        let locking = visibility == .locked || current.visibility == .locked
-        guard capabilities.offers(locking ? .lock : .archive) else { return }
-        let asset = current
-        run {
-            _ = try await mutate(.visibility([asset.id], visibility), on: asset)
-            // A locked photo leaves the library, its media gone with it.
-            if visibility == .locked { close() }
-        }
-    }
-    private func requestDeletion() {
-        guard capabilities.offers(.trash) || capabilities.offers(.deletePermanently) else { return }
-        let asset = current
-        run {
-            let latest = try await api.serverFeatures()
-            guard asset.id == selectedID else { return }
-            features = latest; deletePermanently = asset.isTrashed || !latest.trash
-            deletionTarget = asset; deleteConfirmation = true
-        }
-    }
-    private func deleteAsset() {
-        guard let asset = deletionTarget, asset.ownerId != nil, asset.ownerId == api.userID else { return }
-        let permanently = deletePermanently
-        run { _ = try await mutate(permanently ? .deletePermanently([asset.id]) : .trash([asset.id]), on: asset); close() }
-    }
-    private func restoreAsset() {
-        guard capabilities.offers(.restore) else { return }
-        let asset = current
-        run { _ = try await mutate(.restore([asset.id]), on: asset); close() }
-    }
-    private func refreshCurrentAsset() async {
-        let id = selectedID, revision = refreshRevision
-        let previous = current
-        let accessMustBeConfirmed = accessRefreshRevision >= 0 && accessRefreshRevision <= revision
-        do {
-            if revision > 0 { try await Task.sleep(for: .milliseconds(250)) }
-            let asset = try await api.asset(id: id)
-            try Task.checkCancellation()
-            guard selectedID == id, refreshRevision == revision, showDetails(asset, over: previous) else { return }
-            accessRefreshRevision = -1
-        } catch is CancellationError { }
-        catch {
-            guard selectedID == id, refreshRevision == revision, !Task.isCancelled else { return }
-            switch error {
-            case ServerFailure.forbidden, ServerFailure.notFound:
-                onDeleted(id); close()
-            case ServerFailure.sessionExpired, ServerFailure.proxyRejected:
-                // Not a deletion: the photo is most likely still there, and only the session check
-                // signs out. A photo whose access must be confirmed still closes.
-                if accessMustBeConfirmed { close() }
-                else if revision == 0 { self.error = error.localizedDescription }
-            default:
-                if accessMustBeConfirmed { onDeleted(id); close() }
-                else if revision == 0 { self.error = error.localizedDescription }
-            }
-        }
-    }
-    /// Puts a photo's fresh details on screen, or closes the viewer on a photo locked or put in
-    /// Trash since `previous` was shown. Says whether the viewer stays.
-    private func showDetails(_ asset: Asset, over previous: Asset) -> Bool {
-        if (asset.visibility == .locked && previous.visibility != .locked) || (asset.isTrashed && !previous.isTrashed) {
-            onDeleted(asset.id); close(); return false
-        }
-        replacements[asset.id] = asset
-        if asset != previous { onUpdated(asset) }
-        return true
-    }
-    /// Shares the photo on screen: its original or, with its edits, the version shown. The share
-    /// sheet opens only if the photo is still the one on screen.
-    private func exportAsset(original: Bool) {
-        guard !busy else { return }
-        let asset = current
-        exports.start(.share([asset], original: original)) { outcome in
-            switch outcome {
-            case .files(let files): if selectedID == asset.id { shared = files }
-            case .failed(let failure, _): error = failure.localizedDescription
-            case .saved, .cancelled: break
-            }
-        }
-    }
-    private func saveToPhotos() {
-        guard !busy, capabilities.offers(.saveToPhotos) else { return }
-        exports.start(.saveToPhotos([current], original: false)) { outcome in
-            if case .failed(let failure, _) = outcome { error = failure.localizedDescription }
-        }
     }
     private static func exportLabel(_ request: ExportRequest) -> String {
         switch request.destination {
         case .photos: "Downloading…"
         case .files: request.original || request.assets.contains(where: \.isVideo) ? "Downloading original…" : "Preparing photo…"
+        }
+    }
+}
+
+/// A photo's place on the Places globe, for a viewer that can't raise the library's Earth. A place
+/// chosen there shows its photos.
+private struct ViewerPlaceSheet: View {
+    let api: APIClient
+    let pipeline: MediaPipeline
+    let focus: PlaceFocus
+    @State private var collection: InfoCollection?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            PlacesView(api: api, pipeline: pipeline, onSelect: { place in
+                guard !place.assetIDs.isEmpty else { return }
+                collection = .init(title: place.title, filter: SearchFilter(or: place.assetIDs.map { SearchIDAlternative(id: IDFilter(eq: $0)) }))
+            }, focus: focus)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .sheet(item: $collection) { collection in NavigationStack { InfoCollectionView(api: api, pipeline: pipeline, collection: collection) } }
         }
     }
 }

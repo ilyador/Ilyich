@@ -152,13 +152,13 @@ private extension DisplayedFeed {
     }
 
     /// The server photos of a photo's month and the months beside it, for swiping in the viewer;
-    /// the results, when showing them.
-    func displayedAssets(around asset: Asset) -> [Asset] {
+    /// the results, when showing them. Empty when the feed doesn't show the photo.
+    func displayedAssets(around id: String) -> [Asset] {
         if let results = shownResults { return results }
         let months = shownSections.map(\.month)
         guard let index = months.firstIndex(where: { month in
-            month.flatMap { shownRows(of: $0) }?.contains(where: { $0.id == asset.id }) == true
-        }) else { return [asset] }
+            month.flatMap { shownRows(of: $0) }?.contains(where: { $0.id == id }) == true
+        }) else { return [] }
         return months[max(0, index - 1)...min(months.count - 1, index + 1)].flatMap { month in month.flatMap { shownRows(of: $0) } ?? [] }
     }
 }
@@ -400,9 +400,11 @@ extension FrozenFeed: DisplayedFeed {
         if let frozenFeed { return frozenFeed.displayedAsset(section: section, item: item) }
         return displayedAsset(section: section, item: item)
     }
-    func availableAssets(around asset: Asset) -> [Asset] {
-        if let frozenFeed { return frozenFeed.displayedAssets(around: asset) }
-        return displayedAssets(around: asset)
+    /// The photos the viewer pages through around the photo `id`, as the grid shows them
+    /// (AssetWindowProvider.feed): empty when the grid doesn't show it.
+    func availableAssets(around id: String) -> [Asset] {
+        if let frozenFeed { return frozenFeed.displayedAssets(around: id) }
+        return displayedAssets(around: id)
     }
 
     /// Everything on this phone in the photo's month and the months beside it, in the order the grid
