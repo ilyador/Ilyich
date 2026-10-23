@@ -14,7 +14,10 @@ extension EnvironmentValues {
     private var following: (service: ObjectIdentifier, task: Task<Void, Never>)?
 
     /// Hands every event `service` publishes from now on to `apply`, in order. Following the same
-    /// service again changes nothing; another service replaces it.
+    /// service again changes nothing; another service replaces it. The subscription ends once the
+    /// follower is let go, so `apply` must not hold the follower: a closure that reads a view's
+    /// own properties holds the view, and with it the follower's storage, and a follower its own
+    /// handler holds is never let go. It would run for a screen long gone until sign-out.
     func follow(_ service: LibraryMutationService?, _ apply: @escaping @MainActor (MutationEvent) async -> Void) {
         guard let service else { return stop() }
         let id = ObjectIdentifier(service)
@@ -22,6 +25,11 @@ extension EnvironmentValues {
         following?.task.cancel()
         let events = service.events()
         following = (id, Task { for await event in events { await apply(event) } })
+    }
+
+    /// Hands the server's answer to every mutation `service` makes from now on to `apply`.
+    func follow(_ service: LibraryMutationService?, applying apply: @escaping @MainActor (MutationResult) -> Void) {
+        follow(service) { event in if case .applied(let result) = event { apply(result) } }
     }
 
     func stop() {
@@ -46,9 +54,9 @@ private struct MutationFollowing: ViewModifier {
     let apply: @MainActor (MutationResult) -> Void
 
     func body(content: Content) -> some View {
-        content.onAppear {
-            follower.follow(mutations) { event in if case .applied(let result) = event { apply(result) } }
-        }
+        // Only the handler goes to the follower. A closure made here that read `apply` would hold
+        // this modifier, the follower's storage with it, and no screen's follower would be let go.
+        content.onAppear { follower.follow(mutations, applying: apply) }
     }
 }
 

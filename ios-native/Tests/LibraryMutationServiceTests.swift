@@ -1,4 +1,5 @@
 import IlyichPlatform
+import SwiftUI
 import UIKit
 import XCTest
 @testable import Ilyich
@@ -242,6 +243,35 @@ import XCTest
         XCTAssertEqual(server.requests("DELETE", "assets").count, 1, "Made once, never cancelled or sent again.")
     }
 
+    /// A screen that is gone stops following the results, and what its handler holds goes with
+    /// it: a viewer opened and closed many times leaves no handlers behind to run on every later
+    /// change until sign-out (the review of N2).
+    func testAScreenThatIsGoneStopsFollowingTheResults() async throws {
+        let (service, _, _) = try makeService(server: makeStubServer())
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: .zero)
+        window.frame = CGRect(x: 0, y: 0, width: 120, height: 120)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        weak var screen: UIViewController?
+        weak var held: ScreenRecords?
+        autoreleasepool {
+            let records = ScreenRecords()
+            let controller = UIHostingController(rootView: Color.clear.onMutationApplied { _ in records.heard += 1 }
+                .environment(\.mutations, service))
+            screen = controller; held = records
+            window.rootViewController = controller
+            window.makeKeyAndVisible()
+        }
+        let following = await becomesTrue { service.subscriberCount == 1 }
+        XCTAssertTrue(following, "The screen follows the results once it shows.")
+
+        autoreleasepool { window.rootViewController = nil }
+        let closed = await becomesTrue { screen == nil }
+        XCTAssertTrue(closed, "The screen was let go.")
+        let stopped = await becomesTrue { service.subscriberCount == 0 && held == nil }
+        XCTAssertTrue(stopped, "Its follower, and what its handler holds, went with it.")
+    }
+
     // MARK: - What may be sent
 
     /// Read-only mode refuses every change before it is sent.
@@ -345,4 +375,9 @@ import XCTest
         }
         XCTAssertEqual(server.requests.count, 1)
     }
+}
+
+/// What a screen's handler holds, as a viewer's holds its photos.
+@MainActor private final class ScreenRecords {
+    var heard = 0
 }
