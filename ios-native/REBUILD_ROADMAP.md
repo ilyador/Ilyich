@@ -1145,7 +1145,7 @@ The viewer menu and footer, BulkActionsView, AssetInfoView and ViewerStackView r
   - Decode lanes follow the phone's cores (`ThumbnailScheduler.lanes(cores:)`, three to five, four on the 15 Pro); a perf run may set them with `-IlyichDecodeLanes`. Rail-random disk-hit p95 went from 74 to 63 ms.
   - Exceptions the owner accepted on 2026-10-23 ("scrubbing and shelves are good"): rail-random disk-hit p95 63 ms against 50, and rail-random and background-load hitches about 20 ms/s against 5 (about two dropped frames per far rail jump). No scrub tier was added. No month-scoped reload for phone publishes: background-load measured no extra cost (the backup queue was idle), so it stays a candidate only if flings stop short during large backups.
   - Not measured over Wi-Fi: the airplane-mode run and Time Profiler's main-thread share.
-  - Also in 3040088, the owner's shelf settings: `scrollZoneInset` 0.8 rows (was 0.5) and `glowZoneStart` 0.54 (was 0.46), both confirmed on the phone.
+  - The owner's shelf settings: `glowZoneStart` 0.54 (was 0.46; 3040088, confirmed on the phone), and in 3040089 the areas at the top and bottom of the screen where a long list scrolls, measured from the screen's edge, 60% larger (`scrollAreaGrowth`), the added part at the zone's starting speed so nothing scrolls faster. 3040088's first attempt moved the zone's start only 0.3 rows, about 11% of that area.
 
 ### W2 — Cast with scoped, revocable grants
 

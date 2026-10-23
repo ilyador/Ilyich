@@ -373,6 +373,8 @@ Source status: **53 done, 0 partial, 0 missing**. These are source-audit labels,
   - **W2, Cast.** Each Cast session gets its own scoped, revocable grant sized to the media. Stop and disconnect revoke it, and the app's own session is never touched. This needs a check on the owner's Chromecast.
   - **Merged.** W2 and B3 each added an accessor to `AccountRuntime`; both are kept.
   - **Regression.** 587/587 unit tests and 47 UI tests with one skip and one failure, a viewer-controls test that passed on its own rerun. After the order change, 589/589 unit tests and LibraryTests passed on the branch. The video swipe test now finds its clip by label, since equal-time fixture photos reorder by ID.
+- Build `3040089` (owner's shelf setting, on top of 3040088): the areas at the top and bottom of the screen where a long list of people or albums scrolls are 60% larger, measured from the screen's edge to where scrolling starts. The added part scrolls at the zone's starting speed and the original zone keeps its speeds, so nothing scrolls faster. 3040088 had only moved the zone's start 0.3 rows inward, about 11% more area; that change is reverted.
+
 - Build `3040088` (T7, the measurement gate, and the owner's shelf settings, on top of 3040086; full unit and UI regression passed, two viewer gesture tests needed their one retry):
   - **T7, measured on the phone** (iPhone 15 Pro, Wi-Fi, seed 7, `scripts/perf/record.sh`, build 3040086; coverage complete, so no run fetched a thumbnail from the network):
 
