@@ -148,6 +148,9 @@ actor LibraryMutationService {
     /// How many mutations are running, their follow-ups included.
     nonisolated var runningCount: Int { state.withLock { $0.running.count } }
 
+    /// How many streams `events()` handed out are still open: one for each screen following.
+    nonisolated var subscriberCount: Int { state.withLock { $0.subscribers.count } }
+
     // MARK: A mutation
 
     private nonisolated var isOpen: Bool { state.withLock { $0.open } }

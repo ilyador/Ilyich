@@ -43,13 +43,22 @@ extension MutationRequest {
 }
 
 extension MutationResult {
+    /// The photos this mutation changed, by ID, as it left them: the result's record of each, or
+    /// else the screen's own (`shown`, asked only then) changed as the server changed it. A photo
+    /// deleted for good, or one neither has a record of, has none. One pass over the photos the
+    /// mutation changed, so a bulk change costs a screen no more than the photos it names.
+    func records(updating shown: (String) -> Asset?) -> [String: Asset] {
+        guard !request.removesForGood else { return [:] }
+        var records: [String: Asset] = [:]
+        for id in succeeded {
+            if let record = fresh[id] ?? shown(id).flatMap(request.applied(to:)) { records[id] = record }
+        }
+        return records
+    }
+
     /// `asset` as this mutation left it: the result's record of the photo, or the screen's own
     /// changed as the server changed it; nil when the photo is gone for good. A photo the
     /// mutation didn't change comes back as it was.
-    func record(for asset: Asset) -> Asset? {
-        record(for: asset, changed: Set(succeeded))
-    }
-
     private func record(for asset: Asset, changed: Set<String>) -> Asset? {
         guard changed.contains(asset.id) else { return asset }
         if request.removesForGood { return nil }

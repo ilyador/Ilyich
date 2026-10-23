@@ -94,10 +94,20 @@ import XCTest
                                      description: "Harbor", city: nil, state: nil, country: nil, latitude: nil, longitude: nil, make: nil,
                                      model: nil, lensModel: nil, fNumber: nil, exposureTime: nil, iso: nil, focalLength: nil, fileSizeInByte: nil, rating: nil)
         let bulk = MutationResult(operation: OperationID(), request: .favorite(["a"], true), succeeded: ["a"], failed: [:], fresh: [:], followUp: nil)
-        let record = bulk.record(for: detailed)
-        XCTAssertEqual(record?.isFavorite, true)
-        XCTAssertEqual(record?.exifInfo?.description, "Harbor", "The screen's details are kept.")
-        XCTAssertEqual(bulk.record(for: photo("b")), photo("b"), "A photo the change didn't name is left alone.")
+        let records = bulk.records { id in [detailed, photo("b")].first(where: { $0.id == id }) }
+        XCTAssertEqual(records["a"]?.isFavorite, true)
+        XCTAssertEqual(records["a"]?.exifInfo?.description, "Harbor", "The screen's details are kept.")
+        XCTAssertEqual(Array(records.keys), ["a"], "A photo the change didn't name is left alone.")
+
+        // The server's record is taken without looking through the screen's photos, and a photo
+        // deleted for good has none.
+        let answered = MutationResult(operation: OperationID(), request: .favorite(["a"], true), succeeded: ["a"], failed: [:],
+                                      fresh: ["a": photo("a", favorite: true)], followUp: nil)
+        var asked: [String] = []
+        XCTAssertEqual(answered.records { asked.append($0); return detailed }, ["a": photo("a", favorite: true)])
+        let deleted = MutationResult(operation: OperationID(), request: .deletePermanently(["a"]), succeeded: ["a"], failed: [:], fresh: [:], followUp: nil)
+        XCTAssertEqual(deleted.records { asked.append($0); return detailed }, [:])
+        XCTAssertEqual(asked, [], "The screen's own records were never needed.")
     }
 
     // MARK: - The feed

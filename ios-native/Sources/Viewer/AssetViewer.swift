@@ -153,12 +153,11 @@ struct AssetViewer: View {
             if note.userInfo?["accessChanged"] as? Bool == true { accessRefreshRevision = refreshRevision }
         }
         // A change to a photo here, from its details, its editor or its stack, shows at once. The
-        // records shown are the live ones; the list this closure was made with may be older.
+        // records shown are the live ones; the list this closure was made with may be older. They
+        // change in one write, however many photos a bulk change names.
         .onMutationApplied { result in
-            for id in result.succeeded {
-                guard let shown = replacements[id] ?? result.fresh[id] ?? assets.first(where: { $0.id == id }) else { continue }
-                if let record = result.record(for: shown) { replacements[id] = record }
-            }
+            let changed = result.records(updating: { id in replacements[id] ?? assets.first(where: { $0.id == id }) })
+            if !changed.isEmpty { replacements.merge(changed) { _, new in new } }
         }
     }
 
