@@ -1212,8 +1212,9 @@ final class LibraryTests: XCTestCase {
         requireHittable(app.textFields["library.search"], in: app, file: file, line: line)
         return shown
     }
-    /// A photo put in Trash from the viewer leaves the feed: the viewer closes on it, the photo
-    /// after it takes its place at once, and it stays out once the feed has read its months again
+    /// A photo put in Trash from the viewer leaves the feed. The viewer stays, as in Photos, with
+    /// the photo after it on screen (N3); once it closes, that photo has taken the deleted one's
+    /// place in the grid, and the deleted one stays out once the feed has read its months again
     /// from the server, which remembers the change for this launch's session alone (N2).
     @MainActor func testDeletingFromTheViewerRemovesThePhotoFromTheFeed() {
         let app = launch(extraArguments: ["--ui-testing-mutable-library"])
@@ -1230,6 +1231,9 @@ final class LibraryTests: XCTestCase {
         let confirm = app.buttons["Move to Trash"]
         XCTAssertTrue(confirm.waitForExistence(timeout: 5), "Deleting asks first.")
         confirm.tap()
+        XCTAssertEqual(onScreenPhoto(app, within: 10, where: { $0 == next }), next, "The viewer stays, on the photo after it.")
+        capture(app, "Viewer — after putting a photo in Trash")
+        requireHittable(app.buttons["Close"], in: app); app.buttons["Close"].tap()
         requireHittable(app.textFields["library.search"], in: app)
         capture(app, "Library — after putting a photo in Trash from the viewer")
         XCTAssertEqual(photoID(at: 1, in: grid, app), next, "The photo after it takes its place at once.")

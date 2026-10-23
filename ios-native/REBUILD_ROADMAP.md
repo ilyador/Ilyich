@@ -954,8 +954,8 @@ The viewer menu and footer, BulkActionsView, AssetInfoView and ViewerStackView r
   - Deleted: AssetViewer's onUpdated, onDeleted and onExploreLocation, AssetInfoView's onUpdated and onExploreLocation (it takes the model), ViewerStackView's onUpdated, and pendingLocation. A photo found gone goes to its source (`lose`): the feed takes it out and asks the sync, as before; a list drops it and counts the loss, on which the Locked Folder and a stack read themselves again, as before.
   - Explore is the `.exploreLocation` intent, sent through the library's navigator by the library's viewer only. A sheet over the viewer closes first, then the viewer, then the Earth rises, the details' sequence as before (testPhotoInfoLocationOpensFocusedInteractiveEarth). Viewers opened over other screens show the place in a sheet, as before. The viewer has no Show in timeline; the memories' has been an intent since N1.
   - Nested viewers present a `ViewerRoute`, now Identifiable, with their source (`.collection`, `.stack`, `.similar`, `.locked`), and the zoom presenter takes the library's route. `.single` exists for a photo alone; nothing opens one yet.
-  - Deleting keeps today's close (owner question): the photo on screen goes, not the one opened.
-  - Tests: ViewerModelTests (the two named tests, the window following the photo on screen, the rest before it moves, archiving keeping the photo on screen, a collection's list, a refresh publishing only what lists show, the merge, explore as an intent) and UI testOneSwipeAdvancesExactlyOnePhoto, which also crosses the newest month's end. The rotation, close and reopen UI tests are unchanged.
+  - Deleting moves on (deviation from the scope's "keeps today's dismiss", by the integrator's brief, which extends the owner's P3 answer for the phone's viewer): the photo on screen goes, not the one opened, and the viewer stays with the photo after it, or else the one before, in its place, as Photos does; it closes when no photo is left. An answer that comes mid-swipe waits for the photos to rest, and a source that hasn't yet applied the deletion doesn't bring the photo back. Before, the server viewer closed after a delete. Restore and Move to Locked Folder still close.
+  - Tests: ViewerModelTests (the two named tests, the window following the photo on screen, the rest before it moves, archiving keeping the photo on screen, a collection's list, a deleted photo staying out of a source yet to apply the deletion, a refresh publishing only what lists show, the merge, explore as an intent) and UI testOneSwipeAdvancesExactlyOnePhoto, which also crosses the newest month's end. N2's testDeletingFromTheViewerRemovesThePhotoFromTheFeed now checks that the viewer stays on the next photo before closing it. The rotation, close and reopen UI tests are unchanged.
 
 ### N4 — Collections service, typed shelves, notification dictionaries retired
 
@@ -1336,7 +1336,7 @@ Should a proxy 401 (no Immich error body) stop signing you out and show a connec
 - Navigation, defaults keep today's behavior:
 - a link leaves the shelves and the Earth up, as today; since N1 it first closes any sheet or viewer, where a photo link under a sheet used to do nothing;
 - a viewer opened from More closes the sheet rather than stacking above it;
-- deleting in the viewer dismisses rather than moving to the next photo;
+- deleting in the viewer moves on to the next photo, as the phone's viewer does since P3 (N3; it used to dismiss);
 - the two Trash experiences stay separate;
 - web links are parsed but have no Associated Domains entitlement.
 Change any?
