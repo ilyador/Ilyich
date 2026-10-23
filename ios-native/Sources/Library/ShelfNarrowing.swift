@@ -10,11 +10,16 @@ protocol ShelfFacetSource: Sendable {
 extension LibraryIndex: ShelfFacetSource {}
 
 /// The photos the Earth keeps of its places under a stack of filters: those of the stack without
-/// its place, by ID. Equal by the stack it was counted for.
+/// its place, by ID. Equal by the stack it was counted for and the count, so a count again for the
+/// same stack that found other photos (after a sync) is told apart without comparing every ID.
 struct PlaceNarrowing: Equatable, Sendable {
     let key: String
     let ids: Set<String>
-    static func == (a: PlaceNarrowing, b: PlaceNarrowing) -> Bool { a.key == b.key }
+    /// Moves each time the photos counted for the stack change.
+    var revision = 0
+    /// What the Earth's places are arranged for: the stack and its count.
+    var identity: String { "\(key)#\(revision)" }
+    static func == (a: PlaceNarrowing, b: PlaceNarrowing) -> Bool { a.key == b.key && a.revision == b.revision }
 }
 
 /// What the shelves and the Earth narrow to under the filters stacked (REBUILD_ROADMAP.md N6): the
@@ -34,6 +39,8 @@ struct PlaceNarrowing: Equatable, Sendable {
     @ObservationIgnored private var placing: Task<Void, Never>?
     @ObservationIgnored private var stale = false
     @ObservationIgnored private var earthWanted = false
+    /// The Earth's count, which a count that found other photos moves.
+    @ObservationIgnored private var placeRevision = 0
     @ObservationIgnored private let follower = LibraryFollower()
 
     init(source: (any ShelfFacetSource)?) { self.source = source }
@@ -86,15 +93,20 @@ struct PlaceNarrowing: Equatable, Sendable {
         }
     }
 
+    /// Counts the Earth's photos for the stack without its place. A count again for the stack shown
+    /// (after a sync) that found other photos reaches the Earth as a new revision; the same photos
+    /// leave it as it is.
     private func place() {
         placing?.cancel()
         let narrowing = stack.withoutPlace, key = Self.key(narrowing)
         guard !narrowing.isEmpty, let source else { placing = nil; earth = nil; return }
         if earth?.key != key { earth = nil }
+        let shown = earth?.ids
         placing = Task { [weak self] in
-            guard let ids = try? await Self.read({ try await source.feedIDs(narrowing.query) }, from: source), !Task.isCancelled else { return }
+            guard let ids = try? await Self.placed(narrowing.query, from: source, unless: shown), !Task.isCancelled else { return }
             guard let self, self.earthWanted, Self.key(self.stack.withoutPlace) == key else { return }
-            self.earth = PlaceNarrowing(key: key, ids: ids)
+            self.placeRevision += 1
+            self.earth = PlaceNarrowing(key: key, ids: ids, revision: self.placeRevision)
         }
     }
 
@@ -102,6 +114,14 @@ struct PlaceNarrowing: Equatable, Sendable {
     nonisolated private static func read<T: Sendable>(_ body: @Sendable () async throws -> T, from source: any ShelfFacetSource) async throws -> T? {
         guard try await source.isReadable() else { return nil }
         return try await body()
+    }
+
+    /// A feed's photos from a readable index, compared here, off the main actor, with those the
+    /// Earth shows; nil when they are the same, or the index can't be read.
+    nonisolated private static func placed(_ query: LibraryQuery, from source: any ShelfFacetSource, unless shown: Set<String>?) async throws -> Set<String>? {
+        guard try await source.isReadable() else { return nil }
+        let ids = try await source.feedIDs(query)
+        return ids == shown ? nil : ids
     }
 
     private static func key(_ stack: FilterStack) -> String { stack.query.stableKey }

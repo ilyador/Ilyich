@@ -110,6 +110,54 @@ import XCTest
         XCTAssertEqual(store.orderedAlbums.map(\.id), ["harbor", "lagoon", "coast"])
     }
 
+    /// Under a stack of filters People and Albums list only those in its photos (N6). A row moved
+    /// there, by a drag or Move up and Move down, moves among the rows listed, and the others keep
+    /// their places in the owner's order.
+    func testAMoveAmongTheRowsAStackListsKeepsTheOthersInPlace() async throws {
+        server.route("GET", "server/features", features(map: true))
+        server.route("GET", "people", page(["ana", "ben", "cy", "dee"]))
+        server.route("GET", "albums", albums(["coast", "harbor", "reef"]))
+        let store = makeStore()
+        await store.load()
+        let facets = ShelfFacets(people: ["ben": 2, "dee": 1], albums: ["coast": 1, "reef": 3])
+        func catalog() -> ShelfCatalog { ShelfCatalog(people: store.orderedPeople, albums: store.orderedAlbums, facets: facets) }
+        XCTAssertEqual(catalog().listedPeople.map(\.id), ["ben", "dee"])
+
+        // Dee dragged above Ben.
+        XCTAssertTrue(store.moveRow(from: 1, to: 0, among: catalog().listedPeople.map(\.id), of: .people))
+        XCTAssertEqual(catalog().listedPeople.map(\.id), ["dee", "ben"], "The row dragged is where it was dropped.")
+        XCTAssertEqual(store.orderedPeople.map(\.id), ["ana", "dee", "ben", "cy"], "Ana and Cy keep their places.")
+        XCTAssertEqual(defaults.stringArray(forKey: "shelfOrder.people.\(api.cacheScope)"), ["ana", "dee", "ben", "cy"])
+        // Move down puts Dee just after Ben again.
+        XCTAssertTrue(store.moveRow(from: 0, to: 1, among: catalog().listedPeople.map(\.id), of: .people))
+        XCTAssertEqual(store.orderedPeople.map(\.id), ["ana", "ben", "dee", "cy"])
+        XCTAssertFalse(store.moveRow(from: 1, to: 1, among: catalog().listedPeople.map(\.id), of: .people))
+        XCTAssertFalse(store.moveRow(from: 2, to: 0, among: catalog().listedPeople.map(\.id), of: .people), "Only the rows listed move.")
+
+        XCTAssertTrue(store.moveRow(from: 1, to: 0, among: catalog().listedAlbums.map(\.id), of: .albums))
+        XCTAssertEqual(store.orderedAlbums.map(\.id), ["reef", "coast", "harbor"])
+        XCTAssertEqual(catalog().rows(.albums).prefix(2).map(\.id), ["album-reef", "album-coast"])
+    }
+
+    /// A row moved among some of the rows lands beside its new neighbor, and the rest keep their
+    /// places; with every row listed it is an ordinary move.
+    func testAMoveAmongSomeRowsLandsBesideItsNewNeighbor() {
+        let ids = ["a", "b", "c", "d", "e"]
+        XCTAssertEqual(ShelfOrder.moving(2, to: 0, among: ["b", "d", "e"], in: ids), ["a", "e", "b", "c", "d"])
+        XCTAssertEqual(ShelfOrder.moving(0, to: 2, among: ["b", "d", "e"], in: ids), ["a", "c", "d", "e", "b"])
+        XCTAssertEqual(ShelfOrder.moving(0, to: 1, among: ["b", "d", "e"], in: ids), ["a", "c", "d", "b", "e"])
+        for from in ids.indices {
+            for to in ids.indices where to != from {
+                var moved = ids
+                moved.insert(moved.remove(at: from), at: to)
+                XCTAssertEqual(ShelfOrder.moving(from, to: to, among: ids, in: ids), moved, "\(from) to \(to)")
+            }
+        }
+        XCTAssertNil(ShelfOrder.moving(1, to: 1, among: ids, in: ids))
+        XCTAssertNil(ShelfOrder.moving(0, to: 3, among: ["a", "b"], in: ids))
+        XCTAssertNil(ShelfOrder.moving(0, to: 1, among: ["a", "z"], in: ids), "A row the order doesn't hold moves nothing.")
+    }
+
     /// A launch load that fails leaves the shelves as they are and marks a reload, which the app
     /// coming forward or the shelves opening runs; a later failed reload keeps what loaded before.
     func testFailedLaunchLoadKeepsPeopleAndAlbumsAndReloadsLater() async throws {

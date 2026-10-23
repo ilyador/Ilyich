@@ -159,6 +159,59 @@ import XCTest
         XCTAssertEqual(store.stack.layers.map(\.id), ["favorites"])
     }
 
+    /// Show in timeline (a memory's, the viewer's) leaves every filter stacked, as Clear does: no
+    /// pill stays over the library, no shelf row stays marked, and the next filter chosen is alone.
+    func testShowingAPhotoInTheTimelineLeavesEveryFilterStacked() async throws {
+        let store = LibraryFeedStore(source: StackLibrary())
+        defer { store.stop() }
+        await store.reload()
+        try await until("The library did not load.") { shown(store) == StackLibrary.all }
+        store.add(.collection(.person(maya)))
+        store.add(.place(lisbon, title: "Lisbon"))
+        XCTAssertEqual(store.stack.layers.count, 2)
+
+        store.showInTimeline(Asset(id: "m3", localDateTime: Date(timeIntervalSince1970: 1_770_000_000)))
+        XCTAssertTrue(store.stack.isEmpty, "The stack goes with the filter.")
+        XCTAssertEqual(store.feedQuery, .library)
+        XCTAssertNil(store.filterTitle)
+        XCTAssertEqual(store.shelfSelection, ShelfSelection(), "No shelf row stays marked.")
+        XCTAssertTrue(FilterPill.pills(stack: store.stack, feedTitle: store.filterTitle, feedSymbol: "line.3.horizontal.decrease",
+                                       search: store.query, matches: nil).isEmpty, "No pill stays over the library.")
+
+        store.add(.collection(.favorites))
+        XCTAssertEqual(store.stack.layers.map(\.id), ["favorites"], "The next filter chosen is alone.")
+        XCTAssertEqual(store.feedQuery, .favorites)
+    }
+
+    /// Before the offline library is readable, a stack only search serves keeps to the library's
+    /// photos, as the index and the server timeline do: search reaches the partners shown in the
+    /// timeline too, so a partner's favorite video stays out of Favorites with Videos. A search
+    /// typed in the stack reaches them, as every search does; a place alone is the map's photos
+    /// there, whoever's.
+    func testAStackOnlySearchServesKeepsToTheLibrarysPhotos() async throws {
+        let library = PartnerSearchLibrary()
+        let store = LibraryFeedStore(source: library)
+        defer { store.stop() }
+        await store.reload()
+        store.add(.collection(.favorites))
+        store.add(.collection(.videos))
+        try await until("Favorite videos did not show.") { await library.searches.count == 1 && !store.isSearching && !store.isReplacingFeed }
+        XCTAssertEqual(store.feedPlan?.backend, .serverSearch)
+        XCTAssertEqual(store.results.map(\.id), ["alice-video"], "The partner's favorite video stays out.")
+
+        store.search("beach")
+        try await until("The search in the stack did not run.") { await library.searches.count == 2 && !store.isSearching }
+        XCTAssertEqual(store.results.map(\.id), ["alice-video", "bob-video"], "A search typed reaches the partners, as it always has.")
+
+        store.clearFilters()
+        store.add(.place(lisbon, title: "Lisbon"))
+        try await until("Lisbon did not show.") { await library.searches.count == 3 && !store.isSearching && !store.isReplacingFeed }
+        XCTAssertEqual(store.results.map(\.id), ["alice-video", "bob-video"], "A place alone is the map's photos there, whoever's.")
+        store.add(.collection(.favorites))
+        try await until("Favorites in Lisbon did not show.") { await library.searches.count == 4 && !store.isSearching && !store.isReplacingFeed }
+        XCTAssertEqual(store.results.map(\.id), ["alice-video"], "Stacked, the place keeps to the library's photos.")
+    }
+
     /// N4 with N6: an album deleted or left goes from a stack alone; alone, it clears the filter.
     func testDeletingAStackedAlbumRemovesOnlyItsLayer() async throws {
         let store = LibraryFeedStore(source: StackLibrary())
@@ -188,15 +241,20 @@ import XCTest
         XCTAssertEqual(narrowing.facets(for: lisbonStack)?.people, ["maya": 2])
         XCTAssertNil(narrowing.facets(for: FilterStack([.collection(.person(maya))])), "Counts are only for the stack they were made for.")
 
-        // A slower count for a stack left behind never lands.
-        await source.setDelay(.milliseconds(300))
+        // A count for a stack left behind that comes back after the newer stack's never lands: it
+        // is held at the gate, cancelled or not, until the newer one is in.
+        let gate = StubServer.Gate()
+        await source.hold(gate)
         let mayaStack = FilterStack([.collection(.person(maya))])
         narrowing.show(mayaStack)
-        await source.setDelay(.zero)
+        try await until("Maya's count did not start.") { gate.waiting == 1 }
         narrowing.show(lisbonStack)
-        try await Task.sleep(for: .milliseconds(450))
-        XCTAssertNotNil(narrowing.facets(for: lisbonStack))
-        XCTAssertNil(narrowing.facets(for: mayaStack))
+        try await until("Lisbon was not counted again.") { narrowing.facets(for: lisbonStack) != nil }
+        gate.open()
+        try await until("Maya's count did not come back.") { await source.heldReturned == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNotNil(narrowing.facets(for: lisbonStack), "The newer stack's counts stay.")
+        XCTAssertNil(narrowing.facets(for: mayaStack), "The late count for the stack left behind never lands.")
 
         // Without a readable index nothing narrows.
         await source.setReadable(false)
@@ -248,6 +306,45 @@ import XCTest
         XCTAssertEqual(asked.last?.predicates.place, nil)
         narrowing.earthShown(false)
         XCTAssertNil(narrowing.earth)
+    }
+
+    /// While the Earth is up, the shelves opening after a sync count its photos again for the same
+    /// stack. Other photos reach the Earth as a new revision, which arranges its places again; the
+    /// same photos leave it as it is.
+    func testTheEarthTakesACountAgainForTheSameStack() async throws {
+        let source = FacetSource()
+        let narrowing = ShelfNarrowing(source: source)
+        let bus = LibraryBus()
+        defer { bus.close() }
+        narrowing.follow(bus)
+        narrowing.show(FilterStack([.place(lisbon, title: "Lisbon"), .collection(.person(maya))]))
+        narrowing.earthShown(true)
+        try await until("The Earth did not narrow.") { narrowing.earth != nil }
+        let first = try XCTUnwrap(narrowing.earth)
+        XCTAssertEqual(first.ids, ["lm1", "lm2", "m3"])
+
+        let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "me")
+        let change = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1), indexRevision: 1, origin: .sync)
+        func countAgainAfterASync() async throws {
+            let asked = await source.feedQueries.count
+            bus.post(.changed(change, accessChanged: false))
+            try await until("Opening the shelves did not count the Earth again.") {
+                narrowing.shelvesOpened()
+                return await source.feedQueries.count == asked + 1
+            }
+        }
+
+        try await countAgainAfterASync()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(narrowing.earth, first, "The same photos leave the Earth as it is.")
+        XCTAssertEqual(narrowing.earth?.identity, first.identity)
+
+        await source.setMayaIDs(["lm1", "m3"])
+        try await countAgainAfterASync()
+        try await until("The Earth did not take the count again.") { narrowing.earth?.ids == ["lm1", "m3"] }
+        XCTAssertEqual(narrowing.earth?.key, first.key, "The same stack.")
+        XCTAssertNotEqual(narrowing.earth, first, "A new revision, which the Earth arranges its places for again.")
+        XCTAssertNotEqual(narrowing.earth?.identity, first.identity)
     }
 
     // MARK: Support
@@ -319,23 +416,51 @@ private actor StackLibrary: FakeFeedSource {
     }
 }
 
+/// A library before the offline index is readable, with a partner shown in Alice's timeline: search
+/// answers every request with Alice's favorite video and her partner Bob's, as the server's search
+/// reaches them both.
+private actor PartnerSearchLibrary: FakeFeedSource {
+    nonisolated let cacheScope = "test-partner-search-" + UUID().uuidString
+    nonisolated let userID: String? = "alice"
+    var searches: [SearchFilter] = []
+
+    func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] { [TimeBucket(timeBucket: "2026-03-01T00:00:00Z", count: 1)] }
+    func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] { [Asset(id: "alice-photo", ownerId: "alice", timelineRatio: 1)] }
+    func search(_ query: SearchQuery) async throws -> SearchResponse { answer(query.filter) }
+    func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { answer(query.filter) }
+
+    private func answer(_ filter: SearchFilter) -> SearchResponse {
+        searches.append(filter)
+        let items = [Asset(id: "alice-video", type: .video, ownerId: "alice", isFavorite: true),
+                     Asset(id: "bob-video", type: .video, ownerId: "bob", isFavorite: true)]
+        return SearchResponse(assets: .init(items: items, count: items.count, nextCursor: nil, nextPage: nil), verification: nil)
+    }
+}
+
 /// The index's counts for the shelves, as told, recording what it was asked.
 private actor FacetSource: ShelfFacetSource {
-    private var delay: Duration = .zero
     private var readable = true
+    /// Holds the counts of a stack with a person until it opens, cancelled or not.
+    private var gate: StubServer.Gate?
+    private var mayaIDs: Set<String> = ["lm1", "lm2", "m3"]
     var facetCalls = 0
+    /// Counts held at the gate that have come back.
+    var heldReturned = 0
     var feedQueries: [LibraryQuery] = []
-    func setDelay(_ delay: Duration) { self.delay = delay }
+    func hold(_ gate: StubServer.Gate?) { self.gate = gate }
     func setReadable(_ readable: Bool) { self.readable = readable }
+    func setMayaIDs(_ ids: Set<String>) { mayaIDs = ids }
     func isReadable() async throws -> Bool { readable }
     func facets(_ query: LibraryQuery) async throws -> ShelfFacets {
         facetCalls += 1
-        let delay = self.delay
-        if delay > .zero { try await Task.sleep(for: delay) }
+        if let gate, !query.predicates.people.isEmpty {
+            await gate.wait()
+            heldReturned += 1
+        }
         return ShelfFacets(people: ["maya": query.predicates.people.isEmpty ? 2 : 3], albums: [:])
     }
     func feedIDs(_ query: LibraryQuery) async throws -> Set<String> {
         feedQueries.append(query)
-        return query.predicates.people.contains("maya") ? ["lm1", "lm2", "m3"] : []
+        return query.predicates.people.contains("maya") ? mayaIDs : []
     }
 }

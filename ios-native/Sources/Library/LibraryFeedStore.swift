@@ -623,7 +623,8 @@ extension FrozenFeed: DisplayedFeed {
         // The library shown stays, on the feed its months come from: a month on its way keeps coming.
         beginScopeChange(keepingFeed: reuseTimeline)
         if reuseTimeline { feedPlan = shownPlan }
-        feedQuery = .library; searchScope = Self.librarySearch
+        // Every filter stacked goes with the feed (N6), as Clear takes them.
+        feedQuery = .library; searchScope = Self.librarySearch; stack = FilterStack()
         filterTitle = nil; query = ""; results = []; showingResults = false; usesMetadata = false; choiceBrowse = nil
         originalTimeline = nil; scrollRequest = nil
         let restoreSaved = !reuseTimeline && saved?.summary.isEmpty == false && saved?.plan != nil
@@ -939,7 +940,11 @@ extension FrozenFeed: DisplayedFeed {
             }
             scope = scope.refined(text: text, mode: searchChoices.mode)
         }
-        return try ServerSearchRequest(scope, userID: source.userID, checksContent: similarAssetID == nil && searchChoices.verifiesText)
+        // The stacked feed itself, when only search serves it, keeps to the photos the index and
+        // the server timeline show of it (N6): partners are not in the library yet.
+        let stackedFeed = !stack.isEmpty && text.isEmpty && choiceBrowse == nil && similarAssetID == nil
+        return try ServerSearchRequest(scope, userID: source.userID, checksContent: similarAssetID == nil && searchChoices.verifiesText,
+                                       keepsToOwnPhotos: stackedFeed && QueryPlanner.keepsToOwnPhotos(feedQuery))
     }
 
     /// The choices leave nothing to find: the results are empty at once, as a search that found

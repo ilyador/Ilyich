@@ -193,6 +193,52 @@ final class QueryPlannerTests: XCTestCase {
         for (name, stack, _) in table { XCTAssertFalse(ServerTimelineRequest.allowsPartners(stack.query), name) }
     }
 
+    /// N6: search reaches the partners shown in the timeline, so a stacked feed only search serves
+    /// (before the offline library is readable) keeps on the phone to the photos the index shows of
+    /// it: the account's own, but for an album's photos and a place alone's, which are whoever's.
+    /// A search typed reaches the partners, as it always has.
+    func testAStackOnlySearchServesKeepsToTheLibrarysPhotos() throws {
+        let maya = Person(id: person, name: "Maya", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: false, isFavorite: nil)
+        let coast = Album(id: album, albumName: "Coast", assetCount: 1, shared: false, albumUsers: nil, startDate: nil, endDate: nil,
+                          updatedAt: nil, order: "desc")
+        let place = FilterLayer.place(lisbon, title: "Lisbon")
+        let table: [(String, FilterStack, Bool)] = [
+            ("favorites and videos", FilterStack([.collection(.favorites), .collection(.videos)]), true),
+            ("videos", FilterStack([.collection(.videos)]), true),
+            ("a place and favorites", FilterStack([place, .collection(.favorites)]), true),
+            ("a place and a person", FilterStack([place, .collection(.person(maya))]), true),
+            ("a place in the archive", FilterStack([place, .collection(.archive)]), true),
+            ("a place alone", FilterStack([place]), false),
+            ("a place and an album", FilterStack([place, .collection(.album(coast))]), false),
+            ("an album and a person", FilterStack([.collection(.album(coast)), .collection(.person(maya))]), false),
+        ]
+        /// A photo the feed's visibility holds.
+        func photo(owner: String, in query: LibraryQuery = .library) -> Asset {
+            var asset = Asset(id: owner + "-photo", ownerId: owner)
+            if !query.visibility.contains(.timeline) { asset.visibility = .archive }
+            return asset
+        }
+        for (name, stack, ownOnly) in table {
+            let query = stack.query
+            XCTAssertEqual(QueryPlanner.keepsToOwnPhotos(query), ownOnly, name)
+            // As the index lays the stack out (IndexReader's owner rule).
+            let index = try IndexFeedRequest(query, userID: me)
+            XCTAssertEqual(ownOnly, index.albumIDs.isEmpty && !index.placeAlone, name)
+            let feed = try ServerSearchRequest(stack.searchScope, userID: me, keepsToOwnPhotos: QueryPlanner.keepsToOwnPhotos(query))
+            XCTAssertEqual(feed.owner, ownOnly ? me : nil, name)
+            XCTAssertEqual(feed.limitations.contains(.ownerPostFilter), ownOnly, name)
+            XCTAssertTrue(feed.accepts(photo(owner: me, in: query)), name)
+            XCTAssertEqual(feed.accepts(photo(owner: partner, in: query)), !ownOnly, name)
+        }
+        let favoriteVideos = FilterStack([.collection(.favorites), .collection(.videos)]).query
+        XCTAssertEqual(try QueryPlanner.plan(favoriteVideos, context: online).backend, .serverSearch)
+        let typed = try ServerSearchRequest(favoriteVideos.refined(text: "beach", mode: .context), userID: me)
+        XCTAssertNil(typed.owner, "A search typed reaches the partners.")
+        XCTAssertTrue(typed.accepts(photo(owner: partner)))
+        XCTAssertFalse(QueryPlanner.keepsToOwnPhotos(.partner(partner)), "A partner's feed keeps to the partner's photos itself.")
+        XCTAssertEqual(try ServerSearchRequest(.partner(partner), userID: me, keepsToOwnPhotos: true).owner, partner)
+    }
+
     func testAnIndexServingOfflineSaysHowStaleItIs() throws {
         let since = Date(timeIntervalSince1970: 1_800_000_000)
         let plan = try QueryPlanner.plan(.library, context: PlannerContext(indexReadable: true, indexStaleSince: since))
