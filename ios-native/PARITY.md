@@ -373,6 +373,26 @@ Source status: **53 done, 0 partial, 0 missing**. These are source-audit labels,
   - **W2, Cast.** Each Cast session gets its own scoped, revocable grant sized to the media. Stop and disconnect revoke it, and the app's own session is never touched. This needs a check on the owner's Chromecast.
   - **Merged.** W2 and B3 each added an accessor to `AccountRuntime`; both are kept.
   - **Regression.** 587/587 unit tests and 47 UI tests with one skip and one failure, a viewer-controls test that passed on its own rerun. After the order change, 589/589 unit tests and LibraryTests passed on the branch. The video swipe test now finds its clip by label, since equal-time fixture photos reorder by ID.
+- Build `3040088` (T7, the measurement gate, and the owner's shelf settings, on top of 3040086; full unit and UI regression passed, two viewer gesture tests needed their one retry):
+  - **T7, measured on the phone** (iPhone 15 Pro, Wi-Fi, seed 7, `scripts/perf/record.sh`, build 3040086; coverage complete, so no run fetched a thumbnail from the network):
+
+    | scenario | disk p50 / p95 ms (n) | same-frame memory | hitches ms/s | longest hitch ms | hangs | peak MB | first content ms |
+    |---|---|---|---|---|---|---|---|
+    | rail-random | 49 / 84 (1180) | 0 % | 21.9 | 42 | 0 | 201 | 391 |
+    | rail-sweep | 18 / 23 (9329) | 0.1 % | 2.7 | 17 | 0 | 245 | 417 |
+    | fling | 44 / 70 (60) | 96 % | 3.6 | 17 | 0 | 145 | 425 |
+    | reverse | 38 / 58 (55) | 98 % | 0.0 | 0 | 0 | 157 | 386 |
+    | memory-warning | 18 / 51 (10577) | 0.1 % | 13.0 | 42 | 0 | 251, then 160 two seconds after the trim | 375 |
+    | background-load | 42 / 76 (1180) | 0 % | 19.0 | 42 | 0 | 201 | 379 |
+    | relaunch-check, 5 launches | 41-43 / 61-63 | — | 33-41 (launch window) | 100-108 | 0 | 110 | p50 395, p95 401 |
+
+    Against 3040061's baseline: the rail sweep went from 190 to 2.7 ms/s of hitches, rail-random from 95 to 22, first content from 1498 to 395 ms, peak memory from 423 to 251 MB.
+  - **Gates met:** rail-sweep, fling and reverse hitches under 5 ms/s with the longest hitch at most 50 ms; behind-band rows after a reversal from memory (98 %); rail-sweep disk-hit p95 at most 50 ms; first content p50 at most 1.0 s and p95 at most 1.5 s; no network fetch for covered months; peak at most 450 MB and at most 300 MB two seconds after a trim; zero hangs everywhere.
+  - **Decode lanes.** A random rail jump lands on about 55 photos at once and three lanes queued them. Lanes are now one per core left free, three to five (four on the 15 Pro). Same-session runs of rail-random with 3, 4, 5 and 6 lanes: disk p50/p95 44/74, 37/63, 35/61 and 33/58 ms, hitches 21.2, 20.0, 19.8 and 21.7 ms/s.
+  - **Documented exceptions, for the owner to accept:** rail-random disk-hit p95 is 63 ms against 50 (random far jumps only; continuous scrubbing meets it at 23 ms), and rail-random and background-load hitches are about 20 ms/s against 5 (about two dropped frames per far jump; the background work adds nothing measurable). Decision: no scrub tier, which would cost about 180 MB for the library to shave the burst of a far jump, unless the owner finds far jumps slow. Decision: no month-scoped reload for phone publishes, since background-load measured no extra hitch; the backup queue was idle during the run, so this stays open to the owner's free scroll during a large backup.
+  - **Not measured:** the offline (airplane mode) run, since the phone is reached over Wi-Fi only (online runs fetched nothing from the network); main-thread time in Transfer, Sync, Index and Coverage symbols, since Time Profiler can't attach over Wi-Fi.
+  - **Shelves (owner settings).** A long list starts scrolling 0.8 of a row inside the band's top and bottom (was half a row, +60 %); the zone along a row that opens its group starts 54 % of the way to the tip (was 46 %, 15 % shorter).
+
 - Build `3040086` (rebuild milestone N6, owner request, on top of 3040085):
   - **N6, stackable filters and filter pills.** Filters stack with AND (places, people, albums and More's collections); the shelves, People, Albums and the Earth's places narrow to the stack with counts from the offline index; the single filter tag and its round X became a row of pills in the search chips' cyan glass, each with its own X; a Clear row at the top of the shelves removes every filter and closes the Earth; a chosen row rises and morphs into the next pill's slot. The server serves every stack it can; Recently added with a person, album, place, Videos or Motion is index-only and says so before the first sync. A place on its own keeps today's behaviour; stacked, it keeps to the library's own photos, so partners stay out. Show in timeline clears the stack; reordering People or Albums works under a narrowed shelf.
   - **Regression.** 1003/1003 unit tests and 59/59 UI tests (no skips, no retries), `check-single-engine.sh` passes.
