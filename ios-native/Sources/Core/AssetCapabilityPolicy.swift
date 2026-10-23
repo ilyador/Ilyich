@@ -81,6 +81,22 @@ enum AssetCapabilityPolicy {
     }
 }
 
+/// What a selection of server photos offers (REBUILD_ROADMAP.md N2): what every photo in it
+/// allows, except that a Trash selection offers only Restore and Delete permanently, as Immich does
+/// in its Trash.
+enum SelectionCapabilities {
+    static func evaluate(_ assets: [Asset], context: CapabilityContext) -> AssetCapabilities {
+        let every = AssetCapabilityPolicy.evaluate(selection: assets, context: context)
+        guard isTrash(assets) else { return every }
+        var trash = AssetCapabilities()
+        for action in [AssetAction.restore, .deletePermanently] { trash[action] = every[action] }
+        return trash
+    }
+
+    /// Every photo selected is in the Trash.
+    static func isTrash(_ assets: [Asset]) -> Bool { !assets.isEmpty && assets.allSatisfy(\.isTrashed) }
+}
+
 extension ActionAvailability {
     /// Unavailable only until the photo's details arrive.
     var awaitsDetails: Bool { self == .disabled(AssetCapabilityPolicy.loadingReason) }

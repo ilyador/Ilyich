@@ -69,7 +69,7 @@ struct LockedFolderView: View {
         Group {
             if unlocked && scenePhase == .active {
                 ScrollView {
-                    SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: { viewing = $0 }, onChanged: reloadAfterBulkChange)
+                    SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: { viewing = $0 })
                     if !busy && assets.isEmpty { FeatureEmpty(title: "Your locked folder is empty", symbol: "lock", description: "Move private photos here from your library.") }
                     if busy { ProgressView().padding(24) }
                     if nextBucket < buckets.count { Button("Load more") { Task { await loadNext() } }.padding() }
@@ -111,6 +111,10 @@ struct LockedFolderView: View {
                 else if let index = assets.firstIndex(where: { $0.id == updated.id }) { assets[index] = updated }
             }, onDeleted: { _ in viewing = nil; Task { do { try await loadUnlocked() } catch { failure = .init(error) } } })
         }
+        // A photo moved to the timeline or put in Trash leaves the folder in place, from the grid's
+        // actions or its viewer. Nothing is read again, so a change ending after the folder
+        // relocked shows nothing: the folder then holds no photos to change.
+        .onMutationApplied { assets = $0.applied(to: assets, keeping: CollectionMembership.lockedFolder) }
         .task(id: unlocked) {
             guard unlocked, let expires = status?.pinExpiresAt ?? status?.expiresAt else { return }
             do { try await Task.sleep(for: .seconds(max(0, expires.timeIntervalSinceNow))); await relock() } catch { }
@@ -158,14 +162,6 @@ struct LockedFolderView: View {
             let page = try await api.timeBucket(buckets[0].timeBucket, of: timeline)
             guard requestGeneration == generation else { return }
             assets = page; nextBucket = 1
-        }
-    }
-    /// A bulk action finishing after relock/expiry must not reload (and thereby re-show) the folder.
-    private func reloadAfterBulkChange() {
-        guard unlocked, scenePhase == .active else { return }
-        Task {
-            guard unlocked, scenePhase == .active else { return }
-            do { try await loadUnlocked() } catch { failure = .init(error) }
         }
     }
     private func loadNext() async {

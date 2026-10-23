@@ -24,6 +24,7 @@ struct FaceAssignmentView: View {
     @State private var loading = true
     @State private var saving = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mutations) private var mutations
     var body: some View {
         List {
             if loading { ProgressView("Loading faces") }
@@ -48,29 +49,31 @@ struct FaceAssignmentView: View {
             .sheet(item: $selected) { face in
                 NavigationStack {
                     PeopleView(api: api, pipeline: pipeline) { person in
-                        selected = nil; saving = true
-                        Task {
-                            defer { saving = false }
-                            do {
-                                let _: Person = try await api.request(.put, path: "faces/\(person.id)", body: ["id": face.id])
-                                onChanged(); await load()
-                            } catch { self.error = error.localizedDescription }
-                        }
+                        selected = nil
+                        change(.reassignFace(face: face.id, person: person.id))
                     }.navigationTitle("Choose the correct person")
                         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { selected = nil } } }
                 }
             }
             .confirmationDialog("Remove this detected face?", isPresented: Binding(get: { deleteFace != nil }, set: { if !$0 { deleteFace = nil } }), titleVisibility: .visible) {
                 Button("Remove face", role: .destructive) {
-                    guard let face = deleteFace else { return }; deleteFace = nil; saving = true
-                    Task {
-                        defer { saving = false }
-                        do { try await api.requestVoid(.delete, path: "faces/\(face.id)", body: ["force": false]); onChanged(); await load() }
-                        catch { self.error = error.localizedDescription }
-                    }
+                    guard let face = deleteFace else { return }; deleteFace = nil
+                    change(.removeFace(face.id))
                 }
             } message: { Text("The photo and other people in it are kept.") }
             .alert("Couldn’t update face", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) { Button("OK") { } } message: { Text(error ?? "") }
+    }
+    /// Has the account's mutations change a face; the photo's details and faces are read again
+    /// once it is made, and the sync that follows reconciles the people's feeds.
+    private func change(_ request: MutationRequest) {
+        guard let mutations else { error = APIError.signedOut.localizedDescription; return }
+        saving = true
+        let handle = mutations.start(request, on: [asset])
+        Task {
+            defer { saving = false }
+            do { _ = try await handle.result; onChanged(); await load() }
+            catch { self.error = error.localizedDescription }
+        }
     }
     private func load() async {
         loading = true; defer { loading = false }

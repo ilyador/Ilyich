@@ -187,16 +187,17 @@ private struct FolderAssetsView: View {
     @State private var assets: [Asset] = []
     @State private var loading = true
     @State private var failure: FeatureFailure?
-    @State private var reloadToken = 0
     @State private var generation = 0
     var body: some View {
         ScrollView {
             if loading { ProgressView().padding(40) }
-            SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: onOpenAsset, onChanged: { reloadToken += 1 })
+            SelectableFeatureAssetGrid(api: api, pipeline: pipeline, assets: assets, onOpenAsset: onOpenAsset)
             if !loading && assets.isEmpty { FeatureEmpty(title: "This folder is empty", symbol: "folder", description: "No photos are available in this folder.") }
         }.navigationTitle((path as NSString).lastPathComponent)
-        .task(id: reloadToken) { await load() }
+        .task { await load() }
         .refreshable { await load() }
+        // A photo deleted, archived or locked leaves the folder in place; others show their change.
+        .onMutationApplied { assets = $0.applied(to: assets, keeping: CollectionMembership.folder) }
         .alert("Couldn’t load folder", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
     }
     /// Cancellation (a newer reload token or leaving the view) never replaces the current assets.

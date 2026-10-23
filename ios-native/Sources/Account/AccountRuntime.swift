@@ -32,11 +32,15 @@ final class AccountRuntime: Sendable {
     let work: OwnedWork
     /// The child sessions Cast receivers are given; sign-out revokes them before it logs out.
     let castGrants: CastGrantStore
-    /// Free up space's checks and removals (REBUILD_ROADMAP.md P4). Shut down first at teardown.
+    /// Free up space's checks and removals (REBUILD_ROADMAP.md P4). Shut down right after the
+    /// mutations at teardown.
     let cleanup: CleanupService
     /// The phone's side of the merged library (REBUILD_ROADMAP.md P5). Nil when the environment
     /// runs without the phone's photos. It starts once the library subscribes.
     let deviceIndex: DeviceIndexService?
+    /// The account's changes to its library on the server (REBUILD_ROADMAP.md N2), followed by a
+    /// sync pass when the offline library syncs. Shut down first at teardown.
+    let mutations: LibraryMutationService
     private let device: any AccountDevice
     private let presence: AppPresence
     private let usesDevicePhotos: Bool
@@ -75,8 +79,8 @@ final class AccountRuntime: Sendable {
 
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
-                 cleanup: CleanupService, deviceIndex: DeviceIndexService?, device: any AccountDevice, presence: AppPresence,
-                 cutover: TransferCutoverState, backupContainer: URL?, usesDevicePhotos: Bool) {
+                 cleanup: CleanupService, deviceIndex: DeviceIndexService?, mutations: LibraryMutationService, device: any AccountDevice,
+                 presence: AppPresence, cutover: TransferCutoverState, backupContainer: URL?, usesDevicePhotos: Bool) {
         self.id = id
         self.credential = credential
         self.authorization = authorization
@@ -90,6 +94,7 @@ final class AccountRuntime: Sendable {
         self.castGrants = CastGrantStore(server: api)
         self.cleanup = cleanup
         self.deviceIndex = deviceIndex
+        self.mutations = mutations
         self.device = device
         self.presence = presence
         self.cutover = cutover
@@ -159,10 +164,15 @@ final class AccountRuntime: Sendable {
             deviceIndex = DeviceIndexService(account: credential.account.digest, reader: PhotoKitIndexReader(adapter: .shared), server: server,
                                              backup: receipts, database: PhotoKitAdapter.shared.database, presence: presence)
         }
+        // A mutation's follow-up is a pass of the account's sync, which publishes its change like any.
+        var followUp: (@Sendable () async throws -> LibraryChange?)?
+        if let sync = library?.sync { followUp = { try await sync.refresh() } }
+        let mutations = LibraryMutationService(client: api, pipeline: pipeline, authorization: authorization, refresh: followUp)
         return AccountRuntime(id: id, credential: credential, authorization: authorization, api: api, pipeline: pipeline,
                               library: library, libraryError: libraryError, transfers: transfers, check: check, work: work,
-                              cleanup: cleanup, deviceIndex: deviceIndex, device: dependencies.device, presence: presence,
-                              cutover: cutover, backupContainer: environment.backupContainer, usesDevicePhotos: environment.usesDevicePhotos)
+                              cleanup: cleanup, deviceIndex: deviceIndex, mutations: mutations, device: dependencies.device,
+                              presence: presence, cutover: cutover, backupContainer: environment.backupContainer,
+                              usesDevicePhotos: environment.usesDevicePhotos)
     }
 
     /// Starts the account's work once the screens show it: coverage, which waits for the offline
@@ -180,12 +190,13 @@ final class AccountRuntime: Sendable {
         check.validate()
     }
 
-    /// Cancels the account's work and waits for it to end: coverage, sync and its live stream,
-    /// the session check, read-only changes still on their way, the import, which rolls back, and
-    /// the transfer engine with everything beside it, which gives its leases back. Then the
-    /// transfers database closes. It stays on disk, whatever the reason for ending, and so do the
-    /// staged copies (the owner's decision).
+    /// Cancels the account's work and waits for it to end: library mutations still running,
+    /// cleanup, coverage, sync and its live stream, the session check, read-only changes still on
+    /// their way, the import, which rolls back, and the transfer engine with everything beside it,
+    /// which gives its leases back. Then the transfers database closes. It stays on disk, whatever
+    /// the reason for ending, and so do the staged copies (the owner's decision).
     func cancelAndJoin() async {
+        await mutations.shutdown()
         await cleanup.shutdown()
         await deviceIndex?.shutdown()
         if let library {

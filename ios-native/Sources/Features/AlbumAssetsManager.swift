@@ -8,6 +8,7 @@ struct AlbumAssetsManager: View {
     let mode: Mode
     let onSaved: (Album) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mutations) private var mutations
     @State private var assets: [Asset] = []
     @State private var buckets: [TimeBucket] = []
     @State private var nextBucket = 0
@@ -103,18 +104,26 @@ struct AlbumAssetsManager: View {
             assets.append(contentsOf: page.filter { !existing.contains($0.id) }); nextBucket += 1
         } catch is CancellationError { } catch { if generation == token { failure = .init(error) } }
     }
+    /// The album's photos change through the account's mutations, whose sync reconciles the
+    /// album's feed and shelf.
     private func save() async {
         guard !selection.isEmpty, !busy else { return }
+        guard let mutations else { failure = .init(APIError.signedOut); return }
         busy = true; defer { busy = false }
         let requested = selection
+        let records = assets.filter { requested.contains($0.id) }
         do {
             if mode == .cover {
                 guard let id = requested.first else { return }
-                let updated: Album = try await api.request(.patch, path: "albums/\(album.id)", body: ["albumThumbnailAssetId": id])
-                onSaved(updated); dismiss(); return
+                let result = try await mutations.start(.setAlbumCover(album: album.id, asset: id), on: records).result
+                if let updated = result.album { onSaved(updated) }
+                dismiss(); return
             }
-            let results = try await (mode == .add ? api.addToAlbum(id: album.id, assetIDs: Array(requested)) : api.removeFromAlbum(id: album.id, assetIDs: Array(requested)))
-            let accepted = Set(results.filter { $0.success || (mode == .add && $0.error == "duplicate") }.map(\.id)).intersection(requested)
+            // In the grid's order; anything selected that the grid no longer holds goes last.
+            let shown = assets.map(\.id).filter(requested.contains)
+            let ids = shown + requested.subtracting(shown)
+            let request: MutationRequest = mode == .add ? .addToAlbum(album: album.id, assets: ids) : .removeFromAlbum(album: album.id, assets: ids)
+            let accepted = Set(try await mutations.start(request, on: records).result.succeeded).intersection(requested)
             selection.subtract(accepted)
             if mode == .remove { assets.removeAll { accepted.contains($0.id) } }
             let updated = try await api.album(id: album.id)

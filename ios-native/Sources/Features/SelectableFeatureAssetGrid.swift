@@ -2,13 +2,12 @@ import SwiftUI
 
 /// A feature grid that opens an asset on tap, or multi-selects for bulk actions after the user taps Select.
 /// Selection is keyed by asset ID and keeps snapshots, so it survives pagination and parent reloads.
+/// The parent's photos follow a bulk action from the account's mutations, in place (N2).
 struct SelectableFeatureAssetGrid: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let assets: [Asset]
     let onOpenAsset: (Asset) -> Void
-    /// Called after a bulk action completes. The parent should reload its collection.
-    let onChanged: () -> Void
     @State private var selecting = false
     @State private var selected: [String: Asset] = [:]
     @State private var showActions = false
@@ -70,6 +69,5 @@ struct SelectableFeatureAssetGrid: View {
 
     private func completed() {
         selected = [:]; selecting = false
-        onChanged()
     }
 }

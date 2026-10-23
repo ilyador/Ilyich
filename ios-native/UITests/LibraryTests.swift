@@ -1149,6 +1149,85 @@ final class LibraryTests: XCTestCase {
         } while Date() < deadline
         return condition()
     }
+    /// The photo cell `index` of the grid opens, by its asset; the viewer closes again.
+    @MainActor private func photoID(at index: Int, in grid: XCUIElement, _ app: XCUIApplication,
+                                    file: StaticString = #filePath, line: UInt = #line) -> String? {
+        tapPhoto(grid.cells.element(boundBy: index))
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 10), file: file, line: line)
+        let shown = onScreenPhoto(app)
+        requireHittable(app.buttons["Close"], in: app, file: file, line: line)
+        app.buttons["Close"].tap()
+        requireHittable(app.textFields["library.search"], in: app, file: file, line: line)
+        return shown
+    }
+    /// A photo put in Trash from the viewer leaves the feed: the viewer closes on it, the photo
+    /// after it takes its place at once, and it stays out once the feed has read its months again
+    /// from the server, which remembers the change for this launch's session alone (N2).
+    @MainActor func testDeletingFromTheViewerRemovesThePhotoFromTheFeed() {
+        let app = launch(extraArguments: ["--ui-testing-mutable-library"])
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 2).waitForExistence(timeout: 15))
+        let next = photoID(at: 2, in: grid, app)
+        XCTAssertNotNil(next)
+        tapPhoto(grid.cells.element(boundBy: 1))
+        let delete = app.buttons["Delete"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 10))
+        guard let deleted = onScreenPhoto(app) else { return XCTFail("The viewer shows a photo.") }
+        XCTAssertNotEqual(deleted, next)
+        requireHittable(delete, in: app); delete.tap()
+        let confirm = app.buttons["Move to Trash"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5), "Deleting asks first.")
+        confirm.tap()
+        requireHittable(app.textFields["library.search"], in: app)
+        capture(app, "Library — after putting a photo in Trash from the viewer")
+        XCTAssertEqual(photoID(at: 1, in: grid, app), next, "The photo after it takes its place at once.")
+        // The feed has read its months again from the server meanwhile; the photo stays out.
+        RunLoop.current.run(until: Date().addingTimeInterval(2))
+        XCTAssertEqual(photoID(at: 1, in: grid, app), next, "It stays out once the feed reads its months again.")
+    }
+    /// A photo archived from the viewer leaves the library and shows in the Archive. The viewer
+    /// stays on it, its menu now offering Unarchive (N2).
+    @MainActor func testArchivingFromTheViewerRemovesItFromTheLibrary() {
+        let app = launch(extraArguments: ["--ui-testing-mutable-library"])
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 2).waitForExistence(timeout: 15))
+        let next = photoID(at: 2, in: grid, app)
+        tapPhoto(grid.cells.element(boundBy: 1))
+        let actions = app.buttons["Photo actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        guard let archived = onScreenPhoto(app) else { return XCTFail("The viewer shows a photo.") }
+        requireHittable(actions, in: app); actions.tap()
+        let archive = app.buttons["Archive"]
+        XCTAssertTrue(archive.waitForExistence(timeout: 5))
+        archive.tap()
+        // The menu shows the record it opened with, so it is opened again until the change is in.
+        var offersUnarchive = false
+        for _ in 0..<4 where !offersUnarchive {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            requireHittable(actions, in: app); actions.tap()
+            offersUnarchive = app.buttons["Unarchive"].waitForExistence(timeout: 2)
+            // A tap beside the menu puts it away.
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        XCTAssertTrue(offersUnarchive, "The viewer shows the photo archived.")
+        XCTAssertEqual(onScreenPhoto(app), archived, "The viewer stays on the photo.")
+        requireHittable(app.buttons["Close"], in: app); app.buttons["Close"].tap()
+        requireHittable(app.textFields["library.search"], in: app)
+        XCTAssertEqual(photoID(at: 1, in: grid, app), next, "The photo leaves the library, the next one taking its place.")
+        RunLoop.current.run(until: Date().addingTimeInterval(2))
+        XCTAssertEqual(photoID(at: 1, in: grid, app), next, "It stays out once the library reads its months again.")
+
+        openShelves(app)
+        app.buttons["More"].tap()
+        let archiveShelf = app.buttons["Archive"]
+        XCTAssertTrue(archiveShelf.waitForExistence(timeout: 10))
+        requireHittable(archiveShelf, in: app); archiveShelf.tap()
+        XCTAssertTrue(app.buttons["library.shelves"].waitForExistence(timeout: 5), "Tapping a filter puts the shelves away.")
+        // The library stays, frozen, until the Archive's month is in; then the grid holds its one photo.
+        let one = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in grid.cells.count == 1 }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [one], timeout: 15), .completed, "The Archive shows one photo.")
+        XCTAssertEqual(photoID(at: 0, in: grid, app), archived, "The Archive shows the photo archived.")
+    }
     @MainActor func testViewerCloseAllowsOpeningAnotherPhoto() {
         let app = launch()
         let grid = app.collectionViews["library.grid"]
