@@ -69,7 +69,7 @@ struct PlacesView: View {
     @State private var markerQuery = ""
     /// Moves each time markers load, so what is shown is arranged again for the latest narrowing.
     @State private var markersRevision = 0
-    /// The narrowing `shown` was arranged for.
+    /// The narrowing `shown` was arranged for, by its identity: the stack and its count.
     @State private var arrangedFor: String?
     @State private var selected: PlaceCollection?
     @State private var loading = true
@@ -147,8 +147,9 @@ struct PlacesView: View {
             }
         }
         .task(id: "\(favoritesOnly)|\(includeArchived)|\(includePartners)|\(dateFilter)|\(startDate)|\(endDate)") { await load() }
-        // The filters stacked changed, or markers loaded under an older narrowing: shown again.
-        .task(id: "\(narrowing?.key ?? "")|\(markersRevision)") { await arrange() }
+        // The filters stacked changed or were counted again, or markers loaded under an older
+        // narrowing: shown again.
+        .task(id: "\(narrowing?.identity ?? "")|\(markersRevision)") { await arrange() }
         .refreshable { await load() }
         .sheet(isPresented: $showingDates, onDismiss: sheetDismissed) {
             NavigationStack {
@@ -227,7 +228,7 @@ struct PlacesView: View {
             }.value
             try Task.checkCancellation(); guard generation == requestGeneration else { return }
             places = arranged.all; shown = arranged.shown; lights = arranged.lights
-            self.markers = markers; self.markerQuery = markerQuery; arrangedFor = narrowing?.key; markersRevision += 1
+            self.markers = markers; self.markerQuery = markerQuery; arrangedFor = narrowing?.identity; markersRevision += 1
             if let previous = selected { selected = places.first { $0.id == previous.id } }
             else if compact, let assetID = focus?.assetID, let place = places.first(where: { $0.assetIDs.contains(assetID) }) {
                 selected = place; onSelect(place)
@@ -241,12 +242,12 @@ struct PlacesView: View {
     /// arranged for another.
     private func arrange() async {
         let narrowing = self.narrowing, markers = self.markers, markerQuery = self.markerQuery
-        guard !markers.isEmpty, narrowing?.key != arrangedFor else { return }
+        guard !markers.isEmpty, narrowing?.identity != arrangedFor else { return }
         let arranged = await Task.detached(priority: .userInitiated) {
             Self.arrange(markers, markerQuery: markerQuery, narrowing: narrowing)
         }.value
         guard !Task.isCancelled else { return }
-        shown = arranged.shown; lights = arranged.lights; arrangedFor = narrowing?.key
+        shown = arranged.shown; lights = arranged.lights; arrangedFor = narrowing?.identity
     }
 
     /// The whole place of one shown, which may count only the photos of a stack of filters.

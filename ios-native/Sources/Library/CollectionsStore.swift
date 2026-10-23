@@ -94,13 +94,15 @@ import Foundation
         Task { [weak self] in await self?.load() }
     }
 
-    /// Moves a row of the People or Albums shelf and keeps the order. False when nothing moved.
+    /// Moves a row of the People or Albums shelf and keeps the order. `listed` are the rows the
+    /// shelf lists, by ID, which `from` and `to` count: under a stack of filters only those in its
+    /// photos (N6), and the rows not listed keep their places; nil lists every one. False when
+    /// nothing moved.
     @discardableResult
-    func moveRow(from: Int, to: Int, of kind: ShelfOrder.Kind) -> Bool {
-        var ids = kind == .people ? orderedPeople.map(\.id) : orderedAlbums.map(\.id)
-        guard from != to, ids.indices.contains(from), ids.indices.contains(to) else { return false }
-        ids.insert(ids.remove(at: from), at: to)
-        saveOrder(ids, for: kind)
+    func moveRow(from: Int, to: Int, among listed: [String]? = nil, of kind: ShelfOrder.Kind) -> Bool {
+        let ids = kind == .people ? orderedPeople.map(\.id) : orderedAlbums.map(\.id)
+        guard let moved = ShelfOrder.moving(from, to: to, among: listed ?? ids, in: ids) else { return false }
+        saveOrder(moved, for: kind)
         return true
     }
 

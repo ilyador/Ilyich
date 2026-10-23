@@ -89,6 +89,15 @@ enum QueryPlanner {
         guard indexServes(query), predicates.place == nil, predicates.kind == nil, predicates.motion == nil else { return false }
         return predicates.albums.count + predicates.people.count + (query.scope == .library ? 0 : 1) <= 1
     }
+
+    /// Whether a feed on the library keeps to the account's own photos, as the index lays it out
+    /// (IndexReader's owner rule) and the server timeline serves it: every feed but one with an
+    /// album, whose photos are whoever's, and a place alone, the map's photos there. Partners are
+    /// not in the library yet (QUERY-1), while search reaches those shown in the timeline too, so
+    /// a stacked feed only search serves keeps to the account's photos on the phone (N6).
+    static func keepsToOwnPhotos(_ query: LibraryQuery) -> Bool {
+        query.scope == .library && query.predicates.albums.isEmpty && !IndexFeedRequest.isPlaceAlone(query)
+    }
 }
 
 // MARK: Search options
@@ -266,9 +275,14 @@ struct IndexFeedRequest: Sendable {
         byCreated = field == .createdAt
         self.ascending = ascending
         placeAssetIDs = query.predicates.place?.assetIDs
+        placeAlone = Self.isPlaceAlone(query)
+    }
+
+    /// A place with no other filter, on the library's timeline (`placeAlone`).
+    static func isPlaceAlone(_ query: LibraryQuery) -> Bool {
         var others = query.predicates
         others.place = nil
-        placeAlone = query.predicates.place != nil && others == LibraryQuery.Predicates() && query.scope == .library
+        return query.predicates.place != nil && others == LibraryQuery.Predicates() && query.scope == .library
             && query.trash == .active && query.visibility == .timeline
     }
 }
@@ -302,7 +316,11 @@ struct ServerSearchRequest: Sendable {
         return true
     }
 
-    init(_ query: LibraryQuery, userID: String?, checksContent: Bool = true) throws(Unsupported) {
+    /// `keepsToOwnPhotos` keeps the library to the account's own photos, for a stacked feed only
+    /// search serves (N6): search reaches the partners shown in the timeline too, and the feed keeps
+    /// to what the index and the server timeline show of it (`QueryPlanner.keepsToOwnPhotos`). A
+    /// search typed reaches them, as it always has.
+    init(_ query: LibraryQuery, userID: String?, checksContent: Bool = true, keepsToOwnPhotos: Bool = false) throws(Unsupported) {
         guard !query.visibility.isEmpty else { throw .predicate("visibility") }
         self.query = query
         self.checksContent = checksContent
@@ -313,12 +331,15 @@ struct ServerSearchRequest: Sendable {
         case .chronological(.takenAt, let ascending):
             endpoint = .metadata; order = SearchOrder(field: .localDateTime, direction: ascending ? "asc" : "desc")
         }
+        var limitations = QueryPlanner.searchLimitations(query)
         switch query.scope {
         case .mine: owner = userID
         case .partner(let id): owner = id
-        case .library: owner = nil
+        case .library:
+            owner = keepsToOwnPhotos ? userID : nil
+            if owner != nil { limitations.insert(.ownerPostFilter) }
         }
-        limitations = QueryPlanner.searchLimitations(query)
+        self.limitations = limitations
     }
 
     /// The search filter that states the query. The relevance text and similar photo go in the

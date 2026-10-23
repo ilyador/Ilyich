@@ -1107,8 +1107,13 @@ struct LibraryView: View {
         animate { edgeInteraction.isRearranging = false }
     }
 
+    /// `from` and `to` count the rows the shelf lists, which under a stack of filters are only those
+    /// in its photos (N6): the move is made among them, by ID, and the others keep their places.
     private func moveShelfRow(from: Int, to: Int) {
-        if collections.moveRow(from: from, to: to, of: shelf == .people ? .people : .albums) { Haptics.rowDropped() }
+        let catalog = catalog
+        let people = shelf == .people
+        let listed = people ? catalog.listedPeople.map(\.id) : catalog.listedAlbums.map(\.id)
+        if collections.moveRow(from: from, to: to, among: listed, of: people ? .people : .albums) { Haptics.rowDropped() }
     }
     /// A group opens with its choice or first row where the group's own row was; going back puts
     /// the group's row there. Mid-swipe both happen under the finger, which keeps scrubbing the new
