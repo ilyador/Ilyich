@@ -886,7 +886,8 @@ import XCTest
             (String(format: "%04d-%02d-01T00:00:00Z", 2000 + index / 12, index % 12 + 1), [Asset(id: "photo-\(index)")])
         })
         let api = LibraryAPIFixture([], bucketAssets: assets)
-        let store = LibraryFeedStore(source: api)
+        // Months of one photo each: the photo budget is set aside so the month bound applies.
+        let store = LibraryFeedStore(source: api, residentPhotoBudget: 0)
         await store.reload()
         let first = try XCTUnwrap(store.buckets.first?.id)
         try await until("Initial bucket did not load.") { store.loaded[first] != nil }

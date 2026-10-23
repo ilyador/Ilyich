@@ -253,7 +253,8 @@ import XCTest
                               Asset(id: "c\(index)", localDateTime: second)]
         }
         let api = MonthLibrary(months: library)
-        let store = LibraryFeedStore(source: api)
+        // Months of one photo each: the photo budget is set aside so the month bound applies.
+        let store = LibraryFeedStore(source: api, residentPhotoBudget: 0)
         defer { store.stop() }
         MonthProjector.Probe.start()
         defer { MonthProjector.Probe.stop() }

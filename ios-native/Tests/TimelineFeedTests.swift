@@ -138,7 +138,8 @@ import XCTest
         let api = FeedLibrary(months: months, slow: [months[12]: .milliseconds(300), months[13]: .seconds(10)])
         let keys = try months.map { try XCTUnwrap(MonthKey(bucketID: $0)) }
         let viewport = TimelineFeed.Viewport()
-        let feed = TimelineFeed(source: api, viewport: viewport)
+        // Months of one photo each: the photo budget is set aside so the month bound applies.
+        let feed = TimelineFeed(source: api, viewport: viewport, residentPhotoBudget: 0)
         let recorder = FeedRecorder()
         let ticket = TimelineFeed.Ticket()
         let plan = try await api.plan(.library)
@@ -175,6 +176,31 @@ import XCTest
         XCTAssertEqual(recorder.evicted, [], "Months on screen are never let go.")
         let calls = await api.calls
         XCTAssertEqual(calls.values.reduce(0, +), keys.count, "Each month is read once.")
+        await feed.handle([.close])
+    }
+
+    /// With more months on screen than the resident bound holds, the months beside the screen,
+    /// which the grid also wants, are not let go as soon as they land: they load once and stay,
+    /// instead of loading and unloading in turn at the screen's top and bottom.
+    func testMonthsBesideASparseScreenLoadOnceAndStay() async throws {
+        let months = Self.months(30)
+        let api = FeedLibrary(months: months, delay: .milliseconds(10))
+        let keys = try months.map { try XCTUnwrap(MonthKey(bucketID: $0)) }
+        let feed = TimelineFeed(source: api, viewport: TimelineFeed.Viewport())
+        let recorder = FeedRecorder()
+        let ticket = TimelineFeed.Ticket()
+        let plan = try await api.plan(.library)
+        let shown = Set(keys[5...22])
+        let wanted = shown.union([keys[4], keys[23]])
+        await feed.handle([.attach(recorder), .open(ticket, .library, plan),
+                           .months(keys, buckets: Dictionary(uniqueKeysWithValues: zip(keys, months))),
+                           .viewport(visible: shown)])
+        try await until("The months on screen and beside them did not load.") { wanted.isSubset(of: Set(recorder.loaded.keys)) }
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertTrue(wanted.isSubset(of: Set(recorder.loaded.keys)), "The months the grid wants stay loaded.")
+        XCTAssertTrue(Set(recorder.evicted).isDisjoint(with: wanted), "No month the grid wants is let go.")
+        let calls = await api.calls
+        XCTAssertEqual(calls.values.max(), 1, "Each month is read once, not loaded and unloaded in turn.")
         await feed.handle([.close])
     }
 
