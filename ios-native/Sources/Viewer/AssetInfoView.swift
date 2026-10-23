@@ -303,7 +303,8 @@ struct InfoCollectionView: View {
             .fullScreenCover(item: $viewing) { asset in
                 AssetViewer(api: api, pipeline: pipeline, assets: assets, initial: asset,
                             onUpdated: { fresh in if let i = assets.firstIndex(where: { $0.id == fresh.id }) { assets[i] = fresh } },
-                            onDeleted: { assets.removeAll { $0.id == asset.id } })
+                            // The photo that left, which a swipe may have moved on from the one opened.
+                            onDeleted: { id in assets.removeAll { $0.id == id } })
             }
     }
     private func load() async {

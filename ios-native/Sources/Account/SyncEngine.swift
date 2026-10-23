@@ -258,6 +258,9 @@ actor SyncEngine {
             let committed = CommittedChanges()
             let native = native
             passStopped = false
+            // The pass reads the server from here on, so once it has read its whole stream the
+            // index holds everything the server had now.
+            let began = ContinuousClock.now
             let pass = Task { try await SyncPassProbe.measure { try await native.pass(committed: { committed.add($0) }) } }
             self.pass = pass
             let outcome = await pass.result
@@ -266,7 +269,7 @@ actor SyncEngine {
             passStopped = false
             switch outcome {
             case .success(let index):
-                let change = await passSucceeded(index, hints: taken)
+                let change = await passSucceeded(index, hints: taken, began: began)
                 completed = max(completed, covering)
                 if let change { resolve(through: covering, with: .success(change)) }
             case .failure(let error):
@@ -290,8 +293,9 @@ actor SyncEngine {
         showSyncing()
     }
 
-    private func passSucceeded(_ index: IndexChange, hints taken: ServerInvalidation) async -> LibraryChange? {
-        guard let settled = await settle(index, hints: taken) else { return nil }
+    private func passSucceeded(_ index: IndexChange, hints taken: ServerInvalidation, began: ContinuousClock.Instant) async -> LibraryChange? {
+        guard var settled = await settle(index, hints: taken) else { return nil }
+        settled.change.syncedThrough = began
         let date = try? await entities.lastSyncDate()
         guard isOpen else { return nil }
         update { status in

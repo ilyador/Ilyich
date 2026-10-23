@@ -60,6 +60,16 @@ final class ContractsTests: XCTestCase {
         XCTAssertTrue(change.partnersChanged)
         XCTAssertFalse(change.reset)
 
+        // The index holds what the newest full pass read; a change that doesn't say keeps it.
+        let began = ContinuousClock.now
+        change.syncedThrough = began
+        var unstamped = later; unstamped.syncedThrough = nil
+        change.merge(unstamped)
+        XCTAssertEqual(change.syncedThrough, began)
+        var newer = later; newer.syncedThrough = began + .seconds(1)
+        change.merge(newer)
+        XCTAssertEqual(change.syncedThrough, began + .seconds(1))
+
         let elsewhere = AccountID(server: account.server, userID: "someone-else")
         change.merge(LibraryChange(account: elsewhere, authorization: AuthorizationEpoch(account: elsewhere, value: 1), indexRevision: 1, origin: .sync))
         XCTAssertEqual(change.account, elsewhere)

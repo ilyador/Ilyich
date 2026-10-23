@@ -25,10 +25,11 @@ protocol TimelineFeedConsumer: AnyObject, Sendable {
 ///
 /// A photo the store took out before the source had changed (a deletion or a lock made here, a
 /// photo that left a feed) is withheld (F4): a month read before the source says so leaves it out,
-/// in this feed and in the next one opened, so the library a filter clears back to cannot bring it
-/// back either. A change that names the photo, or the sync that follows the store's own change,
-/// confirms it: reads begun after that are trusted, and the months it was taken out of are read
-/// again, so a photo taken out by mistake comes back.
+/// in every feed it was taken out of, this one and the next one opened, so the library a filter
+/// clears back to cannot bring it back either. A sync that began reading the server after the
+/// photo was taken out confirms it, whether or not its change names the photo: reads begun after
+/// that are trusted, and the months it was taken out of are read again, so a photo taken out by
+/// mistake comes back. A sync that began before cannot: the server may not have had the change.
 actor TimelineFeed {
     /// Names one opening of a feed: its query and the plan its months come from.
     struct Ticket: Hashable, Sendable {
@@ -67,12 +68,13 @@ actor TimelineFeed {
         case restore([MonthKey: [Asset]])
         case replace(Asset)
         case remove(Set<String>)
-        /// Photos the store took out before the source changed: no read of the feeds `scope`
-        /// names brings them back until they are confirmed.
-        case withhold(Set<String>, from: Withholding)
-        /// Photos a change named, or every photo withheld when nil, as after the sync that follows
-        /// the store's own change: the source has them as they now are.
-        case confirm(Set<String>?)
+        /// Photos the store took out at `at`, before the source changed: no read of the feeds
+        /// `scope` names brings them back until they are confirmed. A photo taken out of another
+        /// feed before it is confirmed stays out of both.
+        case withhold(Set<String>, from: Withholding, at: ContinuousClock.Instant)
+        /// The source has every photo taken out by this instant as it now is: a sync that began
+        /// reading the server then has finished.
+        case confirm(heldBy: ContinuousClock.Instant)
         /// Photos a change took out: only a load already on its way, which read the source before
         /// the change, still leaves them out.
         case forget(Set<String>)
@@ -101,8 +103,14 @@ actor TimelineFeed {
     private struct Load { let id: UUID; let sequence: UInt64; let task: Task<[Asset], any Error>; var stale = false }
     private struct Failure { var message: String; var attempts = 0; var transient = false; var due = false }
     /// A withheld photo: the feeds it stays out of, the first load that may show it again (`.max`
-    /// until it is confirmed), and the months it was taken out of, read again once it is.
-    private struct Withheld { var scope: Withholding; var trustedFrom: UInt64; var months: Set<MonthKey> = [] }
+    /// until it is confirmed), when the store last took it out, and the months it was taken out
+    /// of, read again once it is confirmed.
+    private struct Withheld {
+        var scopes: Set<Withholding>
+        var trustedFrom: UInt64
+        var heldAt: ContinuousClock.Instant
+        var months: Set<MonthKey> = []
+    }
 
     private let source: any TimelineSource
     /// What the grid shows right now, ahead of the viewport command that follows it.
@@ -150,8 +158,8 @@ actor TimelineFeed {
             case .restore(let months): restore(months)
             case .replace(let asset): replace(asset)
             case .remove(let ids): remove(ids)
-            case .withhold(let ids, let scope): withhold(ids, from: scope)
-            case .confirm(let ids): confirm(ids)
+            case .withhold(let ids, let scope, let instant): withhold(ids, from: scope, at: instant)
+            case .confirm(let instant): confirm(heldBy: instant)
             case .forget(let ids): forget(ids)
             case .close: close()
             }
@@ -256,24 +264,28 @@ actor TimelineFeed {
         for month in Array(resident.keys) { resident[month]?.removeAll { ids.contains($0.id) } }
     }
 
-    /// Comes before the store's `remove`, while the months still hold the photos.
-    private func withhold(_ ids: Set<String>, from scope: Withholding) {
+    /// Comes before the store's `remove`, while the months still hold the photos. A photo already
+    /// withheld keeps the feeds it was taken out of before, so archiving inside a filter keeps it
+    /// out of the filter and of the library the filter clears back to.
+    private func withhold(_ ids: Set<String>, from scope: Withholding, at instant: ContinuousClock.Instant) {
         var months: [String: Set<MonthKey>] = [:]
         for (month, assets) in resident {
             for asset in assets where ids.contains(asset.id) { months[asset.id, default: []].insert(month) }
         }
         for id in ids {
-            withheld[id] = Withheld(scope: scope, trustedFrom: .max, months: months[id, default: []].union(withheld[id]?.months ?? []))
+            let earlier = withheld[id]
+            withheld[id] = Withheld(scopes: (earlier?.scopes ?? []).union([scope]), trustedFrom: .max, heldAt: instant,
+                                    months: months[id, default: []].union(earlier?.months ?? []))
         }
     }
 
-    /// The source has these photos as they now are: a load that begins from now on reads them as
-    /// they are, while one already on its way still leaves them out. The months they were taken out
-    /// of are read again when the grid wants them, so a photo taken out by mistake comes back.
-    private func confirm(_ ids: Set<String>?) {
+    /// The source has every photo taken out by `instant` as it now is: a load that begins from now
+    /// on reads them as they are, while one already on its way still leaves them out. The months
+    /// they were taken out of are read again when the grid wants them, so a photo taken out by
+    /// mistake comes back. A photo taken out after `instant` waits for a later sync.
+    private func confirm(heldBy instant: ContinuousClock.Instant) {
         var reread = Set<MonthKey>()
-        for id in ids ?? Set(withheld.keys) {
-            guard var entry = withheld[id], entry.trustedFrom == .max else { continue }
+        for (id, var entry) in withheld where entry.trustedFrom == .max && entry.heldAt <= instant {
             entry.trustedFrom = nextLoad
             reread.formUnion(entry.months)
             withheld[id] = entry
@@ -284,7 +296,7 @@ actor TimelineFeed {
 
     /// A change took these out, and the store with it: only loads already on their way read them.
     private func forget(_ ids: Set<String>) {
-        for id in ids { withheld[id] = Withheld(scope: .all, trustedFrom: nextLoad) }
+        for id in ids { withheld[id] = Withheld(scopes: [.all], trustedFrom: nextLoad, heldAt: .now) }
         forgetConfirmed()
     }
 
@@ -293,10 +305,12 @@ actor TimelineFeed {
         guard !withheld.isEmpty, let query = session?.query else { return assets }
         return assets.filter { asset in
             guard let entry = withheld[asset.id], sequence < entry.trustedFrom else { return true }
-            switch entry.scope {
-            case .all: return false
-            case .trash(let trash): return query.trash != trash
-            case .query(let withheldFrom): return query != withheldFrom
+            return !entry.scopes.contains { scope in
+                switch scope {
+                case .all: true
+                case .trash(let trash): query.trash == trash
+                case .query(let withheldFrom): query == withheldFrom
+                }
             }
         }
     }
