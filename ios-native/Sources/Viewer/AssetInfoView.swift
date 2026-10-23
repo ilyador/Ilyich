@@ -5,10 +5,9 @@ import MapKit
 struct AssetInfoView: View {
     let api: APIClient
     let pipeline: MediaPipeline
-    /// A fresher record of the photo, read from the server. Its own changes reach the viewer and
-    /// the feed through the account's mutations.
-    let onUpdated: (Asset) -> Void
-    let onExploreLocation: ((PlaceFocus) -> Void)?
+    /// The viewer showing the photo, which takes the fresher records read here and explores its
+    /// place. The photo's own changes reach the viewer and the feed through the account's mutations.
+    let viewer: ViewerModel
     @State private var asset: Asset
     @State private var caption: String
     @State private var albums: [Album] = []
@@ -25,10 +24,8 @@ struct AssetInfoView: View {
     @State private var tagging = false
     @Environment(\.mutations) private var mutations
 
-    init(api: APIClient, pipeline: MediaPipeline, asset: Asset, onUpdated: @escaping (Asset) -> Void,
-         onExploreLocation: ((PlaceFocus) -> Void)? = nil) {
-        self.api = api; self.pipeline = pipeline; self.onUpdated = onUpdated
-        self.onExploreLocation = onExploreLocation
+    init(api: APIClient, pipeline: MediaPipeline, asset: Asset, viewer: ViewerModel) {
+        self.api = api; self.pipeline = pipeline; self.viewer = viewer
         _asset = State(initialValue: asset); _caption = State(initialValue: asset.exifInfo?.description ?? "")
         _exports = State(initialValue: ExportTracker(api: api))
     }
@@ -61,9 +58,11 @@ struct AssetInfoView: View {
             if let exif = asset.exifInfo {
                 if let latitude = exif.latitude, let longitude = exif.longitude {
                     Section {
-                        if let onExploreLocation {
+                        // From the library's viewer the Earth rises turned to the place, once this
+                        // sheet and the viewer have closed; from any other, the place opens here.
+                        if viewer.exploresOnTheEarth {
                             Button {
-                                onExploreLocation(.init(latitude: latitude, longitude: longitude, assetID: asset.id))
+                                viewer.exploreLocation(.init(latitude: latitude, longitude: longitude, assetID: asset.id))
                             } label: {
                                 locationPreview(latitude: latitude, longitude: longitude, exif: exif)
                             }
@@ -178,7 +177,7 @@ struct AssetInfoView: View {
     private func exifMetric(_ title: String, value: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) { Text(value ?? "—").font(.headline); Text(title).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading)
     }
-    private func update(_ asset: Asset) { show(asset); onUpdated(asset) }
+    private func update(_ asset: Asset) { show(asset); viewer.take(asset) }
     /// Shows a record here only: one the photo's own change left, which the account's mutations
     /// hand to the viewer and the feed.
     private func show(_ asset: Asset) { self.asset = asset; caption = asset.exifInfo?.description ?? "" }
@@ -296,33 +295,35 @@ struct InfoCollectionView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let collection: InfoCollection
-    @State private var assets: [Asset] = []
+    /// The photos found so far, which a viewer opened over them pages through as more arrive.
+    @State private var list = AssetList(keeps: CollectionMembership.searched)
     @State private var cursor: String?
     @State private var more = true
     @State private var loading = false
     @State private var error: String?
-    @State private var viewing: Asset?
+    @State private var viewing: ViewerRoute?
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         ScrollView {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3), spacing: 2) {
-                ForEach(assets) { asset in
-                    Button { viewing = asset } label: { InfoThumbnail(pipeline: pipeline, asset: asset).aspectRatio(1, contentMode: .fit) }.buttonStyle(.plain)
+                ForEach(list.assets) { asset in
+                    Button { viewing = ViewerRoute(asset: asset, source: .collection(collection.id.uuidString), albumContext: nil) } label: {
+                        InfoThumbnail(pipeline: pipeline, asset: asset).aspectRatio(1, contentMode: .fit)
+                    }.buttonStyle(.plain)
                 }
             }
             if let error { Text(error).padding(); Button("Retry") { Task { await load() } } }
             else if more { ProgressView().padding().task { await load() } }
-            if assets.isEmpty && !loading && !more { ContentUnavailableView("No photos", systemImage: "photo") }
+            if list.assets.isEmpty && !loading && !more { ContentUnavailableView("No photos", systemImage: "photo") }
         }.navigationTitle(collection.title).navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
             // A photo changed here or in its viewer shows the change; one deleted, locked or put
             // in Trash leaves the grid in place.
-            .onMutationApplied { assets = $0.applied(to: assets, keeping: CollectionMembership.searched) }
-            .fullScreenCover(item: $viewing) { asset in
-                AssetViewer(api: api, pipeline: pipeline, assets: assets, initial: asset,
-                            onUpdated: { fresh in if let i = assets.firstIndex(where: { $0.id == fresh.id }) { assets[i] = fresh } },
-                            // The photo that left, which a swipe may have moved on from the one opened.
-                            onDeleted: { id in assets.removeAll { $0.id == id } })
+            .onMutationApplied { list.assets = $0.applied(to: list.assets, keeping: CollectionMembership.searched) }
+            // The viewer pages through the grid's photos, and a photo it finds gone leaves the grid,
+            // which a swipe may have moved on from the one opened.
+            .fullScreenCover(item: $viewing) { route in
+                AssetViewer(api: api, pipeline: pipeline, route: route, window: .collection(list))
             }
     }
     private func load() async {
@@ -330,7 +331,7 @@ struct InfoCollectionView: View {
         defer { loading = false }
         do {
             let response = try await api.metadataSearch(.init(filter: collection.filter, cursor: cursor))
-            let seen = Set(assets.map(\.id)); assets += response.assets.items.filter { !seen.contains($0.id) }
+            let seen = Set(list.assets.map(\.id)); list.assets += response.assets.items.filter { !seen.contains($0.id) }
             cursor = response.assets.nextCursor; more = cursor != nil
         } catch is CancellationError { } catch { self.error = error.localizedDescription }
     }

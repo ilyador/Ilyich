@@ -19,7 +19,8 @@ import UIKit
 /// when dragged down, and zooms back into the cell of whichever photo it shows when it closes.
 /// Without a cell to go back to, it closes plainly.
 struct ViewerZoomPresenter: UIViewControllerRepresentable {
-    @Binding var item: Asset?
+    /// The viewer to show: the photo it opens on and where its photos come from.
+    @Binding var item: ViewerRoute?
     /// The grid cell showing a photo, scrolled into view first, or nil when the grid has none.
     let sourceView: (String) -> UIView?
     /// What the account may do. The viewer is outside the app's environment, so it is handed on.
@@ -27,7 +28,7 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
     /// The account's mutations, handed on for the same reason.
     var mutations: LibraryMutationService? = nil
     let onDismiss: () -> Void
-    let content: (Asset, ViewerTransitionState, @escaping () -> Void) -> AnyView
+    let content: (ViewerRoute, ViewerTransitionState, @escaping () -> Void) -> AnyView
     /// Outside the app's scene the viewer would always read as in the background, which keeps
     /// videos and animations from playing, so it is handed the app's phase too.
     @Environment(\.scenePhase) private var scenePhase
@@ -38,9 +39,9 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
     func updateUIViewController(_ anchor: UIViewController, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
-        if let asset = item {
-            if coordinator.host == nil { coordinator.present(asset, from: anchor) }
-            else { coordinator.refresh(asset) }
+        if let route = item {
+            if coordinator.host == nil { coordinator.present(route, from: anchor) }
+            else { coordinator.refresh(route) }
         } else {
             coordinator.close()
         }
@@ -52,11 +53,11 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
         private var state: ViewerTransitionState?
         private var presentedID: String?
 
-        func present(_ asset: Asset, from anchor: UIViewController) {
-            let state = ViewerTransitionState(currentID: asset.id)
+        func present(_ route: ViewerRoute, from anchor: UIViewController) {
+            let state = ViewerTransitionState(currentID: route.asset.id)
             let host = ViewerHostingController(rootView: AnyView(EmptyView()))
-            self.state = state; self.host = host; presentedID = asset.id
-            host.rootView = root(asset)
+            self.state = state; self.host = host; presentedID = route.asset.id
+            host.rootView = root(route)
             host.modalPresentationStyle = .fullScreen
             // The black behind the photo is the controller's, not the SwiftUI view's, so it can
             // fade with the finger while a drag closes the viewer.
@@ -130,10 +131,10 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
 
         /// Keeps the viewer's inputs current, as a cover's content would be; another photo opened
         /// over the viewer replaces it.
-        func refresh(_ asset: Asset) {
+        func refresh(_ route: ViewerRoute) {
             guard let host, let state else { return }
-            if asset.id != presentedID { presentedID = asset.id; state.currentID = asset.id }
-            host.rootView = root(asset)
+            if route.asset.id != presentedID { presentedID = route.asset.id; state.currentID = route.asset.id }
+            host.rootView = root(route)
         }
 
         func close() {
@@ -154,11 +155,11 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
             }
         }
 
-        private func root(_ asset: Asset) -> AnyView {
+        private func root(_ route: ViewerRoute) -> AnyView {
             guard let parent, let state else { return AnyView(EmptyView()) }
-            return AnyView(ViewerRoot(content: parent.content(asset, state, { [weak self] in self?.close() }), authorization: parent.authorization,
+            return AnyView(ViewerRoot(content: parent.content(route, state, { [weak self] in self?.close() }), authorization: parent.authorization,
                                       mutations: parent.mutations, scenePhase: parent.scenePhase)
-                .id(asset.id))
+                .id(route.asset.id))
         }
 
         /// A drag closes the viewer when it goes down on a photo at normal size: a sideways drag

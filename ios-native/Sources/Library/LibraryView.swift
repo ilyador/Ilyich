@@ -219,8 +219,8 @@ struct LibraryView: View {
             // The viewer zooms out of its grid cell and back into the cell of the photo it closes on.
             .background {
                 ViewerZoomPresenter(item: viewerItem, sourceView: { viewport.scroller.zoomSourceView(for: $0, in: store) }, authorization: authorization,
-                                    mutations: mutations, onDismiss: { navigator.layerDidDismiss(level: 0) }) { asset, transition, close in
-                    AnyView(assetViewer(asset, transition: transition, close: close))
+                                    mutations: mutations, onDismiss: { navigator.layerDidDismiss(level: 0) }) { route, transition, close in
+                    AnyView(assetViewer(route, transition: transition, close: close))
                 }
             }
             .alert("Couldn’t complete action", isPresented: alertShown { if case .error = $0 { true } else { false } }) {
@@ -309,20 +309,21 @@ struct LibraryView: View {
         return max(0, (width - (count - 1)) / count)
     }
 
-    private func assetViewer(_ asset: Asset, transition: ViewerTransitionState, close: @escaping () -> Void) -> some View {
-        // Exploring the photo's place closes the viewer, then raises the Earth turned to it.
-        AssetViewer(api: api, pipeline: pipeline, assets: store.availableAssets(around: asset), initial: asset,
-                    onUpdated: store.update, onDeleted: { id in store.removeLocally([id]); Task { await store.refreshAfterMutation() } },
-                    albumID: navigator.viewerRoute?.albumContext ?? store.feedQuery.predicates.albums.first,
-                    matchedLocalPhotos: store.matchingDevicePhotos, onExploreLocation: { navigator.send(.exploreLocation($0)) },
-                    transition: transition, onClose: close)
+    /// The viewer over the feed. It pages through the feed's photos around the one on screen,
+    /// in the album it was opened from or else the album the feed shows; exploring a photo's place
+    /// is an intent, which closes the viewer and then raises the Earth turned to it (N3).
+    private func assetViewer(_ opened: ViewerRoute, transition: ViewerTransitionState, close: @escaping () -> Void) -> some View {
+        let route = ViewerRoute(asset: opened.asset, source: opened.source,
+                                albumContext: opened.albumContext ?? store.feedQuery.predicates.albums.first)
+        return AssetViewer(api: api, pipeline: pipeline, route: route, window: .feed(store), matchedLocalPhotos: store.matchingDevicePhotos,
+                           navigator: navigator, transition: transition, onClose: close)
     }
 
-    /// The photo the viewer shows, until it is asked to close. Closing it from inside, by its
-    /// button or a drag, asks the navigator to close it too.
-    private var viewerItem: Binding<Asset?> {
+    /// The viewer shown, until it is asked to close. Closing it from inside, by its button or a
+    /// drag, asks the navigator to close it too.
+    private var viewerItem: Binding<ViewerRoute?> {
         Binding(get: { navigator.shown(at: 0, style: .zoom).flatMap { layer in
-                    if case .viewer(let route) = layer.route { route.asset } else { nil }
+                    if case .viewer(let route) = layer.route { route } else { nil }
                 } },
                 set: { if $0 == nil, navigator.viewerRoute != nil { navigator.dismiss(level: 0) } })
     }

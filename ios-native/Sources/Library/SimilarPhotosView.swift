@@ -5,7 +5,7 @@ struct SimilarPhotosView: View {
     let pipeline: MediaPipeline
     let reference: Asset
     @State private var store: LibraryFeedStore
-    @State private var viewing: Asset?
+    @State private var viewing: ViewerRoute?
     /// Changes made here, or anywhere, reach the results in place (N2).
     @State private var follower = MutationFollower()
     @Environment(\.dismiss) private var dismiss
@@ -17,7 +17,9 @@ struct SimilarPhotosView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                PhotoGrid(store: store, pipeline: pipeline, columns: 3, topInset: 0, bottomInset: 16) { viewing = $0 }
+                PhotoGrid(store: store, pipeline: pipeline, columns: 3, topInset: 0, bottomInset: 16) {
+                    viewing = ViewerRoute(asset: $0, source: .similar(reference.id), albumContext: nil)
+                }
                 if store.isSearching && store.results.isEmpty { ProgressView("Finding similar photos") }
                 if !store.isSearching, store.results.isEmpty, store.error == nil {
                     ContentUnavailableView("No similar photos", systemImage: "photo.on.rectangle.angled")
@@ -34,9 +36,9 @@ struct SimilarPhotosView: View {
                 follower.follow(mutations) { await FeedMutationApplier.apply($0, to: store, refreshes: false) }
             }
             .onDisappear { store.stop() }
-            .fullScreenCover(item: $viewing) { asset in
-                AssetViewer(api: api, pipeline: pipeline, assets: store.results, initial: asset,
-                            onUpdated: store.update, onDeleted: { store.removeLocally([$0]) })
+            // The viewer pages through the results, which a photo it finds gone leaves.
+            .fullScreenCover(item: $viewing) { route in
+                AssetViewer(api: api, pipeline: pipeline, route: route, window: .similar(store))
             }
         }
     }

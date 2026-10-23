@@ -30,7 +30,7 @@ import XCTest
         XCTAssertEqual(store.sections.map(\.count), [1, 1])
         XCTAssertEqual(store.entry(section: 1, item: 0)?.id, "local:phone", "Only the phone's photo is left in February.")
         XCTAssertNil(store.loaded["2026-02-01"], "The server's photos of the month went with it.")
-        XCTAssertEqual(store.availableAssets(around: Asset(id: "m1")).map(\.id), ["m1"], "The viewer can't swipe to the deleted photo.")
+        XCTAssertEqual(store.availableAssets(around: "m1").map(\.id), ["m1"], "The viewer can't swipe to the deleted photo.")
     }
 
     /// The server gains a month only the phone had: the phone's photo keeps showing while the

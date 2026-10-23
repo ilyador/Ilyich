@@ -4,10 +4,10 @@ struct ViewerStackView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let stackID: String
-    /// A fresher record of a photo, read from the server.
-    let onUpdated: (Asset) -> Void
     @State private var stack: StackDetails?
-    @State private var viewing: Asset?
+    /// The stack's photos, which a viewer opened over them pages through.
+    @State private var list = AssetList()
+    @State private var viewing: ViewerRoute?
     @State private var error: String?
     @State private var confirmUnstack = false
     @State private var busy = false
@@ -17,12 +17,12 @@ struct ViewerStackView: View {
     /// Whether this photo's place in the stack can be changed: only its owner can.
     private func stacking(_ asset: Asset) -> ActionAvailability { AssetCapabilityPolicy.evaluate(asset, context: context)[.stack] }
     /// Unstacking changes every photo in it.
-    private var unstacking: ActionAvailability { AssetCapabilityPolicy.evaluate(selection: stack?.assets ?? [], context: context)[.stack] }
+    private var unstacking: ActionAvailability { AssetCapabilityPolicy.evaluate(selection: list.assets, context: context)[.stack] }
     var body: some View {
         List {
-            ForEach(stack?.assets ?? []) { asset in
+            ForEach(list.assets) { asset in
                 HStack {
-                    Button { viewing = asset } label: {
+                    Button { viewing = ViewerRoute(asset: asset, source: .stack(stackID), albumContext: nil) } label: {
                         HStack {
                             FeatureThumbnail(api: api, pipeline: pipeline, assetID: asset.id, revision: asset.cacheRevision).frame(width: 64, height: 64).clipShape(.rect(cornerRadius: 8))
                             VStack(alignment: .leading) {
@@ -52,21 +52,27 @@ struct ViewerStackView: View {
                 }
             }
             .confirmationDialog("Unstack these photos?", isPresented: $confirmUnstack, titleVisibility: .visible) {
-                Button("Unstack") { run(.unstack(stack: stackID), on: stack?.assets ?? [], then: { dismiss() }) }
+                Button("Unstack") { run(.unstack(stack: stackID), on: list.assets, then: { dismiss() }) }
             } message: { Text("All photos are kept and will appear separately in the timeline.") }
             .task { await load() }
             // The stack is read again whenever one of its photos changes, here or in its viewer;
             // the feed takes stack changes from the sync's change.
             .onMutationApplied { result in
-                guard !Set(result.succeeded).isDisjoint(with: (stack?.assets ?? []).map(\.id)) else { return }
+                guard !Set(result.succeeded).isDisjoint(with: list.assets.map(\.id)) else { return }
                 Task { await load() }
             }
-            .fullScreenCover(item: $viewing) { asset in
-                AssetViewer(api: api, pipeline: pipeline, assets: stack?.assets ?? [asset], initial: asset, onUpdated: onUpdated, onDeleted: { _ in Task { await load() } })
+            // A photo its viewer found gone: the stack is read again.
+            .onChange(of: list.losses) { Task { await load() } }
+            .fullScreenCover(item: $viewing) { route in
+                AssetViewer(api: api, pipeline: pipeline, route: route, window: .stack(list))
             }
     }
     private func load() async {
-        do { stack = try await api.request(.get, path: "stacks/\(stackID)") }
+        do {
+            let stack: StackDetails = try await api.request(.get, path: "stacks/\(stackID)")
+            self.stack = stack
+            list.assets = stack.assets
+        }
         catch { self.error = error.localizedDescription }
     }
     /// Has the account's mutations make the change; the stack is read again once it is made.

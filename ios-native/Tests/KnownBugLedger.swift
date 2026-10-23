@@ -13,9 +13,9 @@ import XCTest
 @MainActor final class KnownBugLedgerTests: XCTestCase {
     // MARK: - Feed
 
-    /// FEED-1, fixed in rebuild milestone F4. Opening a photo calls update(_:) with its detailed
-    /// record, as AssetViewer.refreshCurrentAsset does on every open, and update used to drop the
-    /// saved library timeline. Clearing the filter then reloaded the library from its top instead
+    /// FEED-1, fixed in rebuild milestone F4. Opening a photo called update(_:) with its detailed
+    /// record, as the viewer's refresh did on every open until N3 (it now does so only when the
+    /// record changes what the feed shows), and update used to drop the saved library timeline. Clearing the filter then reloaded the library from its top instead
     /// of returning to the photo it was showing. The saved library now takes the record and keeps
     /// its place.
     func testOpeningAPhotoInAFilterKeepsTheLibraryPositionForClear() async throws {
