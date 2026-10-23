@@ -185,7 +185,7 @@ import XCTest
             return asset
         }
         let source = FilterLibrary(month: march, photos: photos)
-        let store = LibraryStore(source: source)
+        let store = LibraryFeedStore(source: source)
         defer { store.stop() }
         await store.reload()
         let library = await becomesTrue { store.loaded[march]?.count == 3 }
@@ -221,7 +221,7 @@ import XCTest
         let taken = try XCTUnwrap(APIDate.parse("2026-03-10T12:00:00Z"))
         let photos = ["a", "b", "c"].map { Asset(id: $0, originalFileName: $0 + ".jpg", ownerId: "me", localDateTime: taken) }
         let source = FilterLibrary(month: march, photos: photos)
-        let store = LibraryStore(source: source)
+        let store = LibraryFeedStore(source: source)
         defer { store.stop() }
         await store.reload()
         let loaded = await becomesTrue { store.loaded[march]?.count == 3 }
