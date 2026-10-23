@@ -2,12 +2,16 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-/// What the zoom transition needs from the open viewer: the photo on screen and its shape.
-@MainActor final class ViewerTransitionState {
+/// What the zoom transition needs from the open viewer: the photo on screen and its shape, and
+/// whether the viewer is closing.
+@MainActor @Observable final class ViewerTransitionState {
     var currentID: String
     /// Width over height of the photo on screen, so the zoom lines the cell up with the photo
     /// rather than with the whole screen.
     var aspectRatio: CGFloat?
+    /// The viewer is closing, by a drag or a button: its controls step aside so only the photo
+    /// goes back to its cell, as in Photos. A drag let go early brings them back.
+    var dismissing = false
     init(currentID: String) { self.currentID = currentID }
 }
 
@@ -52,6 +56,12 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
             self.state = state; self.host = host; presentedID = asset.id
             host.rootView = root(asset)
             host.modalPresentationStyle = .fullScreen
+            // The black behind the photo is the controller's, not the SwiftUI view's, so it can
+            // fade with the finger while a drag closes the viewer.
+            host.view.backgroundColor = .black
+            host.onDismissing = { [weak state] closing in
+                withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.15)) { state?.dismissing = closing }
+            }
             // The viewer is always dark. Its own preference reaches this host only after SwiftUI's
             // first pass, which let the zoom start in the system's style and flicker.
             host.overrideUserInterfaceStyle = .dark
@@ -167,14 +177,24 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
 /// halfway leaves the viewer open, so a dismissal counts only when its transition completes.
 final class ViewerHostingController: UIHostingController<AnyView> {
     var onDismissed: (() -> Void)?
+    /// Told when the viewer starts closing, and when a drag let go early leaves it open.
+    var onDismissing: ((Bool) -> Void)?
     private var dismissingWithoutTransition = false
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         guard isBeingDismissed else { return }
+        onDismissing?(true)
         if let coordinator = transitionCoordinator {
-            coordinator.animate(alongsideTransition: nil) { [weak self] context in
-                if !context.isCancelled { self?.onDismissed?() }
+            // The black fades as the photo goes back to its cell; on a drag it follows the finger.
+            coordinator.animate(alongsideTransition: { [weak self] _ in self?.view.backgroundColor = .clear }) { [weak self] context in
+                guard let self else { return }
+                if context.isCancelled {
+                    self.view.backgroundColor = .black
+                    self.onDismissing?(false)
+                } else {
+                    self.onDismissed?()
+                }
             }
         } else {
             dismissingWithoutTransition = true
