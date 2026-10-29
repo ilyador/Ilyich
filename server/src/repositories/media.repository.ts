@@ -104,9 +104,9 @@ const getEncodingSettings = (output: { format: ImageFormat; quality: number; pro
 });
 
 /**
- * The image settings that change developed preview, thumbnail and fullsize files, in a fixed shape and key order.
- * `extractEmbedded` only affects the ordinary fallback used when the renderer skips a packet.
- */
+The image settings that change developed preview, thumbnail and fullsize files, in a fixed shape and key order.
+`extractEmbedded` only affects the ordinary fallback used when the renderer skips a packet.
+*/
 const getDevelopmentOutputSettings = ({ colorspace, preview, thumbnail, fullsize }: SystemConfig['image']) => ({
   colorspace,
   preview: { size: preview.size, ...getEncodingSettings(preview) },
@@ -169,9 +169,9 @@ export class MediaRepository {
   }
 
   /**
-   * Identifies the photo, its XMP and the output settings a development render depends on. The renderer build is
-   * deliberately excluded: upgrading it must not re-render every developed asset.
-   */
+  Identifies the photo, its XMP and the output settings a development render depends on. The renderer build is
+  deliberately excluded: upgrading it must not re-render every developed asset.
+  */
   async getDevelopmentInputFingerprint({ originalPath, sidecarPath, image }: DevelopmentInput): Promise<string> {
     const original = await fs.stat(originalPath);
     const [digest] = await this.digestDevelopmentInput(
@@ -190,10 +190,10 @@ export class MediaRepository {
   }
 
   /**
-   * Recomputes the pre-v2 fingerprint of the current inputs, which also covered the renderer build and the whole
-   * image config. Returns one candidate for the installed renderer and one for each version listed in
-   * `IMMICH_SIDECAR_RENDERER_LEGACY_VERSIONS` (comma separated), so stored values can be verified after an upgrade.
-   */
+  Recomputes the pre-v2 fingerprint of the current inputs, which also covered the renderer build and the whole
+  image config. Returns one candidate for the installed renderer and one for each version listed in
+  `IMMICH_SIDECAR_RENDERER_LEGACY_VERSIONS` (comma separated), so stored values can be verified after an upgrade.
+  */
   async getLegacyDevelopmentInputFingerprints({
     originalPath,
     sidecarPath,

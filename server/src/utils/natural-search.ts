@@ -90,7 +90,9 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
   const consume = (start: number, length: number) => {
     for (let offset = 0; offset < length; offset++) used.add(start + offset);
   };
-  const places = [...vocabulary.cities, ...(vocabulary.states ?? []), ...vocabulary.countries].map((value) => words(value));
+  const places = [...vocabulary.cities, ...(vocabulary.states ?? []), ...vocabulary.countries].map((value) =>
+    words(value),
+  );
   for (const [alias, ids] of [...aliases].sort(([a], [b]) => b.length - a.length)) {
     if (ids.size !== 1) continue; // Ambiguous first names must not silently pick a person.
     const parts = alias.split(' ');
@@ -238,15 +240,13 @@ export function planNaturalSearch(query: string, vocabulary: SearchVocabulary, n
   const verificationTokens = tokens.flatMap((token, index) => {
     const person = positive.find(({ start }) => start === index);
     if (person)
-      return [
-        {
-          ...token,
-          text: searchSubjectLabel(subjects.find(({ personGroupId }) => personGroupId === person.id)!.marker),
-          normalized: 'person',
-          end: tokens[person.end - 1].end,
-          endPosition: person.end - 1,
-        },
-      ];
+      return {
+        ...token,
+        text: searchSubjectLabel(subjects.find(({ personGroupId }) => personGroupId === person.id)!.marker),
+        normalized: 'person',
+        end: tokens[person.end - 1].end,
+        endPosition: person.end - 1,
+      };
     return used.has(index) ? [] : [token];
   });
   while (verificationTokens.length > 0 && filler.has(verificationTokens[0].normalized)) verificationTokens.shift();

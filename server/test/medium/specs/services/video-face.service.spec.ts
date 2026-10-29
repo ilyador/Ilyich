@@ -28,6 +28,7 @@ const face = (index: number, size = 200): Face => ({
   score: 0.9,
 });
 
+// eslint-disable-next-line unicorn/no-unnecessary-parameters
 const setup = (db?: Kysely<DB>) => {
   return newMediumService(VideoFaceService, {
     database: db || defaultDatabase,

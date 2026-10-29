@@ -124,12 +124,12 @@ describe(SearchVerifier.name, () => {
     expect(owner.messages[0].content).not.toMatch(/maya|personGroupId/iu);
     // Markers are rendered into the image, not merely mentioned in a prompt.
     const pixels = await sharp(Buffer.from(owner.messages[1].images[0], 'base64')).raw().toBuffer();
-    const yellow = (x: number, y: number) => {
-      const i = (y * 768 + x) * 3;
+    const yellowAtRow240 = (x: number) => {
+      const i = (240 * 768 + x) * 3;
       return pixels[i] > 150 && pixels[i + 1] > 150 && pixels[i + 2] < 100;
     };
-    expect(yellow(0, 240)).toBe(true);
-    expect(yellow(480, 240)).toBe(false);
+    expect(yellowAtRow240(0)).toBe(true);
+    expect(yellowAtRow240(480)).toBe(false);
   });
   it('invalidates a subject decision after a face reassignment or recognition configuration change', async () => {
     const verifier = new SearchVerifier(detectFacesMock);
