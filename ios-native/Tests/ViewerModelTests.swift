@@ -104,6 +104,31 @@ import XCTest
         XCTAssertEqual(model.windowShifts, 1, "A photo added after it leaves the strip where it was.")
     }
 
+    /// While the viewer closes, a reload of the feed leaves its photos as they are, so nothing is
+    /// laid out again under the photo going back to its cell. A drag let go early leaves the
+    /// viewer open, and the photo that arrived meanwhile shows once it rests.
+    func testAClosingViewerHoldsItsPhotos() async throws {
+        let library = ViewerLibrary([try photo("m1", "2026-03-20"), try photo("m2", "2026-03-15")])
+        let store = try await loadedStore(library, months: [Self.march])
+        defer { store.stop() }
+        let (api, mutations) = try makeAccount(makeStubServer())
+        let model = ViewerModel(api: api, route: route(store, "m2"), window: .feed(store), settleDelay: .zero)
+        model.start(mutations: mutations, close: {})
+        XCTAssertEqual(model.assets.map(\.id), ["m1", "m2"])
+
+        model.setClosing(true)
+        await library.set(try photo("m0", "2026-03-25"))
+        await store.reload(preservingPosition: true)
+        try await until("March was not read again.") { store.loaded[Self.march]?.first?.id == "m0" }
+        // The model hears of the change in a task of its own, queued as March changed: it runs first.
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(model.assets.map(\.id), ["m1", "m2"], "Nothing moves while the viewer closes.")
+        model.setClosing(false)
+        XCTAssertEqual(model.assets.map(\.id), ["m0", "m1", "m2"], "Left open, the viewer takes the photo that arrived.")
+        XCTAssertEqual(model.current.id, "m2")
+        XCTAssertEqual(model.pagePosition.viewID(type: String.self), "m2", "The pages moved with the photos.")
+    }
+
     /// The window is asked about the photo on screen, not the one the viewer opened on: once a
     /// swipe has moved on to the next month, the viewer pages through that month's neighbors.
     func testTheWindowFollowsThePhotoOnScreen() async throws {
