@@ -73,8 +73,7 @@ import UIKit
     }
 
     private func openApp() {
-        guard let url = URL(string: "immich://share") else { return }
-        extensionContext?.open(url) { opened in
+        extensionContext?.open(ShareInboxRepository.appLink) { opened in
             Task { @MainActor in
                 if opened { self.extensionContext?.completeRequest(returningItems: nil) }
                 else { self.message.text = "Your files are saved. Open Ilyich to review and upload them." }

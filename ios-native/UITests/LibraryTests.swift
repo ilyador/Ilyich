@@ -754,6 +754,42 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(check.waitForExistence(timeout: 5), "Photo content brings the AI check back.")
         XCTAssertEqual(check.value as? String, "1", "Still on, as it was left.")
     }
+    /// F5, G1: people come a numbered page at a time. Search options' People shows the server's
+    /// first page; Load more people asks for the next page and adds it after, and the last page
+    /// ends the list. The fixture's session serves 75 people thirty at a time, whatever the size
+    /// asked for.
+    @MainActor func testThePeopleListLoadsItsNumberedPages() {
+        let app = launch(extraArguments: ["--ui-testing-paged-people"])
+        let search = app.textFields["library.search"]
+        requireHittable(search, in: app); search.tap()
+        search.typeText("beach\n")
+        XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20))
+        let more = app.buttons["search.more"]
+        requireHittable(more, in: app); more.tap()
+        XCTAssertTrue(app.navigationBars["Search options"].waitForExistence(timeout: 5))
+        let people = app.buttons["People"].firstMatch
+        for _ in 0..<6 where !people.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        requireHittable(people, in: app); people.tap()
+        XCTAssertTrue(app.navigationBars["People"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.switches["Person 01"].waitForExistence(timeout: 10), "The first page shows.")
+        let loadMore = app.buttons["Load more people"]
+        func next(_ first: String) {
+            // The list builds its rows as they scroll in: the button exists only once the list is
+            // scrolled near its end.
+            for _ in 0..<12 where !loadMore.isHittable { app.collectionViews.firstMatch.swipeUp() }
+            if !loadMore.isHittable { capture(app, "People — no Load more people") }
+            XCTAssertTrue(loadMore.isHittable, "More people follow.")
+            XCTAssertFalse(app.switches[first].exists, "\(first) is on a later page.")
+            loadMore.tap()
+            XCTAssertTrue(app.switches[first].waitForExistence(timeout: 10), "The next page adds \(first).")
+        }
+        next("Person 31")
+        next("Person 61")
+        for _ in 0..<12 where !app.switches["Person 75"].isHittable { app.collectionViews.firstMatch.swipeUp() }
+        XCTAssertTrue(app.switches["Person 75"].exists, "The last page reaches the last person.")
+        XCTAssertFalse(loadMore.exists, "The last page ends the list.")
+        capture(app, "Search options — People, last page")
+    }
     @MainActor func testGlobeOpensAndReturnsToLibrary() {
         let app = launch()
         openShelves(app); app.buttons["Places"].tap()
@@ -1095,6 +1131,24 @@ final class LibraryTests: XCTestCase {
         capture(app, "Link — photo opened on launch")
         app.buttons["Close"].tap()
         XCTAssertTrue(app.collectionViews["library.grid"].waitForExistence(timeout: 10))
+        requireHittable(app.textFields["library.search"], in: app)
+    }
+    /// G1: the memory widget's link names its memory. Starting the app, it plays that memory once
+    /// the library is up, from its first photo, and closing the player leaves the memory under it.
+    @MainActor func testAMemoryWidgetLinkThatStartsTheAppPlaysItsMemory() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-testing", "--ui-testing-library", "-appearance", "light", "--ui-testing-shelves-stay-open"]
+        app.terminate()
+        app.open(URL(string: "immich://memory?id=00000000-0000-4000-8000-0000000000a2")!)
+        XCTAssertTrue(app.staticTexts["Maya Memory Two"].waitForExistence(timeout: 30), "The link's memory plays on launch.")
+        XCTAssertTrue(app.staticTexts["1 of 2"].exists, "From its first photo.")
+        capture(app, "Link — memory played on launch")
+        let close = app.buttons["Close memories"]
+        requireHittable(close, in: app); close.tap()
+        XCTAssertTrue(app.navigationBars["On this day"].waitForExistence(timeout: 10), "The memory stays under the player.")
+        XCTAssertTrue(app.buttons["Play memory"].exists, "Its memory can play again.")
+        app.navigationBars["On this day"].buttons["Done"].tap()
         requireHittable(app.textFields["library.search"], in: app)
     }
     @MainActor func testZoomingIntoAPhotoLocationKeepsTheEarthUsable() {
@@ -1495,6 +1549,49 @@ final class LibraryTests: XCTestCase {
         let one = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in grid.cells.count == 1 }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [one], timeout: 15), .completed, "The Archive shows one photo.")
         XCTAssertEqual(photoID(at: 0, in: grid, app), archived, "The Archive shows the photo archived.")
+    }
+    /// G1: the Trash's own screen reads a month at a time. The fixture's session holds three photos
+    /// in Trash from December, two from November and one from October: Load more adds each month in
+    /// turn and the last ends it. Photos restored from the second page leave at once, the others
+    /// staying, and the screen says how many the server restored.
+    @MainActor func testTheTrashLoadsAMonthAtATimeAndRestoresAcrossItsPages() {
+        let app = launch(extraArguments: ["--ui-testing-trashed-library"])
+        openShelves(app); app.buttons["More"].tap()
+        let browse = app.buttons["Browse more"]
+        XCTAssertTrue(browse.waitForExistence(timeout: 10))
+        requireHittable(browse, in: app); browse.tap()
+        XCTAssertTrue(app.navigationBars["More"].waitForExistence(timeout: 10))
+        XCTAssertTrue(browse.waitForNonExistence(timeout: 5), "The shelves closed.")
+        // The Trash's row is the last in the list, which builds its rows as they scroll in.
+        let trash = app.buttons["Trash"]
+        for _ in 0..<4 where !trash.isHittable { app.swipeUp() }
+        requireHittable(trash, in: app); trash.tap()
+        XCTAssertTrue(app.navigationBars["Trash"].waitForExistence(timeout: 10))
+
+        // A timeline row carries no file name, so each photo is "Photo".
+        let photos = app.buttons.matching(NSPredicate(format: "label == %@", "Select Photo"))
+        func shows(_ count: Int) -> Bool {
+            let shown = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in photos.count == count }, object: nil)
+            return XCTWaiter.wait(for: [shown], timeout: 10) == .completed
+        }
+        let loadMore = app.buttons["Load more"]
+        XCTAssertTrue(shows(3), "December's three photos show first.")
+        requireHittable(loadMore, in: app); loadMore.tap()
+        XCTAssertTrue(shows(5), "Load more adds November's two.")
+        requireHittable(loadMore, in: app); loadMore.tap()
+        XCTAssertTrue(shows(6), "And then October's one.")
+        XCTAssertTrue(loadMore.waitForNonExistence(timeout: 5), "October is the last month.")
+        capture(app, "Trash — every month read")
+
+        // Two of November's photos, from the second page, are restored.
+        photos.element(boundBy: 3).tap(); photos.element(boundBy: 4).tap()
+        XCTAssertTrue(app.navigationBars["2 selected"].waitForExistence(timeout: 5))
+        let restore = app.buttons["Restore"]
+        requireHittable(restore, in: app); restore.tap()
+        XCTAssertTrue(app.staticTexts["Restored 2 items."].waitForExistence(timeout: 10), "The screen says how many were restored.")
+        XCTAssertTrue(shows(4), "The restored photos leave the Trash at once.")
+        XCTAssertTrue(app.navigationBars["Trash"].exists, "Nothing is selected any more.")
+        capture(app, "Trash — after restoring from the second page")
     }
     @MainActor func testViewerCloseAllowsOpeningAnotherPhoto() {
         let app = launch()
