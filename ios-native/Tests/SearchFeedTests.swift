@@ -203,6 +203,37 @@ import XCTest
         XCTAssertEqual(store.results.map(\.id), ["a", "b"], "A photo restored from Trash shows again.")
     }
 
+    /// G1: a text search is not read again for a sync's change, but a photo it shows that the
+    /// change names takes the offline library's record. Put in Trash elsewhere, which reaches the
+    /// phone as a change to the photo, not a removal, it leaves the results in place; favorited
+    /// elsewhere, it shows that. Only the photos shown are looked up, and nothing is searched again.
+    func testAPhotoTrashedElsewhereLeavesATextSearch() async throws {
+        let api = SearchStoreFixture(smart: [.page(["a", "b", "c"])])
+        let store = LibraryFeedStore(source: api)
+        defer { store.stop() }
+        store.search("beach")
+        try await until("The results did not show.") { store.results.count == 3 && !store.isSearching }
+        var trashed = Asset(id: "b")
+        trashed.isTrashed = true
+        var favorited = Asset(id: "c")
+        favorited.isFavorite = true
+        await api.setRecords([trashed, favorited])
+        let resetID = store.resetID
+        var change = LibraryChange(account: LegacyGoldens.account,
+                                   authorization: AuthorizationEpoch(account: LegacyGoldens.account, value: 1),
+                                   indexRevision: 2, origin: .sync)
+        change.upserted = ["b": .init(), "c": .init(), "elsewhere": .init()]
+        await store.apply(change)
+        XCTAssertEqual(store.results.map(\.id), ["a", "c"], "The photo put in Trash leaves the results.")
+        XCTAssertEqual(store.results.last?.isFavorite, true, "The favorited photo shows its record.")
+        XCTAssertEqual(store.resetID, resetID, "In place: the grid keeps its position.")
+        XCTAssertEqual(store.query, "beach", "The search stays.")
+        let asked = await api.recordsAsked
+        XCTAssertEqual(asked, [["b", "c"]], "Only the photos shown are looked up.")
+        let searches = await api.smartCalls
+        XCTAssertEqual(searches, 1, "Nothing is searched again.")
+    }
+
     // MARK: - Helpers
 
     private func until(_ message: String, _ condition: () async -> Bool) async throws {
@@ -251,10 +282,20 @@ private actor SearchStoreFixture: FakeFeedSource {
     private var metadataPages: [SearchResponse]
     private var smartPages: [SearchResponse]
     var metadataCursors: [String?] = []
+    private(set) var smartCalls = 0
+    /// The offline library's records, and the photos each lookup asked for.
+    private var stored: [String: Asset] = [:]
+    private(set) var recordsAsked: [Set<String>] = []
     init(_ metadata: [SearchResponse] = [], smart: [SearchResponse] = []) { metadataPages = metadata; smartPages = smart }
+    func setRecords(_ records: [Asset]) { for record in records { stored[record.id] = record } }
+    func records(_ ids: Set<String>) async -> [Asset] {
+        recordsAsked.append(ids)
+        return ids.compactMap { stored[$0] }
+    }
     func monthList(_ query: LibraryQuery) async throws -> [TimeBucket] { [.init(timeBucket: "2026-01-01T00:00:00Z", count: 1)] }
     func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] { [Asset(id: "timeline-photo")] }
     func search(_ body: SearchQuery) async throws -> SearchResponse {
+        smartCalls += 1
         guard !smartPages.isEmpty else { throw ServerFailure.http(500, nil) }
         return smartPages.removeFirst()
     }

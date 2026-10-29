@@ -82,6 +82,19 @@ final class LibraryRepository: LibraryFeedSource {
     /// A sync pass, published like every other, and what it changed. Without a sync the server is
     /// always up to date.
     func refresh() async throws -> LibraryChange? { try await sync?.refresh() }
+
+    /// The index's records of `ids`, at most `recordLimit` of them, once it is readable.
+    func records(_ ids: Set<String>) async -> [Asset] {
+        guard let index, (try? await index.isReadable()) == true else { return [] }
+        var records: [Asset] = []
+        for id in ids.prefix(Self.recordLimit) {
+            if let record = try? await index.asset(id: id) { records.append(record) }
+        }
+        return records
+    }
+
+    /// A change naming more of a search's photos than this leaves the rest to the next search.
+    static let recordLimit = 200
 }
 
 /// When a server read may be answered from the offline index instead: only after a definite
