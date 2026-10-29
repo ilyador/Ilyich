@@ -19,9 +19,8 @@ final class AccountRuntime: Sendable {
     let library: LibraryServices?
     /// Why the offline library couldn't open.
     let libraryError: String?
-    /// The account's transfers database, which the transfer engine runs backup from, and the import
-    /// of the state.json an older build left (REBUILD_ROADMAP.md B1, B9, B10). Nil when the
-    /// environment runs without it.
+    /// The account's transfers database, which the transfer engine runs backup from
+    /// (REBUILD_ROADMAP.md B1, B9). Nil when the environment runs without it.
     let transfers: TransferServices?
     /// Whether the account's backup runs on the transfer engine, once TransferHost decided:
     /// cleanup and the device index read their receipts from it.
@@ -72,8 +71,6 @@ final class AccountRuntime: Sendable {
 
     struct TransferServices: Sendable {
         let store: TransferStore
-        /// Imports the state.json an older build left, for an account no import handed over.
-        let importer: LegacyBackupImporter
     }
 
     var requiresPasswordChange: Bool { credential.requiresPasswordChange == true }
@@ -160,12 +157,8 @@ final class AccountRuntime: Sendable {
         }
         var transfers: TransferServices?
         if environment.keepsTransfers {
-            // The database opens on its own queue at first use; the App Group is only looked up here.
-            let account = credential.account
-            let store = TransferStore(url: TransferStore.url(for: account, in: environment.transfersDirectory))
-            let container = environment.backupContainer ?? (try? AppGroupLayout.current().container)
-            let folder = container?.appendingPathComponent(AccountStoragePaths(account).backup, isDirectory: true)
-            transfers = TransferServices(store: store, importer: LegacyBackupImporter(store: store, folder: folder))
+            // The database opens on its own queue at first use.
+            transfers = TransferServices(store: TransferStore(url: TransferStore.url(for: credential.account, in: environment.transfersDirectory)))
         }
         let cutover = TransferCutoverState()
         let receipts = CutoverReceipts(cutover: cutover)
@@ -245,13 +238,11 @@ final class AccountRuntime: Sendable {
 
     /// Readies the account's transfers database for the engine, once per runtime, and says whether
     /// the account's backup can run on it. A database the engine owns is used as it is: B9's
-    /// import handed most over. For one no import handed over (an account signed in last before
-    /// B9, or a new one) the state.json an older build left is imported now, as B9 did, so its
-    /// records come back as that build left them, signing out included (the critic's correction
-    /// to B10). With no file to import, or one that can't be decoded and was moved aside, the
-    /// engine claims the database as it is (claimForEngine). A file that can't be read now keeps
-    /// the account's backup from starting until the next launch, so nothing it says is lost.
-    /// Afterwards the photos cleanup removed are marked in the receipts, from the device journal.
+    /// import handed the phone's over. The engine claims any other as it is (claimForEngine): a new
+    /// account's, or a copy B1 made that no import handed over, which waits paused with automatic
+    /// backup off. Since C8 nothing reads a state.json an older build left: none is left on the
+    /// one phone, and no older build will be installed again. Afterwards the photos cleanup
+    /// removed are marked in the receipts, from the device journal.
     func prepareTransfers() async -> TransferCutover {
         let task = preparing.withLock { slot -> Task<TransferCutover, Never> in
             if let slot { return slot }
@@ -269,27 +260,10 @@ final class AccountRuntime: Sendable {
         guard meta.schema <= TransferStore.schemaVersion else { return .unavailable("The backup records were written by a newer version.") }
         guard !Task.isCancelled else { return .unavailable("The account closed.") }
         if meta.engine != .transfer {
-            let handed = await Self.handOver(transfers.store, importing: transfers.importer)
-            guard handed == .engine else { return handed }
+            guard (try? await transfers.store.claimForEngine()) == true else { return .unavailable("The backup records database can’t be opened.") }
+            Self.logger.notice("The transfer engine took over the account's backup records")
         }
         if usesDevicePhotos { await importLocalDeletions(into: transfers.store) }
-        return .engine
-    }
-
-    /// Hands a database the engine doesn't own to it: the state.json an older build left is
-    /// imported, as B9 did; with none to import, or one that can't be decoded and was moved aside,
-    /// the engine claims the database as it is.
-    static func handOver(_ store: TransferStore, importing importer: LegacyBackupImporter) async -> TransferCutover {
-        let outcome = await importer.run()
-        switch outcome {
-        case nil: return .unavailable("The account closed.")
-        case .unavailable?: return .unavailable("The backup records an older version left can’t be read now.")
-        case .imported?, .absent?, .quarantined?, .skipped?: break
-        }
-        guard (try? await store.claimForEngine()) == true else { return .unavailable("The backup records database can’t be opened.") }
-        if outcome != .imported {
-            logger.notice("The transfer engine took over backup records without an import (\(outcome?.rawValue ?? "", privacy: .public))")
-        }
         return .engine
     }
 

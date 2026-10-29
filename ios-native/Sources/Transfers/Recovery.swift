@@ -5,11 +5,9 @@ import os
 /// Puts the transfers database back in step with what iOS and the disk hold after the app ended,
 /// for one account (B6), in each account's TransferRuntime (B9). It runs only on a database the
 /// transfer engine owns, and it leaves every job a lease holds to the engine. It needs neither
-/// the server nor the network, so a launch in the background can run it at once.
-///
-/// First, R0 (B10): a task a build before B9 described, in either session and for any account, is
-/// cancelled and logged. Nothing reads its answer any more, so it is never adopted or sent again;
-/// a job whose stage it was uploading is checked again by its checksum, as below.
+/// the server nor the network, so a launch in the background can run it at once. A task whose
+/// description this build didn't write is never touched (C8 retired B10's R0, which cancelled the
+/// tasks builds before B9 described: none is left, and none can be made again).
 ///
 /// For each library job with a stage, in queue order, each unanswered attempt (oldest first, so a
 /// Live Photo's video before its still):
@@ -33,8 +31,7 @@ import os
 ///   attempt abandoned, so a new one is written.
 /// - R4, a job the transport had resumes from its stage; one whose staged files are gone (swept,
 ///   signed out, purged) returns to pending and stages again.
-/// - R5, StagingArea.sweep, keeping every stage, unanswered attempt and task of iOS's. It waits
-///   while iOS holds a task an older build described, whose files it can't tell.
+/// - R5, StagingArea.sweep, keeping every stage, unanswered attempt and task of iOS's.
 /// - R6, a report.
 struct Recovery: Sendable {
     enum ReconcileError: Error, Equatable {
@@ -73,7 +70,6 @@ struct Recovery: Sendable {
         var report = RecoveryReport()
         let inventory = await backup.inventory()
         let shareInventory = await share?.inventory()
-        await cancelOlderBuildsTasks(backup: inventory, share: shareInventory, report: &report)
         for entry in try await store.recoveryJobs() where !entry.leased {
             try Task.checkCancellation()
             try await recover(entry, inventory: inventory, report: &report)
@@ -98,32 +94,10 @@ struct Recovery: Sendable {
             await reconcileShares(share, inventory: shareInventory, references: references, report: &report)
         }
 
-        // R5, unless iOS holds a task an older build described: its files are unknown.
-        if report.olderTasks > 0 {
-            report.sweep.skipped = .olderUploads
-        } else {
-            let imported = try await store.meta().legacyImportMode == .authoritative
-            report.sweep = staging.sweep(keeping: references, legacyImported: imported, now: now())
-        }
+        // R5.
+        report.sweep = staging.sweep(keeping: references, now: now())
         Self.logger.notice("\(report.summary, privacy: .public)")
         return report
-    }
-
-    // MARK: R0: tasks an older build described
-
-    /// Cancels every live task a build before B9 described, in both sessions, and counts every
-    /// such task, live or ending, for the sweep and for retiring state.json.
-    private func cancelOlderBuildsTasks(backup inventory: TransportInventory, share shareInventory: TransportInventory?,
-                                        report: inout RecoveryReport) async {
-        let backupTasks = inventory.legacy, shareTasks = shareInventory?.legacy ?? []
-        report.olderTasks = backupTasks.count + shareTasks.count
-        guard report.olderTasks > 0 else { return }
-        let live = backupTasks.filter(\.isLive).map(\.taskID), liveShares = shareTasks.filter(\.isLive).map(\.taskID)
-        if !live.isEmpty { await backup.cancel(tasks: live) }
-        if let share, !liveShares.isEmpty { await share.cancel(tasks: liveShares) }
-        let found = report.olderTasks, cancelled = live.count + liveShares.count
-        report.cancelledOlder = cancelled
-        Self.logger.notice("Recovery found \(found) upload tasks an older version of Ilyich described and cancelled \(cancelled) still running; their answers aren't read")
     }
 
     // MARK: Jobs
@@ -395,10 +369,6 @@ struct RecoveryReport: Hashable, Sendable {
     var pending = 0
     /// Live tasks of the account no attempt waits for, cancelled.
     var cancelled = 0
-    /// Tasks a build before B9 described, live or ending, in either session (R0), and how many of
-    /// them were still running and cancelled.
-    var olderTasks = 0
-    var cancelledOlder = 0
     /// Share tasks kept, and cancelled.
     var adoptedShares = 0
     var cancelledShares = 0
@@ -416,7 +386,7 @@ struct RecoveryReport: Hashable, Sendable {
 
     var summary: String {
         var parts = ["committed \(committed)", "applied \(applied)", "deferred \(deferred)", "failed \(failed)", "retrying \(retrying)",
-                     "bound \(bound)", "pending \(pending)", "cancelled \(cancelled)", "older tasks \(olderTasks)/-\(cancelledOlder)",
+                     "bound \(bound)", "pending \(pending)", "cancelled \(cancelled)",
                      "shares \(adoptedShares)/-\(cancelledShares)",
                      "resumable \(resumable)", "rebuilt \(rebuilt)", "resumed \(resumed)", "requeued \(requeued)",
                      "swept \(sweep.folders) folders \(sweep.files) files \(sweep.bytes) bytes"]

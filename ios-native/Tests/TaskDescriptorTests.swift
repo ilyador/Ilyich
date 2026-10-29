@@ -5,20 +5,20 @@ import XCTest
 final class TaskDescriptorTests: XCTestCase {
     private typealias G = LegacyGoldens
 
-    /// What builds before B9 wrote, under either container path, is told apart from another app's
-    /// task, and nothing more is read from it (B10): no attempt, no outcome file, no account, and
-    /// nothing is ever written in that shape again.
-    func testOlderBuildsDescriptorsAreRecognizedAndNeverRead() throws {
-        for path in ["backup/descriptor-backup.json", "share/descriptor-share-var.json", "share/descriptor-share-private-var.json"] {
-            let descriptor = TaskDescriptor(taskDescription: String(decoding: try FixtureLoader.data(path), as: UTF8.self))
-            XCTAssertEqual(descriptor, .legacy, path)
-            XCTAssertNil(descriptor.attempt, path)
-            XCTAssertNil(descriptor.outcomePath, path)
-            XCTAssertNil(descriptor.scope, path)
-            XCTAssertNil(descriptor.taskDescription, path)
+    /// What builds before B9 wrote, {id, receipt}, is foreign since C8, like any description this
+    /// build didn't write: no attempt, no outcome file, no account, and nothing is ever written in
+    /// that shape again.
+    func testOlderBuildsDescriptorsAreForeign() throws {
+        let backup = #"{"id":"7F3E2D1C-0B9A-4876-A5B4-C3D2E1F0A9B8","receipt":"file:\/\/\/private\/var\/mobile\/Containers\/Shared\/AppGroup\/0E4C1B7A-9D2F-4A63-8B5E-7C1D2E3F4A5B\/Backup\/\#(G.digest)\/2B7D4E91-6A3C-4F08-9E15-3C4D5E6F7A8B\/7F3E2D1C-0B9A-4876-A5B4-C3D2E1F0A9B8.receipt"}"#
+        let share = #"{"id":"84190c3b90652749141de444753379393b8c4e800494669c7739f3e01b790b8a","receipt":"file:\/\/\/var\/mobile\/Containers\/Shared\/AppGroup\/0E4C1B7A-9D2F-4A63-8B5E-7C1D2E3F4A5B\/ShareInbox\/A9B8C7D6-E5F4-4321-9876-543210FEDCBA\/84190c3b90652749141de444753379393b8c4e800494669c7739f3e01b790b8a.receipt"}"#
+        for text in [backup, share] {
+            let descriptor = TaskDescriptor(taskDescription: text)
+            XCTAssertEqual(descriptor, .foreign, text)
+            XCTAssertNil(descriptor.attempt, text)
+            XCTAssertNil(descriptor.outcomePath, text)
+            XCTAssertNil(descriptor.scope, text)
+            XCTAssertNil(descriptor.taskDescription, text)
         }
-        let outside = TaskDescriptor(taskDescription: #"{"id":"stage","receipt":"file:\/\/\/tmp\/stage.receipt"}"#)
-        XCTAssertEqual(outside, .legacy, "Wherever its outcome file was.")
     }
 
     func testVersion2RoundTripsAndIsWrittenTheSameWayEveryTime() {

@@ -8,8 +8,11 @@
 #   1. a background session is configured anywhere but TransferSessionConfiguration.swift;
 #   2. a session is built from that configuration anywhere but the transport's live session;
 #   2b. code names a type of the engine B10 deleted (BackupCoordinator, BackgroundUploads,
-#      BackupLifecycle and the rest of the way back B9 kept): the old engine must not come back.
-#      The import of a state.json no import read (LegacyBackupImporter) is no engine, and stays;
+#      BackupLifecycle and the rest of the way back B9 kept): the old engine must not come back;
+#   2c. code names an importer, reader or format mirror C8 deleted (B9's state.json import and
+#      its retirement, the places and fingerprint importers, the backup, share manifest version 1,
+#      places and fingerprint mirrors in LegacyFormats), or the files only they read: nothing on
+#      the phone holds those formats any more, and no build that writes them will be installed;
 #   3. app or extension code outside Sources/Transfers names the new transport's types: only
 #      TransferHost creates the sessions and takes iOS's completion handlers;
 #   3b. code outside Sources/Transfers names the new lifecycle's types: iOS allows one launch
@@ -32,6 +35,11 @@ configuration=Sources/Transfers/TransferSessionConfiguration.swift
 session_builders=(Sources/Transfers/TransportSession.swift)
 # The engine B9 replaced and the way back to it, which B10 deleted.
 legacy_engine='BackupCoordinator|BackgroundUploads|BackupLifecycle|ProcessingWindow|LegacyCoordinatorBackend|LegacyStateReceipts|LegacyBackupIndexInputs'
+# The importers and readers C8 deleted, and the format mirrors only they used.
+legacy_importers='LegacyBackupImporter|LegacyBackupPlan|LegacyImportCrashPoint|LegacyRetirement|retireLegacyState|importLegacy|LegacyPlacesImport|importLegacyFingerprints|legacyFingerprintsFolder'
+legacy_mirrors='Legacy\.(BackupState|BackupPreferences|PreparedPhoto|BackupReceipt|RemoteFile|BackupFailure|TransferNotification|UploadFile|SharedBatch|SharedAttachment|TimelinePlaces|PlaceTally|Fingerprint|fingerprintsPath|placesPath)\b'
+# What only they read: an account's state.json, and the places and fingerprint caches in Caches.
+legacy_files='"(state\.json|IlyichTimelinePlaces|IlyichFingerprints)"'
 # The transport's types that open a session or take over iOS's completion handlers. Its value
 # types and the TransferTransport protocol may be named anywhere.
 transport_types='TransportRegistry|BackgroundTransport|BackgroundEventAcks|URLSessionTransportSession|BackgroundSessionDelegate|TransportEventProcessor'
@@ -73,6 +81,12 @@ reject "only the transport's live session may build a background session" \
     "${session_builders[@]}" < <(code_lines 'TransferSessionConfiguration\.make\(')
 reject "the engine B9 replaced was deleted in B10; backup runs on the transfer engine (BackupStore, TransferHost)" \
     < <(code_lines -w "$legacy_engine")
+reject "C8 deleted the legacy importers and readers; nothing on the phone holds those formats any more" \
+    < <(code_lines -w "$legacy_importers")
+reject "C8 deleted the legacy format mirrors with their importers; nothing on the phone holds those formats any more" \
+    < <(code_lines "$legacy_mirrors")
+reject "nothing reads state.json or the places and fingerprint caches since C8; none is left on the phone" \
+    < <(code_lines "$legacy_files")
 reject "only TransferHost creates the transport and takes iOS's completion handlers" \
     < <(code_lines -w "$transport_types" | grep -v '^Sources/Transfers/' || true)
 reject "only TransferHost registers the background tasks and runs the lifecycle; iOS allows one handler each" \
@@ -87,6 +101,6 @@ reject "only the Photos adapter in Sources/Device fetches assets or requests the
     < <(code_lines 'PHImageManager|PHCachingImageManager|PHAsset\.fetchAssets' | grep -v '^Sources/Device/' || true)
 
 if [ "$failures" -gt 0 ]; then
-    echo "check-single-engine: $failures problem(s); see REBUILD_ROADMAP.md, B4, B5, B7, B9, B10, P1 and P3" >&2
+    echo "check-single-engine: $failures problem(s); see REBUILD_ROADMAP.md, B4, B5, B7, B9, B10, C8, P1 and P3" >&2
     exit 1
 fi

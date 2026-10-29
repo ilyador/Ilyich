@@ -136,9 +136,6 @@ struct TransportInventory: Equatable, Sendable {
     /// Tasks of one account, by the scope they name.
     func tasks(scope: String) -> [TransportTaskSnapshot] { tasks.filter { $0.descriptor.scope == scope } }
 
-    /// Tasks a build before B9 described, live or ending, whatever account they were for.
-    var legacy: [TransportTaskSnapshot] { tasks.filter { $0.descriptor == .legacy } }
-
     /// Tasks this app did not describe, or whose description is unreadable.
     var foreign: [TransportTaskSnapshot] { tasks.filter { $0.descriptor == .foreign } }
 }

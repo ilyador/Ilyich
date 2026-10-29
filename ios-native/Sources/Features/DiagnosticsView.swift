@@ -33,7 +33,7 @@ struct DiagnosticsView: View {
                 Section {
                     LabeledContent("Engine") { Text(TransferHost.shared.summary).multilineTextAlignment(.trailing) }
                 } header: { Text("Backup records") } footer: {
-                    Text("This account’s backup runs on Ilyich’s backup engine. Backup records an older version of Ilyich left on this phone are removed once nothing needs them; if any stay, the reason shows above.")
+                    Text("This account’s backup runs on Ilyich’s backup engine.")
                 }
             }
             Section {

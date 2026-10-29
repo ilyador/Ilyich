@@ -25,8 +25,6 @@ struct LiveAccountDevice: AccountDevice {
 
     func removeNetworkSettings(server: URL) async throws { try NetworkConfigurationStore.remove(server: server) }
 
-    func clearTimelineCaches(scope: String) async { LegacyPlacesImport.discard(scope: scope) }
-
     func clearDiagnostics() async { await DiagnosticsStore.shared.clear() }
 
     /// Each time the phone's protected data becomes available after it was locked away, as after
