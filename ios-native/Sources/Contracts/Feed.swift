@@ -68,4 +68,12 @@ protocol LibraryFeedSource: TimelineSource, SearchSource {
     var userID: String? { get }
     /// Brings the library up to date with the server, and says what that changed, when it knows.
     func refresh() async throws -> LibraryChange?
+    /// The offline library's records of `ids`, those it holds, for a sync's change that names
+    /// photos a search shows. None while it isn't readable.
+    func records(_ ids: Set<String>) async -> [Asset]
+}
+
+extension LibraryFeedSource {
+    /// Without an offline library there are no records to read.
+    func records(_ ids: Set<String>) async -> [Asset] { [] }
 }
