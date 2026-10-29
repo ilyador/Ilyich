@@ -98,6 +98,8 @@ enum CollectionMembership {
     static func trash(_ asset: Asset) -> Bool { asset.isTrashed }
     /// A search or a duplicate group: timeline and archived photos out of the Trash.
     static func searched(_ asset: Asset) -> Bool { (asset.visibility == .timeline || asset.visibility == .archive) && !asset.isTrashed }
+    /// A memory: timeline photos out of the Trash, as the server's memories hold them.
+    static func memory(_ asset: Asset) -> Bool { asset.visibility == .timeline && !asset.isTrashed }
 }
 
 /// What the feed does with a mutation's result, through its own commands (F4's entry points):

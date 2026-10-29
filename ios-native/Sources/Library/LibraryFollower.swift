@@ -54,6 +54,28 @@ extension View {
     }
 }
 
+extension View {
+    /// Applies every change the account's sync publishes while this screen exists to what it
+    /// shows, whichever device made it (G1).
+    func onLibraryChange(_ apply: @escaping @MainActor (LibraryChange) -> Void) -> some View {
+        modifier(ChangeFollowing(apply: apply))
+    }
+}
+
+private struct ChangeFollowing: ViewModifier {
+    @Environment(\.libraryBus) private var bus
+    @State private var follower = LibraryFollower()
+    let apply: @MainActor (LibraryChange) -> Void
+
+    func body(content: Content) -> some View {
+        content.onAppear {
+            // Only the handler goes to the follower, as for the collections' changes below.
+            let apply = apply
+            follower.follow(bus) { event in if case .changed(let change, _) = event { apply(change) } }
+        }
+    }
+}
+
 private struct CollectionFollowing: ViewModifier {
     @Environment(\.libraryBus) private var bus
     @State private var follower = LibraryFollower()
