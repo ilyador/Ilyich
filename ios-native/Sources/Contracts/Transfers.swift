@@ -56,14 +56,16 @@ enum TransferSessionID: String, CaseIterable, Hashable, Sendable {
 }
 
 /// What a background upload task's taskDescription says about it.
+///
+/// Builds before B9 wrote {id, receipt}: a stage ID or share identity and the outcome file's
+/// absolute URL. B10 cancelled such tasks at each reconcile; since C8 they are foreign like any
+/// other description this build didn't write. None is left: B10 removed the phone's state.json
+/// only once neither session held one, no build that writes them will be installed again, and
+/// iOS ends any background upload a week after it began (TransferSessionConfiguration).
 enum TaskDescriptor: Equatable, Sendable {
     /// Written from B9: the attempt, the account digest and the outcome file relative to the App Group.
     case v2(attempt: AttemptID, scope: String, outcome: String)
-    /// Written by every build before B9: {id, receipt}, a stage ID or share identity and the
-    /// outcome file's absolute URL. Nothing reads such a task's answer any more (B10): recovery
-    /// cancels the task and logs it, and it is never adopted or sent again.
-    case legacy
-    /// Not written by this app, or unreadable.
+    /// Not written by this build, or unreadable.
     case foreign
 
     private struct Version2: Codable {
@@ -73,21 +75,10 @@ enum TaskDescriptor: Equatable, Sendable {
         let outcome: String
     }
     private struct Version: Decodable { let v: Int? }
-    /// The keys every build before B9 wrote, read only to tell such a task from another app's.
-    private struct Unversioned: Decodable {
-        let id: String
-        let receipt: String
-    }
 
     init(taskDescription: String?) {
-        guard let data = taskDescription?.data(using: .utf8), let version = try? JSONDecoder().decode(Version.self, from: data) else {
-            self = .foreign; return
-        }
-        guard let v = version.v else {
-            self = (try? JSONDecoder().decode(Unversioned.self, from: data)) == nil ? .foreign : .legacy
-            return
-        }
-        guard v == 2, let value = try? JSONDecoder().decode(Version2.self, from: data), !value.attempt.isEmpty,
+        guard let data = taskDescription?.data(using: .utf8), let version = try? JSONDecoder().decode(Version.self, from: data),
+              version.v == 2, let value = try? JSONDecoder().decode(Version2.self, from: data), !value.attempt.isEmpty,
               Self.isRelative(value.outcome) else { self = .foreign; return }
         self = .v2(attempt: AttemptID(legacy: value.attempt), scope: value.scope, outcome: value.outcome)
     }

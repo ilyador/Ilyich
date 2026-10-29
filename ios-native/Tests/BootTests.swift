@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import IlyichPlatform
 import IlyichShareInbox
@@ -8,15 +7,11 @@ import XCTest
 
 /// The account's transfer runtime as the app boots it (architecture section 4) over a database
 /// B9's import handed to the engine, with a fake OS: nothing already backed up is queued, hashed or
-/// sent again, and an answer iOS already wrote is committed without a request. Since B10 the
-/// state.json B9 left in place goes once nothing can need it, and only then: an upload an older
-/// build started that iOS still holds, or a file an older build changed after the import, keeps
-/// it, saying why. An account no import read yet has its file imported first, and comes back as
-/// that build left it.
+/// sent again, an answer iOS already wrote is committed without a request, and stage folders
+/// nothing refers to are swept.
 @MainActor final class BootTests: XCTestCase {
     private typealias G = LegacyGoldens
     private static let current = "Backup/\(G.digest)/\(G.currentFolder)"
-    private static let state = "Backup/\(G.digest)/state.json"
 
     // MARK: Nothing backed up goes again
 
@@ -29,7 +24,7 @@ import XCTest
         let golden = ScaleGolden()
         let h = try await BootHarness()
         addTeardownBlock { await h.tearDown() }
-        try await h.store.seedForTest(golden.seed(), importedDigest: "state")
+        try await h.store.seedForTest(golden.seed())
         let counts = try await h.store.albumUploadCounts()
         XCTAssertEqual(counts, [ScaleGolden.album: AlbumUploadCount(pending: 4, failed: 1)], "Four photos wait for the album; one's upload failed.")
 
@@ -87,112 +82,29 @@ import XCTest
         XCTAssertFalse(h.group.exists(Self.current), "The committed stage goes.")
     }
 
-    // MARK: Retiring state.json (B10)
+    // MARK: Staging
 
-    /// The state.json B9 imported and left in place goes at the first start once iOS holds no
-    /// upload an older build started: the database holds everything it says (its digest is the
-    /// one the import recorded). The database is untouched, the stages it refers to stay, and an
-    /// older build's stage folder nothing refers to is swept. The next start finds nothing left.
-    func testStateJSONGoesOnceTheEngineHoldsEverythingItSays() async throws {
+    /// The start sweeps a stage folder nothing refers to, left by a run that ended (R5), and keeps
+    /// the stages the database refers to; the records are untouched. The next start finds nothing
+    /// more to sweep.
+    func testTheStartSweepsStageFoldersNothingRefersTo() async throws {
         let h = try await BootHarness()
         addTeardownBlock { await h.tearDown() }
-        let file = try h.writeState(FixtureLoader.data("backup/state-current.json"))
-        try await h.seedImportedGolden(digest: file)
+        try await h.seedImportedGolden()
         let orphan = try h.writeOldStageFolder()
         let before = try await h.store.dump()
 
         try await h.start()
-        XCTAssertEqual(h.runtime.legacyRetirement, .removed)
-        XCTAssertFalse(h.group.exists(Self.state), "state.json is gone.")
-        XCTAssertFalse(h.group.exists(orphan), "An older build's stage folder nothing refers to is swept.")
+        XCTAssertFalse(h.group.exists(orphan), "A stage folder nothing refers to is swept.")
         XCTAssertTrue(h.group.exists(Self.current + "/original"), "A stage the database refers to stays.")
         let after = try await h.store.dump()
         XCTAssertEqual(after["receipts"], before["receipts"])
         XCTAssertEqual(after["confirmations"], before["confirmations"])
-        XCTAssertEqual(after["meta"], before["meta"], "The import's record stays; nothing reads state.json again.")
+        XCTAssertEqual(after["meta"], before["meta"])
 
         try await h.restart()
-        XCTAssertEqual(h.runtime.legacyRetirement, .nothingLeft)
-    }
-
-    /// While iOS holds an upload an older build started, state.json stays and nothing is swept:
-    /// recovery cancels the task, logged, and never sends its photo again by itself. Once iOS has
-    /// let go of it, the next start removes the file.
-    func testStateJSONStaysWhileIOSHoldsAnOlderBuildsUpload() async throws {
-        let older = String(decoding: try FixtureLoader.data("backup/descriptor-backup.json"), as: UTF8.self)
-        let h = try await BootHarness(backupTasks: [SessionTask(id: 7, description: older, state: .running, sent: 100, expected: 900)])
-        addTeardownBlock { await h.tearDown() }
-        let file = try h.writeState(FixtureLoader.data("backup/state-current.json"))
-        try await h.seedImportedGolden(digest: file)
-        let orphan = try h.writeOldStageFolder()
-
-        try await h.start()
-        XCTAssertEqual(h.backupSession.cancelled, [7], "The older build's upload is cancelled.")
-        XCTAssertEqual(h.runtime.legacyRetirement, .kept(.olderUploads(1)))
-        XCTAssertTrue(h.group.exists(Self.state))
-        XCTAssertTrue(h.group.exists(orphan), "Nothing is swept while it is with iOS.")
-        XCTAssertTrue(h.backupSession.uploads.isEmpty, "Its photo isn't sent again by recovery.")
-        XCTAssertTrue(LegacyRetirement.Reason.olderUploads(1).text.hasPrefix("1 upload an older version started was still with iOS"))
-
-        h.backupSession.forget(7)
-        try await h.restart()
-        XCTAssertEqual(h.runtime.legacyRetirement, .removed)
-        XCTAssertFalse(h.group.exists(Self.state))
-    }
-
-    /// A state.json whose digest isn't the one the import recorded was written after it, which
-    /// only an older build does: what it says isn't all in the database, so it stays, unread.
-    func testAStateJSONAnOlderBuildChangedStays() async throws {
-        let h = try await BootHarness()
-        addTeardownBlock { await h.tearDown() }
-        let imported = try FixtureLoader.data("backup/state-current.json")
-        try await h.seedImportedGolden(digest: G.digest(of: imported))
-        try h.writeState(FixtureLoader.data("backup/state-9780e9625.json"))
-
-        try await h.start()
-        XCTAssertEqual(h.runtime.legacyRetirement, .kept(.changedSinceImport))
-        XCTAssertEqual(try Data(contentsOf: h.group.url(Self.state)), try FixtureLoader.data("backup/state-9780e9625.json"), "Never read or written.")
-    }
-
-    /// An account no import handed over (one a build before B9 signed out) has the state.json that
-    /// build left imported before its engine starts (AccountRuntime.handOver), over the copy B1
-    /// made while it backed up, as B9 did. It comes back as signing out left it: automatic backup
-    /// off and paused, with the file's records, never uploading by itself as the copy's automatic
-    /// backup and run would have it. The file then goes like any other, and that build's stage
-    /// folders nothing refers to are swept.
-    func testAnAccountNoImportReadComesBackAsSigningOutLeftIt() async throws {
-        let h = try await BootHarness()
-        addTeardownBlock { await h.tearDown() }
-        var state = try FixtureLoader.decode(Legacy.BackupState.self, from: "backup/state-current.json")
-        state.preferences?.automatic = false
-        state.paused = true
-        let file = try h.writeState(JSONEncoder().encode(state))
-        // The copy is older: automatic backup on, a run under way, and the last photo not yet confirmed.
-        var copy = G.importedSeed()
-        copy.intent = .automatic
-        copy.confirmations.removeLast()
-        try await h.seedGolden(copy, digest: "older", mode: .shadow, engine: .legacy)
-        let orphan = try h.writeOldStageFolder()
-
-        let handed = await AccountRuntime.handOver(h.store, importing: LegacyBackupImporter(store: h.store, folder: h.backupFolder))
-        XCTAssertEqual(handed, .engine)
-        let meta = try await h.store.meta()
-        XCTAssertEqual(meta.legacyImportMode, .authoritative)
-        XCTAssertEqual(meta.legacyImportDigest, file)
-        let preferences = try await h.store.preferences()
-        XCTAssertEqual(preferences?.automatic, false, "As signing out left it, not as the copy had it.")
-        let engineState = try await h.store.engineState()
-        XCTAssertEqual(engineState?.intent, .paused)
-
-        try await h.start()
-        let snapshot = await Self.first(await h.runtime.backend.snapshots())
-        XCTAssertEqual(snapshot?.intent, .paused, "Nothing uploads until the user starts it.")
-        XCTAssertEqual(snapshot?.confirmed, 3, "The file's records.")
-        XCTAssertEqual(h.runtime.legacyRetirement, .removed, "Imported, the file goes like any other.")
-        XCTAssertFalse(h.group.exists(Self.state))
-        XCTAssertFalse(h.group.exists(orphan), "That build's stage folders nothing refers to are swept.")
-        XCTAssertTrue(h.group.exists(Self.current + "/original"), "A stage the file refers to stays.")
-        XCTAssertTrue(h.backupSession.uploads.isEmpty)
+        XCTAssertTrue(h.group.exists(Self.current + "/original"))
+        XCTAssertTrue(h.backupSession.uploads.isEmpty, "Nothing is sent.")
     }
 
     /// Cleanup removals Photos committed before the cutover were kept only in the device journal:
@@ -476,8 +388,6 @@ struct ScaleGolden {
     private(set) var runtime: TransferRuntime!
     private var forwarding: Task<Void, Never>?
 
-    var backupFolder: URL { group.url(AccountStoragePaths(LegacyGoldens.account).backup) }
-
     init(backupTasks: [SessionTask] = []) async throws {
         group = try TemporaryAppGroup()
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("Boot-" + UUID().uuidString, isDirectory: true)
@@ -495,20 +405,13 @@ struct ScaleGolden {
     }
 
     /// The database as B9's import of the golden state.json left it, with the stages' files where
-    /// it says they are, and backup paused, so that only recovery acts. `digest` is the
-    /// state.json's the import recorded; `automaticBackup` keeps the preference on.
-    func seedImportedGolden(digest: String = "state", mode: TransferStore.ImportMode = .authoritative,
-                            engine: TransferStore.Engine = .transfer, automaticBackup: Bool = false) async throws {
+    /// it says they are, and backup paused, so that only recovery acts. `automaticBackup` keeps
+    /// the preference on.
+    func seedImportedGolden(automaticBackup: Bool = false) async throws {
         var seed = LegacyGoldens.importedSeed()
         seed.preferences.automatic = automaticBackup
         seed.intent = .paused
-        try await seedGolden(seed, digest: digest, mode: mode, engine: engine)
-    }
-
-    /// `seed`, a variation of the golden rows, written as is, with the golden stages' files where
-    /// it says they are.
-    func seedGolden(_ seed: TransferSeed, digest: String, mode: TransferStore.ImportMode, engine: TransferStore.Engine) async throws {
-        try await store.seedForTest(seed, importedDigest: digest, mode: mode, engine: engine)
+        try await store.seedForTest(seed)
         let current = "Backup/\(LegacyGoldens.digest)/\(LegacyGoldens.currentFolder)"
         try group.write("still of IMG_0001", to: current + "/original")
         try group.write("video of IMG_0001", to: current + "/motion")
@@ -516,18 +419,11 @@ struct ScaleGolden {
         try group.write("video IMG_0006", to: "Backup/\(LegacyGoldens.digest)/\(LegacyGoldens.suspendedFolder)/original")
     }
 
-    /// Writes the account's state.json as an older build left it, and returns its digest.
-    @discardableResult
-    func writeState(_ data: Data) throws -> String {
-        try data.write(to: backupFolder.appendingPathComponent("state.json"), options: .atomic)
-        return LegacyGoldens.digest(of: data)
-    }
-
-    /// A stage folder an older build left that nothing refers to, changed an hour ago: past the
+    /// A stage folder a run that ended left and nothing refers to, changed an hour ago: past the
     /// sweep's grace. Returns its path in the App Group.
     func writeOldStageFolder() throws -> String {
         let path = "Backup/\(LegacyGoldens.digest)/\(UUID().uuidString)"
-        try group.write("an older build's copy", to: path + "/original")
+        try group.write("an earlier run's copy", to: path + "/original")
         let earlier = Date().addingTimeInterval(-3_600)
         for item in [path + "/original", path] {
             try FileManager.default.setAttributes([.modificationDate: earlier], ofItemAtPath: group.url(item).path)

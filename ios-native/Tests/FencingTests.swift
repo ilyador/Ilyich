@@ -88,22 +88,14 @@ import XCTest
         XCTAssertNil(cleared, "An access change drops every feed's places.")
     }
 
-    /// An access change, the server's reset of the library or the owner's, drops what the phone
-    /// kept of the feeds' places: the index's rows, and the files an earlier build kept that the
-    /// index has not imported yet, which go unread, as that build deleted them.
-    func testAnAccessChangeDropsThePlacesAnEarlierBuildKept() async throws {
+    /// The server's reset of the library, or the owner's, drops the feeds' places the index kept,
+    /// after moving the access epoch, so a count begun before the reset is never kept after it.
+    func testAResetDropsTheKeptPlaces() async throws {
         let harness = try makeSyncHarness()
         try await harness.primeIndex()
-        let scope = harness.api.cacheScope
-        let folder = LegacyPlacesImport.liveRoot.appendingPathComponent(Legacy.sha256(scope), isDirectory: true)
-        addTeardownBlock { LegacyPlacesImport.discard(scope: scope) }
         let key = LibraryQuery.library.stableKey
         let rows = [MonthPlaceCount(bucket: "2026-02-01", city: "Kyoto", country: "Japan", count: 4)]
-        func keepPlaces() async throws {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try Data(#"{"months":{},"trips":{}}"#.utf8).write(to: folder.appendingPathComponent(Legacy.sha256(key) + ".json"))
-            try await harness.entities.keepMonthPlaces(rows, forKey: key, ifCurrent: { true })
-        }
+        func keepPlaces() async throws { try await harness.entities.keepMonthPlaces(rows, forKey: key, ifCurrent: { true }) }
 
         // The server resets the library.
         try await keepPlaces()
@@ -113,18 +105,16 @@ import XCTest
         let change = try await harness.engine.refresh()
         XCTAssertTrue(change.reset)
         XCTAssertNotEqual(harness.authorization.snapshot.epoch, before, "The access epoch moved.")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), "The places an earlier build kept are gone.")
         let afterServerReset = try await harness.entities.monthPlaces(forKey: key)
-        XCTAssertNil(afterServerReset, "And the index's.")
+        XCTAssertNil(afterServerReset, "The kept places are gone.")
 
         // The owner recreates the offline library.
         try await keepPlaces()
         let moved = harness.authorization.snapshot.epoch
         await harness.engine.resetLibraryMetadata()
         XCTAssertNotEqual(harness.authorization.snapshot.epoch, moved, "The access epoch moved.")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), "The places an earlier build kept are gone.")
         let afterRecreating = try await harness.entities.monthPlaces(forKey: key)
-        XCTAssertNil(afterRecreating, "And the index's.")
+        XCTAssertNil(afterRecreating, "The kept places are gone.")
     }
 
     // MARK: - Support

@@ -147,12 +147,7 @@ final class TransportEventProcessor: TaskEventHandling {
         }
         let descriptor = TaskDescriptor(taskDescription: task.description)
         guard let attempt = descriptor.attempt else {
-            if descriptor == .legacy {
-                // Nothing applies an answer a build before B9 asked for; its photo is checked again.
-                Self.logger.notice("Task \(task.id) of \(self.session.rawValue, privacy: .public), which an older version of Ilyich started, ended; its answer isn't read")
-            } else {
-                Self.logger.error("Task \(task.id) of \(self.session.rawValue, privacy: .public) ended without a description this app wrote")
-            }
+            Self.logger.error("Task \(task.id) of \(self.session.rawValue, privacy: .public) ended without a description this build wrote")
             return
         }
         let outcome = Self.outcome(of: task, response: response, oversized: oversized)

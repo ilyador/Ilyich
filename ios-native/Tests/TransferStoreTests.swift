@@ -52,7 +52,7 @@ import XCTest
         seed.stages.append(Self.stage(localID: "staged", modified: Date(timeIntervalSinceReferenceDate: -0.0)))
 
         let store = TransferStore(url: temporaryDirectory().appendingPathComponent("transfers.sqlite"))
-        try await store.seedForTest(seed, importedDigest: "digest", importedAt: Date(timeIntervalSinceReferenceDate: 5e-324))
+        try await store.seedForTest(seed)
         let contents = try await store.contents()
         for (index, value) in values.enumerated() {
             let receipt = try XCTUnwrap(contents.receipts.first { $0.localID == "photo-\(index)" })
@@ -67,8 +67,6 @@ import XCTest
                            value.bitPattern, "\(value)")
         }
         XCTAssertEqual(contents.stages.first?.modificationDate?.bitPattern, (-0.0).bitPattern, "A negative zero stays negative.")
-        let meta = try await store.meta()
-        XCTAssertEqual(meta.legacyImportedAt?.timeIntervalSinceReferenceDate.bitPattern, (5e-324).bitPattern)
         let staged = try await store.recoveryJobs().first { $0.job.source.key == "staged" }?.stage
         XCTAssertEqual(staged?.revision.referenceSeconds.bitPattern, (-0.0).bitPattern, "The stage the engine reads keeps it too.")
 
@@ -98,7 +96,8 @@ import XCTest
     }
 
     /// Confirming one more upload with 60,000 receipts on the phone writes only that photo's rows:
-    /// the same statements as with ten, where state.json rewrote every receipt for each photo.
+    /// the same statements as with ten, where the old engine's state.json rewrote every receipt for
+    /// each photo.
     /// None of it runs on the main thread, though every call here comes from it.
     func testCompletionIsIncrementalAndOffMainWith60kReceipts() async throws {
         func statementsToComplete(receipts count: Int) async throws -> (completion: Int, verification: Int, store: TransferStore) {

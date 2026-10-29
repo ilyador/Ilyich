@@ -80,10 +80,8 @@ struct LibraryView: View {
     init(api: APIClient, pipeline: MediaPipeline, session: AccountSession) {
         self.api = api; self.pipeline = pipeline; self.session = session
         let repository = session.libraryRepository ?? LibraryRepository(client: api, index: nil, sync: nil)
-        // The feeds' month places are kept in the index and fenced by the account's access epoch;
-        // the files an earlier build kept are imported once (F5).
-        let places = MonthPlacesService(source: repository, store: session.entities, authorization: session.runtime?.authorization,
-                                        legacy: session.entities.map { LegacyPlacesImport.live(scope: api.cacheScope, index: $0) })
+        // The feeds' month places are kept in the index and fenced by the account's access epoch (F5).
+        let places = MonthPlacesService(source: repository, store: session.entities, authorization: session.runtime?.authorization)
         let store = LibraryFeedStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos,
                                      choices: SearchChoicesStorage(scope: api.cacheScope), places: places)
         _store = State(initialValue: store)
