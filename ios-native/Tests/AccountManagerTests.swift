@@ -623,6 +623,13 @@ import XCTest
         XCTAssertEqual(elsewhere?.fixtureAccount?.server, URL(string: "http://127.0.0.1:18191/api"))
         let people = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-many-people"])
         XCTAssertEqual(people?.fixtureCredential?.token, "ui-test-many-people")
+        let pages = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-paged-people"])
+        XCTAssertEqual(pages?.fixtureCredential?.token, "ui-test-paged-people")
+        // A Trash already holding photos is a library of the launch's own, which the fixture changes for it alone.
+        let trashed = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-trashed-library"])
+        XCTAssertEqual(trashed?.fixtureCredential?.token.hasPrefix("ui-test-mutable-trash-"), true)
+        XCTAssertNotEqual(trashed?.fixtureCredential?.token,
+                          AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-trashed-library"])?.fixtureCredential?.token)
     }
 
     /// An account's backup is taken up each time the account becomes active, not only at launch

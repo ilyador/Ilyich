@@ -67,8 +67,10 @@ struct AccountEnvironment: Sendable {
 
     /// The environment a UI test launch asks for, or nil for any other launch. Nothing reaches the
     /// Keychain, the App Group mirror, the phone's photos, backup or its state. `--ui-testing-library` starts
-    /// signed in to the fixture, with the long People shelf for `--ui-testing-many-people`, and with
-    /// a library of its own that remembers this launch's changes for `--ui-testing-mutable-library`.
+    /// signed in to the fixture, with the long People shelf for `--ui-testing-many-people`, with
+    /// people served a page at a time for `--ui-testing-paged-people`, and with a library of its own
+    /// that remembers this launch's changes for `--ui-testing-mutable-library`, its Trash already
+    /// holding photos in three months for `--ui-testing-trashed-library`.
     static func uiTest(arguments: [String]) -> AccountEnvironment? {
         guard arguments.contains("--ui-testing") else { return nil }
         var environment = AccountEnvironment()
@@ -89,6 +91,8 @@ struct AccountEnvironment: Sendable {
             // session's token is new each launch: the fixture keeps its changes for it alone, so
             // no other test, and no later launch, sees them.
             let token = arguments.contains("--ui-testing-many-people") ? "ui-test-many-people"
+                : arguments.contains("--ui-testing-paged-people") ? "ui-test-paged-people"
+                : arguments.contains("--ui-testing-trashed-library") ? "ui-test-mutable-trash-" + UUID().uuidString.lowercased()
                 : arguments.contains("--ui-testing-mutable-library") ? "ui-test-mutable-" + UUID().uuidString.lowercased() : "ui-test-session"
             environment.fixtureCredential = StoredCredential(server: server, token: token, userID: fixtureUserID, name: "Test library")
         }
