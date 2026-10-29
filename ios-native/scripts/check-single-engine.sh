@@ -8,7 +8,8 @@
 #   1. a background session is configured anywhere but TransferSessionConfiguration.swift;
 #   2. a session is built from that configuration anywhere but the transport's live session;
 #   2b. code names a type of the engine B10 deleted (BackupCoordinator, BackgroundUploads,
-#      BackupLifecycle and the rest of the way back B9 kept): the old engine must not come back;
+#      BackupLifecycle and the rest of the way back B9 kept): the old engine must not come back.
+#      The import of a state.json no import read (LegacyBackupImporter) is no engine, and stays;
 #   3. app or extension code outside Sources/Transfers names the new transport's types: only
 #      TransferHost creates the sessions and takes iOS's completion handlers;
 #   3b. code outside Sources/Transfers names the new lifecycle's types: iOS allows one launch
@@ -30,7 +31,7 @@ roots=(Sources Extensions Packages)
 configuration=Sources/Transfers/TransferSessionConfiguration.swift
 session_builders=(Sources/Transfers/TransportSession.swift)
 # The engine B9 replaced and the way back to it, which B10 deleted.
-legacy_engine='BackupCoordinator|BackgroundUploads|BackupLifecycle|ProcessingWindow|LegacyCoordinatorBackend|LegacyStateReceipts|LegacyBackupIndexInputs|LegacyBackupImporter|LegacyBackupPlan'
+legacy_engine='BackupCoordinator|BackgroundUploads|BackupLifecycle|ProcessingWindow|LegacyCoordinatorBackend|LegacyStateReceipts|LegacyBackupIndexInputs'
 # The transport's types that open a session or take over iOS's completion handlers. Its value
 # types and the TransferTransport protocol may be named anywhere.
 transport_types='TransportRegistry|BackgroundTransport|BackgroundEventAcks|URLSessionTransportSession|BackgroundSessionDelegate|TransportEventProcessor'

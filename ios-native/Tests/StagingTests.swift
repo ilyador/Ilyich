@@ -41,7 +41,7 @@ final class StagingTests: XCTestCase {
         try group.write("{}", to: share + "/manifest.json")
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-60)], ofItemAtPath: group.url(recent + "/original").path)
 
-        // A state.json no import read keeps its build's stages: nothing reads it any more (B10).
+        // A state.json no import read keeps its build's stages until it is imported (LegacyBackupImporter).
         let before = area.sweep(keeping: StagingReferences(), legacyImported: false, now: now)
         XCTAssertEqual(before, StagingArea.Sweep(skipped: .legacyState))
         XCTAssertTrue(group.exists(orphan))
@@ -64,6 +64,16 @@ final class StagingTests: XCTestCase {
         let later = area.sweep(keeping: references, legacyImported: true, now: now.addingTimeInterval(StagingArea.grace))
         XCTAssertEqual(later.folders, 1)
         XCTAssertFalse(group.exists(recent))
+
+        // A state.json moved aside as unreadable holds nothing an import could read: the engine
+        // takes the database over without it, and the sweep runs.
+        try FileManager.default.moveItem(at: group.url(Self.backup + "/state.json"), to: group.url(Self.backup + "/state.json.unreadable-1"))
+        let stray = Self.backup + "/" + UUID().uuidString
+        try group.write("still", to: stray + "/original")
+        let aside = area.sweep(keeping: references, legacyImported: false, now: now.addingTimeInterval(StagingArea.grace))
+        XCTAssertNil(aside.skipped)
+        XCTAssertFalse(group.exists(stray))
+        XCTAssertTrue(group.exists(Self.backup + "/state.json.unreadable-1"))
     }
 
     /// Signing out removes every stage folder of the account and nothing else; the database keeps

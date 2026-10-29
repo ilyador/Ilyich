@@ -10,11 +10,13 @@ import os
 ///   digest is the file's own: everything the file says is in the database;
 /// - only while iOS holds no upload an older build described, in either session. Recovery cancels
 ///   such a task when it finds it, and the file waits for a start that finds none.
-/// An account whose state.json no import read (one last signed in before B9) keeps it: this build
-/// can't read it, so it stays for a later decision. Whatever stays is logged with its reason and
-/// shown in Diagnostics. The stage folders older builds left, once nothing refers to them, are
-/// recovery's sweep's (R5), which waits while iOS holds an older build's upload, and leaves a
-/// Backup folder alone while a state.json no import read is in it.
+/// An account whose state.json no import read (one last signed in before B9) has it imported
+/// before its engine starts (LegacyBackupImporter, AccountRuntime.prepareTransfers), so it goes
+/// here like any other. A file beside a database the engine took over without importing it stays
+/// unread (only an older build, reinstalled, could write one). Whatever stays is logged with its
+/// reason and shown in Diagnostics. The stage folders older builds left, once nothing refers to
+/// them, are recovery's sweep's (R5), which waits while iOS holds an older build's upload, and
+/// leaves a Backup folder alone while a state.json no import read is in it.
 enum LegacyRetirement {
     /// The file builds before B9 kept an account's backup in, in its Backup folder.
     static let fileName = "state.json"

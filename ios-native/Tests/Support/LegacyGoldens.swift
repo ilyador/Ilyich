@@ -73,8 +73,8 @@ enum LegacyGoldens {
                                 "metadata": #"[{"key":"mobile-app","value":{"iCloudId":"0C2F3A1B-7D4E-4F5A-8B6C-9D0E1F2A3B4C:001:AbCdEfGhIjKlMnOpQrStUvWxYz01","createdAt":"2025-10-18T09:41:12Z","latitude":"38.7223","longitude":"-9.1393"}}]"#]
 
     /// What B9's authoritative import of state-current.json wrote into the account's transfers
-    /// database, row for row: the phone's database still holds rows of this shape (B10 keeps
-    /// reading them; nothing imports state.json any more).
+    /// database, row for row: the phone's database still holds rows of this shape, and the import
+    /// B10 keeps for an account no import read writes them the same (LegacyBackupImportTests).
     static func importedSeed() -> TransferSeed {
         let current = "Backup/\(digest)/\(currentFolder)", suspended = "Backup/\(digest)/\(suspendedFolder)"
         var preferences = TransferPreferences()

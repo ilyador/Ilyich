@@ -8,8 +8,9 @@ import SQLite3
 /// and readable after the first unlock. It runs on a queue of its own and opens on first use.
 ///
 /// The transfer engine owns it. B9 imported an account's state.json into it authoritatively, once;
-/// before, B1 kept it as a shadow copy of state.json. B10 retired both imports: a database no
-/// import handed over is claimed by the engine as it is (claimForEngine), and its meta keeps the
+/// before, B1 kept it as a shadow copy of state.json. B10 retired the shadow copy and kept the
+/// authoritative import (LegacyBackupImporter) for an account whose state.json no import read yet;
+/// a database with no file to import is claimed by the engine (claimForEngine). Its meta keeps the
 /// last import's digest and mode, which tell when the state.json left beside it can go
 /// (LegacyRetirement). The engine writes only a database it owns.
 ///
@@ -43,7 +44,7 @@ actor TransferStore: ReceiptQuery {
     }
 
     /// How the last import of an earlier build's state.json wrote the database: a shadow copy
-    /// (B1) or the import that handed it to the engine (B9). Nothing imports since B10.
+    /// (B1, retired in B10) or the import that hands it to the engine (B9, LegacyBackupImporter).
     enum ImportMode: String, Sendable {
         case shadow, authoritative
     }
@@ -404,7 +405,7 @@ enum AttemptPart: String, Sendable {
 struct TransferMeta: Equatable, Sendable {
     var schema: Int
     var engine: TransferStore.Engine
-    /// The SHA-256 of the state.json the last import read (or merged), "absent" when there was none.
+    /// The SHA-256 of the state.json the last import read (or B9 merged), "absent" when B9 found none.
     var legacyImportDigest: String?
     var legacyImportMode: TransferStore.ImportMode?
     var legacyImportedAt: Date?

@@ -4,8 +4,8 @@ import Foundation
 /// Rows a test puts in a transfers database as earlier runs left them: B9's import of an earlier
 /// build's state.json among them, whose rows the phone's database still holds (jobs of origin
 /// legacy, stages whose ID names an interrupted attempt and records no checksum of the still,
-/// confirmations without a time). Nothing in the app imports state.json since B10; tests write
-/// the rows themselves.
+/// confirmations without a time), and B1's copies of a state.json no import read. Tests write the
+/// rows themselves; LegacyBackupImportTests pins that the import writes the same.
 struct TransferSeed {
     struct Receipt {
         let localID: String
