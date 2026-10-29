@@ -294,16 +294,29 @@ private struct TimeRailTripMarks: View {
 private struct TimeRailPuck: View {
     let rail: TimeRailController
     let height: CGFloat
+    /// Room for the month beside the puck; the label keeps to its trailing edge.
+    private static let labelWidth: CGFloat = 160
 
     var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: "chevron.up").font(.system(size: 9, weight: .bold))
-            Capsule().fill(TimeRail.accent).frame(width: 10, height: 2).shadow(color: TimeRail.accent.opacity(0.9), radius: 4)
-            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+        let y = rail.puckY(height: height)
+        ZStack(alignment: .topLeading) {
+            // The month and year the grid shows, beside the puck (owner).
+            Text(TimeRail.month(rail.scale.date(at: rail.activeIndex)))
+                .font(.footnote.weight(.semibold)).monospacedDigit()
+                .foregroundStyle(.white).lineLimit(1).fixedSize()
+                .padding(.horizontal, 12).frame(height: 30)
+                .glassEffect(.clear.tint(.black.opacity(0.18)), in: .capsule)
+                .frame(width: Self.labelWidth, alignment: .trailing)
+                .position(x: 9 - 8 - Self.labelWidth / 2, y: y)
+            VStack(spacing: 4) {
+                Image(systemName: "chevron.up").font(.system(size: 9, weight: .bold))
+                Capsule().fill(TimeRail.accent).frame(width: 10, height: 2).shadow(color: TimeRail.accent.opacity(0.9), radius: 4)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+            }
+            .foregroundStyle(.white)
+            .frame(width: 30, height: 58)
+            .glassEffect(.clear.tint(.black.opacity(0.18)).interactive(), in: .capsule)
+            .position(x: 24, y: y)
         }
-        .foregroundStyle(.white)
-        .frame(width: 30, height: 58)
-        .glassEffect(.clear.tint(.black.opacity(0.18)).interactive(), in: .capsule)
-        .position(x: 24, y: rail.puckY(height: height))
     }
 }
