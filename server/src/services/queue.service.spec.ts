@@ -27,15 +27,31 @@ describe(QueueService.name, () => {
       expect(mocks.job.startWorkers).not.toHaveBeenCalled();
     });
 
-    it('should take jobs only after every other bootstrap step', () => {
+    it('should take jobs only after every other bootstrap step', async () => {
       const others = Object.values(BootstrapEventPriority).filter(
         (priority) => typeof priority === 'number' && priority !== BootstrapEventPriority.JobWorkers,
       ) as number[];
       expect(BootstrapEventPriority.JobWorkers).toBeGreaterThan(Math.max(...others));
 
-      sut.onBootstrapComplete();
+      await sut.onBootstrapComplete();
 
       expect(mocks.job.startWorkers).toHaveBeenCalledTimes(1);
+    });
+
+    it('should give the workers their concurrency once they have started', async () => {
+      await sut.onBootstrapComplete();
+
+      expect(mocks.job.setConcurrency).toHaveBeenCalledTimes(20);
+      expect(mocks.job.setConcurrency).toHaveBeenCalledWith(QueueName.BackgroundTask, 5);
+      expect(mocks.job.startWorkers.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.job.setConcurrency.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('should leave concurrency to the workers starting when the config is first read', async () => {
+      await sut.onConfigInit({ newConfig: defaults });
+
+      expect(mocks.job.setConcurrency).not.toHaveBeenCalled();
     });
   });
 
