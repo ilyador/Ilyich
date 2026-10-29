@@ -76,7 +76,8 @@ extension EnvironmentValues {
     let api: APIClient
     let pipeline: MediaPipeline
     @ObservationIgnored private let authorization: AuthorizationState
-    @ObservationIgnored private let follower = MutationFollower()
+    /// The account's bus: its mutations' results and its sync's changes.
+    @ObservationIgnored private let follower = LibraryFollower()
     /// The private epoch the folder is open under; nil while it is locked.
     @ObservationIgnored private var openEpoch: UInt64?
     @ObservationIgnored private var months: [TimeBucket] = []
@@ -86,6 +87,13 @@ extension EnvironmentValues {
     @ObservationIgnored private(set) var unlocking: Task<Void, Never>?
     /// The read of the folder's months under way, which a relock cancels.
     @ObservationIgnored private var reading: Task<Void, Never>?
+    /// The quiet read a sync's change asked for (G1); another is owed when a change came in while
+    /// it ran. A relock cancels it.
+    @ObservationIgnored private var refreshing: Task<Void, Never>?
+    @ObservationIgnored private var refreshOwed = false
+    /// Moves with each change applied to the photos shown, so a quiet read begun before it is
+    /// read again rather than shown.
+    @ObservationIgnored private var changesApplied = 0
     @ObservationIgnored private var expiry: Task<Void, Never>?
     /// The last request that the server lock the folder, after the ones before it. An unlock waits
     /// for it before it is sent.
@@ -111,12 +119,13 @@ extension EnvironmentValues {
     static let readAhead = 30
 
     /// `mutations` are the account's: a photo moved to the timeline or put in Trash leaves the
-    /// folder in place, from the grid's actions or its viewer.
+    /// folder in place, from the grid's actions or its viewer, and the sync's changes on their bus
+    /// reach the folder while it is open.
     init(api: APIClient, pipeline: MediaPipeline, authorization: AuthorizationState, mutations: LibraryMutationService?) {
         self.api = api
         self.pipeline = pipeline
         self.authorization = authorization
-        follower.follow(mutations, applying: { [weak self] result in self?.apply(result) })
+        follower.follow(mutations?.bus) { [weak self] event in self?.handle(event) }
         // A photo the viewer finds gone, as when the server relocked, has the folder read again.
         photos.onLoss = { [weak self] in self?.photoLost() }
     }
@@ -190,7 +199,7 @@ extension EnvironmentValues {
     /// A photo of the grid came on screen. Near the end of what is read, the next month is read,
     /// so the folder pages as it scrolls, with no Load more button (the owner's decision).
     func photoAppeared(_ id: String) {
-        guard phase == .unlocked, hasMore, !isLoading, let epoch = openEpoch,
+        guard phase == .unlocked, hasMore, !isLoading, refreshing == nil, let epoch = openEpoch,
               photos.assets.suffix(Self.readAhead).contains(where: { $0.id == id }) else { return }
         isLoading = true
         reading = Task { [weak self] in await self?.readMore(epoch: epoch) }
@@ -208,6 +217,7 @@ extension EnvironmentValues {
         }
         expiry?.cancel(); expiry = nil
         reading?.cancel(); reading = nil
+        refreshing?.cancel(); refreshing = nil; refreshOwed = false
         openEpoch = nil
         viewing = nil
         photos.assets = []
@@ -480,13 +490,74 @@ extension EnvironmentValues {
         await readMonths(epoch: epoch, relockingOnFailure: false)
     }
 
+    private func handle(_ event: LibraryEvent) {
+        switch event {
+        case .mutation(.applied(let result)): apply(result)
+        case .changed(let change, _): apply(change)
+        default: break
+        }
+    }
+
     /// A change the account made, here or in the folder's viewer: a photo moved to the timeline or
     /// put in Trash leaves the folder in place, and nothing is read again. A change ending after
     /// the folder relocked finds no photos to change.
     private func apply(_ result: MutationResult) {
-        guard phase == .unlocked, !photos.assets.isEmpty else { return }
+        guard phase == .unlocked, !photos.assets.isEmpty, result.changedPhotos else { return }
+        changesApplied += 1
         let shown = result.applied(to: photos.assets, keeping: CollectionMembership.lockedFolder)
         if shown != photos.assets { photos.assets = shown }
+    }
+
+    /// A sync's change while the folder is open (plan line 78, G1). The offline library lets every
+    /// locked photo go, so a photo of the folder that the change upserts is out of it, moved to the
+    /// timeline elsewhere: it leaves in place. A locked photo changed, put in Trash or deleted
+    /// elsewhere, and a photo locked elsewhere, reach the offline library only as a removal, which
+    /// can't tell them apart: the months shown are read again quietly.
+    private func apply(_ change: LibraryChange) {
+        guard phase == .unlocked, let epoch = openEpoch else { return }
+        let out = Set(change.upserted.keys)
+        if !out.isEmpty, photos.assets.contains(where: { out.contains($0.id) }) {
+            changesApplied += 1
+            photos.assets.removeAll { out.contains($0.id) }
+        }
+        if !change.removed.isEmpty || !change.accessLost.isEmpty || change.reset || change.overflow { refresh(epoch: epoch) }
+    }
+
+    /// Reads the months shown again, and any newer month, quietly: the photos read replace those
+    /// shown in one go, and the grid reads on from there. One read at a time; a change that comes
+    /// in meanwhile has it read once more when it ends, and one the account made here meanwhile has
+    /// it read again rather than undo it. A relock drops it.
+    private func refresh(epoch: UInt64) {
+        guard refreshing == nil else { refreshOwed = true; return }
+        refreshing = Task { [weak self] in await self?.refreshShown(epoch: epoch) }
+    }
+
+    private func refreshShown(epoch: UInt64) async {
+        defer { if openEpoch == epoch { refreshing = nil } }
+        repeat {
+            refreshOwed = false
+            let started = changesApplied
+            // The oldest month shown; the folder's months are newest first.
+            let reach = nextMonth > 0 && months.indices.contains(nextMonth - 1) ? months[nextMonth - 1].timeBucket : nil
+            do {
+                let summary = try await api.timeBuckets(Self.timeline)
+                let shown = reach.map { reach in Array(summary.prefix { $0.timeBucket >= reach }) } ?? Array(summary.prefix(1))
+                var found: [Asset] = []
+                for month in shown { found += try await self.month(month) }
+                guard isOpen(epoch), !Task.isCancelled else { return }
+                // A change was applied here while this read ran: it reads again rather than undo it.
+                guard changesApplied == started else { refreshOwed = true; continue }
+                // A month the grid asked for meanwhile is read again from where this read stops.
+                if let reading { reading.cancel(); self.reading = nil; isLoading = false }
+                months = summary
+                if photos.assets != found { photos.assets = found }
+                nextMonth = shown.count
+                hasMore = nextMonth < summary.count
+            } catch {
+                // A quiet read that fails changes nothing; the next change reads again.
+                return
+            }
+        } while refreshOwed && isOpen(epoch)
     }
 
     // MARK: The server

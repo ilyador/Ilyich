@@ -1157,7 +1157,9 @@ extension FrozenFeed: DisplayedFeed {
     /// shown meanwhile, and the feed is counted again; the saved library's are read again once a
     /// filter clears back to it. A change that names no item one by one (a reset, an overflow), or
     /// that changes how feeds are served or what a stack or partner shows, reads every month
-    /// again. A text search is not read again, as before: its results only drop what went.
+    /// again. A text search is not read again, as before: its results drop what went, and a photo
+    /// they show that the change names takes its record from the offline library, so one put in
+    /// Trash elsewhere leaves them too.
     func apply(_ change: LibraryChange) async {
         prune(change)
         let gone = change.removed.union(change.accessLost)
@@ -1177,7 +1179,7 @@ extension FrozenFeed: DisplayedFeed {
             if everything { savedStaleMonths = nil }
             else { savedStaleMonths?.formUnion(Self.months(touchedBy: change, in: originalTimeline?.rows ?? [:])) }
         }
-        guard query.isEmpty else { return }
+        guard query.isEmpty else { return await recheckResults(named: Set(change.upserted.keys)) }
         if showingResults {
             // Results are read again, as before, unless the change touched no photo, album or person.
             if !named.isEmpty || everything || !change.albums.isEmpty || !change.people.isEmpty { await reload(preservingPosition: true) }
@@ -1191,6 +1193,21 @@ extension FrozenFeed: DisplayedFeed {
         let months = Self.months(touchedBy: change, in: rows)
         if !change.upserted.isEmpty || !gone.isEmpty { await reload(preservingPosition: true, invalidating: months) }
         else if !months.isEmpty { markStale(months) }
+    }
+
+    /// Photos a text search shows that a sync's change names, checked against their records in the
+    /// offline library (G1): the change says only that they changed, and a photo put in Trash or
+    /// hidden elsewhere comes as such a change, not as a removal. Each record decides as
+    /// a viewer's does (FeedMembership): a photo out of the search leaves in place, and any other
+    /// shows its record. A search that was replaced meanwhile takes none.
+    private func recheckResults(named ids: Set<String>) async {
+        guard showingResults, let feed = searchFeed, !ids.isEmpty else { return }
+        let shown = ids.intersection(results.map(\.id))
+        guard !shown.isEmpty else { return }
+        let session = generation
+        let records = await source.records(shown)
+        guard generation == session, searchFeed === feed, showingResults else { return }
+        for record in records where shown.contains(record.id) { update(record) }
     }
 
     /// A change to the account's collections (N4). An album that was deleted or left leaves the

@@ -35,6 +35,8 @@ struct SimilarPhotosView: View {
                 let store = store
                 follower.follow(mutations) { await FeedMutationApplier.apply($0, to: store, refreshes: false) }
             }
+            // A photo deleted, locked or out of reach elsewhere leaves the results at once.
+            .onLibraryChange { [store] in store.prune($0) }
             .onDisappear { store.stop() }
             // The viewer pages through the results, which a photo it finds gone leaves.
             .fullScreenCover(item: $viewing) { route in

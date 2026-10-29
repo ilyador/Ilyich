@@ -1,3 +1,4 @@
+import RealityKit
 import XCTest
 import simd
 @testable import Ilyich
@@ -92,6 +93,41 @@ final class GlobeGeometryTests: XCTestCase {
         XCTAssertNil(GlobeLand.decode(Data("not a mesh".utf8)))
     }
 
+    /// Build 3040030: the Earth's land, built while a finger crossed Places, stalled the first cold
+    /// use of the shelves. A cold build runs off the main thread, in pieces of at most 24,000
+    /// triangles, and the main thread keeps answering throughout, nowhere near a 250 ms hang. On
+    /// the main thread, decoding the land alone takes about 450 ms on the simulator.
+    @MainActor func testAColdBuildOfTheEarthNeverHoldsUpTheMainThread() async throws {
+        let earth = try XCTUnwrap(GlobeLand.decode())
+        let land = earth.layers[0]
+        let pieces = GlobeLand.pieces(of: land)
+        XCTAssertGreaterThan(pieces.count, 1, "The land is built in pieces.")
+        XCTAssertTrue(pieces.allSatisfy { $0.indices.count <= 24_000 * 3 }, "No piece passes 24,000 triangles.")
+        XCTAssertEqual(pieces.reduce(0) { $0 + $1.indices.count }, land.indices.count, "The pieces hold every triangle.")
+
+        // RealityKit sets itself up on the main thread the first time a process makes any mesh,
+        // about a second on the simulator whatever the mesh. That is not the Earth's build, so a
+        // mesh of one triangle is made first.
+        let setup = MainThreadWatch()
+        let ready = await Task.detached { () -> Bool in
+            var descriptor = MeshDescriptor(name: "Setup")
+            descriptor.positions = MeshBuffer([SIMD3<Float>(0, 0, 0), SIMD3<Float>(1, 0, 0), SIMD3<Float>(0, 1, 0)])
+            descriptor.primitives = .triangles([0, 1, 2])
+            return (try? await MeshResource(from: [descriptor])) != nil
+        }.value
+        let setupWorst = await setup.stop()
+        XCTAssertTrue(ready)
+
+        let watch = MainThreadWatch()
+        let started = ContinuousClock.now
+        let meshes = await GlobeLand.Builder().prepare()
+        let built = ContinuousClock.now - started
+        let worst = await watch.stop()
+        XCTAssertEqual(meshes?.land.count, pieces.count, "Every piece became a mesh.")
+        print("EARTH COLD BUILD: \(built.formatted(.units(allowed: [.milliseconds]))), main thread at worst \(worst.formatted(.units(allowed: [.milliseconds]))); RealityKit's setup held it \(setupWorst.formatted(.units(allowed: [.milliseconds])))")
+        XCTAssertLessThan(worst, .milliseconds(250), "The main thread answered within the hang threshold all through the build.")
+    }
+
     func testOnlyRoadsTowardTheViewAreDrawn() {
         let lisbon = GlobeGeometry.position(latitude: 38.72, longitude: -9.14)
         let porto = GlobeGeometry.position(latitude: 41.15, longitude: -8.61)
@@ -125,4 +161,29 @@ final class GlobeGeometryTests: XCTestCase {
         XCTAssertFalse(GlobeRibbon.strings(clusters, cell: 0.01).indices.isEmpty)
     }
 
+}
+
+/// How long, at worst, the main thread takes to run work handed to it while it is watched: a
+/// task off the main thread hands it an empty job every few milliseconds and times the answer.
+private final class MainThreadWatch: Sendable {
+    private let watching: Task<Duration, Never>
+
+    init() {
+        watching = Task.detached(priority: .userInitiated) {
+            let clock = ContinuousClock()
+            var worst = Duration.zero
+            while !Task.isCancelled {
+                let asked = clock.now
+                await MainActor.run {}
+                worst = max(worst, clock.now - asked)
+                try? await Task.sleep(for: .milliseconds(4))
+            }
+            return worst
+        }
+    }
+
+    func stop() async -> Duration {
+        watching.cancel()
+        return await watching.value
+    }
 }

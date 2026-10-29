@@ -1,4 +1,5 @@
 import Foundation
+import IlyichShareInbox
 import XCTest
 @testable import Ilyich
 
@@ -27,6 +28,15 @@ final class AppLinkTests: XCTestCase {
         XCTAssertEqual(AppLink(url: URL(string: "https://photos.example/prefix/albums/\(album)/photos/\(asset)")!, server: server), .asset(asset, albumID: album))
         XCTAssertNil(AppLink(url: URL(string: "immich://asset?id=\(asset)&albumId=invalid")!, server: nil))
         XCTAssertNil(AppLink(url: URL(string: "immich://share/users/me")!, server: nil))
+    }
+    /// The link the Share extension opens once it has staged a batch is the one the app answers
+    /// with Shared files (G1). The extension itself can't be driven from a UI test: the share sheet
+    /// belongs to another app. LibraryTests.testLinksOpenMemoriesSharedFilesAlbumsPeopleAndActivity
+    /// opens this link through the system, and NavigatorTests follow it to Shared files.
+    func testTheShareExtensionsLinkOpensSharedFiles() {
+        XCTAssertEqual(AppLink(url: ShareInboxRepository.appLink, server: nil), .sharedFiles)
+        XCTAssertEqual(AppLink(url: ShareInboxRepository.appLink, server: URL(string: "https://photos.example/api")!), .sharedFiles,
+                       "Whichever server the account uses.")
     }
     func testAlbumsPeopleAndPhotosAreNamedInEitherSpelling() {
         let id = "00000000-0000-4000-8000-000000000001"

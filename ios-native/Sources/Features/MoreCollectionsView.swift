@@ -48,14 +48,15 @@ struct MemoriesView: View {
     let onPlay: (MemoryPlayback) -> Void
     var initialID: String? = nil
     @Environment(\.collectionsService) private var collections
+    @Environment(\.libraryBus) private var bus
     @State private var openedInitial = false
-    @State private var memories: [Memory] = []
+    /// The memories shown, following the account's changes (G1).
+    @State private var model = MemoriesModel()
     @State private var savedOnly = false
-    @State private var loading = true
-    @State private var failure: FeatureFailure?
+    private var memories: [Memory] { model.memories }
     var body: some View {
         ScrollView {
-            if loading { ProgressView().padding(50) }
+            if model.loading { ProgressView().padding(50) }
             else if memories.isEmpty { FeatureEmpty(title: "Memories will appear here", symbol: "clock.arrow.circlepath", description: "Look back at moments from your library.") }
             LazyVStack(alignment: .leading, spacing: 24) {
                 ForEach(memories) { memory in
@@ -73,33 +74,28 @@ struct MemoriesView: View {
         }.navigationTitle(savedOnly ? "Saved memories" : "On this day")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Toggle("Saved memories", isOn: $savedOnly).toggleStyle(.button) } }
         .task(id: savedOnly) { await load() }.refreshable { await load() }
-        .alert("Couldn’t update memories", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+        .alert("Couldn’t update memories", isPresented: Binding(get: { model.failure != nil }, set: { if !$0 { model.failure = nil } })) {
             Button("OK", role: .cancel) { }
-        } message: { Text(failure?.message ?? "") }
+        } message: { Text(model.failure?.message ?? "") }
     }
     private func memoryTitle(_ memory: Memory) -> String {
         if let name = memory.data.personName { return name }
         return memory.memoryAt.formatted(.dateTime.month(.wide).day()) + " · " + String(memory.data.year)
     }
     private func load() async {
-        loading = true; defer { loading = false }
-        guard let collections else { failure = .init(APIError.signedOut); return }
-        do {
-            if let initialID, !openedInitial {
-                let memory = try await collections.memory(initialID)
-                try Task.checkCancellation()
-                memories = [memory]; openedInitial = true
-                onPlay(MemoryPlayback(memories: [memory], initialID: memory.id))
-            } else {
-                let loaded = try await collections.memories(savedOnly: savedOnly)
-                try Task.checkCancellation()
-                memories = loaded
-            }
-        } catch is CancellationError { } catch { failure = .init(error) }
+        // A photo deleted, locked, archived or put in Trash elsewhere leaves its memory, and a
+        // change to the memories reads them again.
+        model.follow(collections: collections, bus: bus)
+        if let initialID, !openedInitial {
+            guard let memory = await model.load(.one(initialID))?.first else { return }
+            openedInitial = true
+            onPlay(MemoryPlayback(memories: [memory], initialID: memory.id))
+        } else {
+            await model.load(savedOnly ? .saved : .today)
+        }
     }
     private func toggleSaved(_ memory: Memory) async {
-        guard let collections else { failure = .init(APIError.signedOut); return }
-        do { try await collections.setMemorySaved(memory.id, !memory.isSaved); await load() } catch { failure = .init(error) }
+        if await model.toggleSaved(memory) { await load() }
     }
 }
 

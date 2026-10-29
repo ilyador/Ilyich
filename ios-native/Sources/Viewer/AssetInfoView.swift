@@ -321,6 +321,8 @@ struct InfoCollectionView: View {
             // A photo changed here or in its viewer shows the change; one deleted, locked or put
             // in Trash leaves the grid in place.
             .onMutationApplied { list.assets = $0.applied(to: list.assets, keeping: CollectionMembership.searched) }
+            // One deleted, locked or out of reach elsewhere leaves too.
+            .onLibraryChange { list.drop($0) }
             // The viewer pages through the grid's photos, and a photo it finds gone leaves the grid,
             // which a swipe may have moved on from the one opened.
             .fullScreenCover(item: $viewing) { route in
