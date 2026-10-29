@@ -502,7 +502,9 @@ export class DatabaseRepository {
     return new Migrator({
       db: this.db,
       migrationLockTableName: 'kysely_migrations_lock',
-      allowUnorderedMigrations: this.configRepository.isDev(),
+      // The fork's own migrations interleave with upstream's at every sync, so an upstream migration dated
+      // before one already applied here must still run instead of stopping the server.
+      allowUnorderedMigrations: true,
       migrationTableName: 'kysely_migrations',
       provider: new FileMigrationProvider({
         fs: { readdir },
