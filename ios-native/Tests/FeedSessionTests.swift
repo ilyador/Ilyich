@@ -533,6 +533,62 @@ import XCTest
         try await until("February was not read again.") { store.loaded[Self.february]?.first?.isFavorite == true }
     }
 
+    /// G1, plan line 78: photos added to or taken out of an album elsewhere, or faces moved to
+    /// another person. The sync's change names the album or the person, not the photos' months, and
+    /// a feed showing it reads its months again: the photo added shows and the one taken out
+    /// leaves. A change naming another album or person reads nothing.
+    func testAnAlbumOrPersonFeedFollowsMembershipChangedElsewhere() async throws {
+        let api = try ChangingLibrary([photo("m1", "2026-03-20"), photo("m2", "2026-03-10"), photo("f1", "2026-02-10")],
+                                      people: ["maya": ["m1"]], albums: ["coast": ["m1", "m2"]])
+        let store = LibraryFeedStore(source: api)
+        defer { store.stop() }
+        await store.reload()
+        try await until("The library did not load.") { store.loaded[Self.march]?.count == 2 }
+        let coast = Album(id: "coast", albumName: "Coast", assetCount: 2, shared: false, albumUsers: nil, startDate: nil, endDate: nil,
+                          updatedAt: nil, order: "desc")
+        store.setAlbum(coast)
+        try await until("Coast did not replace the library.") { !store.isReplacingFeed && store.filterTitle == "Coast" && store.totalCount == 2 }
+
+        // On the web, m2 is taken out of Coast and f1 added.
+        await api.setAlbum("coast", ["m1", "f1"])
+        var summaries = await api.summaryCalls
+        var harbor = change()
+        harbor.albums = ["harbor"]
+        await store.apply(harbor)
+        try await Task.sleep(for: .milliseconds(100))
+        var after = await api.summaryCalls
+        XCTAssertEqual(after, summaries, "A change to another album reads nothing.")
+        var album = change()
+        album.albums = ["coast"]
+        await store.apply(album)
+        try await until("Coast was not counted again.") { store.sections.map(\.id) == [Self.march, Self.february] }
+        store.visibleSections([0, 1])
+        try await until("Coast's months were not read again.") {
+            store.loaded[Self.march]?.map(\.id) == ["m1"] && store.loaded[Self.february]?.map(\.id) == ["f1"]
+        }
+        await store.settleProjections()
+        XCTAssertEqual(store.sections.map(\.count), [1, 1])
+        XCTAssertEqual(store.filterTitle, "Coast", "The album stays shown.")
+
+        // A face on m2 is moved to Maya.
+        store.setPerson(Self.maya)
+        try await until("Maya did not replace Coast.") { !store.isReplacingFeed && store.filterTitle == "Maya" && store.totalCount == 1 }
+        await api.setPerson("maya", ["m1", "m2"])
+        summaries = await api.summaryCalls
+        var ben = change()
+        ben.people = ["ben"]
+        await store.apply(ben)
+        try await Task.sleep(for: .milliseconds(100))
+        after = await api.summaryCalls
+        XCTAssertEqual(after, summaries, "A change to another person reads nothing.")
+        var faces = change()
+        faces.people = ["maya"]
+        await store.apply(faces)
+        try await until("Maya's photos were not read again.") { store.loaded[Self.march]?.map(\.id) == ["m1", "m2"] }
+        await store.settleProjections()
+        XCTAssertEqual(store.sections.map(\.count), [2])
+    }
+
     // MARK: - Support
 
     private func photo(_ id: String, _ day: String, favorite: Bool = false) throws -> Asset {
@@ -582,7 +638,8 @@ private actor ChangingLibrary: FakeFeedSource {
     nonisolated let cacheScope = "test-feed-session-" + UUID().uuidString
     nonisolated var userID: String? { "alice" }
     private var photos: [String: Asset] = [:]
-    private let people: [String: Set<String>]
+    private var people: [String: Set<String>]
+    private var albums: [String: Set<String>]
     private var emptied: Set<String> = []
     private var failing: Set<String> = []
     private var summaryGate: StubServer.Gate?
@@ -594,12 +651,17 @@ private actor ChangingLibrary: FakeFeedSource {
     private(set) var refreshCalls = 0
     private(set) var monthReads: [String] = []
 
-    init(_ photos: [Asset], people: [String: Set<String>] = [:]) throws {
+    init(_ photos: [Asset], people: [String: Set<String>] = [:], albums: [String: Set<String>] = [:]) throws {
         for photo in photos { self.photos[photo.id] = photo }
         self.people = people
+        self.albums = albums
     }
 
     func set(_ asset: Asset) { photos[asset.id] = asset }
+    /// A person's photos, as faces moved to or from them elsewhere left them.
+    func setPerson(_ id: String, _ members: Set<String>) { people[id] = members }
+    /// An album's photos, as photos added or taken out elsewhere left them.
+    func setAlbum(_ id: String, _ members: Set<String>) { albums[id] = members }
     func delete(_ id: String) { photos[id] = nil }
     func empty(_ bucket: String) { emptied.insert(bucket) }
     /// The month fails as a busy server does, until healed.
@@ -651,7 +713,8 @@ private actor ChangingLibrary: FakeFeedSource {
     func search(_ query: SearchQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { throw ServerFailure.http(500, nil) }
 
-    /// What the server keeps in a feed: its visibility and trash, favorite, and a person's photos.
+    /// What the server keeps in a feed: its visibility and trash, favorite, and a person's or an
+    /// album's photos.
     private func belongs(_ asset: Asset, to query: LibraryQuery) -> Bool {
         switch asset.visibility {
         case .timeline: guard query.visibility.contains(.timeline) else { return false }
@@ -661,6 +724,7 @@ private actor ChangingLibrary: FakeFeedSource {
         guard asset.isTrashed == (query.trash == .trashed) else { return false }
         if let favorite = query.predicates.favorite, asset.isFavorite != favorite { return false }
         if let person = query.predicates.people.first, people[person]?.contains(asset.id) != true { return false }
+        if let album = query.predicates.albums.first, albums[album]?.contains(asset.id) != true { return false }
         return true
     }
 
