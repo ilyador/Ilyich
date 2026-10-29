@@ -8,6 +8,9 @@ private struct AssetFace: Decodable, Identifiable, Sendable {
     let boundingBoxX2: Int
     let boundingBoxY1: Int
     let boundingBoxY2: Int
+    /// Milliseconds into a video, for a face found further in than its preview: its box is in
+    /// that frame, so the server cuts its image.
+    let frameTimestamp: Int?
     let person: Person?
 }
 
@@ -18,6 +21,7 @@ struct FaceAssignmentView: View {
     let onChanged: () -> Void
     @State private var faces: [AssetFace] = []
     @State private var image: UIImage?
+    @State private var frameFaces: [String: UIImage] = [:]
     @State private var selected: AssetFace?
     @State private var deleteFace: AssetFace?
     @State private var error: String?
@@ -32,7 +36,7 @@ struct FaceAssignmentView: View {
             ForEach(faces) { face in
                 Button { selected = face } label: {
                     HStack(spacing: 14) {
-                        if let faceImage = croppedFace(face) { Image(uiImage: faceImage).resizable().scaledToFill().frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 10)) }
+                        if let faceImage = faceImage(face) { Image(uiImage: faceImage).resizable().scaledToFill().frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 10)) }
                         else { Image(systemName: "person.crop.rectangle").frame(width: 56, height: 56) }
                         VStack(alignment: .leading) {
                             Text(face.person?.name.isEmpty == false ? face.person!.name : "Unassigned person")
@@ -80,7 +84,13 @@ struct FaceAssignmentView: View {
         do {
             faces = try await api.request(.get, path: "faces", query: [.init(name: "id", value: asset.id)])
             if image == nil { image = try await pipeline.image(for: asset, size: .preview, pixelSize: 1600).uiImage }
+            for face in faces where face.frameTimestamp != nil && frameFaces[face.id] == nil {
+                frameFaces[face.id] = try? await pipeline.detectedFaceImage(faceID: face.id, pixelSize: 168).uiImage
+            }
         } catch is CancellationError { } catch { self.error = error.localizedDescription }
+    }
+    private func faceImage(_ face: AssetFace) -> UIImage? {
+        face.frameTimestamp == nil ? croppedFace(face) : frameFaces[face.id]
     }
     private func croppedFace(_ face: AssetFace) -> UIImage? {
         guard let source = image?.cgImage, face.imageWidth > 0, face.imageHeight > 0 else { return nil }
