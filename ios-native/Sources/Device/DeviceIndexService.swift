@@ -83,10 +83,9 @@ struct DeviceIndexSnapshot: Sendable {
 ///   there, a fingerprint for the same revision with the server's checksum, then for an unedited
 ///   photo its cloud identity. Only server photos the timeline shows count, so a phone copy of a
 ///   trashed or archived photo stays a phone photo.
-/// - Fingerprints are kept in device.sqlite. The JSON files earlier builds kept are imported
-///   first, then deleted, so nothing is hashed again. Hashing is serial, never downloads, waits
-///   in Low Power mode and when the phone is hot, checks the revision again before keeping a
-///   checksum, and only runs once the offline library is complete.
+/// - Fingerprints are kept in device.sqlite, so a photo is hashed once per revision. Hashing is
+///   serial, never downloads, waits in Low Power mode and when the phone is hot, checks the
+///   revision again before keeping a checksum, and only runs once the offline library is complete.
 actor DeviceIndexService {
     /// What a publish is compared on, so an identical one is not sent.
     private struct Published: Equatable {
@@ -100,7 +99,6 @@ actor DeviceIndexService {
     private let server: (any DeviceIndexServer)?
     private let backup: any DeviceIndexBackupSource
     private let database: DeviceDatabase
-    private let legacyFingerprints: URL?
     private let presence: AppPresence
     private let pause: Duration
     private let coalescing: Duration
@@ -166,7 +164,7 @@ actor DeviceIndexService {
     /// `pause` is the wait between two photos hashed; `coalescing`, how long server changes are
     /// gathered before they are read (backup changes, five times as long).
     init(account: String, reader: any DeviceIndexReading, server: (any DeviceIndexServer)?, backup: any DeviceIndexBackupSource,
-         database: DeviceDatabase, legacyFingerprints: URL? = DeviceDatabase.legacyFingerprintsFolder, presence: AppPresence,
+         database: DeviceDatabase, presence: AppPresence,
          pause: Duration = .milliseconds(30), coalescing: Duration = .seconds(1),
          powerAllowsHashing: @escaping @Sendable () -> Bool = DeviceIndexService.powerAllowsHashing) {
         self.account = account
@@ -174,7 +172,6 @@ actor DeviceIndexService {
         self.server = server
         self.backup = backup
         self.database = database
-        self.legacyFingerprints = legacyFingerprints
         self.presence = presence
         self.pause = pause
         self.coalescing = coalescing
@@ -291,7 +288,6 @@ actor DeviceIndexService {
     // MARK: - The loop
 
     private func run() async {
-        if let legacyFingerprints { _ = try? await database.importLegacyFingerprints(from: legacyFingerprints) }
         fingerprints = (try? await database.fingerprints()) ?? [:]
         var iterator = wakes.makeAsyncIterator()
         while !Task.isCancelled, !ended {

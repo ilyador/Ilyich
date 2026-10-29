@@ -240,12 +240,11 @@ import UIKit
     /// Photos access changed in the backup screen: automatic backup looks again.
     func accessChanged() { source?.preferencesChanged() }
 
-    /// What Diagnostics says about the engine: whether it runs, why the account's backup can't
-    /// start if it can't, and why records an older build left stay on the phone if they do.
+    /// What Diagnostics says about the engine: whether it runs, and why the account's backup can't
+    /// start if it can't.
     var summary: String {
         var text = registry == nil ? "Not started" : "Transfer engine"
         if let unavailableReason { text += ". This account’s backup can’t start: \(unavailableReason)" }
-        if case .kept(let reason)? = current?.legacyRetirement { text += ". Old backup records kept: \(reason.text)" }
         return text
     }
 }

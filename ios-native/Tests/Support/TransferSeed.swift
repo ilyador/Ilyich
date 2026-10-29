@@ -5,7 +5,7 @@ import Foundation
 /// build's state.json among them, whose rows the phone's database still holds (jobs of origin
 /// legacy, stages whose ID names an interrupted attempt and records no checksum of the still,
 /// confirmations without a time), and B1's copies of a state.json no import read. Tests write the
-/// rows themselves; LegacyBackupImportTests pins that the import writes the same.
+/// rows themselves, as B9's import wrote them.
 struct TransferSeed {
     struct Receipt {
         let localID: String
@@ -70,12 +70,10 @@ struct TransferSeed {
 }
 
 extension TransferStore {
-    /// Writes `seed` into the database in one transaction and records who owns it: the engine
-    /// with B9's authoritative import of a state.json whose digest is `importedDigest`, unless the
-    /// test says otherwise (a fresh database the engine claimed has no digest; B1's shadow copy
-    /// is mode shadow and the old engine's).
-    func seedForTest(_ seed: TransferSeed, importedDigest: String? = nil, mode: ImportMode? = .authoritative, engine: Engine = .transfer,
-                     importedAt: Date = Date(timeIntervalSinceReferenceDate: 790_000_000)) throws {
+    /// Writes `seed` into the database in one transaction and records who owns it: the engine,
+    /// through B9's authoritative import, as on the phone, unless the test says otherwise (B1's
+    /// shadow copy is mode shadow and the old engine's).
+    func seedForTest(_ seed: TransferSeed, mode: ImportMode? = .authoritative, engine: Engine = .transfer) throws {
         let db = try database()
         try db.transaction {
             try db.run("INSERT INTO preferences(id,json) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json",
@@ -136,9 +134,7 @@ extension TransferStore {
                     """, [.text(batch.id.uuidString), .integer(Int64(batch.total)), .integer(Int64(batch.completed)),
                           .optionalInteger(batch.failed.map(Int64.init))])
             }
-            try db.run("UPDATE meta SET engine=?,legacy_import_digest=?,legacy_import_mode=?,legacy_imported_at=? WHERE id=1",
-                       [.text(engine.rawValue), .optionalText(importedDigest), .optionalText(mode?.rawValue),
-                        importedDigest == nil ? .null : .date(importedAt)])
+            try db.run("UPDATE meta SET engine=?,legacy_import_mode=? WHERE id=1", [.text(engine.rawValue), .optionalText(mode?.rawValue)])
         }
     }
 }

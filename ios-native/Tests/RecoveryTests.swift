@@ -7,8 +7,8 @@ import XCTest
 /// Recovery's reconcile (rebuild milestone B6), on a transfers database the engine owns: stages
 /// B9's import wrote from an earlier build's state.json, or jobs an earlier run left, with the
 /// background sessions faked through their TransportSession seam and a throwaway App Group. Every
-/// task description and outcome file is version 2, as this build writes them (B10); a task an
-/// older build described is only ever cancelled.
+/// task description and outcome file is version 2, as this build writes them (B10); a task this
+/// build didn't describe, such as one an older build did, is left alone (C8).
 final class RecoveryTests: XCTestCase {
     private typealias G = LegacyGoldens
     private static let current = "Backup/\(G.digest)/\(G.currentFolder)"
@@ -19,50 +19,8 @@ final class RecoveryTests: XCTestCase {
     private static let lost = OutcomeRecord(error: "The network connection was lost.", errorDomain: NSURLErrorDomain,
                                             errorCode: URLError.networkConnectionLost.rawValue, v: 2)
     private static let forceQuit = OutcomeRecord(error: "cancelled", errorDomain: NSURLErrorDomain, errorCode: NSURLErrorCancelled, cancelReason: 0, v: 2)
-
-    // MARK: R0: tasks an older build described
-
-    /// Tasks a build before B9 described, in either session, are cancelled and counted, never
-    /// bound to the stage they were uploading or sent again; their files are left alone until iOS
-    /// has let go of them.
-    func testUnexpectedLegacyDescriptorIsCancelledAndLogged() async throws {
-        let backupText = String(decoding: try FixtureLoader.data("backup/descriptor-backup.json"), as: UTF8.self)
-        let varShare = String(decoding: try FixtureLoader.data("share/descriptor-share-var.json"), as: UTF8.self)
-        let privateShare = String(decoding: try FixtureLoader.data("share/descriptor-share-private-var.json"), as: UTF8.self)
-        let h = try await RecoveryHarness.imported(
-            backupTasks: [SessionTask(id: 7, description: backupText, state: .running, sent: 100, expected: 900)],
-            shareTasks: [SessionTask(id: 8, description: varShare, state: .running, sent: 0, expected: 10),
-                         SessionTask(id: 9, description: privateShare, state: .canceling, sent: 0, expected: 10)])
-        addTeardownBlock { await h.tearDown() }
-        let orphan = "Backup/\(G.digest)/\(UUID().uuidString)"
-        try h.group.write("an older build's copy", to: orphan + "/original")
-
-        let report = try await h.recovery.reconcile()
-        XCTAssertEqual(h.backupSession.cancelled, [7])
-        XCTAssertEqual(h.shareSession.cancelled, [8], "A task already ending isn't cancelled again.")
-        XCTAssertEqual(report.olderTasks, 3)
-        XCTAssertEqual(report.cancelledOlder, 2)
-        XCTAssertTrue(report.summary.contains("older tasks 3/-2"), report.summary)
-        XCTAssertEqual(report.bound, 0, "The stage the task was uploading isn't bound to it.")
-        let attempt = try await h.attempt(G.currentStage)
-        XCTAssertNotEqual(attempt?.state, .submitted)
-        XCTAssertNil(attempt?.taskID)
-        let job = try await h.job(G.l1)
-        XCTAssertEqual(job?.state, .staged, "The photo is checked again by its checksum before anything is sent.")
-        XCTAssertTrue(h.backupSession.uploads.isEmpty, "Nothing is sent again.")
-        XCTAssertTrue(h.shareSession.uploads.isEmpty)
-        XCTAssertEqual(report.sweep.skipped, .olderUploads)
-        XCTAssertTrue(h.group.exists(orphan), "Nothing is swept while iOS holds them.")
-
-        // Once iOS has let go of them, the sweep runs again.
-        for id in [7] { h.backupSession.forget(id) }
-        for id in [8, 9] { h.shareSession.forget(id) }
-        let later = try await h.recovery.reconcile()
-        XCTAssertEqual(later.olderTasks, 0)
-        XCTAssertNil(later.sweep.skipped)
-        XCTAssertFalse(h.group.exists(orphan))
-        XCTAssertTrue(h.group.exists(Self.current + "/original"), "A stage the database holds stays.")
-    }
+    /// A description builds before B9 wrote: the current stage's ID and its outcome file's URL.
+    private static let olderBuilds = #"{"receipt":"file:\/\/\/private\/var\/mobile\/Containers\/Shared\/AppGroup\/0E4C1B7A-9D2F-4A63-8B5E-7C1D2E3F4A5B\/Backup\/af60ad43866ab2fed0ab93fc6aa03bdeaaa5e190dca5884d2f57af6919b19395\/2B7D4E91-6A3C-4F08-9E15-3C4D5E6F7A8B\/7F3E2D1C-0B9A-4876-A5B4-C3D2E1F0A9B8.receipt","id":"7F3E2D1C-0B9A-4876-A5B4-C3D2E1F0A9B8"}"#
 
     // MARK: R2: tasks iOS still holds
 
@@ -109,7 +67,8 @@ final class RecoveryTests: XCTestCase {
     }
 
     /// Live tasks of the account that no unanswered attempt owns are cancelled, in both sessions;
-    /// another account's and tasks this app did not describe are left alone.
+    /// another account's and tasks this build did not describe (an older build's {id, receipt}
+    /// among them) are left alone.
     func testOrphanTasksAreCancelledAndOtherAccountsLeftAlone() async throws {
         let other = AccountID(server: URL(string: "https://other.example/api")!, userID: "someone")
         func v2(_ scope: String, folder: String = "Backup") -> String {
@@ -119,7 +78,8 @@ final class RecoveryTests: XCTestCase {
             backupTasks: [SessionTask(id: 1, description: v2(G.digest), state: .running, sent: 0, expected: 10),
                           SessionTask(id: 2, description: v2(other.digest), state: .running, sent: 0, expected: 10),
                           SessionTask(id: 3, description: "not ours", state: .running, sent: 0, expected: 10),
-                          SessionTask(id: 4, description: v2(G.digest), state: .canceling, sent: 0, expected: 10)],
+                          SessionTask(id: 4, description: v2(G.digest), state: .canceling, sent: 0, expected: 10),
+                          SessionTask(id: 5, description: Self.olderBuilds, state: .running, sent: 0, expected: 10)],
             shareTasks: [SessionTask(id: 8, description: v2(G.digest, folder: "ShareInbox"), state: .running, sent: 0, expected: 10),
                          SessionTask(id: 9, description: v2(other.digest, folder: "ShareInbox"), state: .suspended, sent: 0, expected: 10)])
         addTeardownBlock { await h.tearDown() }
@@ -129,7 +89,6 @@ final class RecoveryTests: XCTestCase {
         XCTAssertEqual(report.cancelled, 1)
         XCTAssertEqual(h.shareSession.cancelled, [8])
         XCTAssertEqual(report.cancelledShares, 1)
-        XCTAssertEqual(report.olderTasks, 0)
     }
 
     // MARK: R1: outcomes nobody applied
@@ -390,9 +349,8 @@ final class RecoveryTests: XCTestCase {
     /// Recovery runs only on a database the engine owns: on a copy no import handed over, as B1
     /// left one, it changes nothing, on disk or with iOS.
     func testADatabaseTheEngineDoesntOwnIsNeverReconciled() async throws {
-        let older = String(decoding: try FixtureLoader.data("backup/descriptor-backup.json"), as: UTF8.self)
         let h = try await RecoveryHarness.imported(mode: .shadow, engine: .legacy, backupTasks: [
-            SessionTask(id: 7, description: older, state: .running, sent: 0, expected: 9),
+            SessionTask(id: 7, description: Self.olderBuilds, state: .running, sent: 0, expected: 9),
             SessionTask(id: 8, description: TaskDescriptor.v2(attempt: AttemptID(), scope: G.digest, outcome: "Backup/x/y.receipt").taskDescription,
                         state: .running, sent: 0, expected: 9),
         ])
@@ -469,7 +427,7 @@ struct RecoveryHarness {
     static func imported(mode: TransferStore.ImportMode = .authoritative, engine: TransferStore.Engine = .transfer,
                          backupTasks: [SessionTask] = [], shareTasks: [SessionTask] = []) async throws -> RecoveryHarness {
         try await RecoveryHarness(account: LegacyGoldens.account, backupTasks: backupTasks, shareTasks: shareTasks) { group, store in
-            try await store.seedForTest(LegacyGoldens.importedSeed(), importedDigest: "state", mode: mode, engine: engine)
+            try await store.seedForTest(LegacyGoldens.importedSeed(), mode: mode, engine: engine)
             let current = "Backup/\(LegacyGoldens.digest)/\(LegacyGoldens.currentFolder)"
             try group.write("still of IMG_0001", to: current + "/original")
             try group.write("video of IMG_0001", to: current + "/motion")

@@ -8,16 +8,15 @@ import SQLite3
 /// and readable after the first unlock. It runs on a queue of its own and opens on first use.
 ///
 /// The transfer engine owns it. B9 imported an account's state.json into it authoritatively, once;
-/// before, B1 kept it as a shadow copy of state.json. B10 retired the shadow copy and kept the
-/// authoritative import (LegacyBackupImporter) for an account whose state.json no import read yet;
-/// a database with no file to import is claimed by the engine (claimForEngine). Its meta keeps the
-/// last import's digest and mode, which tell when the state.json left beside it can go
-/// (LegacyRetirement). The engine writes only a database it owns.
+/// before, B1 kept it as a shadow copy of state.json. Since C8 nothing reads a state.json: the
+/// engine claims any database it doesn't own as it is (claimForEngine). The engine writes only a
+/// database it owns.
 ///
 /// Tables:
-/// - meta: schema, engine (legacy for a copy no import handed over, transfer once the engine owns
-///   it), the digest, mode and time of the last import of state.json, and the comparison made
-///   after it, which nothing reads since B10;
+/// - meta: schema, engine (legacy for a database the engine hasn't claimed yet, transfer once it
+///   owns it), the digest, mode and time of the last import of state.json, of which only the mode
+///   is read (claimForEngine tells B1's shadow copy by it), and the comparison B1 made, which
+///   nothing reads since B10;
 /// - preferences(id=1, json): TransferPreferences;
 /// - engine_state(id=1): the run intent, an account blocker and the last message;
 /// - jobs: one per photo to upload, in seq order, UNIQUE(lane, source_key). The library lane's
@@ -37,14 +36,15 @@ import SQLite3
 actor TransferStore: ReceiptQuery {
     static let schemaVersion = 1
 
-    /// Who the records serve: `legacy` for a copy of an earlier build's state.json that no import
-    /// handed over, or the transfer engine, which owns the database from B9 on.
+    /// Who the records serve: `legacy` for a database the engine hasn't claimed (a new one, or a
+    /// copy B1 made of an earlier build's state.json that no import handed over), or the transfer
+    /// engine, which owns the database from B9 on.
     enum Engine: String, Sendable {
         case legacy, transfer
     }
 
     /// How the last import of an earlier build's state.json wrote the database: a shadow copy
-    /// (B1, retired in B10) or the import that hands it to the engine (B9, LegacyBackupImporter).
+    /// (B1, retired in B10) or the import that handed it to the engine (B9, retired in C8).
     enum ImportMode: String, Sendable {
         case shadow, authoritative
     }
@@ -82,10 +82,9 @@ actor TransferStore: ReceiptQuery {
     func meta() throws -> TransferMeta {
         let db = try database()
         var meta = TransferMeta(schema: Self.schemaVersion, engine: .legacy)
-        try db.run("SELECT schema,engine,legacy_import_digest,legacy_import_mode,legacy_imported_at FROM meta WHERE id=1") { row in
+        try db.run("SELECT schema,engine,legacy_import_mode FROM meta WHERE id=1") { row in
             meta = TransferMeta(schema: Int(row.integer(0) ?? 0), engine: row.text(1).flatMap(Engine.init(rawValue:)) ?? .legacy,
-                                legacyImportDigest: row.text(2), legacyImportMode: row.text(3).flatMap(ImportMode.init(rawValue:)),
-                                legacyImportedAt: row.date(4))
+                                legacyImportMode: row.text(2).flatMap(ImportMode.init(rawValue:)))
         }
         return meta
     }
@@ -405,10 +404,8 @@ enum AttemptPart: String, Sendable {
 struct TransferMeta: Equatable, Sendable {
     var schema: Int
     var engine: TransferStore.Engine
-    /// The SHA-256 of the state.json the last import read (or B9 merged), "absent" when B9 found none.
-    var legacyImportDigest: String?
+    /// How the last import of an earlier build's state.json wrote the database, if one did.
     var legacyImportMode: TransferStore.ImportMode?
-    var legacyImportedAt: Date?
 }
 
 /// A finished job, ready to commit.

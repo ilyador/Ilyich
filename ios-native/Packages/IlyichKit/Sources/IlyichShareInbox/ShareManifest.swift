@@ -78,13 +78,15 @@ public enum ShareBatchDamage: LocalizedError, Hashable, Sendable {
     }
 }
 
-/// <AppGroup>/ShareInbox/<batch>/manifest.json.
+/// <AppGroup>/ShareInbox/<batch>/manifest.json, version 2: `"v": 2`, the batch's ID and creation
+/// date, and each file by its `name` in the batch folder, with the source's file name and the
+/// MIME type. JSONEncoder's defaults, keys sorted: dates are seconds since 2001.
 ///
-/// Version 1, written by builds before rebuild milestone W3, has no version key and records each
-/// file by its absolute URL, under whatever container path iOS reported to the writer. Version 2
-/// adds `"v": 2` and each file's `name` in the batch folder, which is all a reader needs. It keeps
-/// every version 1 key, so an older build still reads and uploads a batch staged by a newer one.
-/// Both use JSONEncoder's defaults: dates are seconds since 2001 and URLs absolute strings.
+/// Builds from W3 to 3040093 also wrote each file's absolute URL, for builds before W3, which read
+/// only URLs; readers since W3 use the names and skip it, so those manifests read as any other.
+/// No build that reads URLs will be installed again, so the URLs are no longer written (C8). A
+/// version 1 manifest (no version, URLs only) is no longer read: it is a damaged batch, kept on
+/// disk and out of the list.
 public enum ShareManifest {
     public static let version = 2
     public static let fileName = "manifest.json"
@@ -93,34 +95,18 @@ public enum ShareManifest {
     public static let maximumAttachments = 100
 
     /// Reads a manifest of the batch whose folder is `folder`. Every file resolves to `folder` plus
-    /// its name. A version 1 URL counts only when it names a file in a ShareInbox/<batch> folder;
-    /// the container path before that is ignored, since a reinstall or the /var and /private/var
-    /// forms change it. Files are not looked at on disk here.
+    /// its name, so a batch survives a moved container. Files are not looked at on disk here.
     public static func decode(_ data: Data, batch id: UUID, folder: URL) throws(ShareBatchDamage) -> SharedBatch {
         let stored: Stored
         do { stored = try JSONDecoder().decode(Stored.self, from: data) } catch { throw .undecodable }
-        let version: Int
-        switch stored.v {
-        case nil: version = 1
-        case let value? where value == Self.version: version = value
-        case let value? where value > Self.version: throw .newerVersion(value)
-        default: throw .undecodable
-        }
+        // Without a version it is a version 1 manifest, which no build since C8 reads.
+        guard let version = stored.v else { throw .undecodable }
+        guard version <= Self.version else { throw .newerVersion(version) }
+        guard version == Self.version else { throw .undecodable }
         guard stored.id == id else { throw .wrongBatch }
         guard (1...maximumAttachments).contains(stored.attachments.count) else { throw .invalid }
         func file(_ file: StoredFile) throws(ShareBatchDamage) -> SharedFile {
-            let name: String
-            if version >= 2 {
-                guard let given = file.name else { throw .invalid }
-                name = given
-            } else {
-                guard let url = file.url, url.isFileURL else { throw .invalid }
-                let components = url.standardizedFileURL.pathComponents
-                guard components.count >= 3, components[components.count - 3] == ShareInboxRepository.folderName,
-                      UUID(uuidString: components[components.count - 2]) == id else { throw .invalid }
-                name = components[components.count - 1]
-            }
-            guard isPlainName(name) else { throw .invalid }
+            guard let name = file.name, isPlainName(name) else { throw .invalid }
             return SharedFile(name: name, filename: file.filename, contentType: file.contentType, folder: folder)
         }
         var attachments: [SharedAttachment] = []
@@ -133,10 +119,10 @@ public enum ShareManifest {
         return SharedBatch(id: id, createdAt: stored.createdAt, attachments: attachments)
     }
 
-    /// The version 2 encoding, keys sorted.
+    /// The version 2 encoding, keys sorted: each file by its name, with no URL.
     public static func encode(_ batch: SharedBatch) throws -> Data {
         func file(_ file: SharedFile) -> StoredFile {
-            StoredFile(url: file.url, filename: file.filename, contentType: file.contentType, name: file.name)
+            StoredFile(filename: file.filename, contentType: file.contentType, name: file.name)
         }
         let stored = Stored(v: version, id: batch.id, createdAt: batch.createdAt, attachments: batch.attachments.map {
             StoredAttachment(original: file($0.original), motion: $0.motion.map(file), sidecar: $0.sidecar.map(file))
@@ -151,7 +137,8 @@ public enum ShareManifest {
         !name.isEmpty && name != "." && name != ".." && name != fileName && !name.contains("/") && !name.contains("\0")
     }
 
-    // The keys on disk. Version 1 readers decode the same structure and skip `v` and `name`.
+    // The keys on disk. A `url` key, which builds from W3 to 3040093 wrote beside each name, is
+    // skipped.
     private struct Stored: Codable {
         var v: Int?
         let id: UUID
@@ -166,12 +153,9 @@ public enum ShareManifest {
     }
 
     private struct StoredFile: Codable {
-        /// Where the writer saw the file, kept for version 1 readers. Version 2 readers use `name`
-        /// and don't need it, so a later writer may leave it out.
-        let url: URL?
         let filename: String
         let contentType: String
-        /// Absent in version 1.
+        /// The file's name in the batch folder; a manifest without it is damaged.
         let name: String?
     }
 }

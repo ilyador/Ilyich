@@ -465,14 +465,11 @@ import XCTest
 
     /// The account's transfers database is readied for the engine once, when its backup starts
     /// (TransferHost.activate), never on the app coming forward. A new account's is claimed as it
-    /// is. For an account no import handed over (one a build before B9 signed out), the state.json
-    /// that build left is imported over the copy B1 made of it while it backed up, as B9 did (the
-    /// critic's correction to B10): the account comes back as signing out left it, with automatic
-    /// backup off and paused, not as the copy had it. A copy with no file left is claimed with
-    /// automatic backup off and paused too. The database and the file stay at sign-out.
+    /// is. A copy B1 made of an account's state.json, which no import handed over, is claimed with
+    /// its records, automatic backup off and paused, since it never saw how that account's last
+    /// session ended. The database stays at sign-out.
     func testTheTransfersDatabaseIsTheEnginesOnceBackupStartsAndStaysAtSignOut() async throws {
-        enum Earlier: CaseIterable { case newAccount, copy, copyAndFile }
-        let signedOut = try Self.signedOutState()
+        enum Earlier: CaseIterable { case newAccount, copy }
         for earlier in Earlier.allCases {
             let name = "\(earlier)"
             let server = makeStubServer()
@@ -481,21 +478,15 @@ import XCTest
             let saved = credential("alice", on: server)
             let environment = keepingTransfers(self.environment())
             let database = TransferStore.url(for: saved.account, in: environment.transfersDirectory)
-            let folder = try XCTUnwrap(environment.backupContainer).appendingPathComponent(AccountStoragePaths(saved.account).backup, isDirectory: true)
-            let stateFile = folder.appendingPathComponent("state.json")
-            if earlier != .newAccount {
+            if earlier == .copy {
                 // The copy is as old as the account's last time in front: automatic backup on, a run under way.
                 let copy = TransferStore(url: database)
                 var seed = TransferSeed()
                 seed.preferences.automatic = true
                 seed.intent = .automatic
                 seed.confirmations = [("photo", Date(timeIntervalSinceReferenceDate: 700_000_000.5))]
-                try await copy.seedForTest(seed, importedDigest: "older", mode: .shadow, engine: .legacy)
+                try await copy.seedForTest(seed, mode: .shadow, engine: .legacy)
                 await copy.close()
-            }
-            if earlier == .copyAndFile {
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try signedOut.write(to: stateFile)
             }
             let dependencies = self.dependencies(saved, server: server, log: AccountEventLog())
             let session = AccountSession(environment: environment, dependencies: dependencies, presence: AppPresence(isForeground: false))
@@ -525,31 +516,13 @@ import XCTest
                 XCTAssertEqual(confirmed, ["photo"], "The copy's records stay.")
                 XCTAssertEqual(preferences?.automatic, false, "Automatic backup goes off: the copy never saw the sign-out.")
                 XCTAssertEqual(state?.intent, .paused)
-            case .copyAndFile:
-                XCTAssertEqual(meta.legacyImportMode, .authoritative, "The file is imported, as B9 did.")
-                XCTAssertEqual(meta.legacyImportDigest, LegacyBackupImporter.digest(signedOut))
-                XCTAssertEqual(confirmed, [LegacyGoldens.l2, LegacyGoldens.l4, LegacyGoldens.l5], "The file's records, not the copy's.")
-                XCTAssertEqual(preferences?.automatic, false, "As signing out left it.")
-                XCTAssertEqual(state?.intent, .paused)
             }
             let again = await runtime.prepareTransfers()
             XCTAssertEqual(again, .engine, name)
 
             await session.signOut()
             XCTAssertTrue(FileManager.default.fileExists(atPath: database.path), name)
-            if earlier == .copyAndFile {
-                XCTAssertEqual(try Data(contentsOf: stateFile), signedOut, "state.json is only read; the engine's start retires it.")
-            }
         }
-    }
-
-    /// The state.json a build before B9 left when it signed the account out: automatic backup off
-    /// and paused, as every sign-out left it.
-    private static func signedOutState() throws -> Data {
-        var state = try FixtureLoader.decode(Legacy.BackupState.self, from: "backup/state-current.json")
-        state.preferences?.automatic = false
-        state.paused = true
-        return try JSONEncoder().encode(state)
     }
 
     /// The sign-in screen asks the server how it signs in only once typing pauses, and signs in
@@ -615,7 +588,6 @@ import XCTest
         XCTAssertEqual(library?.keepsTransfers, false, "Nor its backup records.")
         XCTAssertTrue(AccountEnvironment.live.keepsTransfers)
         XCTAssertNil(AccountEnvironment.live.transfersDirectory)
-        XCTAssertNil(AccountEnvironment.live.backupContainer)
         XCTAssertEqual(try library?.credentialStore().load()?.userID, AccountEnvironment.fixtureUserID)
         XCTAssertEqual(library?.fixtureCredential?.server, AccountEnvironment.fixtureServer)
         let elsewhere = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-fixture-port", "18191"])
@@ -651,7 +623,7 @@ import XCTest
 
     /// What an ordinary sign-out records, in order.
     private static let signOutSteps = ["endCasting", "removeCredential", "reloadWidgets", "clearNotifications",
-                                       "removeLockedPIN", "clearTimelineCaches", "removeNetworkSettings", "clearDiagnostics"]
+                                       "removeLockedPIN", "removeNetworkSettings", "clearDiagnostics"]
 
     private static let completeStream = #"{"type":"SyncCompleteV1","data":{},"ack":"SyncCompleteV1|done"}"# + "\n"
 
@@ -678,13 +650,11 @@ import XCTest
         return environment
     }
 
-    /// `environment`, with the account's transfers database and the App Group's Backup folders in
-    /// folders of the test's.
+    /// `environment`, with the account's transfers database in a folder of the test's.
     private func keepingTransfers(_ environment: AccountEnvironment) -> AccountEnvironment {
         var environment = environment
         environment.keepsTransfers = true
         environment.transfersDirectory = temporaryDirectory()
-        environment.backupContainer = temporaryDirectory()
         return environment
     }
 
@@ -827,7 +797,6 @@ final class FakeAccountDevice: AccountDevice {
     func clearNotifications() async { log.append("clearNotifications") }
     func removeLockedPIN(scope: String) async { log.append("removeLockedPIN") }
     func removeNetworkSettings(server: URL) async throws { log.append("removeNetworkSettings") }
-    func clearTimelineCaches(scope: String) async { log.append("clearTimelineCaches") }
     func clearDiagnostics() async { log.append("clearDiagnostics") }
 }
 

@@ -33,9 +33,6 @@ struct AccountEnvironment: Sendable {
     /// Where the transfers databases are kept: nil for Application Support/IlyichTransfers, a
     /// folder for tests.
     var transfersDirectory: URL?
-    /// The folder that holds each account's Backup/<digest>/state.json an older build left: nil
-    /// for the App Group container, a folder for tests.
-    var backupContainer: URL?
     /// URL protocols put in front of the media sessions (thumbnails, previews, originals): nil on
     /// the phone; a UI test can take the media offline with them.
     var mediaProtocolClasses: [AnyClass]?

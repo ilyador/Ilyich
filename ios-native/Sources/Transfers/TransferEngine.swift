@@ -117,7 +117,7 @@ struct JobContext: Sendable {
 /// retries after a backoff, keeping the job eligible; an item failure waits for the user, which a
 /// manual run does for every failed photo at its start.
 ///
-/// It runs only on a database it owns (TransferStore.claimForEngine, or B9's authoritative
+/// It runs only on a database it owns (TransferStore.claimForEngine, or, on the phone, B9's
 /// import).
 actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration {
     enum StartError: Error, Equatable {

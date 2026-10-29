@@ -67,8 +67,6 @@ protocol AccountDevice: Sendable {
     /// Forgets the Locked Folder PIN kept for biometric unlock.
     func removeLockedPIN(scope: String) async
     func removeNetworkSettings(server: URL) async throws
-    /// The month places an earlier build kept in Caches that the index has not imported yet (F5).
-    func clearTimelineCaches(scope: String) async
     func clearDiagnostics() async
 }
 
@@ -339,10 +337,7 @@ actor AccountManager {
         await device.removeLockedPIN(scope: scope)
         // 5. What the account kept on the phone, as the policy for the reason says.
         if policy.clearsLibraryIndex { await runtime.clearLibrary() }
-        if policy.clearsMedia {
-            await runtime.pipeline.removeAll()
-            await device.clearTimelineCaches(scope: scope)
-        }
+        if policy.clearsMedia { await runtime.pipeline.removeAll() }
         if policy.removesNetworkSettings, environment.usesDeviceStorage {
             do { try await device.removeNetworkSettings(server: runtime.api.baseURL) }
             catch { problem = problem ?? error.localizedDescription }
