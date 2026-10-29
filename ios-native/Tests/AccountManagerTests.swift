@@ -207,6 +207,12 @@ import XCTest
                                                                                   ocr: true, facialRecognition: true, map: true, trash: true, sidecar: true,
                                                                                   realtimeTranscoding: false))
             XCTAssertEqual(mirror.read()?.digest, saved.account.digest, name)
+            // The account's grid thumbnails, in Application Support since T8.
+            let thumbnails = runtime.pipeline.thumbnails
+            await thumbnails.store(Data(name.utf8), assetID: "asset", revision: "1")
+            let thumbnail = thumbnails.url(assetID: "asset", revision: "1")
+            XCTAssertTrue(thumbnail.path.contains("/Library/Application Support/IlyichThumbnails/"), "\(name): \(thumbnail.path)")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: thumbnail.path), name)
 
             if reason == .user {
                 await harness.manager.signOut(.user)
@@ -229,10 +235,40 @@ import XCTest
             XCTAssertNil(features, "\(name): the offline library is emptied.")
             let syncOpen = await library.sync.isOpen
             XCTAssertFalse(syncOpen, name)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: thumbnails.directory.path), "\(name): the account's thumbnails are removed.")
             XCTAssertTrue(FileManager.default.fileExists(atPath: transfers.path), "\(name): the transfers database stays.")
             XCTAssertTrue(ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID), "\(name): the read-only flag stays.")
             XCTAssertEqual(ShelfOrder(scope: saved.account.cacheScope).ids(.albums), ["b", "a"], "\(name): the shelf order stays.")
         }
+    }
+
+    /// Clear browsing cache (Settings, Diagnostics) empties the account's thumbnail folder in
+    /// Application Support, which the cache usage Diagnostics shows counted, and keeps the account.
+    func testClearingTheBrowsingCacheEmptiesTheThumbnailFolder() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let harness = makeHarness(credential("alice", on: server), server: server)
+        await harness.manager.restore()
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+        let thumbnails = runtime.pipeline.thumbnails
+        await thumbnails.store(Data("thumbnail".utf8), assetID: "asset", revision: "1")
+        let thumbnail = thumbnails.url(assetID: "asset", revision: "1")
+        XCTAssertTrue(thumbnail.path.contains("/Library/Application Support/IlyichThumbnails/"), thumbnail.path)
+        let stored = await thumbnails.currentUsage()
+        XCTAssertGreaterThan(stored, 0)
+        let shown = await runtime.pipeline.cacheUsage().diskBytes
+        XCTAssertGreaterThanOrEqual(shown, stored, "Diagnostics counts the thumbnails.")
+
+        await harness.manager.clearBrowsingCache()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: thumbnail.path))
+        XCTAssertFalse(thumbnails.contains(assetID: "asset", revision: "1"))
+        let cleared = await thumbnails.currentUsage()
+        XCTAssertEqual(cleared, 0)
+        let phase = await harness.manager.phase
+        XCTAssertEqual(phase, .active, "The account stays signed in.")
+        await signOutAfterwards(harness)
     }
 
     /// A server the logout can't reach within the budget doesn't hold sign-out up. Here the
