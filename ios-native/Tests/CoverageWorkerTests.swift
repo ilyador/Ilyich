@@ -228,11 +228,13 @@ import XCTest
     func testCoverageHoldsWhileScrubbingOrViewing() async throws {
         let h = try await makeHarness(photos: Array(Self.six.prefix(4)))
         var policy = CoveragePolicy.today
-        policy.motionHold = 1.0
+        // Long enough that a loaded Mac still sees the hold after motion before it ends.
+        policy.motionHold = 2.0
         h.conditions.setViewing(true)
         let worker = makeWorker(h, policy: policy)
         worker.start()
-        try await Task.sleep(for: .milliseconds(400))
+        try await until("The viewing hold was not shown.") { worker.progress.hold == .viewing }
+        try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(h.server.requested, [], "Nothing downloads while a photo is open.")
         XCTAssertEqual(worker.progress.hold, .viewing)
         XCTAssertTrue(worker.isRunning, "The pass has work; it waits.")
@@ -240,14 +242,17 @@ import XCTest
         // The grid starts moving as the viewer closes.
         h.conditions.setMoving(true)
         h.conditions.setViewing(false)
-        try await Task.sleep(for: .milliseconds(300))
+        try await until("The motion hold was not shown.") { worker.progress.hold == .moving }
+        try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(h.server.requested, [], "Nothing downloads while the grid moves.")
         XCTAssertEqual(worker.progress.hold, .moving)
 
         h.conditions.setMoving(false)
-        try await Task.sleep(for: .milliseconds(300))
+        try await until("The hold after motion was not shown.") {
+            guard case .settling(_)? = worker.progress.hold else { return false }
+            return true
+        }
         XCTAssertEqual(h.server.requested, [], "Nor for a moment after it stops.")
-        guard case .settling(_)? = worker.progress.hold else { return XCTFail("The hold after motion is not shown: \(String(describing: worker.progress.hold)).") }
 
         try await until("Coverage did not resume once the grid rested.") { h.server.requested.count == 4 }
         try await until("The pass did not finish.") { worker.statistics.completedPasses == 1 }
