@@ -531,7 +531,7 @@ import XCTest
         environment.usesDeviceStorage = false
         environment.syncsLibrary = false
         environment.usesDevicePhotos = false
-        environment.importsBackupState = false
+        environment.keepsTransfers = false
         environment.validatesSession = false
         let clients = AccountClients { address, credential, purpose in
             let authorization: AuthorizationState? = if case .session(let state) = purpose { state } else { nil }

@@ -4,9 +4,8 @@ import XCTest
 @testable import Ilyich
 
 /// The backup screens' store over typed commands (REBUILD_ROADMAP.md B8): each enqueue answers
-/// for itself, preference edits are written once they settle and before any command, the album
-/// chips count from the store, and today's coordinator reaches the store through
-/// LegacyCoordinatorBackend without anything polling it.
+/// for itself, preference edits are written once they settle and before any command, and the
+/// album chips count from the store.
 @MainActor final class BackupStoreTests: XCTestCase {
     private typealias G = LegacyGoldens
 
@@ -49,7 +48,7 @@ import XCTest
     /// written before any command, so the command runs with what the screen shows.
     func testPreferencesWriteDebounced() async throws {
         let backend = FakeTransferBackend()
-        backend.storedPreferences = TransferPreferences(Legacy.BackupPreferences())
+        backend.storedPreferences = TransferPreferences()
         backend.send(Self.snapshot())
         let store = BackupStore(backend: backend, photos: .unavailable, debounce: .milliseconds(150))
         try await until("The store did not read the preferences.") { backend.calls.contains("preferences") }
@@ -87,118 +86,34 @@ import XCTest
         backend.finish()
     }
 
-    /// The album chips count from the store: today's backup and the transfers database's copy of
-    /// it count the same photos waiting for each album, and the same that need retry.
+    /// The album chips count from the store: the photos waiting for each album, and how many of
+    /// them need a retry, as the transfers database counts them.
     func testAlbumUploadCountsFromStore() async throws {
-        let folder = temporaryDirectory().appendingPathComponent(AccountStoragePaths(G.account).backup, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try FixtureLoader.data("backup/state-current.json").write(to: folder.appendingPathComponent("state.json"))
-        let coordinator = BackupCoordinator()
-        try coordinator.load(G.credential, folder: folder)
-        let store = BackupStore(backend: LegacyCoordinatorBackend(coordinator: coordinator), photos: .unavailable, debounce: .zero)
-
-        let expected = [G.serverAlbum: AlbumUploadCount(pending: 1, failed: 1), G.otherServerAlbum: AlbumUploadCount(pending: 1, failed: 1)]
-        try await until("The store did not count the album uploads.") { store.albumUploads == expected }
-        XCTAssertEqual(coordinator.pendingAlbumUploadCount(G.serverAlbum), 1)
-        XCTAssertEqual(coordinator.failedAlbumUploadCount(G.serverAlbum), 1)
-
         let transfers = TransferStore(url: TransferStore.url(for: G.account, in: temporaryDirectory()))
-        _ = await LegacyBackupImporter(mode: .shadow, store: transfers, folder: folder).run()
-        let imported = try await transfers.albumUploadCounts()
-        XCTAssertEqual(imported, expected, "The transfer engine counts as today's backup does.")
+        var seed = TransferSeed()
+        seed.jobs = [.init(localID: G.l1),
+                     .init(localID: G.l3, state: .failed, failure: .init(message: "The server refused this file.", date: G.Dates.failure,
+                                                                         filename: "IMG_0003.HEIC"))]
+        seed.destinations = [(G.l3, G.serverAlbum, nil), (G.l3, G.otherServerAlbum, nil), (G.l1, G.serverAlbum, nil)]
+        try await transfers.seedForTest(seed)
+        let counts = try await transfers.albumUploadCounts()
+        let expected = [G.serverAlbum: AlbumUploadCount(pending: 2, failed: 1), G.otherServerAlbum: AlbumUploadCount(pending: 1, failed: 1)]
+        XCTAssertEqual(counts, expected)
         await transfers.close()
-    }
 
-    /// Today's coordinator reaches the store as it changes, with no polling: its counts, its
-    /// failures and preferences, and an upload's progress the session reports.
-    func testLegacyBackendFollowsTheCoordinatorWithoutPolling() async throws {
-        let folder = temporaryDirectory()
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try FixtureLoader.data("backup/state-current.json").write(to: folder.appendingPathComponent("state.json"))
-        let coordinator = BackupCoordinator()
-        let backend = LegacyCoordinatorBackend(coordinator: coordinator)
+        let backend = FakeTransferBackend()
+        backend.counts = counts
+        backend.send(Self.snapshot())
         let store = BackupStore(backend: backend, photos: .unavailable, debounce: .zero)
-        try await until("The store did not start from the coordinator.") { store.snapshot.activity != nil }
-        XCTAssertEqual(store.confirmed, 0)
-
-        try coordinator.load(G.credential, folder: folder)
-        try await until("Taking up the account did not reach the store.") { store.confirmed == 3 }
-        XCTAssertEqual(store.remaining, 3)
-        XCTAssertEqual(store.snapshot.failed, 1)
-        XCTAssertEqual(store.error, ServerFailure.sessionExpired(nil).localizedDescription)
-        XCTAssertEqual(store.failures.map(\.displayName), ["IMG_0003.HEIC"])
-        XCTAssertEqual(store.preferences.triggerDelay, 120)
-        XCTAssertFalse(store.isRunning)
-
-        // The queue and the confirmed uploads, a page at a time.
-        let first = try await backend.queuePage(lane: .library, after: nil, limit: 2)
-        XCTAssertEqual(first.map(\.source), [.photo(DeviceAssetID(rawValue: G.l1)), .photo(DeviceAssetID(rawValue: G.l3))])
-        XCTAssertEqual(first.map(\.state), [.queued, .failed])
-        XCTAssertEqual(first.last?.message, "The photo uploaded but could not be added to the selected album. Check album permissions and retry.")
-        let rest = try await backend.queuePage(lane: .library, after: first.last?.seq, limit: 2)
-        XCTAssertEqual(rest.map(\.source), [.photo(DeviceAssetID(rawValue: G.l6))])
-        let history = try await backend.historyPage(offset: 0, limit: 10)
-        XCTAssertEqual(history.map(\.localID.rawValue), Self.confirmedOrder(coordinator.associations))
-        let later = try await backend.historyPage(offset: 1, limit: 10)
-        XCTAssertEqual(later.map(\.localID.rawValue), history.dropFirst().map(\.localID.rawValue))
-
-        // Progress, as the backup session reports it, appears only while backup runs.
-        coordinator.applyProgress(UploadProgressSnapshot(taskID: 7, sent: 512, expected: 1_024))
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertEqual(store.snapshot.bytesSent, 0, "Nothing is sending while backup is paused.")
-
-        // An edit made on the screen reaches the coordinator, and its file.
-        store.preferences.triggerDelay = 300
-        store.preferencesChanged()
-        await store.flushPreferences()
-        XCTAssertEqual(coordinator.preferences.triggerDelay, 300)
-        let saved = try JSONDecoder().decode(BackupState.self, from: Data(contentsOf: folder.appendingPathComponent("state.json")))
-        XCTAssertEqual(saved.preferences.triggerDelay, 300)
-    }
-
-    /// A snapshot is sent for every progress tick, and the store rereads the failures and album
-    /// counts with each: until the backup state changes, the backend hands back what it built,
-    /// without sorting the failures again, and the store's comparison meets the same storage.
-    func testLegacyBackendKeepsFailuresUntilTheStateChanges() async throws {
-        let folder = temporaryDirectory()
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try FixtureLoader.data("backup/state-current.json").write(to: folder.appendingPathComponent("state.json"))
-        let coordinator = BackupCoordinator()
-        try coordinator.load(G.credential, folder: folder)
-        let backend = LegacyCoordinatorBackend(coordinator: coordinator)
-        XCTAssertEqual(coordinator.failureCount, coordinator.failures.count)
-
-        let revision = coordinator.stateRevision
-        let first = try await backend.failures(limit: 10_000)
-        coordinator.applyProgress(UploadProgressSnapshot(taskID: 7, sent: 512, expected: 1_024))
-        let second = try await backend.failures(limit: 10_000)
-        XCTAssertEqual(coordinator.stateRevision, revision, "A progress tick leaves the backup state alone.")
-        XCTAssertEqual(first.map(\.displayName), ["IMG_0003.HEIC"])
-        XCTAssertEqual(Self.storage(first), Self.storage(second), "The failures were built again with nothing changed.")
-
-        coordinator.savePreferences()
-        XCTAssertNotEqual(coordinator.stateRevision, revision)
-        let third = try await backend.failures(limit: 10_000)
-        XCTAssertEqual(third, first)
-        XCTAssertNotEqual(Self.storage(third), Self.storage(first), "A changed state reads the failures again.")
+        try await until("The store did not count the album uploads.") { store.albumUploads == expected }
+        backend.finish()
     }
 
     // MARK: Support
 
-    private static func storage(_ items: [TransferQueueItem]) -> UnsafeRawPointer? {
-        items.withUnsafeBufferPointer { $0.baseAddress.map(UnsafeRawPointer.init) }
-    }
-
     private static func snapshot(lastMessage: String? = nil) -> TransferSnapshot {
         TransferSnapshot(intent: .paused, phase: .idle, remaining: 0, confirmed: 0, failed: 0, fileProgress: nil, bytesSent: 0,
                          bytesExpected: 0, bytesPerSecond: nil, lastMessage: lastMessage)
-    }
-
-    private static func confirmedOrder(_ receipts: [String: BackupReceipt]) -> [String] {
-        receipts.sorted {
-            let left = $0.value.confirmedAt ?? .distantPast, right = $1.value.confirmedAt ?? .distantPast
-            return left == right ? $0.key < $1.key : left > right
-        }.map(\.key)
     }
 
     private func temporaryDirectory() -> URL {
@@ -223,6 +138,7 @@ import XCTest
     var written: [TransferPreferences] = []
     var enqueueAnswer: Result<EnqueueResult, any Error> = .success(.queued(0))
     var storedPreferences: TransferPreferences?
+    var counts: [String: AlbumUploadCount] = [:]
     private let stream: AsyncStream<TransferSnapshot>
     private let continuation: AsyncStream<TransferSnapshot>.Continuation
 
@@ -252,5 +168,5 @@ import XCTest
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem] { [] }
     func historyPage(offset: Int, limit: Int) async throws -> [TransferHistoryItem] { [] }
     func failures(limit: Int) async throws -> [TransferQueueItem] { [] }
-    func albumUploadCounts() async throws -> [String: AlbumUploadCount] { [:] }
+    func albumUploadCounts() async throws -> [String: AlbumUploadCount] { counts }
 }

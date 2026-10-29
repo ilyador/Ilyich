@@ -71,7 +71,7 @@ final class StagingRulesTests: XCTestCase {
         XCTAssertThrowsError(try StagingRules.requireMotion(isLive: true, motion: nil)) { error in
             guard case BackupError.item(let message) = error else { return XCTFail("\(error)") }
             XCTAssertEqual(message, StagingRules.livePhotoWithoutMotion)
-            XCTAssertTrue(BackupAttempt.canContinue(after: error), "Backup moves on to the next photo.")
+            guard case .item = TransferFailureClassifier.classify(error) else { return XCTFail("Backup moves on to the next photo.") }
         }
         XCTAssertNoThrow(try StagingRules.requireMotion(isLive: true, motion: 1))
         XCTAssertNoThrow(try StagingRules.requireMotion(isLive: false, motion: nil))

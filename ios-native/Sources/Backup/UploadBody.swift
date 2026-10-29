@@ -1,7 +1,8 @@
 import Foundation
 import CryptoKit
 
-struct UploadFile: Codable, Sendable {
+/// A file to upload: where it is, and the name and type the server receives.
+struct UploadFile: Sendable {
     let url: URL
     let filename: String
     let contentType: String
@@ -64,11 +65,6 @@ enum UploadBody {
         try writer.synchronize()
         succeeded = true
     }
-}
-
-struct UploadReceipt: Codable, Sendable {
-    let id: String
-    let status: String
 }
 
 struct UploadCheck: Encodable, Sendable {

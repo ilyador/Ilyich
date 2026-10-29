@@ -4,13 +4,13 @@ import os
 import Synchronization
 
 /// The background URLSession configuration, the app's only call to
-/// URLSessionConfiguration.background(withIdentifier:). BackgroundTransport and today's
-/// BackgroundUploads (the way back, until B10) both build their sessions from it, so they are configured identically, and
-/// scripts/check-single-engine.sh fails the build if a second call site appears.
+/// URLSessionConfiguration.background(withIdentifier:). Only BackgroundTransport's live session
+/// builds a session from it, and scripts/check-single-engine.sh fails the build if a second call
+/// site or a second builder appears.
 ///
 /// iOS allows one session per identifier in a process: a second one with the same identifier gets
 /// undefined event delivery. Each identifier's configurations are counted, and a repeat is logged
-/// as a fault: TransferHost starts only one engine's sessions in a process.
+/// as a fault: TransferHost starts the engine's sessions once in a process.
 enum TransferSessionConfiguration {
     /// Uploads may take a week: iOS retries them across network changes and relaunches.
     static let resourceTimeout: TimeInterval = 7 * 24 * 3600

@@ -4,9 +4,9 @@ import Photos
 import XCTest
 @testable import Ilyich
 
-/// TransferFailureClassifier against section 5 of the architecture, with every input of
-/// BackupAttemptTests given its new class. BackupAttempt.canContinue said only "skip this photo"
-/// or "stop the run"; the classes now say who retries and when.
+/// TransferFailureClassifier against section 5 of the architecture, with every input the old
+/// engine's tests gave BackupAttempt.canContinue given its new class. canContinue said only "skip
+/// this photo" or "stop the run"; the classes now say who retries and when.
 final class ClassifierTests: XCTestCase {
     private typealias Classifier = TransferFailureClassifier
 

@@ -446,7 +446,7 @@ import XCTest
 
     /// BACKUP-1, fixed in B9. A server error (5xx) used to stop automatic backup with "Backup needs
     /// attention" until the user acted. The transfer engine retries it by itself after a backoff,
-    /// and automatic backup carries on. (BackupCoordinator could only be driven with the
+    /// and automatic backup carries on. (The old engine could only be driven with the
     /// simulator's own session, Photos and background URLSession, so the bug is pinned on the
     /// engine that replaced it, behind fakes.)
     func testAServerErrorDoesNotStopAutomaticBackup() async throws {

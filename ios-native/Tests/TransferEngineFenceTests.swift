@@ -39,7 +39,7 @@ final class TransferEngineFenceTests: XCTestCase {
     /// uploads are taken again.
     func testReadOnlyStopsSubmission() async throws {
         let h = try await TransferEngineHarness()
-        var automatic = TransferPreferences(Legacy.BackupPreferences())
+        var automatic = TransferPreferences()
         automatic.automatic = true
         try await h.store.savePreferences(automatic)
         let gate = TransferGate()

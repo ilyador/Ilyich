@@ -33,9 +33,9 @@ struct AccountState: Sendable {
 }
 
 /// What sign-out removes besides the session, by reason. Always kept, for either reason: the
-/// backup state (Backup/<digest>/state.json, and from B1 the transfers database) with its
-/// receipts, the read-only flag, shelf order and the app's preferences. Both reasons switch
-/// automatic backup off in that backup state and remove the rest, as every earlier build did.
+/// account's transfers database with its receipts and the staged copies, the read-only flag,
+/// shelf order and the app's preferences. Both reasons switch automatic backup off in that
+/// database and remove the rest, as every earlier build did.
 /// Keeping automatic backup on, and keeping thumbnails and network settings after a session
 /// expiry, are open owner questions, so they stay off until the owner answers.
 struct SignOutPolicy: Equatable, Sendable {
@@ -46,8 +46,8 @@ struct SignOutPolicy: Equatable, Sendable {
     var clearsMedia = true
     /// The server's custom headers, other addresses and client certificate.
     var removesNetworkSettings = true
-    /// Automatic backup stays on in the account's backup state, so signing in to the account
-    /// again carries on with it.
+    /// Automatic backup stays on in the account's transfers database, so signing in to the
+    /// account again carries on with it.
     var keepsAutomaticBackup = false
 
     init(reason: SignOutReason) {}
@@ -56,14 +56,10 @@ struct SignOutPolicy: Equatable, Sendable {
 /// The device-wide services that still hold some of an account's work until later milestones
 /// move it into the runtime, and the stores sign-out clears outside it.
 protocol AccountDevice: Sendable {
-    /// Starts the account's backup each time the account becomes active: at launch and after
-    /// every sign-in, so the backup screens show the account signed in without a relaunch. The
-    /// transfer engine runs it once the account's backup records are imported, else today's
-    /// backup takes up its state (TransferHost).
+    /// Starts the account's backup on the transfer engine each time the account becomes active:
+    /// at launch and after every sign-in, so the backup screens show the account signed in
+    /// without a relaunch (TransferHost).
     func activateBackup(_ runtime: AccountRuntime) async
-    /// Stops backup and shared uploads, and switches automatic backup off unless
-    /// `keepingAutomaticBackup`. The backup state stays on disk with its receipts.
-    func stopUploads(keepingAutomaticBackup: Bool) async
     /// Stops casting and revokes the grants the receiver was given.
     func endCasting() async
     func reloadWidgets() async
@@ -74,11 +70,6 @@ protocol AccountDevice: Sendable {
     /// The month places an earlier build kept in Caches that the index has not imported yet (F5).
     func clearTimelineCaches(scope: String) async
     func clearDiagnostics() async
-    /// Uploads follow a read-only change.
-    func readOnlyChanged(_ enabled: Bool) async
-    /// Keeps how the latest import of the backup state into the transfers database went, for
-    /// Diagnostics, until sign-out clears diagnostics.
-    func recordTransferImport(_ report: LegacyImportReport) async
 }
 
 /// Makes every client the account layer uses, so that tests can route them to a stub server.
@@ -331,7 +322,6 @@ actor AccountManager {
         //    the transfer engine winds down first, then everything the runtime runs.
         await runtime.prepareForSignOut(keepingAutomaticBackup: policy.keepsAutomaticBackup)
         await runtime.cancelAndJoin()
-        await device.stopUploads(keepingAutomaticBackup: policy.keepsAutomaticBackup)
         // 3. While the token and the network settings still work: casting stops and its grants
         //    are revoked, which needs the token, then the session itself. Past the budget,
         //    sign-out goes on without them.
@@ -400,14 +390,6 @@ actor AccountManager {
             guard let runtime = manager.runtime else { return }
             await runtime.clearBrowsingCache()
         }
-    }
-
-    /// Restores the session if needed, then syncs the library once for a background window of
-    /// today's backup. Returns whether the library is ready for it.
-    func prepareForBackgroundBackup() async -> Bool {
-        await restore()
-        guard phase == .active, let sync = runtime?.library?.sync else { return false }
-        return await sync.prepareForBackgroundBackup()
     }
 
     // MARK: Support

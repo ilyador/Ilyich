@@ -164,11 +164,13 @@ final class TransferEngineRaceTests: XCTestCase {
         await h.tearDown()
     }
 
-    func testTheEngineNeverRunsOnTheShadowCopy() async throws {
+    /// The engine runs only on a database handed to it: the account's runtime claims one no
+    /// import handed over before it starts the engine (AccountRuntime.prepareTransfers).
+    func testTheEngineNeverRunsOnADatabaseNotHandedToIt() async throws {
         let h = try await TransferEngineHarness(claim: false)
         do {
             try await h.engine.start()
-            XCTFail("A database BackupCoordinator's shadow import owns is not the engine's.")
+            XCTFail("A database nobody handed to the engine is not the engine's.")
         } catch let error as TransferEngine<TestClock>.StartError {
             XCTAssertEqual(error, .notOwned)
         }

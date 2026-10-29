@@ -176,10 +176,9 @@ import XCTest
     }
 
     /// Sign-out, for either reason, removes exactly its list, in order: what the account kept and
-    /// the device-wide services hold for it. Uploads stop as the app stops them, over the
-    /// account's backup in the middle of a run. Not on the list, for either reason: the backup
-    /// state with its receipts, in which automatic backup is switched off as every earlier build
-    /// did; the read-only flag; and the shelf order.
+    /// the device-wide services hold for it. Not on the list, for either reason: the transfers
+    /// database with its receipts (BootTests pins what the engine does to it at sign-out), the
+    /// read-only flag and the shelf order.
     func testSignOutRemovesExactlyItsCleanupListForEitherReason() async throws {
         // Owner question: keeping thumbnails and network settings after a session expiry. Until it
         // is answered, an expiry removes what an explicit sign-out does.
@@ -195,11 +194,9 @@ import XCTest
             server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
             let mirror = makeMirror()
             let saved = credential("alice", on: server)
-            let backup = try goldenBackup(for: saved)
             turnOnReadOnlyAndOrderShelves(for: saved)
-            let environment = copyingBackupState(self.environment(library: true))
-            let harness = makeHarness(saved, server: server, environment: environment, mirror: mirror,
-                                      uploads: LiveAccountDevice(backup: { backup.coordinator }))
+            let environment = keepingTransfers(self.environment(library: true))
+            let harness = makeHarness(saved, server: server, environment: environment, mirror: mirror)
             await harness.manager.restore()
             let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
             _ = await runtime.prepareTransfers()
@@ -232,36 +229,9 @@ import XCTest
             XCTAssertNil(features, "\(name): the offline library is emptied.")
             let syncOpen = await library.sync.isOpen
             XCTAssertFalse(syncOpen, name)
-            XCTAssertEqual(try backup.state(), try Self.backupStateAfterSignOut(keepingAutomaticBackup: false),
-                           "\(name): the backup state stays with its receipts, paused, and with automatic backup off.")
-            XCTAssertTrue(FileManager.default.fileExists(atPath: transfers.path), "\(name): the transfers database stays, as the backup state does.")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: transfers.path), "\(name): the transfers database stays.")
             XCTAssertTrue(ReadOnlyPolicy.isEnabled(server: saved.server, userID: saved.userID), "\(name): the read-only flag stays.")
             XCTAssertEqual(ShelfOrder(scope: saved.account.cacheScope).ids(.albums), ["b", "a"], "\(name): the shelf order stays.")
-        }
-    }
-
-    /// Uploads stop as the app stops them at sign-out: backup pauses, its batch of transfer
-    /// notifications ends and nobody is left signed in to it, while its state stays on disk with
-    /// its receipts. Automatic backup is switched off in that state, as every earlier build did,
-    /// unless sign-out keeps it, the roadmap's default that waits for the owner's answer: then
-    /// signing in to the account again carries on with it.
-    func testStoppingUploadsSwitchesAutomaticBackupOffUnlessKept() async throws {
-        XCTAssertFalse(SignOutPolicy(reason: .user).keepsAutomaticBackup, "Owner question: until it is answered, sign-out switches it off.")
-        XCTAssertFalse(SignOutPolicy(reason: .sessionExpired).keepsAutomaticBackup)
-        for keeping in [false, true] {
-            let saved = LegacyGoldens.credential
-            let backup = try goldenBackup(for: saved)
-
-            await LiveAccountDevice(backup: { backup.coordinator }).stopUploads(keepingAutomaticBackup: keeping)
-
-            XCTAssertFalse(backup.coordinator.preferences.automatic, "Nobody is signed in, so nothing backs up.")
-            XCTAssertTrue(backup.coordinator.associations.isEmpty)
-            XCTAssertEqual(backup.coordinator.remaining, 0)
-            XCTAssertEqual(try backup.state(), try Self.backupStateAfterSignOut(keepingAutomaticBackup: keeping), "keeping: \(keeping)")
-            let again = BackupCoordinator()
-            try again.load(saved, folder: backup.folder)
-            XCTAssertEqual(again.preferences.automatic, keeping, "Signing in again carries on as sign-out left it.")
-            XCTAssertEqual(again.associations.count, 2, "The receipts are kept.")
         }
     }
 
@@ -298,21 +268,22 @@ import XCTest
         XCTAssertTrue(server.requests("POST", "auth/logout").isEmpty, "Nothing is sent once the budget is spent.")
     }
 
-    /// The address the logout goes to is chosen while uploads stop, so the budget goes to the
-    /// logout rather than to checking every address, which can take longer than the budget.
-    func testSignOutChoosesTheServersAddressWhileUploadsStop() async throws {
+    /// The address the logout goes to is chosen while the account's work ends, before casting
+    /// stops, so the budget goes to the logout rather than to checking every address, which can
+    /// take longer than the budget.
+    func testSignOutChoosesTheServersAddressWhileTheAccountsWorkEnds() async throws {
         let server = answeringAddressChecks(makeStubServer()), away = makeStubServer()
         let unreachable = StubServer.Gate(), stopping = StubServer.Gate()
         addTeardownBlock { unreachable.open(); stopping.open() }
         away.route("GET", "server/ping", StubServer.Response.transportFailure(.cannotConnectToHost).waiting(for: unreachable))
         server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
         let harness = makeHarness(credential("alice", on: server), server: server, environment: environment(validatesSession: false),
-                                  holdingUploadsStop: stopping,
+                                  holdingCastingStop: stopping,
                                   network: NetworkConfiguration(alternateEndpoints: [away.baseURL], automaticallySwitchEndpoints: true))
         await harness.manager.restore()
 
         let signingOut = Task { await harness.manager.signOut(.user) }
-        try await until("The address was not checked while uploads stopped.") {
+        try await until("The address was not checked before casting stopped.") {
             stopping.waiting == 1 && away.requests("GET", "server/ping").count == 1
         }
         unreachable.open()
@@ -457,7 +428,7 @@ import XCTest
     // MARK: - Session
 
     /// The session shows what the manager publishes, and a read-only toggle changes the controls
-    /// at once while uploads follow afterwards.
+    /// at once; the transfer engine follows the account's authorization itself.
     func testTheSessionShowsTheAccountAndReadOnlyChangesAtOnce() async throws {
         let server = makeStubServer()
         server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
@@ -479,11 +450,10 @@ import XCTest
 
         session.setReadOnly(true)
         XCTAssertEqual(session.authorization?.readOnly, true, "The controls follow at once.")
-        XCTAssertTrue(session.isApplyingReadOnly)
-        try await until("Uploads did not follow.") { !session.isApplyingReadOnly }
-        XCTAssertEqual(log.all, ["readOnly(true)"])
+        XCTAssertEqual(session.runtime?.authorization.snapshot.readOnly, true, "So does the account's authorization, which the engine follows.")
+        XCTAssertTrue(log.all.isEmpty, "Nothing device-wide is asked.")
         session.setReadOnly(false)
-        try await until("Uploads did not follow.") { !session.isApplyingReadOnly }
+        XCTAssertEqual(session.authorization?.readOnly, false)
 
         session.pendingLink = .album("00000000-0000-4000-8000-000000000003")
         await session.signOut()
@@ -493,56 +463,51 @@ import XCTest
         XCTAssertNil(session.pendingLink, "A link for the account that signed out is dropped.")
     }
 
-    /// The account's backup records are imported into its transfers database once, when its
-    /// backup starts (TransferHost.activate), authoritatively: the engine owns the database from
-    /// then on. Never when state.json is written or the app comes forward, and Diagnostics shows
-    /// the comparison made at the import. state.json is only ever read, and both stay at sign-out.
-    func testBackupRecordsAreImportedOnceWhenBackupStartsNeverOnWrites() async throws {
-        let server = makeStubServer()
-        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
-        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
-        let saved = credential("alice", on: server)
-        let environment = copyingBackupState(self.environment())
-        let folder = try XCTUnwrap(environment.backupContainer).appendingPathComponent(AccountStoragePaths(saved.account).backup, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let stateFile = folder.appendingPathComponent("state.json")
-        try FixtureLoader.data("backup/state-current.json").write(to: stateFile)
-        let dependencies = self.dependencies(saved, server: server, log: AccountEventLog())
-        let device = try XCTUnwrap(dependencies.device as? FakeAccountDevice)
-        let session = AccountSession(environment: environment, dependencies: dependencies, presence: AppPresence(isForeground: false))
+    /// The account's transfers database is readied for the engine once, when its backup starts
+    /// (TransferHost.activate): a new account's is claimed as it is, and so is a copy B1 made of an
+    /// earlier build's state.json that no import handed over, whose records it keeps (B10: nothing
+    /// reads state.json any more). Never on the app coming forward. The database stays at sign-out.
+    func testTheTransfersDatabaseIsTheEnginesOnceBackupStartsAndStaysAtSignOut() async throws {
+        for copy in [false, true] {
+            let server = makeStubServer()
+            server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+            server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+            let saved = credential("alice", on: server)
+            let environment = keepingTransfers(self.environment())
+            let database = TransferStore.url(for: saved.account, in: environment.transfersDirectory)
+            if copy {
+                let earlier = TransferStore(url: database)
+                var seed = TransferSeed()
+                seed.confirmations = [("photo", Date(timeIntervalSinceReferenceDate: 700_000_000.5))]
+                try await earlier.seedForTest(seed, importedDigest: "older", mode: .shadow, engine: .legacy)
+                await earlier.close()
+            }
+            let dependencies = self.dependencies(saved, server: server, log: AccountEventLog())
+            let session = AccountSession(environment: environment, dependencies: dependencies, presence: AppPresence(isForeground: false))
 
-        await session.restore()
-        XCTAssertEqual(session.phase, .active)
-        let runtime = try XCTUnwrap(session.runtime)
-        session.sceneChanged(.active)
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertTrue(device.transferImports.isEmpty, "Nothing is imported until backup starts.")
+            await session.restore()
+            XCTAssertEqual(session.phase, .active)
+            let runtime = try XCTUnwrap(session.runtime)
+            session.sceneChanged(.active)
+            let store = try XCTUnwrap(runtime.transfers).store
+            let before = try await store.meta()
+            XCTAssertEqual(before.engine, .legacy, "copy: \(copy): nothing is claimed until backup starts.")
 
-        let decision = await runtime.prepareTransfers()
-        XCTAssertEqual(decision, .engine)
-        XCTAssertEqual(device.transferImports.count, 1)
-        XCTAssertEqual(device.transferImports.last?.outcome, .imported)
-        XCTAssertEqual(device.transferImports.last?.comparison?.total, 0)
-        let meta = try await XCTUnwrap(runtime.transfers).store.meta()
-        XCTAssertEqual(meta.engine, .transfer)
-        let database = TransferStore.url(for: saved.account, in: environment.transfersDirectory)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
+            let decision = await runtime.prepareTransfers()
+            XCTAssertEqual(decision, .engine)
+            let meta = try await store.meta()
+            XCTAssertEqual(meta.engine, .transfer)
+            XCTAssertEqual(meta.legacyImportMode, copy ? .shadow : nil, "Its record says no import handed it over.")
+            let again = await runtime.prepareTransfers()
+            XCTAssertEqual(again, .engine)
+            if copy {
+                let confirmed = try await store.historyPage(offset: 0, limit: 10).map(\.localID.rawValue)
+                XCTAssertEqual(confirmed, ["photo"], "The copy's records stay.")
+            }
 
-        // An older build writing state.json, the app coming and going, asking again: nothing more.
-        try FixtureLoader.data("backup/state-9780e9625.json").write(to: stateFile, options: .atomic)
-        session.sceneChanged(.background)
-        session.sceneChanged(.active)
-        _ = await runtime.prepareTransfers()
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertEqual(device.transferImports.count, 1)
-
-        await session.compareBackupRecords()
-        XCTAssertEqual(device.transferImports.count, 2, "Diagnostics asks.")
-        XCTAssertEqual(device.transferImports.last?.outcome, .merged, "The older build's file merges.")
-
-        await session.signOut()
-        XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
-        XCTAssertEqual(try Data(contentsOf: stateFile), try FixtureLoader.data("backup/state-9780e9625.json"), "state.json is only ever read.")
+            await session.signOut()
+            XCTAssertTrue(FileManager.default.fileExists(atPath: database.path))
+        }
     }
 
     /// The sign-in screen asks the server how it signs in only once typing pauses, and signs in
@@ -605,10 +570,9 @@ import XCTest
         XCTAssertEqual(library?.keepsShelvesOpen, true)
         XCTAssertEqual(library?.syncsLibrary, false)
         XCTAssertEqual(library?.usesDevicePhotos, false)
-        XCTAssertEqual(library?.importsBackupState, false, "Nor its backup state.")
-        XCTAssertTrue(AccountEnvironment.live.importsBackupState)
+        XCTAssertEqual(library?.keepsTransfers, false, "Nor its backup records.")
+        XCTAssertTrue(AccountEnvironment.live.keepsTransfers)
         XCTAssertNil(AccountEnvironment.live.transfersDirectory)
-        XCTAssertNil(AccountEnvironment.live.backupContainer)
         XCTAssertEqual(try library?.credentialStore().load()?.userID, AccountEnvironment.fixtureUserID)
         XCTAssertEqual(library?.fixtureCredential?.server, AccountEnvironment.fixtureServer)
         let elsewhere = AccountEnvironment.uiTest(arguments: ["--ui-testing", "--ui-testing-library", "--ui-testing-fixture-port", "18191"])
@@ -620,53 +584,30 @@ import XCTest
 
     /// An account's backup is taken up each time the account becomes active, not only at launch
     /// (REBUILD_ROADMAP.md, Critic's corrections, B8): signing out and in as someone else without
-    /// relaunching shows the new account's backup, with no screen calling activate().
-    func testSigningOutAndBackInShowsTheNewAccountsBackupState() async throws {
+    /// relaunching starts the new account's backup, with no screen asking. The screens follow
+    /// (BackupBackendRouterTests.testTheScreensFollowEachAccountsEngineAcrossASignIn).
+    func testSigningOutAndBackInStartsTheNewAccountsBackup() async throws {
         let server = makeStubServer()
         server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
         server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
-        let alice = credential("alice", on: server), bob = credential("bob", on: server)
-        let container = temporaryDirectory()
-        var aliceState = LegacyGoldens.backupState()
-        aliceState.paused = true
-        aliceState.transferNotification = nil
-        try writeBackupState(aliceState, for: alice, in: container)
-        var bobState = BackupState()
-        bobState.confirmed = ["B0B00000-0000-4000-8000-000000000001/L0/001": Date(timeIntervalSinceReferenceDate: 700_000_000)]
-        bobState.preferences.triggerDelay = 300
-        try writeBackupState(bobState, for: bob, in: container)
+        let alice = credential("alice", on: server)
         var environment = self.environment()
         environment.usesDevicePhotos = true
-        environment.backupContainer = container
-        let coordinator = BackupCoordinator()
-        let harness = makeHarness(alice, server: server, environment: environment, uploads: LiveAccountDevice(backup: { coordinator }))
-        let store = BackupStore(backend: LegacyCoordinatorBackend(coordinator: coordinator), photos: .unavailable, debounce: .zero)
+        let harness = makeHarness(alice, server: server, environment: environment)
 
         await harness.manager.restore()
-        try await until("The backup screens did not show Alice's backup.") { store.confirmed == 3 && store.preferences.triggerDelay == 120 }
-        XCTAssertEqual(coordinator.activeScope, alice.account.digest)
-        XCTAssertEqual(store.failures.count, 1)
-
+        try await until("Alice's backup did not start.") { harness.log.all.contains("activateBackup(alice)") }
         await harness.manager.signOut(.user)
-        try await until("Signing out did not empty the backup screens.") { store.confirmed == 0 && store.failures.isEmpty }
         try await harness.manager.completeSSO(login("bob"), server: server.baseURL)
-
-        try await until("The backup screens did not show Bob's backup.") { store.confirmed == 1 && store.preferences.triggerDelay == 300 }
-        XCTAssertEqual(coordinator.activeScope, bob.account.digest)
+        try await until("Bob's backup did not start.") { harness.log.all.contains("activateBackup(bob)") }
         XCTAssertEqual(harness.log.all.filter { $0.hasPrefix("activateBackup") }, ["activateBackup(alice)", "activateBackup(bob)"])
         await signOutAfterwards(harness)
     }
 
     // MARK: - Support
 
-    private func writeBackupState(_ state: BackupState, for credential: StoredCredential, in container: URL) throws {
-        let folder = container.appendingPathComponent(AccountStoragePaths(credential.account).backup, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try JSONEncoder().encode(state).write(to: folder.appendingPathComponent("state.json"))
-    }
-
     /// What an ordinary sign-out records, in order.
-    private static let signOutSteps = ["stopUploads", "endCasting", "removeCredential", "reloadWidgets", "clearNotifications",
+    private static let signOutSteps = ["endCasting", "removeCredential", "reloadWidgets", "clearNotifications",
                                        "removeLockedPIN", "clearTimelineCaches", "removeNetworkSettings", "clearDiagnostics"]
 
     private static let completeStream = #"{"type":"SyncCompleteV1","data":{},"ack":"SyncCompleteV1|done"}"# + "\n"
@@ -689,25 +630,23 @@ import XCTest
         environment.usesDevicePhotos = false
         environment.syncsLibrary = library
         environment.validatesSession = validatesSession
-        environment.importsBackupState = false
+        environment.keepsTransfers = false
         if library { environment.libraryDirectory = temporaryDirectory() }
         return environment
     }
 
-    /// `environment`, copying the backup state into a transfers database, both in folders of the test's.
-    private func copyingBackupState(_ environment: AccountEnvironment) -> AccountEnvironment {
+    /// `environment`, with the account's transfers database in a folder of the test's.
+    private func keepingTransfers(_ environment: AccountEnvironment) -> AccountEnvironment {
         var environment = environment
-        environment.importsBackupState = true
+        environment.keepsTransfers = true
         environment.transfersDirectory = temporaryDirectory()
-        environment.backupContainer = temporaryDirectory()
         return environment
     }
 
-    /// `uploads` stops uploads as the app does; `uploadsStop` holds stopping them back until the
-    /// test opens it.
+    /// `castingStop` holds ending casting back until the test opens it.
     private func dependencies(_ credential: StoredCredential?, server: StubServer, log: AccountEventLog, locked: Bool = false,
                               mirror: AuthorizationMirror? = nil, unlockEvents: AsyncStream<Void> = AsyncStream { $0.finish() },
-                              uploads: LiveAccountDevice? = nil, uploadsStop: StubServer.Gate? = nil,
+                              castingStop: StubServer.Gate? = nil,
                               network: NetworkConfiguration = NetworkConfiguration(), serverSignOutBudget: Duration = .seconds(3)) -> AccountDependencies {
         let store = TestCredentialStore(credential, log: log, locked: locked)
         let clients = AccountClients { address, credential, purpose in
@@ -715,19 +654,19 @@ import XCTest
             return try APIClient(baseURL: address, accessToken: credential?.token, userID: credential?.userID, sessionConfiguration: server.configuration(),
                                  networkConfiguration: network, wifiName: NoWiFi(), authorization: authorization)
         }
-        return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log, uploads: uploads, uploadsStop: uploadsStop),
+        return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log, castingStop: castingStop),
                                    clients: clients, unlockEvents: { unlockEvents }, expiryRecheckDelay: .milliseconds(20),
                                    serverSignOutBudget: serverSignOutBudget)
     }
 
     private func makeHarness(_ credential: StoredCredential?, server: StubServer, environment: AccountEnvironment? = nil,
                              locked: Bool = false, foreground: Bool = false, mirror: AuthorizationMirror? = nil,
-                             uploads: LiveAccountDevice? = nil, holdingUploadsStop uploadsStop: StubServer.Gate? = nil,
+                             holdingCastingStop castingStop: StubServer.Gate? = nil,
                              network: NetworkConfiguration = NetworkConfiguration(), serverSignOutBudget: Duration = .seconds(3)) -> AccountHarness {
         let log = AccountEventLog()
         let (events, unlock) = AsyncStream.makeStream(of: Void.self)
         let dependencies = dependencies(credential, server: server, log: log, locked: locked, mirror: mirror, unlockEvents: events,
-                                        uploads: uploads, uploadsStop: uploadsStop, network: network, serverSignOutBudget: serverSignOutBudget)
+                                        castingStop: castingStop, network: network, serverSignOutBudget: serverSignOutBudget)
         let harness = AccountHarness(log: log, credentials: dependencies.credentials as! TestCredentialStore, unlock: unlock)
         harness.presence.isForeground = foreground
         let recorder = harness.recorder
@@ -746,29 +685,6 @@ import XCTest
         server.route("GET", "server/ping", .json(#"{"res":"pong"}"#))
         server.route("GET", "users/me", .immichError(401, message: "Authentication required"))
         return server
-    }
-
-    /// `saved`'s backup, loaded as the app loads it, from the golden state of a backup in the
-    /// middle of a run: a queue, a stage in flight, receipts, failures and a notification batch.
-    private func goldenBackup(for saved: StoredCredential) throws -> GoldenBackup {
-        let folder = temporaryDirectory()
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try FixtureLoader.data("backup/state-current.json").write(to: folder.appendingPathComponent("state.json"))
-        let coordinator = BackupCoordinator()
-        try coordinator.load(saved, folder: folder)
-        XCTAssertTrue(coordinator.preferences.automatic)
-        XCTAssertEqual(coordinator.associations.count, 2)
-        return GoldenBackup(coordinator: coordinator, folder: folder)
-    }
-
-    /// The golden backup state as sign-out leaves it: paused, its notification batch ended, and
-    /// automatic backup off unless kept. Everything else, receipts included, is as it was.
-    private static func backupStateAfterSignOut(keepingAutomaticBackup: Bool) throws -> String {
-        var state = LegacyGoldens.backupState()
-        state.paused = true
-        state.transferNotification = nil
-        state.preferences.automatic = keepingAutomaticBackup
-        return try FixtureLoader.canonicalJSON(JSONEncoder().encode(state), unorderedArrays: LegacyGoldens.stateSets)
     }
 
     /// Turns `saved`'s read-only flag on and orders its album shelf, until the test ends.
@@ -846,52 +762,28 @@ final class AccountEventLog: Sendable {
     var all: [String] { events.withLock { $0 } }
 }
 
-/// An account's backup in a folder of the test's, and its state.json as it is now.
-struct GoldenBackup {
-    let coordinator: BackupCoordinator
-    let folder: URL
-
-    /// state.json, canonical.
-    func state() throws -> String {
-        try FixtureLoader.canonicalJSON(Data(contentsOf: folder.appendingPathComponent("state.json")), unorderedArrays: LegacyGoldens.stateSets)
-    }
-}
-
-/// The device-wide services, recording what they are asked. With `uploads`, uploads stop as the
-/// app stops them; with `uploadsStop`, only once the test opens it.
+/// The device-wide services, recording what they are asked. With `castingStop`, casting ends
+/// only once the test opens it.
 final class FakeAccountDevice: AccountDevice {
     let log: AccountEventLog
-    private let uploads: LiveAccountDevice?
-    private let uploadsStop: StubServer.Gate?
+    private let castingStop: StubServer.Gate?
 
-    init(log: AccountEventLog, uploads: LiveAccountDevice? = nil, uploadsStop: StubServer.Gate? = nil) {
+    init(log: AccountEventLog, castingStop: StubServer.Gate? = nil) {
         self.log = log
-        self.uploads = uploads
-        self.uploadsStop = uploadsStop
+        self.castingStop = castingStop
     }
 
-    func activateBackup(_ runtime: AccountRuntime) async {
-        log.append("activateBackup(\(runtime.credential.userID))")
-        await uploads?.activateBackup(runtime)
+    func activateBackup(_ runtime: AccountRuntime) async { log.append("activateBackup(\(runtime.credential.userID))") }
+    func endCasting() async {
+        log.append("endCasting")
+        await castingStop?.wait()
     }
-    func stopUploads(keepingAutomaticBackup: Bool) async {
-        log.append(keepingAutomaticBackup ? "stopUploads(keepingAutomaticBackup)" : "stopUploads")
-        await uploadsStop?.wait()
-        await uploads?.stopUploads(keepingAutomaticBackup: keepingAutomaticBackup)
-    }
-    func endCasting() async { log.append("endCasting") }
     func reloadWidgets() async { log.append("reloadWidgets") }
     func clearNotifications() async { log.append("clearNotifications") }
     func removeLockedPIN(scope: String) async { log.append("removeLockedPIN") }
     func removeNetworkSettings(server: URL) async throws { log.append("removeNetworkSettings") }
     func clearTimelineCaches(scope: String) async { log.append("clearTimelineCaches") }
     func clearDiagnostics() async { log.append("clearDiagnostics") }
-    func readOnlyChanged(_ enabled: Bool) async { log.append("readOnly(\(enabled))") }
-
-    /// The backup state imports reported, in order. They stay out of the event log.
-    private let imports = Mutex<[LegacyImportReport]>([])
-    var transferImports: [LegacyImportReport] { imports.withLock { $0 } }
-    func recordTransferImport(_ report: LegacyImportReport) async { imports.withLock { $0.append(report) } }
 }
 
 /// A credential kept in memory that records saves and removals, and can stand for a Keychain

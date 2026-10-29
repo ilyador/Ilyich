@@ -105,34 +105,6 @@ final class TransportTests: XCTestCase {
         XCTAssertEqual(server.requests("GET", "albums").count, 1)
     }
 
-    // MARK: - Client certificates
-
-    /// Background uploads to the local address are offered the client certificate, like those to
-    /// the server's other addresses; nothing else is.
-    func testClientCertificateIsOfferedForTheLocalEndpoint() throws {
-        let saved = StoredCredential(server: URL(string: "https://photos.example/api")!, token: "session-token", userID: "alice", name: "Owner")
-        let configuration = try NetworkConfiguration(alternateEndpoints: [URL(string: "https://photos.tailnet.example")!],
-                                                     automaticallySwitchEndpoints: true, preferredWifiName: "Home",
-                                                     localEndpoint: URL(string: "https://192.168.1.20:2283")!).validated()
-        func upload(_ address: String, token: String = "session-token", proxy: Bool = false) -> URLRequest {
-            var request = URLRequest(url: URL(string: address)!)
-            if proxy {
-                request.setValue("Basic proxy", forHTTPHeaderField: "Authorization")
-                request.setValue(token, forHTTPHeaderField: "x-immich-user-token")
-            } else { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-            return request
-        }
-        for address in ["https://192.168.1.20:2283/api/assets", "https://photos.example/api/assets", "https://photos.tailnet.example/api/assets"] {
-            XCTAssertTrue(BackgroundUploads.offersCertificate(for: upload(address), saved: saved, configuration: configuration), address)
-        }
-        XCTAssertTrue(BackgroundUploads.offersCertificate(for: upload("https://192.168.1.20:2283/api/assets", proxy: true), saved: saved,
-                                                          configuration: configuration))
-        XCTAssertFalse(BackgroundUploads.offersCertificate(for: upload("https://192.168.1.20:443/api/assets"), saved: saved, configuration: configuration))
-        XCTAssertFalse(BackgroundUploads.offersCertificate(for: upload("https://elsewhere.example/api/assets"), saved: saved, configuration: configuration))
-        XCTAssertFalse(BackgroundUploads.offersCertificate(for: upload("https://192.168.1.20:2283/api/assets", token: "other"), saved: saved,
-                                                           configuration: configuration))
-    }
-
     // MARK: - Streamed answers
 
     /// The sync stream's lines arrive in pieces that cut through them, with either line ending.

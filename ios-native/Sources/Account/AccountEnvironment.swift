@@ -27,15 +27,12 @@ struct AccountEnvironment: Sendable {
     var keepsShelvesOpen = false
     /// Where the offline library is kept: nil for Application Support, a folder for tests.
     var libraryDirectory: URL?
-    /// The account's backup state is imported into its transfers database, which the transfer
-    /// engine runs backup from (REBUILD_ROADMAP.md B9).
-    var importsBackupState = true
+    /// The account keeps a transfers database, which the transfer engine runs backup from
+    /// (REBUILD_ROADMAP.md B9).
+    var keepsTransfers = true
     /// Where the transfers databases are kept: nil for Application Support/IlyichTransfers, a
     /// folder for tests.
     var transfersDirectory: URL?
-    /// The folder that holds each account's Backup/<digest>/state.json: nil for the App Group
-    /// container, a folder for tests.
-    var backupContainer: URL?
     /// URL protocols put in front of the media sessions (thumbnails, previews, originals): nil on
     /// the phone; a UI test can take the media offline with them.
     var mediaProtocolClasses: [AnyClass]?
@@ -76,7 +73,7 @@ struct AccountEnvironment: Sendable {
         environment.networkConfiguration = NetworkConfiguration()
         environment.syncsLibrary = false
         environment.usesDevicePhotos = false
-        environment.importsBackupState = false
+        environment.keepsTransfers = false
         environment.resetsInterfaceState = true
         environment.keepsShelvesOpen = arguments.contains("--ui-testing-shelves-stay-open")
         // The fixture server is shared by every test run, so a launch that wants its media

@@ -6,10 +6,9 @@ import Synchronization
 /// One background URLSession for one TransferSessionID, backup or share-upload, which TransferHost
 /// creates once the process runs the transfer engine (B9).
 ///
-/// New tasks get a version 2 descriptor. A task iOS still holds for an attempt, from this launch,
-/// an earlier one or an earlier build, is adopted by its attempt rather than sent again, and a
-/// legacy task keeps its legacy description, so an older build reinstalled over this one still
-/// recognizes it.
+/// New tasks get a version 2 descriptor. A task iOS still holds for an attempt, from this launch or
+/// an earlier one, is adopted by its attempt rather than sent again. A task a build before B9
+/// described is never adopted (B10): recovery cancels it.
 final class BackgroundTransport: TransferTransport {
     let session: TransferSessionID
     private let tasks: any TransportSession
@@ -148,7 +147,12 @@ final class TransportEventProcessor: TaskEventHandling {
         }
         let descriptor = TaskDescriptor(taskDescription: task.description)
         guard let attempt = descriptor.attempt else {
-            Self.logger.error("Task \(task.id) of \(self.session.rawValue, privacy: .public) ended without a description this app wrote")
+            if descriptor == .legacy {
+                // Nothing applies an answer a build before B9 asked for; its photo is checked again.
+                Self.logger.notice("Task \(task.id) of \(self.session.rawValue, privacy: .public), which an older version of Ilyich started, ended; its answer isn't read")
+            } else {
+                Self.logger.error("Task \(task.id) of \(self.session.rawValue, privacy: .public) ended without a description this app wrote")
+            }
             return
         }
         let outcome = Self.outcome(of: task, response: response, oversized: oversized)

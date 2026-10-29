@@ -6,62 +6,47 @@ import Synchronization
 import XCTest
 @testable import Ilyich
 
-/// The cutover to the transfer engine (rebuild milestone B9), with a fake OS: the account's
-/// state.json imported authoritatively, then the account's TransferRuntime started over fake
-/// background sessions, as the app boots it (architecture section 4). Nothing already backed up is
-/// queued, hashed or sent again; an upload iOS still holds from the earlier build is adopted, and
-/// an answer it already wrote is committed without a request.
+/// The account's transfer runtime as the app boots it (architecture section 4) over a database
+/// B9's import handed to the engine, with a fake OS: nothing already backed up is queued, hashed or
+/// sent again, and an answer iOS already wrote is committed without a request. Since B10 the
+/// state.json B9 left in place goes once nothing can need it, and only then: an upload an older
+/// build started that iOS still holds, a file an older build changed after the import, or an
+/// account no import ever read keeps it, saying why.
 @MainActor final class BootTests: XCTestCase {
     private typealias G = LegacyGoldens
     private static let current = "Backup/\(G.digest)/\(G.currentFolder)"
+    private static let state = "Backup/\(G.digest)/state.json"
 
     // MARK: Nothing backed up goes again
 
-    /// The owner's phone holds tens of thousands of receipts. A state.json at that scale, built the
-    /// way BackupCoordinator writes it and pinned by its digest, imports with every receipt,
-    /// confirmation, failure, album add and preference, and the backup screens read what they read
-    /// from today's backup. Discovery over the same library then queues only the photos never
-    /// backed up and the ones edited since: no confirmed photo gets a job, and nothing is hashed,
-    /// checked or sent.
-    func testGoldenStateAtScaleQueuesNothingAlreadyBackedUp() async throws {
+    /// The owner's phone holds tens of thousands of receipts, which B9 imported. A database at that
+    /// scale starts with every receipt, confirmation, failure, album add and preference as the
+    /// screens read them, and discovery over the same library queues only the photos never backed
+    /// up and the ones edited since: no confirmed photo gets a job, and nothing is hashed, checked
+    /// or sent.
+    func testADatabaseAtScaleQueuesNothingAlreadyBackedUp() async throws {
         let golden = ScaleGolden()
-        let data = try golden.encoded()
-        XCTAssertEqual(LegacyBackupImporter.digest(data), ScaleGolden.digest, "The golden state.json is the one pinned.")
-        let h = try await BootHarness(state: data)
+        let h = try await BootHarness()
         addTeardownBlock { await h.tearDown() }
-
-        let report = try await h.imported()
-        XCTAssertEqual(report.outcome, .imported)
-        XCTAssertEqual(report.comparison?.total, 0, report.summary)
-        XCTAssertEqual(report.comparison?.compared[.receipts], golden.receipts)
-        XCTAssertEqual(report.comparison?.compared[.confirmations], golden.confirmed.count)
-        let meta = try await h.store.meta()
-        XCTAssertEqual(meta.engine, .transfer)
-        XCTAssertTrue(h.group.exists("Backup/\(G.digest)/state.json"), "state.json stays where it is, for the way back.")
+        try await h.store.seedForTest(golden.seed(), importedDigest: "state")
+        let counts = try await h.store.albumUploadCounts()
+        XCTAssertEqual(counts, [ScaleGolden.album: AlbumUploadCount(pending: 4, failed: 1)], "Four photos wait for the album; one's upload failed.")
 
         try await h.start()
-        // The backup screens read the same as from today's backup.
-        let legacy = try h.legacyBackend()
         let engine = h.runtime.backend
-        let legacyFailures = try await legacy.failures(limit: 100).map(Self.shown)
-        let engineFailures = try await engine.failures(limit: 100).map(Self.shown)
-        XCTAssertEqual(engineFailures, legacyFailures)
-        let legacyCounts = try await legacy.albumUploadCounts()
-        let engineCounts = try await engine.albumUploadCounts()
-        XCTAssertEqual(engineCounts, legacyCounts)
-        let legacyPreferences = try await legacy.preferences()
-        let enginePreferences = try await engine.preferences()
-        XCTAssertEqual(enginePreferences, legacyPreferences)
-        let legacyQueue = try await legacy.queuePage(lane: .library, after: nil, limit: 100).map(\.source)
-        let engineQueue = try await engine.queuePage(lane: .library, after: nil, limit: 100).map(\.source)
-        XCTAssertEqual(engineQueue, legacyQueue)
+        let failures = try await engine.failures(limit: 100)
+        XCTAssertEqual(Set(failures.map(\.source)), Set(golden.failures.map { .photo(DeviceAssetID(rawValue: $0)) }))
+        XCTAssertEqual(Set(failures.compactMap(\.displayName)), ["IMG_0.HEIC", "IMG_1.HEIC", "IMG_2.HEIC"])
+        let preferences = try await engine.preferences()
+        XCTAssertEqual(preferences, golden.seed().preferences)
+        let queue = try await engine.queuePage(lane: .library, after: nil, limit: 100).map(\.source)
+        XCTAssertEqual(queue, golden.queue.map { .photo(DeviceAssetID(rawValue: $0)) }, "The queue keeps its order.")
         let snapshot = await Self.first(await engine.snapshots())
         XCTAssertEqual(snapshot?.confirmed, golden.confirmed.count)
         XCTAssertEqual(snapshot?.remaining, golden.queue.count)
         XCTAssertEqual(snapshot?.failed, golden.failures.count)
         let history = try await engine.historyPage(offset: 0, limit: 3).map(\.localID.rawValue)
-        let legacyHistory = try await legacy.historyPage(offset: 0, limit: 3).map(\.localID.rawValue)
-        XCTAssertEqual(history, legacyHistory, "Confirmed uploads keep their order.")
+        XCTAssertEqual(history, [5_999, 5_998, 5_997].map(ScaleGolden.localID), "Confirmed uploads keep their order.")
 
         // The library as Photos has it now: everything backed up, the queue, two photos edited
         // since their backup and seven new ones.
@@ -84,67 +69,14 @@ import XCTest
         XCTAssertEqual(receipts.count, golden.receipts, "Cleanup and the device index read every receipt.")
     }
 
-    /// Today's backup marks itself paused at the end of every run and starts again whenever
-    /// automatic backup is on, so automatic backup on is the automatic intent, run or not; with it
-    /// off a run under way is manual, and anything else paused.
-    func testRunIntentFollowsTodaysBackup() {
-        func intent(automatic: Bool, paused: Bool?) -> RunIntent {
-            var state = Legacy.BackupState()
-            var preferences = Legacy.BackupPreferences()
-            preferences.automatic = automatic
-            state.preferences = preferences
-            state.paused = paused
-            return LegacyBackupPlan.intent(state)
-        }
-        XCTAssertEqual(intent(automatic: true, paused: true), .automatic, "Idle automatic backup keeps running.")
-        XCTAssertEqual(intent(automatic: true, paused: false), .automatic)
-        XCTAssertEqual(intent(automatic: false, paused: false), .manual)
-        XCTAssertEqual(intent(automatic: false, paused: true), .paused)
-        XCTAssertEqual(intent(automatic: false, paused: nil), .paused)
-    }
-
-    // MARK: Uploads in flight at the update
-
-    /// The earlier build's upload of the current photo is still with iOS: the runtime binds it by
-    /// its stage ID and waits, never sending it again. When iOS finishes it, the answer the new
-    /// delegate writes commits the photo, and only then is iOS told its events are handled.
-    func testInFlightLegacyTaskIsAdoptedAndItsDrainAcknowledgedAfterCommit() async throws {
-        let descriptor = String(decoding: try FixtureLoader.data("backup/descriptor-backup.json"), as: UTF8.self)
-        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()),
-                                      backupTasks: [SessionTask(id: 7, description: descriptor, state: .running, sent: 100, expected: 900)])
-        addTeardownBlock { await h.tearDown() }
-        try h.writeGoldenStages()
-        let imported = try await h.imported()
-        XCTAssertEqual(imported.outcome, .imported)
-
-        try await h.start()
-        let bound = try await h.store.job(lane: .library, sourceKey: G.l1)
-        XCTAssertEqual(bound?.state, .submitted, "The photo waits for the task iOS holds.")
-        XCTAssertTrue(h.backupSession.uploads.isEmpty)
-        XCTAssertTrue(h.backupSession.cancelled.isEmpty)
-
-        _ = h.backupSession.handler.task(7, didReceive: Data(#"{"id":"\#(G.originalAsset)","status":"created"}"#.utf8))
-        h.backupSession.handler.taskDidComplete(CompletedTask(id: 7, description: descriptor, httpStatus: 201, failure: nil))
-        h.backupSession.forget(7)
-        h.backupSession.handler.sessionDidFinishEvents()
-
-        try await untilTransfers("The answer commits the photo.") { try await h.store.receipts(for: [G.l1])[G.l1] != nil }
-        await untilTransfers("iOS hears back once it is committed.") { h.acknowledged.value == ["backup:1"] }
-        let receipt = try await h.store.receipts(for: [G.l1])[G.l1]
-        XCTAssertEqual(receipt?.original.id, G.originalAsset)
-        XCTAssertTrue(h.backupSession.uploads.isEmpty, "The photo went once.")
-        XCTAssertTrue(h.server.checks.filter { $0.id == G.l1 }.isEmpty, "Its answer needed no check.")
-    }
-
-    /// BM5: an answer the earlier build's delegate wrote before the update finalizes the photo
-    /// with no request at all.
+    /// BM5: an answer the delegate wrote while the app was gone finalizes the photo with no
+    /// request at all.
     func testSuccessOutcomeFinalizesWithoutPost() async throws {
-        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()))
+        let h = try await BootHarness()
         addTeardownBlock { await h.tearDown() }
-        try h.writeGoldenStages()
-        try FixtureLoader.data("backup/outcome-created.json").write(to: h.group.url(Self.current + "/\(G.currentStage).receipt"))
-        let imported = try await h.imported()
-        XCTAssertEqual(imported.outcome, .imported)
+        try await h.seedImportedGolden()
+        try OutcomeRecord.encoded(OutcomeRecord(receipt: .init(id: G.originalAsset, status: "created"), httpStatus: 201, v: 2))
+            .write(to: h.group.url(Self.current + "/\(G.currentStage).receipt"))
 
         try await h.start()
         let receipt = try await h.store.receipts(for: [G.l1])[G.l1]
@@ -154,101 +86,101 @@ import XCTest
         XCTAssertFalse(h.group.exists(Self.current), "The committed stage goes.")
     }
 
-    // MARK: Import
+    // MARK: Retiring state.json (B10)
 
-    /// BM1: importing twice changes nothing, and so does an app that ended right after the
-    /// import committed. state.json is never renamed or removed: an earlier build reinstalled
-    /// finds it (the critic's correction for B9).
-    func testImportingTwiceIsANoOpAndAnEndAfterCommitLeavesTheFile() async throws {
-        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()))
+    /// The state.json B9 imported and left in place goes at the first start once iOS holds no
+    /// upload an older build started: the database holds everything it says (its digest is the
+    /// one the import recorded). The database is untouched, the stages it refers to stay, and an
+    /// older build's stage folder nothing refers to is swept. The next start finds nothing left.
+    func testStateJSONGoesOnceTheEngineHoldsEverythingItSays() async throws {
+        let h = try await BootHarness()
         addTeardownBlock { await h.tearDown() }
-        let crashed = await LegacyBackupImporter(mode: .authoritative, store: h.store, folder: h.backupFolder, crashingAt: .afterCommit).run()
-        XCTAssertNil(crashed, "The app ended right after the commit.")
-        let first = try await h.store.dump()
-        let again = try await h.imported()
-        XCTAssertEqual(again.outcome, .unchanged)
-        XCTAssertEqual(again.comparison?.total, 0)
-        let third = try await h.imported()
-        XCTAssertEqual(third.outcome, .unchanged)
+        let file = try h.writeState(FixtureLoader.data("backup/state-current.json"))
+        try await h.seedImportedGolden(digest: file)
+        let orphan = try h.writeOldStageFolder()
+        let before = try await h.store.dump()
+
+        try await h.start()
+        XCTAssertEqual(h.runtime.legacyRetirement, .removed)
+        XCTAssertFalse(h.group.exists(Self.state), "state.json is gone.")
+        XCTAssertFalse(h.group.exists(orphan), "An older build's stage folder nothing refers to is swept.")
+        XCTAssertTrue(h.group.exists(Self.current + "/original"), "A stage the database refers to stays.")
         let after = try await h.store.dump()
-        XCTAssertEqual(after.filter { $0.key != "meta" }, first.filter { $0.key != "meta" }, "No row is added twice.")
-        XCTAssertEqual(try h.backupFolderContents(), ["state.json"])
+        XCTAssertEqual(after["receipts"], before["receipts"])
+        XCTAssertEqual(after["confirmations"], before["confirmations"])
+        XCTAssertEqual(after["meta"], before["meta"], "The import's record stays; nothing reads state.json again.")
+
+        try await h.restart()
+        XCTAssertEqual(h.runtime.legacyRetirement, .nothingLeft)
     }
 
-    /// BM8: an earlier build reinstalled over this one backs up from the state.json left in place;
-    /// back on this build, what it did is merged and what the engine did is kept.
-    func testAReinstalledOldBuildsStateMerges() async throws {
-        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()))
+    /// While iOS holds an upload an older build started, state.json stays and nothing is swept:
+    /// recovery cancels the task, logged, and never sends its photo again by itself. Once iOS has
+    /// let go of it, the next start removes the file.
+    func testStateJSONStaysWhileIOSHoldsAnOlderBuildsUpload() async throws {
+        let older = String(decoding: try FixtureLoader.data("backup/descriptor-backup.json"), as: UTF8.self)
+        let h = try await BootHarness(backupTasks: [SessionTask(id: 7, description: older, state: .running, sent: 100, expected: 900)])
         addTeardownBlock { await h.tearDown() }
-        let imported = try await h.imported()
-        XCTAssertEqual(imported.outcome, .imported)
-        // The engine backed up a photo after the cutover.
-        _ = try await h.store.enqueue([TransferRequest(source: .photo(DeviceAssetID(rawValue: "engine-photo")), origin: .discovery, revision: nil)])
-        let stored = try await h.store.job(lane: .library, sourceKey: "engine-photo")
-        let job = try XCTUnwrap(stored)
-        let revision = AssetRevision(referenceSeconds: 790_000_000.5)
-        let completed = try await h.store.complete(TransferCompletion(
-            job: job.id, lease: nil, localID: "engine-photo", revision: revision, assetID: "engine-asset",
-            receipt: TransferReceipt(localID: "engine-photo", revision: revision, original: RemoteCopy(id: "engine-asset", checksum: "e="), motion: nil,
-                                     confirmedAt: nil), confirmedAt: Date(timeIntervalSinceReferenceDate: 790_000_100)))
-        XCTAssertTrue(completed)
+        let file = try h.writeState(FixtureLoader.data("backup/state-current.json"))
+        try await h.seedImportedGolden(digest: file)
+        let orphan = try h.writeOldStageFolder()
 
-        // The older build backed up l3 and found another photo to queue.
-        var older = Self.pausedGolden()
-        let l3Date = Date(timeIntervalSinceReferenceDate: 783_000_000.75)
-        older.confirmed[G.l3] = l3Date
-        older.receipts?[G.l3] = BackupReceipt(modificationDate: l3Date, original: BackupRemoteFile(id: "old-build-asset", checksum: "o="),
-                                              confirmedAt: Date(timeIntervalSinceReferenceDate: 783_000_100))
-        older.queue = [G.l1, G.l6, "older-new-photo"]
-        try h.writeState(JSONEncoder().encode(older))
+        try await h.start()
+        XCTAssertEqual(h.backupSession.cancelled, [7], "The older build's upload is cancelled.")
+        XCTAssertEqual(h.runtime.legacyRetirement, .kept(.olderUploads(1)))
+        XCTAssertTrue(h.group.exists(Self.state))
+        XCTAssertTrue(h.group.exists(orphan), "Nothing is swept while it is with iOS.")
+        XCTAssertTrue(h.backupSession.uploads.isEmpty, "Its photo isn't sent again by recovery.")
+        XCTAssertTrue(LegacyRetirement.Reason.olderUploads(1).text.hasPrefix("1 upload an older version started was still with iOS"))
 
-        let merge = try await h.imported()
-        XCTAssertEqual(merge.outcome, .merged)
-        let receipts = try await h.store.receipts(for: [G.l3, "engine-photo", G.l2])
-        XCTAssertEqual(receipts[G.l3]?.original.id, "old-build-asset", "What the older build backed up is kept.")
-        XCTAssertEqual(receipts["engine-photo"]?.original.id, "engine-asset", "What the engine backed up is kept.")
-        XCTAssertNotNil(receipts[G.l2])
-        let l3Job = try await h.store.job(lane: .library, sourceKey: G.l3)
-        XCTAssertNil(l3Job, "A photo the older build backed up leaves the queue.")
-        let queued = try await h.store.job(lane: .library, sourceKey: "older-new-photo")
-        XCTAssertEqual(queued?.state, .queued)
-        let again = try await h.imported()
-        XCTAssertEqual(again.outcome, .unchanged, "It merges once.")
+        h.backupSession.forget(7)
+        try await h.restart()
+        XCTAssertEqual(h.runtime.legacyRetirement, .removed)
+        XCTAssertFalse(h.group.exists(Self.state))
     }
 
-    /// BM8, after a rollback and re-upgrade: the older build's state.json lists every photo
-    /// backed up before the cutover too. A photo the engine queued again since (an edit, Back up
-    /// selected) keeps its job, since that build confirmed nothing newer of it; an album add for a
-    /// photo with a job waits for that upload's copy rather than the one its receipt names.
-    func testAMergeKeepsWhatTheEngineQueuedSinceTheCutover() async throws {
-        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()))
+    /// A state.json whose digest isn't the one the import recorded was written after it, which
+    /// only an older build does: what it says isn't all in the database, so it stays, unread.
+    func testAStateJSONAnOlderBuildChangedStays() async throws {
+        let h = try await BootHarness()
         addTeardownBlock { await h.tearDown() }
-        let imported = try await h.imported()
-        XCTAssertEqual(imported.outcome, .imported)
-        // l2 was backed up before the cutover; edited since, it is queued again.
-        _ = try await h.store.enqueue([TransferRequest(source: .photo(DeviceAssetID(rawValue: G.l2)), origin: .selection)])
+        let imported = try FixtureLoader.data("backup/state-current.json")
+        try await h.seedImportedGolden(digest: G.digest(of: imported))
+        try h.writeState(FixtureLoader.data("backup/state-9780e9625.json"))
 
-        // The older build didn't upload l2; it added it to an album.
-        var older = Self.pausedGolden()
-        older.pendingAlbumAdds?[G.l2] = [G.otherServerAlbum]
-        try h.writeState(JSONEncoder().encode(older))
-        let merge = try await h.imported()
-        XCTAssertEqual(merge.outcome, .merged)
-        let job = try await h.store.job(lane: .library, sourceKey: G.l2)
-        XCTAssertEqual(job?.state, .queued, "The edit queued since the cutover is still backed up.")
-        let destinations = try await h.store.albumDestinations()
-        let add = destinations.first { $0.localID == G.l2 && $0.albumID == G.otherServerAlbum }
-        XCTAssertNotNil(add)
-        XCTAssertNil(add?.remoteID, "The album gets the copy l2's upload makes, not the one from before the edit.")
+        try await h.start()
+        XCTAssertEqual(h.runtime.legacyRetirement, .kept(.changedSinceImport))
+        XCTAssertEqual(try Data(contentsOf: h.group.url(Self.state)), try FixtureLoader.data("backup/state-9780e9625.json"), "Never read or written.")
+    }
+
+    /// An account whose state.json no import read (last signed in before B9) keeps it: this build
+    /// can't read it. The engine takes the copy B1 made of it as it is (AccountRuntime claims it),
+    /// backs up from it, and leaves that build's stage folders alone.
+    func testAnAccountsStateJSONNoImportReadStays() async throws {
+        let h = try await BootHarness()
+        addTeardownBlock { await h.tearDown() }
+        let file = try h.writeState(FixtureLoader.data("backup/state-current.json"))
+        try await h.seedImportedGolden(digest: file, mode: .shadow, engine: .legacy)
+        let orphan = try h.writeOldStageFolder()
+        let claimed = try await h.store.claimForEngine()
+        XCTAssertTrue(claimed, "The engine takes the copy as it is.")
+        let meta = try await h.store.meta()
+        XCTAssertEqual(meta.legacyImportMode, .shadow, "Its record says no import handed it over.")
+
+        try await h.start()
+        XCTAssertEqual(h.runtime.legacyRetirement, .kept(.neverImported))
+        XCTAssertTrue(h.group.exists(Self.state))
+        XCTAssertTrue(h.group.exists(orphan), "That build's stages stay with its state.json.")
+        let snapshot = await Self.first(await h.runtime.backend.snapshots())
+        XCTAssertEqual(snapshot?.confirmed, 3, "Backup runs on the copy's records.")
     }
 
     /// Cleanup removals Photos committed before the cutover were kept only in the device journal:
     /// each marks its receipt when the receipt is still of the revision removed.
     func testCleanupRemovalsBeforeTheCutoverMarkTheirReceipts() async throws {
-        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()))
+        let h = try await BootHarness()
         addTeardownBlock { await h.tearDown() }
-        let imported = try await h.imported()
-        XCTAssertEqual(imported.outcome, .imported)
+        try await h.seedImportedGolden()
         let removed = Date(timeIntervalSinceReferenceDate: 790_000_000)
         func record(_ ids: [String], expected: [String: Date], account: String, outcome: DeviceMutationResult.Outcome?) -> DeviceJournalRecord {
             let assets = ids.map(DeviceAssetID.init(rawValue:))
@@ -281,7 +213,7 @@ import XCTest
     func testManualRunAsksForWindowsAndEnds() async throws {
         let scheduler = RecordingWindowScheduler()
         let h = try await TransferEngineHarness(scheduler: scheduler)
-        try await h.store.savePreferences(TransferPreferences(Legacy.BackupPreferences()))
+        try await h.store.savePreferences(TransferPreferences())
         try await h.engine.start()
         await untilTransfers("The first plan.") { scheduler.plans == [.none] }
         let gate = TransferGate()
@@ -303,7 +235,7 @@ import XCTest
     func testAManualRunEndsWhenRecoveryCommitsItsLastPhoto() async throws {
         let scheduler = RecordingWindowScheduler()
         let h = try await TransferEngineHarness(scheduler: scheduler)
-        try await h.store.savePreferences(TransferPreferences(Legacy.BackupPreferences()))
+        try await h.store.savePreferences(TransferPreferences())
         _ = try await h.store.enqueue([h.photo("a")])
         // The photo's upload is with iOS, from the process before.
         let job = try await h.requireJob("a")
@@ -368,9 +300,9 @@ import XCTest
     /// The backup screen lists the phone's failed photos only, as it always did, beside its
     /// Remaining count; a shared file's failure shows in Shared files, from the share lane's queue.
     func testTheScreensListEachLanesFailuresWhereTheyAlwaysDid() async throws {
-        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()))
+        let h = try await BootHarness()
         addTeardownBlock { await h.tearDown() }
-        _ = try await h.imported()
+        try await h.seedImportedGolden()
         let share = TransferRequest(source: .shared(batch: UUID(), attachment: "IMG_0002.JPG"), origin: .shareApproval)
         _ = try await h.store.enqueue([share])
         let shared = try await h.store.job(lane: .share, sourceKey: share.source.key)
@@ -389,33 +321,35 @@ import XCTest
 
     /// Signing out switches automatic backup off and pauses (as every build did), cancels the
     /// account's tasks with iOS, and keeps the database and the staged copies (the owner's
-    /// decision).
+    /// decision). Kept, as the sign-out policy may one day say, automatic backup stays on.
     func testSignOutKeepsStagedCopiesAndTheDatabase() async throws {
-        let descriptor = String(decoding: try FixtureLoader.data("backup/descriptor-backup.json"), as: UTF8.self)
-        let h = try await BootHarness(state: try JSONEncoder().encode(Self.pausedGolden()),
-                                      backupTasks: [SessionTask(id: 7, description: descriptor, state: .running, sent: 100, expected: 900)])
-        addTeardownBlock { await h.tearDown() }
-        try h.writeGoldenStages()
-        let imported = try await h.imported()
-        XCTAssertEqual(imported.outcome, .imported)
-        try await h.start()
+        XCTAssertFalse(SignOutPolicy(reason: .user).keepsAutomaticBackup, "Owner question: until it is answered, sign-out switches it off.")
+        XCTAssertFalse(SignOutPolicy(reason: .sessionExpired).keepsAutomaticBackup)
+        for keeping in [false, true] {
+            let key = AttemptKey(attempt: AttemptID(legacy: G.currentStage), scope: G.digest, folder: Self.current)
+            let h = try await BootHarness(backupTasks: [SessionTask(id: 7, description: key.descriptor.taskDescription, state: .running,
+                                                                    sent: 100, expected: 900)])
+            try await h.seedImportedGolden(automaticBackup: true)
+            try await h.start()
 
-        await h.runtime.signOut(keepingAutomaticBackup: false)
-        await h.runtime.stop()
-        XCTAssertEqual(h.backupSession.cancelled, [7], "The account's upload stops with its session.")
-        let preferences = try await h.store.preferences()
-        XCTAssertEqual(preferences?.automatic, false)
-        let state = try await h.store.engineState()
-        XCTAssertEqual(state?.intent, .paused)
-        XCTAssertTrue(h.group.exists(Self.current + "/original"), "The staged copy stays.")
-        let kept = try await h.store.receipts(for: [G.l2])
-        XCTAssertNotNil(kept[G.l2], "The records stay.")
+            await h.runtime.signOut(keepingAutomaticBackup: keeping)
+            await h.runtime.stop()
+            XCTAssertEqual(h.backupSession.cancelled, [7], "The account's upload stops with its session.")
+            let preferences = try await h.store.preferences()
+            XCTAssertEqual(preferences?.automatic, keeping, "keeping: \(keeping): signing in again carries on as sign-out left it.")
+            let state = try await h.store.engineState()
+            XCTAssertEqual(state?.intent, .paused, "keeping: \(keeping)")
+            XCTAssertTrue(h.group.exists(Self.current + "/original"), "The staged copy stays.")
+            let kept = try await h.store.receipts(for: [G.l2])
+            XCTAssertNotNil(kept[G.l2], "The records stay.")
+            await h.tearDown()
+        }
     }
 
     /// The backup screen counts failed photos in Remaining and words the status line as it
     /// always has, whichever engine runs.
     func testTheBackupScreenReadsTheEngineAsBefore() {
-        var preferences = TransferPreferences(Legacy.BackupPreferences())
+        var preferences = TransferPreferences()
         func shown(_ phase: TransferPhase, intent: RunIntent = .automatic, remaining: Int = 0, failed: Int = 0) -> TransferSnapshot {
             EngineBackend.presented(TransferSnapshot(intent: intent, phase: phase, remaining: remaining, confirmed: 5, failed: failed, fileProgress: nil,
                                                      bytesSent: 0, bytesExpected: 0, bytesPerSecond: nil, lastMessage: nil), preferences: preferences)
@@ -435,35 +369,19 @@ import XCTest
 
     // MARK: Support
 
-    /// The golden state with backup idle and automatic backup off, so the engine's loop leaves
-    /// the queue alone and only recovery acts.
-    private static func pausedGolden() -> BackupState {
-        var state = G.backupState()
-        state.preferences.automatic = false
-        state.paused = true
-        return state
-    }
-
-    private static func shown(_ item: TransferQueueItem) -> [String?] {
-        [item.displayName, item.message, item.failedAt.map { String($0.timeIntervalSinceReferenceDate.bitPattern) }, "\(item.source)"]
-    }
-
     private static func first(_ stream: AsyncStream<TransferSnapshot>) async -> TransferSnapshot? {
         for await value in stream { return value }
         return nil
     }
 }
+// MARK: - A database at the owner's scale
 
-// MARK: - The golden state at scale
-
-/// A state.json at the owner's scale: thousands of photos backed up, some Live Photos, some
-/// confirmed without a receipt (Live Photos sent before their video's checksum was kept), a queue
-/// with failures, album adds and linked albums. Encoded with sorted keys, so its bytes, pinned by
-/// their digest, never change; BackupCoordinator writes the same keys in its own order.
+/// What B9's import wrote for a state.json at the owner's scale: thousands of photos backed up,
+/// some Live Photos, some confirmed without a receipt (Live Photos sent before their video's
+/// checksum was kept), a queue with failures, album adds and linked albums.
 struct ScaleGolden {
     static let count = 6_000
     static let base = Date(timeIntervalSinceReferenceDate: 650_000_000.125)
-    static let digest = "89881d5ba4cc38e6fe202d00d8dc84f47ee204a7545e40216054e663c7d26a23"
     static let album = "d4c3b2a1-0f9e-4d8c-b7a6-958473625141"
 
     let confirmed: [String: Date]
@@ -487,53 +405,46 @@ struct ScaleGolden {
     static func localID(_ index: Int) -> String { String(format: "%08X-1D2C-4B3A-8F9E-%012X/L0/001", index, index &* 7_919) }
     static func assetID(_ index: Int) -> String { String(format: "%08x-5a6b-4c7d-8e9f-%012x", index, index &* 104_729) }
 
-    func state() -> BackupState {
-        var preferences = BackupPreferences()
+    func seed() -> TransferSeed {
+        var preferences = TransferPreferences()
         preferences.includedAlbums = [FakeStaging.album]
         preferences.cellularPhotos = true
         preferences.triggerDelay = 60
         preferences.syncAlbums = true
-        var state = BackupState()
-        state.preferences = preferences
-        state.confirmed = confirmed
-        var receipts: [String: BackupReceipt] = [:]
+        var seed = TransferSeed()
+        seed.preferences = preferences
+        seed.intent = .paused
+        seed.confirmations = confirmed.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
         for index in 0..<Self.count where index % 50 != 7 {
             let id = Self.localID(index)
-            let motion = index % 10 == 3 ? BackupRemoteFile(id: Self.assetID(1_000_000 + index), checksum: "m\(index)=") : nil
-            receipts[id] = BackupReceipt(modificationDate: confirmed[id]!, original: BackupRemoteFile(id: Self.assetID(index), checksum: "c\(index)=",
-                                                                                                        byteCount: index % 3 == 0 ? Int64(index) * 1_000 : nil),
-                                         motion: motion, confirmedAt: Self.base.addingTimeInterval(86_400 + Double(index) * 61.25))
+            let video = index % 10 == 3
+            seed.receipts.append(.init(localID: id, modified: confirmed[id]!, originalID: Self.assetID(index), originalChecksum: "c\(index)=",
+                                       originalBytes: index % 3 == 0 ? Int64(index) * 1_000 : nil,
+                                       motionID: video ? Self.assetID(1_000_000 + index) : nil, motionChecksum: video ? "m\(index)=" : nil,
+                                       confirmedAt: Self.base.addingTimeInterval(86_400 + Double(index) * 61.25)))
         }
-        state.receipts = receipts
-        state.queue = queue
-        var failures: [String: BackupFailure] = [:]
-        for (offset, id) in self.failures.enumerated() {
-            failures[id] = BackupFailure(id: id, filename: "IMG_\(offset).HEIC", message: "The server rejected IMG_\(offset).HEIC. Check its supported file formats.",
-                                         date: Self.base.addingTimeInterval(Double(offset) * 3_600.5))
+        seed.jobs = queue.map { id in
+            guard let offset = failures.firstIndex(of: id) else { return TransferSeed.Job(localID: id) }
+            return TransferSeed.Job(localID: id, state: .failed, failure: .init(
+                message: "The server rejected IMG_\(offset).HEIC. Check its supported file formats.",
+                date: Self.base.addingTimeInterval(Double(offset) * 3_600.5), filename: "IMG_\(offset).HEIC"))
         }
-        state.failures = failures
-        state.pendingAlbumAdds = [Self.localID(10): [Self.album], Self.localID(11): [Self.album], queue[0]: [Self.album], queue[3]: [Self.album]]
-        state.linkedAlbums = [FakeStaging.album: Self.album]
-        state.paused = true
-        return state
-    }
-
-    func encoded() throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        return try encoder.encode(state())
+        // Album adds of photos backed up already take their receipt's server ID; queued ones wait.
+        seed.destinations = [(Self.localID(10), Self.album, Self.assetID(10)), (Self.localID(11), Self.album, Self.assetID(11)),
+                             (queue[0], Self.album, nil), (queue[3], Self.album, nil)]
+        seed.linkedAlbums = [(FakeStaging.album, Self.album)]
+        return seed
     }
 }
 
 // MARK: - Harness
 
-/// One account's transfers database, state.json in a throwaway App Group, fake background
+/// One account's transfers database, its Backup folder in a throwaway App Group, fake background
 /// sessions, and the TransferRuntime the app would start over them.
 @MainActor final class BootHarness {
     let group: TemporaryAppGroup
     let folder: URL
     let store: TransferStore
-    let importer: LegacyBackupImporter
     let backupSession: FakeTransportSession
     let shareSession: FakeTransportSession
     let registry: TransportRegistry
@@ -547,14 +458,11 @@ struct ScaleGolden {
 
     var backupFolder: URL { group.url(AccountStoragePaths(LegacyGoldens.account).backup) }
 
-    init(state: Data?, backupTasks: [SessionTask] = []) async throws {
+    init(backupTasks: [SessionTask] = []) async throws {
         group = try TemporaryAppGroup()
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("Boot-" + UUID().uuidString, isDirectory: true)
         store = TransferStore(url: folder.appendingPathComponent("transfers.sqlite"))
-        let backup = group.url(AccountStoragePaths(LegacyGoldens.account).backup)
-        try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
-        if let state { try state.write(to: backup.appendingPathComponent("state.json"), options: .atomic) }
-        importer = LegacyBackupImporter(mode: .authoritative, store: store, folder: backup)
+        try FileManager.default.createDirectory(at: group.url(AccountStoragePaths(LegacyGoldens.account).backup), withIntermediateDirectories: true)
         let backupSession = FakeTransportSession(tasks: backupTasks), shareSession = FakeTransportSession()
         self.backupSession = backupSession
         self.shareSession = shareSession
@@ -566,27 +474,39 @@ struct ScaleGolden {
         }
     }
 
-    /// Runs the import, as the account's runtime does when backup starts.
-    func imported(file: StaticString = #filePath, line: UInt = #line) async throws -> LegacyImportReport {
-        let report = await importer.run()
-        return try XCTUnwrap(report, file: file, line: line)
-    }
-
-    func writeState(_ data: Data) throws {
-        try data.write(to: backupFolder.appendingPathComponent("state.json"), options: .atomic)
-    }
-
-    func backupFolderContents() throws -> [String] {
-        try FileManager.default.contentsOfDirectory(atPath: backupFolder.path).sorted()
-    }
-
-    /// The golden state's staged files, where state.json says they are.
-    func writeGoldenStages() throws {
+    /// The database as B9's import of the golden state.json left it, with the stages' files where
+    /// it says they are, and backup paused, so that only recovery acts. `digest` is the
+    /// state.json's the import recorded; `automaticBackup` keeps the preference on.
+    func seedImportedGolden(digest: String = "state", mode: TransferStore.ImportMode = .authoritative,
+                            engine: TransferStore.Engine = .transfer, automaticBackup: Bool = false) async throws {
+        var seed = LegacyGoldens.importedSeed()
+        seed.preferences.automatic = automaticBackup
+        seed.intent = .paused
+        try await store.seedForTest(seed, importedDigest: digest, mode: mode, engine: engine)
         let current = "Backup/\(LegacyGoldens.digest)/\(LegacyGoldens.currentFolder)"
         try group.write("still of IMG_0001", to: current + "/original")
         try group.write("video of IMG_0001", to: current + "/motion")
         try group.write("<xmp/>", to: current + "/sidecar")
         try group.write("video IMG_0006", to: "Backup/\(LegacyGoldens.digest)/\(LegacyGoldens.suspendedFolder)/original")
+    }
+
+    /// Writes the account's state.json as an older build left it, and returns its digest.
+    @discardableResult
+    func writeState(_ data: Data) throws -> String {
+        try data.write(to: backupFolder.appendingPathComponent("state.json"), options: .atomic)
+        return LegacyGoldens.digest(of: data)
+    }
+
+    /// A stage folder an older build left that nothing refers to, changed an hour ago: past the
+    /// sweep's grace. Returns its path in the App Group.
+    func writeOldStageFolder() throws -> String {
+        let path = "Backup/\(LegacyGoldens.digest)/\(UUID().uuidString)"
+        try group.write("an older build's copy", to: path + "/original")
+        let earlier = Date().addingTimeInterval(-3_600)
+        for item in [path + "/original", path] {
+            try FileManager.default.setAttributes([.modificationDate: earlier], ofItemAtPath: group.url(item).path)
+        }
+        return path
     }
 
     /// Starts the runtime as TransferHost does, routing the sessions' events to it.
@@ -600,17 +520,19 @@ struct ScaleGolden {
             conditionsPermit: { _ in true }, poster: poster)
         let runtime = TransferRuntime(parts)
         self.runtime = runtime
-        let events = registry.events
-        forwarding = Task { for await event in events { runtime.receive(event) } }
+        if forwarding == nil {
+            // One stream for the registry's life: each event goes to the runtime running then.
+            let events = registry.events
+            forwarding = Task { [weak self] in for await event in events { self?.runtime?.receive(event) } }
+        }
         registry.connect()
         try await runtime.start()
     }
 
-    /// Today's backup over the same state.json, for comparing what the screens read.
-    func legacyBackend() throws -> LegacyCoordinatorBackend {
-        let coordinator = BackupCoordinator()
-        try coordinator.load(LegacyGoldens.credential, folder: backupFolder)
-        return LegacyCoordinatorBackend(coordinator: coordinator, inbox: ShareInboxStore())
+    /// The app's next start: the runtime ends, and a new one starts over the same database and sessions.
+    func restart() async throws {
+        await runtime?.stop()
+        try await start()
     }
 
     func tearDown() async {

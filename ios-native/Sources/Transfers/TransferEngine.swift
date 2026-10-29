@@ -37,7 +37,7 @@ struct LeasedJob: Hashable, Sendable {
 /// What a finished job commits.
 enum JobResult: Hashable, Sendable {
     /// A photo the server now holds: its revision when staged, its server ID and the receipt,
-    /// nil for a legacy Live Photo confirmed without its video's checksum.
+    /// nil for a Live Photo an earlier build staged, confirmed without its video's checksum.
     case backedUp(revision: AssetRevision, assetID: String, receipt: TransferReceipt?)
     /// A shared file the server now holds.
     case shared(remoteID: String?)
@@ -118,10 +118,10 @@ struct JobContext: Sendable {
 /// manual run does for every failed photo at its start.
 ///
 /// It runs only on a database it owns (TransferStore.claimForEngine, or B9's authoritative
-/// import), never on the shadow copy a shadow import rewrites.
+/// import).
 actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration {
     enum StartError: Error, Equatable {
-        /// The database is still BackupCoordinator's shadow copy.
+        /// The engine doesn't own the database.
         case notOwned
     }
 
@@ -521,7 +521,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     /// The windows this state asks for: automatic backup's while the preference is on and nothing
-    /// blocks the engine, as BackupLifecycle scheduled them. A manual run asks for them too, even
+    /// blocks the engine, as the old backup scheduled them. A manual run asks for them too, even
     /// with automatic backup off (the owner's decision), until it ends; a pause drops them.
     private func currentPlan() -> SchedulePlan {
         guard intent != .paused, blocker == nil, preferences?.automatic == true || intent == .manual else { return .none }

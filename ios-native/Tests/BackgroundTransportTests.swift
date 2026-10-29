@@ -3,7 +3,7 @@ import Synchronization
 import XCTest
 @testable import Ilyich
 
-/// The dormant background transport (rebuild milestone B5), driven through its session and
+/// The background transport (rebuild milestone B5), driven through its session and
 /// TaskEventHandling seams with a temporary App Group.
 final class BackgroundTransportTests: XCTestCase {
     private typealias G = LegacyGoldens
@@ -42,48 +42,40 @@ final class BackgroundTransportTests: XCTestCase {
         XCTAssertEqual(inventory.tasks(scope: G.digest).map(\.taskID), [id])
     }
 
-    func testLegacyDescriptorAdoptedByStageIDDespitePathForm() async throws {
-        // An earlier build's tasks, described under their day's container path: /private/var for
-        // the backup, /var for the share, both in a container this install no longer has.
+    /// Tasks builds before B9 described, under either container path, belong to no attempt and no
+    /// account (B10): submitting the attempt their stage ID named never adopts one, and when one
+    /// ends, no outcome is written and nothing is reported. Recovery cancels them.
+    func testOlderBuildsTasksAreNeverAdoptedOrAnswered() async throws {
         let backupText = try fixtureText("backup/descriptor-backup.json")
         let shareText = try fixtureText("share/descriptor-share-var.json")
-        XCTAssertTrue(backupText.contains(#"file:\/\/\/private\/var\/mobile\/Containers\/Shared\/AppGroup\/0E4C1B7A"#))
-        XCTAssertTrue(shareText.contains(#"file:\/\/\/var\/mobile\/Containers\/Shared\/AppGroup\/0E4C1B7A"#))
-        let share = try FixtureLoader.decode(Legacy.Descriptor.self, from: "share/descriptor-share-var.json")
         let backups = FakeTransportSession(tasks: [SessionTask(id: 7, description: backupText, state: .running, sent: 1_000, expected: 9_000)])
         let shares = FakeTransportSession(tasks: [SessionTask(id: 9, description: shareText, state: .suspended, sent: 0, expected: 4_000)])
         let log = TransportEventLog()
         let backup = makeTransport(backups, log: log)
-        let sharing = makeTransport(shares, session: .shareUpload)
+        let sharing = makeTransport(shares, session: .shareUpload, log: log)
         let stageKey = key(G.currentStage)
-        let shareKey = key(share.id, folder: Self.shareFolder)
         try group.write("body", to: stageKey.bodyPath)
-        try group.write("body", to: shareKey.bodyPath)
 
         let inventory = await backup.inventory()
-        XCTAssertEqual(inventory.task(for: stageKey.attempt)?.taskID, 7, "Matched by the stage ID, not by the recorded path.")
-        XCTAssertEqual(inventory.tasks(scope: G.digest).map(\.taskID), [7])
+        XCTAssertEqual(inventory.legacy.map(\.taskID), [7])
+        XCTAssertNil(inventory.task(for: stageKey.attempt), "Not matched to the stage ID it named.")
+        XCTAssertTrue(inventory.tasks(scope: G.digest).isEmpty, "Nor to an account.")
         let shareInventory = await sharing.inventory()
-        XCTAssertEqual(shareInventory.task(for: shareKey.attempt)?.taskID, 9)
+        XCTAssertEqual(shareInventory.legacy.map(\.taskID), [9])
+        let cancelled = await backup.cancel(scope: G.digest)
+        XCTAssertEqual(cancelled, 0, "Signing out cancels the account's own tasks; recovery cancels these.")
 
-        // Submitting each attempt adopts its task instead of uploading again, and keeps the legacy
-        // description, which an older build reinstalled over this one still reads.
-        let adoptedBackup = try await backup.submit(Self.request, key: stageKey)
-        let adoptedShare = try await sharing.submit(Self.request, key: shareKey)
-        XCTAssertEqual(adoptedBackup, 7)
-        XCTAssertEqual(adoptedShare, 9)
-        XCTAssertEqual(backups.uploads, [])
-        XCTAssertEqual(shares.uploads, [])
-        XCTAssertEqual(shares.resumed, [9], "A suspended task is resumed when adopted.")
-        XCTAssertEqual(backups.current.map(\.description), [backupText])
-
-        // Its outcome lands in this install's container, where the stage's key looks for it.
+        // When it ends, its answer is neither written nor reported.
         XCTAssertTrue(backups.handler.task(7, didReceive: Data(Self.receiptJSON.utf8)))
         backups.handler.taskDidComplete(CompletedTask(id: 7, description: backupText, httpStatus: 201, failure: nil))
-        let outcome = try XCTUnwrap(try backup.outcome(for: stageKey))
-        XCTAssertEqual(outcome.receipt, OutcomeRecord.Receipt(id: G.originalAsset, status: "created"))
-        guard case .finished(.backup, let completion)? = log.all.last else { return XCTFail("\(log.all)") }
-        XCTAssertEqual(completion, TransportCompletion(taskID: 7, attempt: stageKey.attempt, outcomePath: stageKey.outcomePath, journal: .recorded(outcome)))
+        backups.forget(7)
+        XCTAssertNil(try backup.outcome(for: stageKey))
+        XCTAssertTrue(log.all.isEmpty, "\(log.all)")
+
+        // The attempt is sent as a version 2 task of its own.
+        let submitted = try await backup.submit(Self.request, key: stageKey)
+        XCTAssertEqual(backups.uploads.map(\.id), [submitted])
+        XCTAssertEqual(TaskDescriptor(taskDescription: backups.uploads.first?.description), stageKey.descriptor)
     }
 
     func testAnOutcomeIsNeitherReplayedNorLostBySendingAgain() async throws {
@@ -91,14 +83,14 @@ final class BackgroundTransportTests: XCTestCase {
         let transport = makeTransport(fake)
         let key = key()
         try group.write("body", to: key.bodyPath)
-        // An earlier attempt's failure, as a share retry or a force-quit stage finds it today.
-        try group.write(#"{"error":"cancelled"}"#, to: key.outcomePath)
+        // An earlier try's failure, as a share retry or a force-quit stage finds it.
+        try group.write(#"{"cancelReason":0,"error":"cancelled","errorCode":-999,"errorDomain":"NSURLErrorDomain","v":2}"#, to: key.outcomePath)
         await assertSubmit(transport, key, throws: .unacknowledgedOutcome)
         XCTAssertEqual(fake.uploads, [])
-        let legacy = try XCTUnwrap(try transport.outcome(for: key))
-        XCTAssertNil(legacy.v)
-        XCTAssertNil(legacy.receipt)
-        XCTAssertNil(legacy.httpStatus)
+        let stale = try XCTUnwrap(try transport.outcome(for: key))
+        XCTAssertEqual(stale.cancelReason, 0)
+        XCTAssertNil(stale.receipt)
+        XCTAssertNil(stale.httpStatus)
 
         // Applied as an interrupted attempt, the outcome goes and the body stays, so the attempt is
         // sent again from the body it has.
@@ -204,9 +196,10 @@ final class BackgroundTransportTests: XCTestCase {
         ])
         let transport = makeTransport(fake)
         let cancelled = await transport.cancel(scope: G.digest)
-        XCTAssertEqual(cancelled, 2)
-        XCTAssertEqual(fake.cancelled, [1, 3], "The account's version 2 and legacy backup tasks; a legacy share names no account.")
+        XCTAssertEqual(cancelled, 1)
+        XCTAssertEqual(fake.cancelled, [1], "The account's live version 2 task; tasks older builds described name no account.")
         let inventory = await transport.inventory()
+        XCTAssertEqual(inventory.legacy.map(\.taskID), [3, 4])
         XCTAssertEqual(inventory.foreign.map(\.taskID), [6])
     }
 
@@ -231,10 +224,6 @@ final class BackgroundTransportTests: XCTestCase {
         XCTAssertEqual(existed.value, [true], "The outcome file existed when the task was reported finished.")
         let text = try group.text(key.outcomePath)
         XCTAssertEqual(text, #"{"httpStatus":201,"receipt":{"id":"\#(G.originalAsset)","status":"created"},"v":2}"#)
-        // Older builds read version 2, so an install rolled back over this one still finds the upload.
-        let data = Data(text.utf8)
-        XCTAssertEqual(try JSONDecoder().decode(BackgroundUploads.Outcome.self, from: data).receipt?.id, G.originalAsset)
-        XCTAssertEqual(try Legacy.decoder().decode(Legacy.Outcome.self, from: data).receipt, Legacy.UploadReceipt(id: G.originalAsset, status: "created"))
     }
 
     func testOutcomesRecordWhatHappenedWithoutClassifying() throws {
@@ -315,10 +304,6 @@ final class BackgroundTransportTests: XCTestCase {
         XCTAssertEqual(try transport.outcome(for: key), redirected)
         XCTAssertEqual(log.all, [.finished(.backup, TransportCompletion(taskID: 2, attempt: key.attempt, outcomePath: key.outcomePath,
                                                                         journal: .recorded(redirected)))])
-        // An older build reinstalled over this one reads it as a failure without a status.
-        let legacy = try JSONDecoder().decode(BackgroundUploads.Outcome.self, from: Data(try group.text(key.outcomePath).utf8))
-        XCTAssertNil(legacy.receipt)
-        XCTAssertNil(legacy.httpStatus)
     }
 
     func testAnswersOver64KiBAreCancelledUnread() throws {
@@ -438,6 +423,7 @@ final class BackgroundTransportTests: XCTestCase {
         XCTAssertEqual(disposition("https://photos.example.org/api/assets", token: saved.token), .useCredential)
         XCTAssertEqual(disposition("https://photos.tailnet-1234.ts.net/api/assets", token: saved.token), .useCredential)
         XCTAssertEqual(disposition("http://192.168.1.20:2283/api/assets", token: saved.token), .useCredential, "The local address is the server's too.")
+        XCTAssertEqual(disposition("http://192.168.1.20:443/api/assets", token: saved.token), .performDefaultHandling, "Its port too.")
         XCTAssertEqual(disposition("https://photos.example.org/api/assets", token: saved.token, header: "x-immich-user-token"), .useCredential)
         XCTAssertEqual(disposition("https://elsewhere.example/api/assets", token: saved.token), .performDefaultHandling)
         XCTAssertEqual(disposition("https://photos.example.org/api/assets", token: "someone-else"), .performDefaultHandling)

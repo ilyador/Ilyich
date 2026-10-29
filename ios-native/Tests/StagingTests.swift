@@ -41,7 +41,7 @@ final class StagingTests: XCTestCase {
         try group.write("{}", to: share + "/manifest.json")
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-60)], ofItemAtPath: group.url(recent + "/original").path)
 
-        // Before the authoritative import, state.json's stages are BackupCoordinator's.
+        // A state.json no import read keeps its build's stages: nothing reads it any more (B10).
         let before = area.sweep(keeping: StagingReferences(), legacyImported: false, now: now)
         XCTAssertEqual(before, StagingArea.Sweep(skipped: .legacyState))
         XCTAssertTrue(group.exists(orphan))
@@ -67,7 +67,7 @@ final class StagingTests: XCTestCase {
     }
 
     /// Signing out removes every stage folder of the account and nothing else; the database keeps
-    /// the jobs, which stage again. Before the import, BackupCoordinator's stages stay.
+    /// the jobs, which stage again. A state.json no import read keeps its build's stages.
     func testSignOutRemovesScopeStaging() throws {
         let stages = (0..<3).map { _ in Self.backup + "/" + UUID().uuidString }
         for stage in stages { try group.write("still", to: stage + "/original") }
@@ -83,7 +83,7 @@ final class StagingTests: XCTestCase {
         XCTAssertEqual(removed.folders, 3)
         XCTAssertEqual(removed.files, 3)
         XCTAssertTrue(stages.allSatisfy { !group.exists($0) })
-        XCTAssertTrue(group.exists(Self.backup + "/state.json"), "state.json survives sign-out, as today.")
+        XCTAssertTrue(group.exists(Self.backup + "/state.json"), "state.json survives sign-out.")
         XCTAssertTrue(group.exists(otherAccount + "/original"))
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: group.url("ShareInbox").path).count, 1)
 

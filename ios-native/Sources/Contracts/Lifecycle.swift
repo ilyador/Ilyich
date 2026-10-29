@@ -77,7 +77,7 @@ struct SchedulePlan: Hashable, Sendable {
     /// No windows.
     static let none = SchedulePlan(processing: nil, refresh: nil)
 
-    /// What automatic backup asks for, as BackupLifecycle schedules today: a processing window,
+    /// What automatic backup asks for, as the old backup scheduled it: a processing window,
     /// needing the network, no sooner than the trigger delay (at least 30 s), and a refresh window
     /// after five minutes.
     static func automatic(requireCharging: Bool, triggerDelay: Int) -> SchedulePlan {

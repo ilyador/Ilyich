@@ -7,14 +7,16 @@ import SQLite3
 /// lock of it is ever held in the App Group when iOS suspends the app, excluded from iCloud backup
 /// and readable after the first unlock. It runs on a queue of its own and opens on first use.
 ///
-/// From the cutover (B9) LegacyBackupImporter imports state.json into it authoritatively, once,
-/// and the transfer engine owns it; before, B1 kept it as a shadow copy of state.json. The engine
-/// writes only a database it owns, which no shadow import touches.
+/// The transfer engine owns it. B9 imported an account's state.json into it authoritatively, once;
+/// before, B1 kept it as a shadow copy of state.json. B10 retired both imports: a database no
+/// import handed over is claimed by the engine as it is (claimForEngine), and its meta keeps the
+/// last import's digest and mode, which tell when the state.json left beside it can go
+/// (LegacyRetirement). The engine writes only a database it owns.
 ///
 /// Tables:
-/// - meta: schema, engine (legacy while BackupCoordinator is authoritative, transfer once this
-///   database is), the digest, mode and time of the last import of state.json, and the comparison
-///   made after it;
+/// - meta: schema, engine (legacy for a copy no import handed over, transfer once the engine owns
+///   it), the digest, mode and time of the last import of state.json, and the comparison made
+///   after it, which nothing reads since B10;
 /// - preferences(id=1, json): TransferPreferences;
 /// - engine_state(id=1): the run intent, an account blocker and the last message;
 /// - jobs: one per photo to upload, in seq order, UNIQUE(lane, source_key). The library lane's
@@ -22,8 +24,8 @@ import SQLite3
 ///   class, message, time and the file name shown with it;
 /// - stages: files staged for a job, in the App Group, paths relative to it. A suspended stage was
 ///   kept after a failed attempt because part of it already reached the server;
-/// - attempts: one upload of a part, named by its attempt ID, which for a legacy stage is the stage
-///   ID that already names its body, outcome file and background task;
+/// - attempts: one upload of a part, named by its attempt ID, which for a stage B9 imported is the
+///   stage ID that already names its body and outcome file;
 /// - confirmations and receipts: what was backed up, keyed by local identifier;
 /// - album_destinations: albums a backed-up photo still has to join, runnable once remote_id is
 ///   known; stack_tasks; linked_albums; share_consumed; notification_batches.
@@ -34,10 +36,16 @@ import SQLite3
 actor TransferStore: ReceiptQuery {
     static let schemaVersion = 1
 
-    /// Who the records serve: BackupCoordinator, of which this database is a copy, or the transfer
-    /// engine, which owns it from B9 on.
+    /// Who the records serve: `legacy` for a copy of an earlier build's state.json that no import
+    /// handed over, or the transfer engine, which owns the database from B9 on.
     enum Engine: String, Sendable {
         case legacy, transfer
+    }
+
+    /// How the last import of an earlier build's state.json wrote the database: a shadow copy
+    /// (B1) or the import that handed it to the engine (B9). Nothing imports since B10.
+    enum ImportMode: String, Sendable {
+        case shadow, authoritative
     }
 
     /// The account's database: Application Support/IlyichTransfers/<digest>.sqlite, or
@@ -73,116 +81,16 @@ actor TransferStore: ReceiptQuery {
     func meta() throws -> TransferMeta {
         let db = try database()
         var meta = TransferMeta(schema: Self.schemaVersion, engine: .legacy)
-        try db.run("SELECT schema,engine,legacy_import_digest,legacy_import_mode,legacy_imported_at,legacy_report_digest,legacy_report FROM meta WHERE id=1") { row in
+        try db.run("SELECT schema,engine,legacy_import_digest,legacy_import_mode,legacy_imported_at FROM meta WHERE id=1") { row in
             meta = TransferMeta(schema: Int(row.integer(0) ?? 0), engine: row.text(1).flatMap(Engine.init(rawValue:)) ?? .legacy,
-                                legacyImportDigest: row.text(2), legacyImportMode: row.text(3).flatMap(LegacyBackupImporter.Mode.init(rawValue:)),
-                                legacyImportedAt: row.date(4), legacyReportDigest: row.text(5), legacyReport: row.text(6))
+                                legacyImportDigest: row.text(2), legacyImportMode: row.text(3).flatMap(ImportMode.init(rawValue:)),
+                                legacyImportedAt: row.date(4))
         }
         return meta
     }
 
-    /// Keeps the comparison made of the state.json whose digest is `digest`, for the next launch.
-    func saveLegacyReport(_ report: String, digest: String) throws {
-        try database().run("UPDATE meta SET legacy_report_digest=?,legacy_report=? WHERE id=1", [.text(digest), .text(report)])
-    }
-
-    // MARK: - Legacy import
-
-    /// Replaces the library lane's records with what `plan` says, and records `digest` with them,
-    /// in one transaction (BM1): a crash before the commit leaves the database as it was, and one
-    /// after it leaves a complete import that the same digest finds again. The share lane is left
-    /// alone. An authoritative import hands the database to the transfer engine in the same
-    /// transaction. `crash` simulates the app ending at a point, for tests.
-    func replace(with plan: LegacyBackupPlan, digest: String, mode: LegacyBackupImporter.Mode, at date: Date,
-                 crashingAt crash: LegacyImportCrashPoint? = nil) throws {
-        let db = try database()
-        func stop(_ point: LegacyImportCrashPoint) throws {
-            if crash == point { throw SimulatedCrash(point: point) }
-        }
-        try db.transaction {
-            for statement in [
-                "DELETE FROM attempts WHERE job_id IN (SELECT id FROM jobs WHERE lane='library')",
-                "DELETE FROM stages WHERE job_id IN (SELECT id FROM jobs WHERE lane='library')",
-                "DELETE FROM jobs WHERE lane='library'",
-                "DELETE FROM confirmations", "DELETE FROM receipts", "DELETE FROM album_destinations", "DELETE FROM stack_tasks",
-                "DELETE FROM linked_albums", "DELETE FROM notification_batches WHERE kind='backup'",
-                "DELETE FROM preferences", "DELETE FROM engine_state",
-            ] { try db.run(statement) }
-            try stop(.afterClearing)
-
-            try db.run("INSERT INTO preferences(id,json) VALUES(1,?)", [.text(TransferJSON.encode(plan.preferences))])
-            try db.run("INSERT INTO engine_state(id,intent,blocker,last_message) VALUES(1,?,NULL,?)",
-                       [.text(plan.intent.rawValue), .optionalText(plan.lastMessage)])
-            var jobIDs: [String: Int64] = [:]
-            for (seq, job) in plan.jobs.enumerated() {
-                try db.run("""
-                    INSERT INTO jobs(lane,source_key,origin,state,seq,retry_count,error_class,error_message,error_at,display_name,batch_id) \
-                    VALUES('library',?,?,?,?,0,?,?,?,?,?)
-                    """, [.text(job.localID), .text(job.origin.rawValue), .text(job.state.rawValue), .integer(Int64(seq)),
-                          .optionalText(job.failure == nil ? nil : "item"), .optionalText(job.failure?.message),
-                          .optionalDate(job.failure?.date), .optionalText(job.failure?.filename),
-                          .optionalText(job.batch?.uuidString)])
-                jobIDs[job.localID] = db.lastInsertedRow
-            }
-            for stage in plan.stages {
-                guard let job = jobIDs[stage.localID] else { continue }
-                try db.run("""
-                    INSERT OR IGNORE INTO stages(stage_id,job_id,folder,modification_date,original_json,motion_json,sidecar_json,fields_json,\
-                    is_video,motion_remote_id,motion_checksum,original_checksum,suspended) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?)
-                    """, [.text(stage.stageID), .integer(job), .text(stage.folder), .date(stage.modificationDate),
-                          .text(TransferJSON.encode(stage.original)), .optionalText(stage.motion.map(TransferJSON.encode)),
-                          .optionalText(stage.sidecar.map(TransferJSON.encode)), .text(TransferJSON.encode(stage.fields)),
-                          .bool(stage.isVideo), .optionalText(stage.motionRemoteID), .optionalText(stage.motionChecksum), .bool(stage.suspended)])
-                try db.run("INSERT OR IGNORE INTO attempts(id,job_id,part,session,state,body_path) VALUES(?,?,?,?,?,?)",
-                           [.text(stage.stageID), .integer(job), .text(stage.part.rawValue), .text(TransferSessionID.backup.rawValue),
-                            .text(AttemptState.interrupted.rawValue), .optionalText(stage.bodyPath)])
-            }
-            try stop(.afterJobs)
-
-            for (index, (localID, modified)) in plan.confirmations.enumerated() {
-                if index % 4_096 == 0 { try Task.checkCancellation() }
-                try db.run("INSERT OR REPLACE INTO confirmations(local_id,modification_date,confirmed_at) VALUES(?,?,NULL)",
-                           [.text(localID), .date(modified)])
-            }
-            for (index, (localID, receipt)) in plan.receipts.enumerated() {
-                if index % 4_096 == 0 { try Task.checkCancellation() }
-                try db.run("""
-                    INSERT OR REPLACE INTO receipts(local_id,modification_date,original_id,original_checksum,original_bytes,motion_id,\
-                    motion_checksum,motion_bytes,confirmed_at,verified_at,local_deleted_at) VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL)
-                    """, [.text(localID), .date(receipt.modificationDate), .text(receipt.original.id), .text(receipt.original.checksum),
-                          .optionalInteger(receipt.original.byteCount), .optionalText(receipt.motion?.id), .optionalText(receipt.motion?.checksum),
-                          .optionalInteger(receipt.motion?.byteCount), .optionalDate(receipt.confirmedAt)])
-            }
-            try stop(.afterReceipts)
-
-            for destination in plan.destinations {
-                try db.run("INSERT OR IGNORE INTO album_destinations(local_id,album_id,remote_id,state,attempts,error) VALUES(?,?,?,'pending',0,NULL)",
-                           [.text(destination.localID), .text(destination.albumID), .optionalText(destination.remoteID)])
-            }
-            for (device, album) in plan.linkedAlbums {
-                try db.run("INSERT OR REPLACE INTO linked_albums(device_album_id,album_id) VALUES(?,?)", [.text(device), .text(album)])
-            }
-            if let batch = plan.batch {
-                try db.run("""
-                    INSERT OR REPLACE INTO notification_batches(id,kind,total,completed,failed,started_posted,terminal_posted) \
-                    VALUES(?,'backup',?,?,?,1,0)
-                    """, [.text(batch.id.uuidString), .integer(Int64(batch.total)), .integer(Int64(batch.completed)),
-                          .optionalInteger(batch.terminalFailures.map(Int64.init))])
-            }
-            try db.run("""
-                UPDATE meta SET legacy_import_digest=?,legacy_import_mode=?,legacy_imported_at=?,engine=?,\
-                legacy_report_digest=NULL,legacy_report=NULL WHERE id=1
-                """, [.text(digest), .text(mode.rawValue), .date(date), .text((mode == .authoritative ? Engine.transfer : .legacy).rawValue)])
-            try Task.checkCancellation()
-            try stop(.beforeCommit)
-        }
-        // A rebuild passes every row through the log; give its space back.
-        try? db.run("PRAGMA wal_checkpoint(TRUNCATE)")
-        try stop(.afterCommit)
-    }
-
-    /// Everything the library lane holds, for comparing it with state.json. Jobs come in seq
-    /// order; everything else in key order.
+    /// Everything the library lane holds, as the database keeps it, for tests that compare it
+    /// with what they wrote. Jobs come in seq order; everything else in key order.
     func contents() throws -> TransferStoreContents {
         let db = try database()
         var contents = TransferStoreContents()
@@ -483,16 +391,6 @@ enum TransferStoreError: Error, Equatable {
     case sqlite(Int32)
 }
 
-/// A crash simulated at a point of an import, for tests.
-struct SimulatedCrash: Error, Equatable {
-    let point: LegacyImportCrashPoint
-}
-
-/// Points inside an import where a test can make the app end.
-enum LegacyImportCrashPoint: Sendable, CaseIterable {
-    case afterClearing, afterJobs, afterReceipts, beforeCommit, afterCommit
-}
-
 /// An upload attempt's state (architecture section 3).
 enum AttemptState: String, Sendable {
     case created, bodyWritten, submitted, interrupted, completed, failed, abandoned
@@ -506,11 +404,10 @@ enum AttemptPart: String, Sendable {
 struct TransferMeta: Equatable, Sendable {
     var schema: Int
     var engine: TransferStore.Engine
+    /// The SHA-256 of the state.json the last import read (or merged), "absent" when there was none.
     var legacyImportDigest: String?
-    var legacyImportMode: LegacyBackupImporter.Mode?
+    var legacyImportMode: TransferStore.ImportMode?
     var legacyImportedAt: Date?
-    var legacyReportDigest: String?
-    var legacyReport: String?
 }
 
 /// A finished job, ready to commit.
@@ -523,44 +420,37 @@ struct TransferCompletion: Sendable {
     let revision: AssetRevision
     /// The still or video's server ID, which the albums it waits for take.
     let assetID: String
-    /// Nil for a legacy Live Photo without its video's checksum, confirmed without a receipt. A
-    /// receipt without its own confirmation time takes `confirmedAt`.
+    /// Nil for a Live Photo without its video's checksum (one an earlier build staged), confirmed
+    /// without a receipt. A receipt without its own confirmation time takes `confirmedAt`.
     let receipt: TransferReceipt?
     let confirmedAt: Date
 }
 
-/// A staged file, relative to the App Group, or its recorded absolute URL when it lies outside
-/// the Backup and ShareInbox folders.
+/// A staged file, relative to the App Group, or, for a stage B9 imported, its recorded absolute URL
+/// when it lies outside the Backup and ShareInbox folders.
 struct StagedFile: Codable, Hashable, Sendable {
     let path: String
     let filename: String
     let contentType: String
 }
 
-/// Backup preferences as the transfers database keeps them: BackupPreferences' keys, with album
-/// sets written as sorted arrays and keys sorted, so the same preferences always give the same text.
+/// Backup preferences as the transfers database keeps them: the keys earlier builds' backup
+/// preferences had, with album sets written as sorted arrays and keys sorted, so the same
+/// preferences always give the same text.
 struct TransferPreferences: Codable, Equatable, Sendable {
-    var includedAlbums: Set<String>
-    var excludedAlbums: Set<String>
-    var cellularPhotos: Bool
-    var cellularVideos: Bool
-    var downloadCloudOriginals: Bool
-    var automatic: Bool
-    var requireCharging: Bool
-    var triggerDelay: Int
-    var syncAlbums: Bool
+    var includedAlbums: Set<String> = []
+    var excludedAlbums: Set<String> = []
+    var cellularPhotos = false
+    var cellularVideos = false
+    var downloadCloudOriginals = false
+    var automatic = false
+    var requireCharging = false
+    /// Seconds automatic backup waits after a change, from 0 to an hour.
+    var triggerDelay = 30
+    var syncAlbums = false
 
-    init(_ legacy: Legacy.BackupPreferences) {
-        includedAlbums = legacy.includedAlbums
-        excludedAlbums = legacy.excludedAlbums
-        cellularPhotos = legacy.cellularPhotos
-        cellularVideos = legacy.cellularVideos
-        downloadCloudOriginals = legacy.downloadCloudOriginals
-        automatic = legacy.automatic
-        requireCharging = legacy.requireCharging
-        triggerDelay = legacy.triggerDelay
-        syncAlbums = legacy.syncAlbums
-    }
+    /// Backup's defaults: no albums chosen, nothing on cellular, automatic backup off.
+    init() {}
 
     private enum CodingKeys: String, CodingKey {
         case includedAlbums, excludedAlbums, cellularPhotos, cellularVideos, downloadCloudOriginals

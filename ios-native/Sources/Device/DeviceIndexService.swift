@@ -1,5 +1,4 @@
 import Foundation
-import Observation
 
 /// What the device index reads of the Photos library (PhotoKitIndexReader over the app's one
 /// adapter; tests fake it).
@@ -36,8 +35,8 @@ struct DeviceIndexBackupInputs: Equatable, Sendable {
     var receipts: [String: CleanupReceipt] = [:]
 }
 
-/// Backup's preferences and receipts for the device index: the transfers database's, or on the
-/// way back today's backup state (CutoverReceipts), read as ReceiptRepository reads the receipts.
+/// Backup's preferences and receipts for the device index: the transfers database's
+/// (CutoverReceipts), read as ReceiptRepository reads the receipts.
 protocol DeviceIndexBackupSource: Sendable {
     /// The account's inputs, or nil while its backup state isn't the one taken up.
     func inputs(account: String) async -> DeviceIndexBackupInputs?
@@ -563,70 +562,4 @@ struct LibraryIndexIdentities: DeviceIndexServer {
     }
 
     func changes() async -> AsyncStream<LibraryChange> { await libraryChanges() }
-}
-
-/// The device index's inputs from today's backup state, on the way back (until B10). They count only while the
-/// account's backup state is the one taken up; reading them never takes it up.
-struct LegacyBackupIndexInputs: DeviceIndexBackupSource {
-    private let coordinator: @MainActor @Sendable () -> BackupCoordinator
-
-    init(coordinator: @escaping @MainActor @Sendable () -> BackupCoordinator = { .shared }) {
-        self.coordinator = coordinator
-    }
-
-    func inputs(account: String) async -> DeviceIndexBackupInputs? {
-        let coordinator = coordinator
-        let read = await MainActor.run { () -> (BackupPreferences, [String: BackupReceipt])? in
-            let backup = coordinator()
-            guard let receipts = backup.cleanupReceipts(scope: account) else { return nil }
-            return (backup.preferences, receipts)
-        }
-        guard let (preferences, legacy) = read else { return nil }
-        // Converted off the main actor.
-        var receipts: [String: CleanupReceipt] = [:]
-        receipts.reserveCapacity(legacy.count)
-        for (localID, receipt) in legacy { receipts[localID] = CleanupReceipt(localID: localID, receipt) }
-        return DeviceIndexBackupInputs(included: preferences.includedAlbums, excluded: preferences.excludedAlbums, receipts: receipts)
-    }
-
-    func changes() async -> AsyncStream<Void> {
-        let coordinator = coordinator
-        return await MainActor.run { BackupInputsWatch.stream(coordinator()) }
-    }
-}
-
-/// Follows the backup state's albums, receipts and account through Observation, so nothing polls.
-@MainActor private final class BackupInputsWatch {
-    private let coordinator: BackupCoordinator
-    private let continuation: AsyncStream<Void>.Continuation
-    private var stopped = false
-
-    private init(coordinator: BackupCoordinator, continuation: AsyncStream<Void>.Continuation) {
-        self.coordinator = coordinator
-        self.continuation = continuation
-    }
-
-    static func stream(_ coordinator: BackupCoordinator) -> AsyncStream<Void> {
-        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
-        let watch = BackupInputsWatch(coordinator: coordinator, continuation: continuation)
-        continuation.onTermination = { _ in Task { @MainActor in watch.stopped = true } }
-        watch.arm()
-        return stream
-    }
-
-    private func arm() {
-        guard !stopped else { return }
-        withObservationTracking {
-            _ = coordinator.preferences.includedAlbums
-            _ = coordinator.preferences.excludedAlbums
-            _ = coordinator.associations
-            _ = coordinator.activeScope
-        } onChange: { [weak self] in
-            Task { @MainActor in
-                guard let self, !self.stopped else { return }
-                self.continuation.yield()
-                self.arm()
-            }
-        }
-    }
 }

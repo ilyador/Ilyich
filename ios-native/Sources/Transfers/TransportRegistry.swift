@@ -5,9 +5,9 @@ import Synchronization
 /// never twice, whichever launch path asks first (launch, background events or the engine), with
 /// their events merged into one stream for the transfer engine.
 ///
-/// Only TransferHost creates one, once the process runs the transfer engine (B9): a live registry
-/// beside today's BackgroundUploads would open a second session for the same identifier.
-/// scripts/check-single-engine.sh fails the build if code outside this folder names it.
+/// Only TransferHost creates one, once, when the process starts the transfer engine: a second
+/// registry would open a second session for the same identifier. scripts/check-single-engine.sh
+/// fails the build if code outside this folder names it.
 final class TransportRegistry: Sendable {
     typealias Factory = @Sendable (TransferSessionID, _ emit: @escaping @Sendable (TransportEvent) -> Void) -> BackgroundTransport
 

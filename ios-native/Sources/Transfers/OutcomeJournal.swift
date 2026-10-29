@@ -8,7 +8,7 @@ protocol OutcomeJournaling: Sendable {
     /// The file a path names, or nil when the App Group is unavailable.
     func url(for path: String) -> URL?
     func write(_ record: OutcomeRecord, to path: String) throws
-    /// The outcome at a path, legacy or version 2, or nil when there is no file.
+    /// The outcome at a path, or nil when there is no file.
     func read(_ path: String) throws -> OutcomeRecord?
     func exists(_ path: String) -> Bool
     /// Deletes a file. A file that is already gone is not an error.

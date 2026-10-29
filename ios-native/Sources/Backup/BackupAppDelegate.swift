@@ -20,14 +20,13 @@ import UIKit
         // Photos access may have changed in Settings meanwhile.
         let photos = PhotoKitAdapter.shared
         Task { await photos.refreshAccess() }
-        TransferHost.shared.becameActive()
     }
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         OrientationLock.mask
     }
-    /// The session's completion goes to the process's backup engine, which answers it once what the
-    /// session delivered is committed, or at iOS's deadline.
+    /// The session's completion goes to the transfer engine, which answers it once what the session
+    /// delivered is committed, or at iOS's deadline.
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
         let completion = SystemCompletion(completionHandler)
