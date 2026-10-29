@@ -85,123 +85,59 @@ struct TrashView: View {
     let pipeline: MediaPipeline
     let onOpenAsset: (Asset) -> Void
     @Environment(\.mutations) private var mutations
-    @State private var assets: [Asset] = []
-    @State private var buckets: [TimeBucket] = []
-    @State private var nextBucket = 0
-    @State private var loading = false
-    @State private var initialized = false
-    @State private var selection = Set<String>()
-    @State private var failure: FeatureFailure?
+    @Environment(\.libraryBus) private var bus
+    /// What the Trash shows and does, following the account's changes (G1).
+    @State private var trash: TrashModel
     @State private var confirmPermanent = false
     @State private var confirmAll = false
     @State private var emptyAll = false
-    @State private var trashEnabled: Bool?
-    @State private var resultMessage: String?
+
+    init(api: APIClient, pipeline: MediaPipeline, onOpenAsset: @escaping (Asset) -> Void) {
+        self.api = api; self.pipeline = pipeline; self.onOpenAsset = onOpenAsset
+        _trash = State(initialValue: TrashModel(api: api))
+    }
+
     var body: some View {
         ScrollView {
-            if trashEnabled == false { FeatureEmpty(title: "Trash is turned off", symbol: "trash.slash", description: "Your server does not keep deleted photos in trash.") }
-            if let resultMessage { Text(resultMessage).font(.subheadline).foregroundStyle(.secondary).padding() }
-            if trashEnabled == true && !loading && initialized && assets.isEmpty { FeatureEmpty(title: "Trash is empty", symbol: "trash", description: "Deleted photos stay here until your server’s retention period ends.") }
+            if trash.trashEnabled == false { FeatureEmpty(title: "Trash is turned off", symbol: "trash.slash", description: "Your server does not keep deleted photos in trash.") }
+            if let resultMessage = trash.resultMessage { Text(resultMessage).font(.subheadline).foregroundStyle(.secondary).padding() }
+            if trash.trashEnabled == true && !trash.loading && trash.initialized && trash.assets.isEmpty { FeatureEmpty(title: "Trash is empty", symbol: "trash", description: "Deleted photos stay here until your server’s retention period ends.") }
             LazyVGrid(columns: Array(repeating: .init(.flexible(), spacing: 2), count: 3), spacing: 2) {
-                ForEach(assets) { asset in
-                    Button { if !selection.insert(asset.id).inserted { selection.remove(asset.id) } } label: {
+                ForEach(trash.assets) { asset in
+                    Button { if !trash.selection.insert(asset.id).inserted { trash.selection.remove(asset.id) } } label: {
                         FeatureAssetImage(pipeline: pipeline, asset: asset).aspectRatio(1, contentMode: .fit)
-                            .overlay(alignment: .topTrailing) { Image(systemName: selection.contains(asset.id) ? "checkmark.circle.fill" : "circle").symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.6)).padding(7) }
+                            .overlay(alignment: .topTrailing) { Image(systemName: trash.selection.contains(asset.id) ? "checkmark.circle.fill" : "circle").symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.6)).padding(7) }
                     }.buttonStyle(.plain).contextMenu { Button("Preview") { onOpenAsset(asset) } }.accessibilityLabel("Select \(asset.displayName)")
                 }
             }
-            if loading { ProgressView().padding(30) }
-            if nextBucket < buckets.count { Button("Load more") { Task { await loadNext() } }.padding() }
-        }.navigationTitle(selection.isEmpty ? "Trash" : "\(selection.count) selected")
+            if trash.loading { ProgressView().padding(30) }
+            if trash.nextBucket < trash.buckets.count { Button("Load more") { Task { await trash.loadNext() } }.padding() }
+        }.navigationTitle(trash.selection.isEmpty ? "Trash" : "\(trash.selection.count) selected")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { Button(selection.count == assets.count && !assets.isEmpty ? "Deselect" : "Select loaded") { selection = selection.count == assets.count ? [] : Set(assets.map(\.id)) }.disabled(assets.isEmpty) }
+            ToolbarItem(placement: .topBarTrailing) { Button(trash.selection.count == trash.assets.count && !trash.assets.isEmpty ? "Deselect" : "Select loaded") { trash.selection = trash.selection.count == trash.assets.count ? [] : Set(trash.assets.map(\.id)) }.disabled(trash.assets.isEmpty) }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button("Restore all items") { emptyAll = false; confirmAll = true }
                     Button("Empty trash", role: .destructive) { emptyAll = true; confirmAll = true }
                 } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Trash actions")
-                    .disabled(loading || trashEnabled != true || buckets.isEmpty).requiresWriteAccess()
+                    .disabled(trash.loading || trash.trashEnabled != true || trash.buckets.isEmpty).requiresWriteAccess()
             }
             ToolbarItemGroup(placement: .bottomBar) {
-                Button("Restore", systemImage: "arrow.uturn.backward") { Task { await restore() } }.disabled(selection.isEmpty || loading).requiresWriteAccess()
+                Button("Restore", systemImage: "arrow.uturn.backward") { Task { await trash.restoreSelected() } }.disabled(trash.selection.isEmpty || trash.loading).requiresWriteAccess()
                 Spacer()
-                Button("Delete forever", systemImage: "trash", role: .destructive) { confirmPermanent = true }.disabled(selection.isEmpty || loading).requiresWriteAccess()
+                Button("Delete forever", systemImage: "trash", role: .destructive) { confirmPermanent = true }.disabled(trash.selection.isEmpty || trash.loading).requiresWriteAccess()
             }
         }
-        .task { await reload() }.refreshable { await reload() }
-        // Photos restored or deleted, here or from their viewer, leave in place.
-        .onMutationApplied(apply)
-        .confirmationDialog("Permanently delete \(selection.count) items?", isPresented: $confirmPermanent, titleVisibility: .visible) {
-            Button("Delete forever", role: .destructive) { Task { await remove() } }.requiresWriteAccess()
+        // Photos restored, deleted or put in Trash, here, from their viewer or anywhere else the
+        // account changes them, leave or join in place.
+        .task { trash.follow(mutations: mutations, bus: bus); await trash.reload() }.refreshable { await trash.reload() }
+        .confirmationDialog("Permanently delete \(trash.selection.count) items?", isPresented: $confirmPermanent, titleVisibility: .visible) {
+            Button("Delete forever", role: .destructive) { Task { await trash.deleteSelected() } }.requiresWriteAccess()
         } message: { Text("These photos and videos will be permanently removed from your server. This cannot be undone.") }
         .confirmationDialog(emptyAll ? "Permanently delete everything in trash?" : "Restore every item in trash?", isPresented: $confirmAll, titleVisibility: .visible) {
-            if emptyAll { Button("Empty trash", role: .destructive) { Task { await changeAll(permanently: true) } }.requiresWriteAccess() }
-            else { Button("Restore all items") { Task { await changeAll(permanently: false) } }.requiresWriteAccess() }
+            if emptyAll { Button("Empty trash", role: .destructive) { Task { await trash.changeAll(permanently: true) } }.requiresWriteAccess() }
+            else { Button("Restore all items") { Task { await trash.changeAll(permanently: false) } }.requiresWriteAccess() }
         } message: { Text(emptyAll ? "This removes all of your trashed photos and videos from the server, including items you have not loaded here. This cannot be undone." : "All of your trashed photos and videos will return to their previous visibility, including items you have not loaded here.") }
-        .alert("Couldn’t update trash", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
-    }
-    /// The trash with every stacked photo on its own, from the server timeline.
-    private var timeline: ServerTimelineRequest {
-        get throws { var query = LibraryQuery.trash; query.stacks = .all; return try ServerTimelineRequest(query, userID: api.userID) }
-    }
-    private func reload() async {
-        guard !loading else { return }
-        loading = true
-        do {
-            trashEnabled = try await api.serverFeatures().trash
-            guard trashEnabled == true else { assets = []; buckets = []; selection = []; loading = false; initialized = true; return }
-            buckets = try await api.timeBuckets(try timeline); assets = []; nextBucket = 0; selection = []; initialized = true
-        } catch is CancellationError { } catch { failure = .init(error) }
-        loading = false
-        if !buckets.isEmpty { await loadNext() }
-    }
-    private func loadNext() async {
-        guard !loading, nextBucket < buckets.count else { return }
-        loading = true; defer { loading = false }
-        do { assets += try await api.timeBucket(buckets[nextBucket].timeBucket, of: try timeline); nextBucket += 1 } catch { failure = .init(error) }
-    }
-    /// Restored photos keep their thumbnails; the account's mutations forget only those deleted
-    /// for good.
-    private func restore() async {
-        let ids = Array(selection)
-        if let result = await change(.restore(ids), on: assets.filter { selection.contains($0.id) }) {
-            resultMessage = "Restored \((result.affected ?? result.succeeded.count).formatted()) items."
-        }
-    }
-    private func remove() async {
-        await change(.deletePermanently(Array(selection)), on: assets.filter { selection.contains($0.id) })
-    }
-    private func changeAll(permanently: Bool) async {
-        guard !loading else { return }
-        do {
-            guard try await api.serverFeatures().trash else { throw APIError.invalidResponse("Trash is turned off on this server.") }
-        } catch { failure = .init(error); return }
-        // Photos not loaded here are named by the sync, which forgets an emptied Trash's as their
-        // deletions arrive.
-        guard let result = await change(permanently ? .emptyTrash : .restoreAllTrash, on: assets) else { return }
-        let count = (result.affected ?? result.succeeded.count).formatted()
-        resultMessage = permanently ? "Permanently removed \(count) items." : "Restored \(count) items."
-    }
-    /// Has the account's mutations make the change, and says what it did. The photos leave the
-    /// grid from the result, in place, as they leave the feed.
-    @discardableResult private func change(_ request: MutationRequest, on records: [Asset]) async -> MutationResult? {
-        guard let mutations else { failure = .init(APIError.signedOut); return nil }
-        loading = true; defer { loading = false }
-        do {
-            let result = try await mutations.start(request, on: records).result
-            if !result.failed.isEmpty { failure = .init(APIError.invalidResponse("\(result.failed.count.formatted()) items couldn’t be changed. Refresh and try again.")) }
-            return result
-        } catch { failure = .init(error); return nil }
-    }
-    /// What a mutation leaves of the Trash shown: everything goes when it was emptied or restored
-    /// whole, and otherwise each photo restored or deleted.
-    private func apply(_ result: MutationResult) {
-        switch result.request {
-        case .emptyTrash, .restoreAllTrash:
-            assets = []; buckets = []; nextBucket = 0; selection = []
-        default:
-            assets = result.applied(to: assets, keeping: CollectionMembership.trash)
-            selection.formIntersection(assets.map(\.id))
-        }
+        .alert("Couldn’t update trash", isPresented: Binding(get: { trash.failure != nil }, set: { if !$0 { trash.failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(trash.failure?.message ?? "") }
     }
 }

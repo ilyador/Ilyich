@@ -27,6 +27,14 @@ import Foundation
         if keeps(asset) { assets[index] = asset } else { assets.remove(at: index) }
     }
 
+    /// A sync's change: the photos the offline library let go, deleted, locked or out of reach
+    /// elsewhere, leave the list at once (G1). Photos it names otherwise stay until read again.
+    func drop(_ change: LibraryChange) {
+        let gone = change.removed.union(change.accessLost)
+        guard !gone.isEmpty, assets.contains(where: { gone.contains($0.id) }) else { return }
+        assets.removeAll { gone.contains($0.id) }
+    }
+
     /// A photo is gone from the server, or out of the account's reach: it leaves the list.
     func lose(_ id: String) {
         assets.removeAll { $0.id == id }

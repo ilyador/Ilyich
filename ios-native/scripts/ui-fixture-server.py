@@ -23,6 +23,13 @@ PERSON = {'id': '00000000-0000-4000-8000-000000000002', 'name': 'Maya', 'isHidde
 MANY_PEOPLE_TOKEN = 'ui-test-many-people'
 MANY_PEOPLE = [PERSON] + [{'id': f'00000000-0000-4000-8000-0000000001{n:02d}', 'name': f'Friend {n:02d}', 'isHidden': False, 'isFavorite': False}
                           for n in range(2, 61)]
+# People a page at a time, for the session of the test that pages through the People screen
+# (REBUILD_ROADMAP.md F5, G1). The server pages by its own size, whatever size is asked for, and says
+# whether more follow; only this session's token sees them.
+PAGED_PEOPLE_TOKEN = 'ui-test-paged-people'
+PAGED_PEOPLE = [{'id': f'00000000-0000-4000-8000-0000000002{n:02d}', 'name': f'Person {n:02d}', 'isHidden': False, 'isFavorite': False}
+                for n in range(1, 76)]
+PAGED_PEOPLE_SIZE = 30
 ALBUM = {'id': '00000000-0000-4000-8000-000000000003', 'albumName': 'Coast', 'assetCount': 100, 'shared': False,
          'albumUsers': [], 'albumThumbnailAssetId': None, 'updatedAt': '2026-12-01T12:00:00Z'}
 # A second album, so shelf rows can be put in another order. It is shared only by a link,
@@ -214,11 +221,19 @@ class MutableLibrary:
 
 LIBRARIES = {}
 LIBRARIES_LOCK = threading.Lock()
+# A mutable session whose Trash already holds photos in three months: three in December 2026, two in
+# November and one in October, for the Trash's pages (G1).
+TRASHED_PREFIX = MUTABLE_PREFIX + 'trash-'
+TRASHED_SEED = [(date, index) for date, count in [('2026-12-01', 3), ('2026-11-01', 2), ('2026-10-01', 1)] for index in range(10, 10 + count)]
 
 def mutable_library(token):
     if not token or not token.startswith(MUTABLE_PREFIX): return None
     with LIBRARIES_LOCK:
-        return LIBRARIES.setdefault(token, MutableLibrary())
+        if token not in LIBRARIES:
+            library = MutableLibrary()
+            if token.startswith(TRASHED_PREFIX): library.trashed.update(asset(index, date)['id'] for date, index in TRASHED_SEED)
+            LIBRARIES[token] = library
+        return LIBRARIES[token]
 
 @functools.lru_cache(maxsize=1)
 def asset_locations():
@@ -393,6 +408,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/shared-links':
             album=q.get('albumId',[None])[0]
             return self.send([HARBOR_LINK] if album in (None, HARBOR['id']) else [])
+        if path=='/people' and self.token()==PAGED_PEOPLE_TOKEN:
+            page=max(1,int(q.get('page',['1'])[0]));start=(page-1)*PAGED_PEOPLE_SIZE
+            return self.send({'people':PAGED_PEOPLE[start:start+PAGED_PEOPLE_SIZE],'total':len(PAGED_PEOPLE),'hidden':0,
+                              'hasNextPage':start+PAGED_PEOPLE_SIZE<len(PAGED_PEOPLE)})
         if path=='/people':
             many=MANY_PEOPLE_TOKEN in (self.headers.get('x-immich-user-token'),self.headers.get('Authorization','').removeprefix('Bearer '))
             people=MANY_PEOPLE if many else [PERSON]
@@ -400,6 +419,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/users/me':return self.send({'id':OWNER,'name':'Test library','email':'fixture@example.test'})
         if path=='/users/me/preferences':return self.send({'memories':{'enabled':True,'duration':5},'people':{'enabled':True,'sidebarWeb':False}})
         if path=='/memories':return self.send(memories())
+        # One memory, as the memory widget's link opens it.
+        if path.startswith('/memories/') and path.count('/')==2:
+            found=[m for m in memories() if m['id']==path.split('/')[2]]
+            return self.send(found[0]) if found else self.send_immich_error(400,'Not found or no memory.read access')
         if path=='/map/markers':return self.send(MARKERS)
         if path=='/server/features':return self.send({k:True for k in ['passwordLogin','smartSearch','ocr','facialRecognition','map','trash','sidecar','realtimeTranscoding']}|{'oauth':False})
         if path=='/server/version':return self.send({'major':3,'minor':3,'patch':3})
