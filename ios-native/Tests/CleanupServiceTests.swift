@@ -178,11 +178,6 @@ import XCTest
         XCTAssertEqual(settings, .blocked(.checkAgain))
 
         _ = try await h.scan()
-        h.photos.setStatus(.limited)
-        let access = await h.service.remove(["a"])
-        XCTAssertEqual(access, .blocked(.checkAgain))
-
-        _ = try await h.scan()
         let events = listen(to: await h.service.events())
         h.photos.emit(PhotoLibraryChangeDetails(requiresFullReload: true))
         try await waitFor { events.value.contains(.invalidated(.library)) }
@@ -195,6 +190,13 @@ import XCTest
         try await waitFor { events.value.contains(.invalidated(.account)) }
         let epoch = await h.service.remove(["a"])
         XCTAssertEqual(epoch, .blocked(.checkAgain))
+
+        // Photos access last: reading the new access also reports a full reload, which arrives
+        // later and would end a check begun after it as outdated.
+        _ = try await h.scan()
+        h.photos.setStatus(.limited)
+        let access = await h.service.remove(["a"])
+        XCTAssertEqual(access, .blocked(.checkAgain))
         XCTAssertEqual(h.photos.performed, 0)
     }
 
