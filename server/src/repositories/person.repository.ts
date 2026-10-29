@@ -20,7 +20,14 @@ import { AssetFaceTable } from 'src/schema/tables/asset-face.table.js';
 import { FaceSearchTable } from 'src/schema/tables/face-search.table.js';
 import { PersonGroupTable } from 'src/schema/tables/person-group.table.js';
 import { PersonTable } from 'src/schema/tables/person.table.js';
-import { anyUuid, dummy, inSharedAlbum, removeUndefinedKeys } from 'src/utils/database.js';
+import {
+  anyUuid,
+  dummy,
+  inSharedAlbum,
+  removeUndefinedKeys,
+  withVideoFormat,
+  withVideoStream,
+} from 'src/utils/database.js';
 import { isLeapDayObserved } from 'src/utils/date.js';
 import { type PaginationOptions, paginationHelper } from 'src/utils/pagination.js';
 
@@ -581,6 +588,7 @@ export class PersonRepository {
       .innerJoin('asset_face', 'asset_face.id', 'person.faceAssetId')
       .innerJoin('asset', 'asset_face.assetId', 'asset.id')
       .leftJoin('asset_exif', 'asset_exif.assetId', 'asset.id')
+      .leftJoin('asset_video', 'asset_video.assetId', 'asset.id')
       .select([
         'person.ownerId',
         'asset_face.boundingBoxX1 as x1',
@@ -589,10 +597,13 @@ export class PersonRepository {
         'asset_face.boundingBoxY2 as y2',
         'asset_face.imageWidth as oldWidth',
         'asset_face.imageHeight as oldHeight',
+        'asset_face.frameTimestamp',
         'asset.type',
         'asset.originalPath',
         'asset_exif.orientation as exifOrientation',
       ])
+      .select((eb) => withVideoStream(eb).as('videoStream'))
+      .select((eb) => withVideoFormat(eb).as('format'))
       .select(assetIsDeveloped)
       .select((eb) =>
         eb
@@ -973,7 +984,11 @@ export class PersonRepository {
   async getLatestFaceDate(): Promise<string | undefined> {
     const result = (await this.db
       .selectFrom('asset_job_status')
-      .select((eb) => sql`${eb.fn.max('asset_job_status.facesRecognizedAt')}::text`.as('latestDate'))
+      .select((eb) =>
+        sql`${eb.fn.max(eb.fn('greatest', ['asset_job_status.facesRecognizedAt', 'asset_job_status.videoFacesDetectedAt']))}::text`.as(
+          'latestDate',
+        ),
+      )
       .executeTakeFirst()) as { latestDate: string } | undefined;
 
     return result?.latestDate;

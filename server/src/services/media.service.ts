@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join, parse } from 'node:path';
 import type {
   AudioStreamInfo,
+  Bitmap,
   DecodeToBufferOptions,
   GenerateThumbnailOptions,
   ImageDimensions,
@@ -44,7 +46,7 @@ import { BoundingBox } from 'src/repositories/machine-learning.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { getAssetFile, getDimensions } from 'src/utils/asset.util.js';
 import { checkFaceVisibility, checkOcrVisibility } from 'src/utils/editor.js';
-import { BaseConfig, ThumbnailConfig } from 'src/utils/media.js';
+import { BaseConfig, ThumbnailConfig, getVideoFrameCommand } from 'src/utils/media.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { batched, clamp } from 'src/utils/misc.js';
 import { getOutputDimensions } from 'src/utils/transform.js';
@@ -715,34 +717,41 @@ export class MediaService extends BaseService {
     ownerId,
     personGroupId,
   }: JobOf<JobName.PersonGenerateThumbnail>): Promise<JobStatus> {
-    const { image } = await this.getConfig({ withCache: true });
+    const config = await this.getConfig({ withCache: true });
+    const { image } = config;
     const data = await this.personRepository.getDataForThumbnailGenerationJob({ ownerId, personGroupId });
     if (!data) {
       this.logger.error(`Could not generate person thumbnail for ${personGroupId}: missing data`);
       return JobStatus.Failed;
     }
 
-    const { x1, y1, x2, y2, oldWidth, oldHeight, exifOrientation, previewPath, originalPath } = data;
-    let inputImage: string | Buffer;
-    if (data.type === AssetType.Video || data.isDeveloped) {
-      if (!previewPath) {
-        this.logger.error(`Could not generate person thumbnail for ${personGroupId}: missing preview path`);
-        return JobStatus.Failed;
-      }
-      inputImage = previewPath;
-    } else if (image.extractEmbedded && mimeTypes.isRaw(originalPath)) {
-      const extracted = await this.extractImage(originalPath, image.preview.size);
-      inputImage = extracted ? extracted.buffer : originalPath;
+    const { x1, y1, x2, y2, oldWidth, oldHeight, exifOrientation, previewPath, originalPath, frameTimestamp } = data;
+    let decoded: Bitmap;
+    if (data.type === AssetType.Video && frameTimestamp !== null) {
+      // the face was found further into the video than its preview, so it is cut from that frame
+      decoded = await this.decodeVideoFrame(data, frameTimestamp, config);
     } else {
-      inputImage = originalPath;
-    }
+      let inputImage: string | Buffer;
+      if (data.type === AssetType.Video || data.isDeveloped) {
+        if (!previewPath) {
+          this.logger.error(`Could not generate person thumbnail for ${personGroupId}: missing preview path`);
+          return JobStatus.Failed;
+        }
+        inputImage = previewPath;
+      } else if (image.extractEmbedded && mimeTypes.isRaw(originalPath)) {
+        const extracted = await this.extractImage(originalPath, image.preview.size);
+        inputImage = extracted ? extracted.buffer : originalPath;
+      } else {
+        inputImage = originalPath;
+      }
 
-    const decoded = await this.mediaRepository.decodeImage(inputImage, {
-      colorspace: image.colorspace,
-      processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
-      // if this is an extracted image, it may not have orientation metadata
-      orientation: Buffer.isBuffer(inputImage) && exifOrientation ? Number(exifOrientation) : undefined,
-    });
+      decoded = await this.mediaRepository.decodeImage(inputImage, {
+        colorspace: image.colorspace,
+        processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
+        // if this is an extracted image, it may not have orientation metadata
+        orientation: Buffer.isBuffer(inputImage) && exifOrientation ? Number(exifOrientation) : undefined,
+      });
+    }
 
     const thumbnailPath = StorageCore.getPersonThumbnailPath({ ownerId, personGroupId });
     this.storageCore.ensureFolders(thumbnailPath);
@@ -772,6 +781,38 @@ export class MediaService extends BaseService {
     await this.personRepository.update({ ownerId, personGroupId, thumbnailPath });
 
     return JobStatus.Success;
+  }
+
+  /** The frame `timestamp` milliseconds into a video, as large as the video's preview. */
+  private async decodeVideoFrame(
+    video: { originalPath: string; videoStream: VideoStreamInfo | null; format: VideoFormat | null },
+    timestamp: number,
+    config: SystemConfig,
+  ): Promise<Bitmap> {
+    let { videoStream, format } = video;
+    if (!videoStream) {
+      // videos added before stream metadata was stored still have it in the file
+      const probed = await this.mediaRepository.probe(video.originalPath);
+      if (!probed.videoStreams[0]) {
+        throw new Error(`No video stream in ${video.originalPath}`);
+      }
+      videoStream = probed.videoStreams[0];
+      format = probed.format;
+    }
+
+    const folder = join(tmpdir(), 'immich-video-frames', randomUUID());
+    this.storageRepository.mkdirSync(folder);
+    try {
+      const framePath = join(folder, `${timestamp}.jpg`);
+      const command = getVideoFrameCommand(config, timestamp, videoStream, format);
+      await this.mediaRepository.transcode(video.originalPath, framePath, command);
+      return await this.mediaRepository.decodeImage(framePath, {
+        colorspace: config.image.colorspace,
+        processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
+      });
+    } finally {
+      await this.storageRepository.unlinkDir(folder, { recursive: true, force: true });
+    }
   }
 
   private getCrop(

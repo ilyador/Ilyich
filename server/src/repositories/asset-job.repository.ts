@@ -282,6 +282,39 @@ export class AssetJobRepository {
   }
 
   @GenerateSql({ params: [DummyValue.UUID] })
+  getForDetectVideoFacesJob(id: string) {
+    return this.db
+      .selectFrom('asset')
+      .innerJoin('user', 'user.id', 'asset.ownerId')
+      .innerJoin('asset_exif', 'asset_exif.assetId', 'asset.id')
+      .leftJoin('asset_video', 'asset_video.assetId', 'asset.id')
+      .select([
+        'asset.id',
+        'asset.type',
+        'asset.visibility',
+        'asset.deletedAt',
+        'asset.isOffline',
+        'asset.originalPath',
+        'asset.duration',
+        'asset.fileCreatedAt',
+        'user.clusterGroupId',
+      ])
+      .select((eb) => withVideoStream(eb).as('videoStream'))
+      .select((eb) => withVideoFormat(eb).as('format'))
+      .select((eb) =>
+        jsonArrayFrom(
+          eb
+            .selectFrom('asset_face')
+            .leftJoin('face_search', 'face_search.faceId', 'asset_face.id')
+            .select(['asset_face.id', 'asset_face.personGroupId', 'face_search.embedding'])
+            .whereRef('asset_face.assetId', '=', 'asset.id'),
+        ).as('faces'),
+      )
+      .where('asset.id', '=', id)
+      .executeTakeFirst();
+  }
+
+  @GenerateSql({ params: [DummyValue.UUID] })
   getForOcr(id: string) {
     return this.db
       .selectFrom('asset')
@@ -470,6 +503,23 @@ export class AssetJobRepository {
     return this.assetsWithPreviews()
       .$if(force === false, (qb) => qb.where('job_status.facesRecognizedAt', 'is', null))
       .select(['asset.id'])
+      .orderBy('asset.fileCreatedAt', 'desc')
+      .stream();
+  }
+
+  @GenerateSql({ params: [], stream: true })
+  streamForDetectVideoFacesJob(force?: boolean) {
+    // only videos whose preview has been searched for faces, so that the rest of each adds just the people it misses
+    return this.db
+      .selectFrom('asset')
+      .innerJoin('asset_job_status as job_status', 'job_status.assetId', 'asset.id')
+      .select(['asset.id'])
+      .where('asset.type', '=', sql.lit(AssetType.Video))
+      .where('asset.visibility', '!=', AssetVisibility.Hidden)
+      .where('asset.deletedAt', 'is', null)
+      .where('asset.isOffline', '=', false)
+      .where('job_status.facesRecognizedAt', 'is not', null)
+      .$if(!force, (qb) => qb.where('job_status.videoFacesDetectedAt', 'is', null))
       .orderBy('asset.fileCreatedAt', 'desc')
       .stream();
   }

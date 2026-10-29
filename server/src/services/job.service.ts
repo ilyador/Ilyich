@@ -271,6 +271,19 @@ export class JobService extends BaseService {
         break;
       }
 
+      case JobName.AssetDetectFaces: {
+        if (response !== JobStatus.Success) {
+          break;
+        }
+
+        // the rest of a video is searched after its preview, so that people seen in both are only added once
+        const asset = await this.assetRepository.getById(item.data.id);
+        if (asset?.type === AssetType.Video) {
+          await this.jobRepository.queue({ name: JobName.AssetDetectVideoFaces, data: { id: asset.id } });
+        }
+        break;
+      }
+
       // no default
     }
   }

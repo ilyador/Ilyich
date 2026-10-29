@@ -26,4 +26,7 @@ export class AssetJobStatusTable {
 
   @Column({ type: 'jsonb', nullable: true })
   development!: ImageDevelopmentState | null;
+
+  @Column({ type: 'timestamp with time zone', nullable: true })
+  videoFacesDetectedAt!: Timestamp | null;
 }

@@ -27,7 +27,7 @@ import { AssetFaceFactory } from 'test/factories/asset-face.factory.js';
 import { AssetFileFactory } from 'test/factories/asset-file.factory.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
 import { PersonFactory } from 'test/factories/person.factory.js';
-import { probeStub } from 'test/fixtures/media.stub.js';
+import { probeStub, videoInfoStub } from 'test/fixtures/media.stub.js';
 import { personThumbnailStub } from 'test/fixtures/person.stub.js';
 import { systemConfigStub } from 'test/fixtures/system-config.stub.js';
 import { getForAsset, getForGenerateThumbnail } from 'test/mappers.js';
@@ -2275,6 +2275,116 @@ describe(MediaService.name, () => {
         personGroupId: person.personGroupId,
         thumbnailPath: expect.any(String),
       });
+    });
+
+    it('should cut a face found further into a video from the frame it was found in', async () => {
+      const person = PersonFactory.create();
+      mocks.person.getDataForThumbnailGenerationJob.mockResolvedValue({
+        ...personThumbnailStub.videoThumbnail,
+        ...probeStub.videoStream2160p,
+        x1: 1000,
+        y1: 500,
+        x2: 1200,
+        y2: 700,
+        oldWidth: 2560,
+        oldHeight: 1440,
+        frameTimestamp: 7000,
+      });
+      const data = Buffer.from('');
+      const info = { width: 2560, height: 1440 } as OutputInfo;
+      mocks.media.decodeImage.mockResolvedValue({ data, info });
+
+      await expect(
+        sut.handleGeneratePersonThumbnail({ ownerId: person.ownerId, personGroupId: person.personGroupId }),
+      ).resolves.toBe(JobStatus.Success);
+
+      const [input, output, command] = mocks.media.transcode.mock.calls[0];
+      const framePath = output as string;
+      expect(input).toBe('/original/path.mp4');
+      expect(framePath).toMatch(/immich-video-frames\/[\w-]+\/7000\.jpg$/);
+      expect(command).toEqual(
+        expect.objectContaining({
+          inputOptions: ['-ss', '7.000', '-sws_flags', 'accurate_rnd+full_chroma_int'],
+          outputOptions: expect.arrayContaining(['-frames:v', '1', '-q:v', '2']),
+        }),
+      );
+      expect(mocks.media.decodeImage).toHaveBeenCalledExactlyOnceWith(framePath, {
+        colorspace: Colorspace.P3,
+        processInvalidImages: false,
+      });
+      expect(mocks.storage.unlinkDir).toHaveBeenCalledWith(framePath.slice(0, framePath.lastIndexOf('/')), {
+        recursive: true,
+        force: true,
+      });
+      expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
+        { data, info },
+        expect.objectContaining({
+          edits: [{ action: AssetEditAction.Crop, parameters: { x: 990, y: 490, width: 220, height: 220 } }],
+        }),
+        expect.any(String),
+      );
+    });
+
+    it('should read the stream of a video without stored metadata from the file to cut a face from', async () => {
+      mocks.person.getDataForThumbnailGenerationJob.mockResolvedValue({
+        ...personThumbnailStub.videoThumbnail,
+        frameTimestamp: 7000,
+      });
+      mocks.media.probe.mockResolvedValue(videoInfoStub.videoStream2160p);
+      mocks.media.decodeImage.mockResolvedValue({
+        data: Buffer.from(''),
+        info: { width: 2560, height: 1440 } as OutputInfo,
+      });
+
+      await expect(
+        sut.handleGeneratePersonThumbnail({ ownerId: 'owner-1', personGroupId: 'person-group-1' }),
+      ).resolves.toBe(JobStatus.Success);
+
+      expect(mocks.media.probe).toHaveBeenCalledWith('/original/path.mp4');
+      expect(mocks.media.transcode).toHaveBeenCalledWith(
+        '/original/path.mp4',
+        expect.stringMatching(/7000\.jpg$/),
+        expect.objectContaining({
+          outputOptions: expect.arrayContaining([
+            'scale=-2:1440:flags=lanczos+accurate_rnd+full_chroma_int:out_range=pc',
+          ]),
+        }),
+      );
+    });
+
+    it('should not cut a face from a file without a video stream', async () => {
+      mocks.person.getDataForThumbnailGenerationJob.mockResolvedValue({
+        ...personThumbnailStub.videoThumbnail,
+        frameTimestamp: 7000,
+      });
+      mocks.media.probe.mockResolvedValue(videoInfoStub.noVideoStreams);
+
+      await expect(
+        sut.handleGeneratePersonThumbnail({ ownerId: 'owner-1', personGroupId: 'person-group-1' }),
+      ).rejects.toThrow('No video stream');
+
+      expect(mocks.media.transcode).not.toHaveBeenCalled();
+      expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();
+    });
+
+    it('should clean up when the frame of a face cannot be read from the video', async () => {
+      mocks.person.getDataForThumbnailGenerationJob.mockResolvedValue({
+        ...personThumbnailStub.videoThumbnail,
+        ...probeStub.videoStream2160p,
+        frameTimestamp: 7000,
+      });
+      mocks.media.transcode.mockRejectedValue(new Error('Invalid data'));
+
+      await expect(
+        sut.handleGeneratePersonThumbnail({ ownerId: 'owner-1', personGroupId: 'person-group-1' }),
+      ).rejects.toThrow('Invalid data');
+
+      expect(mocks.storage.unlinkDir).toHaveBeenCalledWith(expect.stringContaining('immich-video-frames'), {
+        recursive: true,
+        force: true,
+      });
+      expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();
+      expect(mocks.person.update).not.toHaveBeenCalled();
     });
 
     it('should generate a thumbnail without going negative', async () => {

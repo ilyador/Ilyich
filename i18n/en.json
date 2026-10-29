@@ -496,7 +496,9 @@
     "version_check_settings": "Version Check",
     "version_check_settings_description": "Enable/disable the new version notification",
     "video_conversion_job": "Transcode videos",
-    "video_conversion_job_description": "Transcode videos for wider compatibility with browsers and devices"
+    "video_conversion_job_description": "Transcode videos for wider compatibility with browsers and devices",
+    "video_face_detection": "Video face detection",
+    "video_face_detection_description": "Detect faces in frames from the whole length of videos using machine learning, adding the people who are not in the thumbnail. Faces already on a video are kept as they are. \"All\" (re-)processes all videos. \"Missing\" queues videos that haven't been processed yet. Detected faces will be queued for Facial Recognition, grouping them into existing or new people."
   },
   "admin_email": "Admin Email",
   "admin_password": "Admin Password",

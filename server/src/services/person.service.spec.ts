@@ -1204,6 +1204,29 @@ describe(PersonService.name, () => {
       expect(mocks.person.reassignFaces).not.toHaveBeenCalled();
     });
 
+    it('should leave the faces found across the rest of a video alone', async () => {
+      const assetId = newUuid();
+      const frameFace = AssetFaceFactory.create({ assetId, frameTimestamp: 5000 });
+      const asset = AssetFactory.from({ id: assetId })
+        .face(frameFace)
+        .file({ type: AssetFileType.Preview })
+        .exif()
+        .build();
+      const previewFace = AssetFaceFactory.create({ assetId });
+      mocks.machineLearning.detectFaces.mockResolvedValue(getAsDetectedFace(previewFace));
+      mocks.assetJob.getForDetectFacesJob.mockResolvedValue(getForDetectedFaces(asset));
+      mocks.crypto.randomUUID.mockReturnValue(previewFace.id);
+
+      await sut.handleDetectFaces({ id: asset.id });
+
+      // the preview face sits where the frame face is in its own frame, but is not taken for it or removed with it
+      expect(mocks.person.refreshFaces).toHaveBeenCalledWith(
+        [expect.objectContaining({ id: previewFace.id, assetId })],
+        [],
+        [{ faceId: previewFace.id, embedding: '[1, 2, 3, 4]' }],
+      );
+    });
+
     it('should add embedding to matching metadata face', async () => {
       const face = AssetFaceFactory.create({ sourceType: SourceType.Exif });
       const asset = AssetFactory.from().face(face).file({ type: AssetFileType.Preview }).exif().build();

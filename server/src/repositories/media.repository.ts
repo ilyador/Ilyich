@@ -709,6 +709,11 @@ export class MediaRepository {
     return { width, height, isTransparent: hasAlpha };
   }
 
+  /** A tiny greyscale square of an image, cheap to compare with another one. */
+  getImageFingerprint(input: string, size: number): Promise<Buffer> {
+    return sharp(input).greyscale().resize(size, size, { fit: 'fill' }).raw().toBuffer();
+  }
+
   private configureFfmpegCall(input: string, output: string | Writable, options: TranscodeCommand) {
     const ffmpegCall = ffmpeg(input, { niceness: 10 })
       .inputOptions(options.inputOptions)

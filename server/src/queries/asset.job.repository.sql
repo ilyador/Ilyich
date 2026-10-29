@@ -573,6 +573,98 @@ from
 where
   "asset"."id" = $1
 
+-- AssetJobRepository.getForDetectVideoFacesJob
+select
+  "asset"."id",
+  "asset"."type",
+  "asset"."visibility",
+  "asset"."deletedAt",
+  "asset"."isOffline",
+  "asset"."originalPath",
+  "asset"."duration",
+  "asset"."fileCreatedAt",
+  "user"."clusterGroupId",
+  (
+    select
+      to_json(obj)
+    from
+      (
+        select
+          "asset_video"."index",
+          "asset_video"."codecName",
+          "asset_video"."profile",
+          "asset_video"."level",
+          "asset_video"."bitrate",
+          "asset_exif"."exifImageWidth" as "width",
+          "asset_exif"."exifImageHeight" as "height",
+          "asset_video"."pixelFormat",
+          "asset_video"."frameCount",
+          "asset_exif"."fps" as "frameRate",
+          "asset_video"."timeBase",
+          case
+            when "asset_exif"."orientation" = '6' then -90
+            when "asset_exif"."orientation" = '8' then 90
+            when "asset_exif"."orientation" = '3' then 180
+            else 0
+          end as "rotation",
+          "asset_video"."colorPrimaries",
+          "asset_video"."colorMatrix",
+          "asset_video"."colorTransfer",
+          "asset_video"."dvProfile",
+          "asset_video"."dvLevel",
+          "asset_video"."dvBlSignalCompatibilityId"
+        from
+          (
+            select
+              1
+          ) as "dummy"
+        where
+          "asset_video"."assetId" is not null
+      ) as obj
+  ) as "videoStream",
+  (
+    select
+      to_json(obj)
+    from
+      (
+        select
+          "asset_video"."formatName",
+          "asset_video"."formatLongName",
+          "asset"."duration",
+          "asset_video"."bitrate"
+        from
+          (
+            select
+              1
+          ) as "dummy"
+        where
+          "asset_video"."assetId" is not null
+      ) as obj
+  ) as "format",
+  (
+    select
+      coalesce(json_agg(agg), '[]')
+    from
+      (
+        select
+          "asset_face"."id",
+          "asset_face"."personGroupId",
+          "face_search"."embedding"
+        from
+          "asset_face"
+          left join "face_search" on "face_search"."faceId" = "asset_face"."id"
+        where
+          "asset_face"."assetId" = "asset"."id"
+      ) as agg
+  ) as "faces"
+from
+  "asset"
+  inner join "user" on "user"."id" = "asset"."ownerId"
+  inner join "asset_exif" on "asset_exif"."assetId" = "asset"."id"
+  left join "asset_video" on "asset_video"."assetId" = "asset"."id"
+where
+  "asset"."id" = $1
+
 -- AssetJobRepository.getForOcr
 select
   "asset"."visibility",
@@ -917,6 +1009,22 @@ where
       "assetId" = "asset"."id"
       and "asset_file"."type" = $2
   )
+order by
+  "asset"."fileCreatedAt" desc
+
+-- AssetJobRepository.streamForDetectVideoFacesJob
+select
+  "asset"."id"
+from
+  "asset"
+  inner join "asset_job_status" as "job_status" on "job_status"."assetId" = "asset"."id"
+where
+  "asset"."type" = 'VIDEO'
+  and "asset"."visibility" != $1
+  and "asset"."deletedAt" is null
+  and "asset"."isOffline" = $2
+  and "job_status"."facesRecognizedAt" is not null
+  and "job_status"."videoFacesDetectedAt" is null
 order by
   "asset"."fileCreatedAt" desc
 

@@ -33,6 +33,15 @@ describe(JobService.name, () => {
       });
     });
 
+    it('should not search the rest of a video when its preview was skipped', async () => {
+      mocks.job.run.mockResolvedValue(JobStatus.Skipped);
+      mocks.asset.getById.mockResolvedValue(getForAsset(AssetFactory.create({ id: 'asset-1', type: AssetType.Video })));
+
+      await sut.onJobRun(QueueName.FaceDetection, { name: JobName.AssetDetectFaces, data: { id: 'asset-1' } });
+
+      expect(mocks.job.queue).not.toHaveBeenCalled();
+    });
+
     it('should process a successful job', async () => {
       mocks.job.run.mockResolvedValue(JobStatus.Success);
 
@@ -268,6 +277,16 @@ describe(JobService.name, () => {
       {
         item: { name: JobName.AssetDetectFaces, data: { id: 'asset-1' } },
         jobs: [],
+      },
+      {
+        item: { name: JobName.AssetDetectFaces, data: { id: 'asset-1' } },
+        jobs: [],
+        stub: [AssetFactory.create({ id: 'asset-1' })],
+      },
+      {
+        item: { name: JobName.AssetDetectFaces, data: { id: 'asset-1', source: 'upload' } },
+        jobs: [JobName.AssetDetectVideoFaces],
+        stub: [AssetFactory.create({ id: 'asset-1', type: AssetType.Video })],
       },
       {
         item: { name: JobName.FacialRecognition, data: { id: 'asset-1' } },

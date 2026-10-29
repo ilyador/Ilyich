@@ -17,7 +17,7 @@ import {
   HEVC_LEVELS,
   SUPPORTED_HWA_CODECS,
 } from 'src/constants.js';
-import { ConfigFFmpegDto } from 'src/dtos/config.dto.js';
+import { ConfigFFmpegDto, SystemConfig } from 'src/dtos/config.dto.js';
 import {
   CQMode,
   ColorMatrix,
@@ -489,11 +489,7 @@ export class ThumbnailConfig extends BaseConfig {
   }
 
   getBaseInputOptions(videoStream: VideoStreamInfo, format?: VideoFormat): string[] {
-    // skip_frame nointra skips all frames for some MPEG-TS files. Look at ffmpeg tickets 7950 and 7895 for more details.
-    const options =
-      format?.formatName === 'mpegts'
-        ? ['-sws_flags', 'accurate_rnd+full_chroma_int']
-        : ['-skip_frame', 'nointra', '-sws_flags', 'accurate_rnd+full_chroma_int'];
+    const options = [...this.getFrameInputOptions(format), '-sws_flags', 'accurate_rnd+full_chroma_int'];
 
     const metadataOverrides = [];
     if (videoStream.colorPrimaries === ColorPrimaries.Reserved) {
@@ -516,18 +512,26 @@ export class ThumbnailConfig extends BaseConfig {
     return options;
   }
 
+  getFrameInputOptions(format?: VideoFormat): string[] {
+    // skip_frame nointra skips all frames for some MPEG-TS files. Look at ffmpeg tickets 7950 and 7895 for more details.
+    return format?.formatName === 'mpegts' ? [] : ['-skip_frame', 'nointra'];
+  }
+
   getBaseOutputOptions() {
     return ['-fps_mode', 'vfr', '-frames:v', '1', '-update', '1'];
   }
 
   getFilterOptions(videoStream: VideoStreamInfo): string[] {
+    return [...this.getFrameSelectionFilters(), ...super.getFilterOptions(videoStream)];
+  }
+
+  getFrameSelectionFilters(): string[] {
     return [
       'fps=12:start_time=0:eof_action=pass:round=down',
       'thumbnail=12',
       String.raw`select=gt(scene\,0.1)-eq(prev_selected_n\,n)+isnan(prev_selected_n)+gt(n\,20)`,
       'trim=end_frame=2',
       'reverse',
-      ...super.getFilterOptions(videoStream),
     ];
   }
 
@@ -547,6 +551,49 @@ export class ThumbnailConfig extends BaseConfig {
     return super.getScaling(videoStream) + ':flags=lanczos+accurate_rnd+full_chroma_int:out_range=pc';
   }
 }
+
+/** The frame at an exact point in a video, scaled and tone-mapped like the video's thumbnail. */
+export class VideoFrameConfig extends ThumbnailConfig {
+  private constructor(
+    config: ConfigFFmpegDto,
+    private timestamp: number,
+  ) {
+    super(config);
+  }
+
+  /** `timestamp` is in milliseconds from the start of the video. */
+  static create(config: ConfigFFmpegDto, timestamp = 0): VideoCodecSWConfig {
+    return new VideoFrameConfig(config, timestamp);
+  }
+
+  getFrameInputOptions(): string[] {
+    // seeks to the keyframe before the timestamp and decodes every frame from there up to it
+    return ['-ss', (this.timestamp / 1000).toFixed(3)];
+  }
+
+  getFrameSelectionFilters(): string[] {
+    return [];
+  }
+
+  getEncoderOptions(): string[] {
+    // the frame is written as JPEG for face detection, so it is kept close to how it was decoded
+    return ['-q:v', '2'];
+  }
+}
+
+/** Writes one frame, `timestamp` milliseconds into the video, at the size of the video's preview. */
+export const getVideoFrameCommand = (
+  { ffmpeg, image }: Pick<SystemConfig, 'ffmpeg' | 'image'>,
+  timestamp: number,
+  videoStream: VideoStreamInfo,
+  format?: VideoFormat | null,
+) =>
+  VideoFrameConfig.create({ ...ffmpeg, targetResolution: image.preview.size.toString() }, timestamp).getCommand(
+    TranscodeTarget.Video,
+    videoStream,
+    undefined,
+    format ?? undefined,
+  );
 
 export class H264Config extends BaseConfig {
   getEncoderOptions(): string[] {

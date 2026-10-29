@@ -185,6 +185,7 @@ const AdminConfigSchemaWithVisibility = z
         metadataExtraction: AdminConfigJobSettingsSchema,
         videoConversion: AdminConfigJobSettingsSchema,
         faceDetection: AdminConfigJobSettingsSchema,
+        videoFaceDetection: AdminConfigJobSettingsSchema,
         smartSearch: AdminConfigJobSettingsSchema,
         backgroundTask: AdminConfigJobSettingsSchema,
         migration: AdminConfigJobSettingsSchema,
@@ -600,6 +601,8 @@ export const defaults = Object.freeze<SystemConfig>({
     metadataExtraction: { concurrency: 5 },
     videoConversion: { concurrency: 1 },
     faceDetection: { concurrency: 2 },
+    // decodes and analyses many frames per video, so one video at a time
+    videoFaceDetection: { concurrency: 1 },
     smartSearch: { concurrency: 2 },
     backgroundTask: { concurrency: 5 },
     migration: { concurrency: 5 },

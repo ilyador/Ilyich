@@ -19116,6 +19116,9 @@
           "videoConversion": {
             "$ref": "#/components/schemas/AdminConfigJobSettingsDto"
           },
+          "videoFaceDetection": {
+            "$ref": "#/components/schemas/AdminConfigJobSettingsDto"
+          },
           "workflow": {
             "$ref": "#/components/schemas/AdminConfigJobSettingsDto"
           }
@@ -19135,6 +19138,7 @@
           "smartSearch",
           "thumbnailGeneration",
           "videoConversion",
+          "videoFaceDetection",
           "workflow"
         ],
         "type": "object"
@@ -22826,6 +22830,8 @@
           "AssetDeleteCheck",
           "AssetDetectFacesQueueAll",
           "AssetDetectFaces",
+          "AssetDetectVideoFacesQueueAll",
+          "AssetDetectVideoFaces",
           "AssetDetectDuplicatesQueueAll",
           "AssetDetectDuplicates",
           "AssetEditThumbnailGeneration",
@@ -26218,7 +26224,8 @@
           "ocr",
           "workflow",
           "integrityCheck",
-          "editor"
+          "editor",
+          "videoFaceDetection"
         ],
         "type": "string"
       },
@@ -26388,6 +26395,9 @@
           "videoConversion": {
             "$ref": "#/components/schemas/QueueResponseLegacyDto"
           },
+          "videoFaceDetection": {
+            "$ref": "#/components/schemas/QueueResponseLegacyDto"
+          },
           "workflow": {
             "$ref": "#/components/schemas/QueueResponseLegacyDto"
           }
@@ -26411,6 +26421,7 @@
           "storageTemplateMigration",
           "thumbnailGeneration",
           "videoConversion",
+          "videoFaceDetection",
           "workflow"
         ],
         "type": "object"
