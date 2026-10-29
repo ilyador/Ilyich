@@ -66,14 +66,20 @@
       return;
     }
 
+    let results;
     try {
-      let results = await mergePeople({ mergePersonDto: { ids: [person.id, ...selectedPeople.map(({ id }) => id)] } });
-      const mergedPerson = await getPerson({ id: person.id });
-      const count = results.filter(({ success }) => success).length;
-      toastManager.primary($t('merged_people_count', { values: { count } }));
-      onMerge(mergedPerson);
+      results = await mergePeople({ mergePersonDto: { ids: [person.id, ...selectedPeople.map(({ id }) => id)] } });
     } catch (error) {
       handleError(error, $t('cannot_merge_people'));
+      return;
+    }
+    const count = results.filter(({ success }) => success).length;
+    toastManager.primary($t('merged_people_count', { values: { count } }));
+    try {
+      onMerge(await getPerson({ id: person.id }));
+    } catch {
+      // The person shown was merged into another: show everyone rather than an error.
+      await goto(Route.people());
     }
   };
 </script>
