@@ -634,6 +634,18 @@ describe(AssetMediaService.name, () => {
       });
     });
 
+    it('never sends a shared link to the original of an ordinary web-compatible image', async () => {
+      const asset = AssetFactory.create();
+      const auth = AuthFactory.from().sharedLink().build();
+      mocks.access.asset.checkSharedLinkAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getForThumbnail.mockResolvedValue({ ...asset, path: null, isDeveloped: false, isEdited: false });
+
+      await expect(sut.viewThumbnail(auth, asset.id, { size: AssetMediaSize.FULLSIZE })).resolves.toEqual({
+        targetSize: AssetMediaSize.PREVIEW,
+      });
+      expect(mocks.asset.getForThumbnail).toHaveBeenCalledWith(asset.id, AssetFileType.FullSize, true);
+    });
+
     it('should require asset.view permissions', async () => {
       await expect(sut.viewThumbnail(authStub.admin, 'id', {})).rejects.toBeInstanceOf(BadRequestException);
 
