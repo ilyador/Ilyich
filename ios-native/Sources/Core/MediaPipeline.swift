@@ -456,6 +456,26 @@ actor MediaPipeline {
         }
     }
 
+    /// One detected face as the server cuts it (Fix faces). A face found further into a video than
+    /// its preview has its box in that frame, so it can't be cut from the preview here.
+    func detectedFaceImage(faceID: String, pixelSize: Int) async throws -> PreparedImage {
+        let request = try await client.authorizedRequest(path: "faces/\(faceID)/thumbnail")
+        let session = self.session, limiter = faceLimiter
+        return try await Task.detached(priority: .utility) { () throws -> PreparedImage in
+            try await limiter.acquire()
+            do {
+                let (data, response) = try await session.data(for: request)
+                try ServerFailure.check(response, body: data)
+                let image = try Self.downsample(data, pixelSize: pixelSize)
+                await limiter.release()
+                return image
+            } catch {
+                await limiter.release()
+                throw error
+            }
+        }.value
+    }
+
     private func faceFlight(_ identity: MediaCacheIdentity, person: Person) async throws -> Task<PreparedImage, Error> {
         if let flight = faceFlights[identity] { return flight }
         let request = try await client.authorizedRequest(path: "people/\(person.id)/thumbnail", query: [.init(name: "c", value: identity.revision)])
