@@ -14,12 +14,19 @@ import Synchronization
 /// downloaded again. Every launch compares the folders with the index once, the same way, so files
 /// an older build or iOS removed, or an older build added, are noticed.
 ///
+/// The app's root is Application Support, which iOS never empties, and the folder is kept out of
+/// backups (REBUILD_ROADMAP.md T8). Builds before T8 kept it in Caches: the store's first turn
+/// moves it from there by renaming, and until then reads look in both places
+/// (ThumbnailDiskStore+Move.swift).
+///
 /// Writes return at once: the bytes are readable straight away and reach the disk on the store's
 /// own queue, which also does all its file and SQLite work, never the main thread. Trimming,
 /// least recently viewed first, runs only after a few idle seconds or when the app goes to the
 /// background.
 final class ThumbnailDiskStore: Sendable {
     nonisolated let directory: URL
+    /// The same folder where a build before T8 kept it, in Caches.
+    nonisolated let earlierDirectory: URL?
     nonisolated let limit: Int
     /// Downloads that began before their photo was forgotten, or before the store was cleared, are not written.
     nonisolated let fence: MediaFence
@@ -54,6 +61,9 @@ final class ThumbnailDiskStore: Sendable {
         var maintenanceScheduled = false
         /// The index's meta rows as last read or written, for coverage's position.
         var meta: [String: String] = [:]
+        /// Until the store's first turn has moved the folder out of Caches, reads not answered
+        /// here look there too.
+        var moving = false
 
         func knows(_ folder: String) -> Bool { complete || cursor.map { folder <= $0 } ?? false }
 
@@ -92,38 +102,48 @@ final class ThumbnailDiskStore: Sendable {
     private struct Weak: @unchecked Sendable { weak var store: ThumbnailDiskStore? }
     private static let opened = Mutex<[String: Weak]>([:])
 
-    /// The store of `scope` under `root`. Everyone in the process who opens the same folder gets the
-    /// same store, so its index stays the one view of the folder.
-    static func shared(scope: String, limit: Int = defaultLimit, root: URL? = nil) -> ThumbnailDiskStore {
+    /// The store of `scope` under `root`, or the app's own in Application Support, which first moves
+    /// what a build before T8 kept in Caches; a test names the earlier root itself. Everyone in the
+    /// process who opens the same folder gets the same store, so its index stays the one view of
+    /// the folder.
+    static func shared(scope: String, limit: Int = defaultLimit, root: URL? = nil, earlierRoot: URL? = nil) -> ThumbnailDiskStore {
         let directory = directory(scope: scope, root: root)
         return opened.withLock { opened in
             if let store = opened[directory.path]?.store { return store }
-            let store = ThumbnailDiskStore(directory: directory, limit: limit)
+            let store = ThumbnailDiskStore(directory: directory, limit: limit, earlierRoot: root == nil ? cachesRoot : earlierRoot)
             opened[directory.path] = Weak(store: store)
             return store
         }
     }
 
     static let defaultLimit = 1_536 * 1024 * 1024
+    static let folderName = "IlyichThumbnails"
 
+    /// `<root>/IlyichThumbnails/<scope digest>`, the root being Application Support unless a test
+    /// names one.
     static func directory(scope: String, root: URL?) -> URL {
-        let base = root ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let base = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let name = SHA256.hash(data: Data(scope.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
-        return base.appendingPathComponent("IlyichThumbnails", isDirectory: true).appendingPathComponent(name, isDirectory: true)
+        return base.appendingPathComponent(folderName, isDirectory: true).appendingPathComponent(name, isDirectory: true)
     }
 
     /// A store of its own, as a new launch would open it. `indexDelay` is how long after opening
     /// the folders are compared with the index; `idleDelay` how long the store must be idle before
     /// it trims; `touchInterval` how stale, in milliseconds, a read must find a row before it
-    /// records the new time.
+    /// records the new time. With `earlierRoot`, what an earlier build kept in its IlyichThumbnails
+    /// folder moves into this store's before anything else the store does.
     init(directory: URL, limit: Int = defaultLimit, fence: MediaFence = MediaFence(),
-         indexDelay: TimeInterval? = 2, idleDelay: TimeInterval = 5, touchInterval: Int64 = 60_000) {
+         indexDelay: TimeInterval? = 2, idleDelay: TimeInterval = 5, touchInterval: Int64 = 60_000, earlierRoot: URL? = nil) {
         self.directory = directory
+        earlierDirectory = earlierRoot.map {
+            $0.appendingPathComponent(Self.folderName, isDirectory: true).appendingPathComponent(directory.lastPathComponent, isDirectory: true)
+        }
         self.limit = limit
         self.fence = fence
         self.idleDelay = idleDelay
         self.touchInterval = touchInterval
-        queue.async { [self] in load() }
+        if earlierRoot != nil { state.withLock { $0.moving = true } }
+        queue.async { [self] in prepare() }
         if let indexDelay {
             queue.asyncAfter(deadline: .now() + indexDelay) { [weak self] in self?.startScan() }
         }
@@ -134,7 +154,8 @@ final class ThumbnailDiskStore: Sendable {
     }
 
     convenience init(scope: String, limit: Int = defaultLimit, root: URL? = nil, indexDelay: TimeInterval? = 2) {
-        self.init(directory: Self.directory(scope: scope, root: root), limit: limit, indexDelay: indexDelay)
+        self.init(directory: Self.directory(scope: scope, root: root), limit: limit, indexDelay: indexDelay,
+                  earlierRoot: root == nil ? Self.cachesRoot : nil)
     }
 
     deinit {
@@ -148,8 +169,8 @@ final class ThumbnailDiskStore: Sendable {
         url(name: Self.name(assetID: assetID, revision: revision))
     }
 
-    private nonisolated func url(name: String) -> URL {
-        directory.appendingPathComponent(Self.folder(ofName: name), isDirectory: true).appendingPathComponent(name)
+    private nonisolated func url(name: String, in folder: URL? = nil) -> URL {
+        (folder ?? directory).appendingPathComponent(Self.folder(ofName: name), isDirectory: true).appendingPathComponent(name)
     }
 
     private static func name(assetID: String, revision: String) -> String {
@@ -176,7 +197,7 @@ final class ThumbnailDiskStore: Sendable {
     nonisolated func data(assetID: String, revision: String) -> Data? {
         let name = Self.name(assetID: assetID, revision: revision)
         if let pending = state.withLock({ $0.pending[name]?.data }) { return pending }
-        if let data = try? Data(contentsOf: url(name: name)) {
+        if let data = (try? Data(contentsOf: url(name: name))) ?? earlierData(name) {
             touch(name)
             return data
         }
@@ -190,7 +211,21 @@ final class ThumbnailDiskStore: Sendable {
             if state.pending[name] != nil { return true }
             return state.knows(Self.folder(ofName: name)) ? state.rows[name] != nil : nil
         }
-        return known ?? FileManager.default.fileExists(atPath: url(name: name).path)
+        return known ?? (FileManager.default.fileExists(atPath: url(name: name).path) || earlierExists(name))
+    }
+
+    /// Until the folder has moved out of Caches, a file not found here is looked for there, and
+    /// here once more, in case it moved between the two looks: a file the move takes is never a
+    /// miss, so it is never downloaded again.
+    private nonisolated func earlierData(_ name: String) -> Data? {
+        guard let earlierDirectory, state.withLock({ $0.moving }) else { return nil }
+        return (try? Data(contentsOf: url(name: name, in: earlierDirectory))) ?? (try? Data(contentsOf: url(name: name)))
+    }
+
+    private nonisolated func earlierExists(_ name: String) -> Bool {
+        guard let earlierDirectory, state.withLock({ $0.moving }) else { return false }
+        return FileManager.default.fileExists(atPath: url(name: name, in: earlierDirectory).path)
+            || FileManager.default.fileExists(atPath: url(name: name).path)
     }
 
     private func touch(_ name: String) {
@@ -331,13 +366,15 @@ final class ThumbnailDiskStore: Sendable {
         }
     }
 
-    /// Sign-out and Clear browsing cache: every file and the index go. A write begun before is refused.
+    /// Sign-out and Clear browsing cache: every file and the index go, and whatever of the folder a
+    /// move left in Caches. A write begun before is refused.
     func removeAll() async {
         fence.forgetAll()
         state.withLock { state in state.pending.removeAll() }
         await onQueue { [self] in
             database?.close(); database = nil
             try? FileManager.default.removeItem(at: directory)
+            if let earlierDirectory { try? FileManager.default.removeItem(at: earlierDirectory) }
             state.withLock { state in
                 let pending = state.pending, tickets = state.tickets
                 state = State()
@@ -416,6 +453,19 @@ final class ThumbnailDiskStore: Sendable {
         await withCheckedContinuation { continuation in queue.async { continuation.resume(returning: work()) } }
     }
 
+    /// The store's first turn, before any other: what a build before T8 kept in Caches moves here
+    /// (one move at a time in the process), then the index is loaded. Reads that come meanwhile
+    /// look in both places. Anything that could not be moved waits for the next launch's move and
+    /// is not read meanwhile, so forgetting a photo or a sweep never misses a copy left behind.
+    private func prepare() {
+        if let earlierDirectory {
+            let earlier = earlierDirectory.deletingLastPathComponent(), tree = directory.deletingLastPathComponent()
+            Self.moveLock.withLock { _ in _ = Self.moveEarlierFolders(from: earlier, to: tree) }
+            state.withLock { $0.moving = false }
+        }
+        load()
+    }
+
     /// Opens the index and loads it into memory. One written by another build, or none, is
     /// rebuilt from the folders.
     private func load() {
@@ -453,6 +503,9 @@ final class ThumbnailDiskStore: Sendable {
         if let database { return database }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            // Checked each time the index opens, at launch and after clearing: a folder moved here
+            // from Caches, or made again, has lost the mark.
+            Self.excludeFromBackup(directory.deletingLastPathComponent())
             let opened = try SQLiteConnection(path: directory.appendingPathComponent(Self.indexName).path, readOnly: false, busyTimeout: 2_000)
             try opened.execute("PRAGMA journal_mode=WAL")
             try opened.execute("PRAGMA synchronous=NORMAL")

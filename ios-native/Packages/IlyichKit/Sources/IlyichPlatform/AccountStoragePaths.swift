@@ -10,7 +10,8 @@ public struct AccountStoragePaths: Sendable {
     /// The offline library database, in Application Support.
     public var entitiesDatabase: String { "IlyichEntities/\(account.digest).sqlite" }
 
-    /// Grid thumbnails, in Caches. The folder takes only the first 32 digits of the digest.
+    /// Grid thumbnails, in Application Support; builds before T8 kept the same folder in Caches.
+    /// The folder takes only the first 32 digits of the digest.
     public var thumbnails: String { "IlyichThumbnails/\(account.digest.prefix(32))" }
 
     /// The disk path of the media URL cache.
