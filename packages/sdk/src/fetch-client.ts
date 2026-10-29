@@ -180,6 +180,7 @@ export type AdminConfigJobDto = {
     smartSearch: AdminConfigJobSettingsDto;
     thumbnailGeneration: AdminConfigJobSettingsDto;
     videoConversion: AdminConfigJobSettingsDto;
+    videoFaceDetection: AdminConfigJobSettingsDto;
     workflow: AdminConfigJobSettingsDto;
 };
 export type AdminConfigLibraryScanDto = {
@@ -1824,6 +1825,7 @@ export type QueuesResponseLegacyDto = {
     storageTemplateMigration: QueueResponseLegacyDto;
     thumbnailGeneration: QueueResponseLegacyDto;
     videoConversion: QueueResponseLegacyDto;
+    videoFaceDetection: QueueResponseLegacyDto;
     workflow: QueueResponseLegacyDto;
 };
 export type JobCreateDto = {
@@ -8612,7 +8614,8 @@ export enum QueueName {
     Ocr = "ocr",
     Workflow = "workflow",
     IntegrityCheck = "integrityCheck",
-    Editor = "editor"
+    Editor = "editor",
+    VideoFaceDetection = "videoFaceDetection"
 }
 export enum QueueCommand {
     Start = "start",
@@ -8663,6 +8666,8 @@ export enum JobName {
     AssetDeleteCheck = "AssetDeleteCheck",
     AssetDetectFacesQueueAll = "AssetDetectFacesQueueAll",
     AssetDetectFaces = "AssetDetectFaces",
+    AssetDetectVideoFacesQueueAll = "AssetDetectVideoFacesQueueAll",
+    AssetDetectVideoFaces = "AssetDetectVideoFaces",
     AssetDetectDuplicatesQueueAll = "AssetDetectDuplicatesQueueAll",
     AssetDetectDuplicates = "AssetDetectDuplicates",
     AssetEditThumbnailGeneration = "AssetEditThumbnailGeneration",

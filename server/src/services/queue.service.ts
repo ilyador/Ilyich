@@ -233,6 +233,10 @@ export class QueueService extends BaseService {
         return this.jobRepository.queue({ name: JobName.AssetDetectFacesQueueAll, data: { force } });
       }
 
+      case QueueName.VideoFaceDetection: {
+        return this.jobRepository.queue({ name: JobName.AssetDetectVideoFacesQueueAll, data: { force } });
+      }
+
       case QueueName.FacialRecognition: {
         return this.jobRepository.queue({ name: JobName.FacialRecognitionQueueAll, data: { force } });
       }

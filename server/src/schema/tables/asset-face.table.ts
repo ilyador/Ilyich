@@ -110,4 +110,8 @@ export class AssetFaceTable {
 
   @Column({ type: 'timestamp with time zone', nullable: true })
   assetDeletedAt!: Timestamp | null;
+
+  /** Milliseconds into the video of the frame this face was found in, when not found in the preview */
+  @Column({ type: 'integer', nullable: true })
+  frameTimestamp!: number | null;
 }

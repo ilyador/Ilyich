@@ -408,14 +408,16 @@ export class PersonService extends BaseService {
     const embeddings: FaceSearchTable[] = [];
     const mlFaceIds = new Set<string>();
 
-    for (const face of asset.faces) {
+    // faces from the rest of a video come from other frames than the preview and are left to video face detection
+    const previewFaces = asset.faces.filter((face) => face.frameTimestamp === null);
+    for (const face of previewFaces) {
       if (face.sourceType === SourceType.MachineLearning) {
         mlFaceIds.add(face.id);
       }
     }
 
     for (const { boundingBox, embedding } of faces) {
-      const matches = asset.faces.filter((face) => this.iou(face, boundingBox, imageWidth, imageHeight) > 0.5);
+      const matches = previewFaces.filter((face) => this.iou(face, boundingBox, imageWidth, imageHeight) > 0.5);
       // prefer metadata faces over machine learning duplicates
       const match = matches.find((face) => face.sourceType !== SourceType.MachineLearning) ?? matches[0];
 

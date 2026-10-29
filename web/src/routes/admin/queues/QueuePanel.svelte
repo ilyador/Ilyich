@@ -66,6 +66,11 @@
       missingText: $t('missing'),
       disabled: !machineLearning.facialRecognition.enabled,
     },
+    [QueueName.VideoFaceDetection]: {
+      allText: $t('all'),
+      missingText: $t('missing'),
+      disabled: !machineLearning.facialRecognition.enabled,
+    },
     [QueueName.FacialRecognition]: {
       allText: $t('reset'),
       missingText: $t('missing'),

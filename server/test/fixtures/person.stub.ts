@@ -16,6 +16,9 @@ export const personThumbnailStub = {
     originalPath: '/original/path.jpg',
     exifOrientation: '1',
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
+    frameTimestamp: null,
+    videoStream: null,
+    format: null,
   }),
   newThumbnailMiddle: Object.freeze({
     isDeveloped: false,
@@ -30,6 +33,9 @@ export const personThumbnailStub = {
     originalPath: '/original/path.jpg',
     exifOrientation: '1',
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
+    frameTimestamp: null,
+    videoStream: null,
+    format: null,
   }),
   newThumbnailEnd: Object.freeze({
     isDeveloped: false,
@@ -44,6 +50,9 @@ export const personThumbnailStub = {
     originalPath: '/original/path.jpg',
     exifOrientation: '1',
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
+    frameTimestamp: null,
+    videoStream: null,
+    format: null,
   }),
   rawEmbeddedThumbnail: Object.freeze({
     isDeveloped: false,
@@ -58,6 +67,9 @@ export const personThumbnailStub = {
     originalPath: '/original/path.dng',
     exifOrientation: '1',
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
+    frameTimestamp: null,
+    videoStream: null,
+    format: null,
   }),
   negativeCoordinate: Object.freeze({
     isDeveloped: false,
@@ -72,6 +84,9 @@ export const personThumbnailStub = {
     originalPath: '/original/path.jpg',
     exifOrientation: '1',
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
+    frameTimestamp: null,
+    videoStream: null,
+    format: null,
   }),
   overflowingCoordinate: Object.freeze({
     isDeveloped: false,
@@ -86,6 +101,9 @@ export const personThumbnailStub = {
     originalPath: '/original/path.jpg',
     exifOrientation: '1',
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
+    frameTimestamp: null,
+    videoStream: null,
+    format: null,
   }),
   videoThumbnail: Object.freeze({
     isDeveloped: false,
@@ -100,5 +118,8 @@ export const personThumbnailStub = {
     originalPath: '/original/path.mp4',
     exifOrientation: '1',
     previewPath: AssetFileFactory.create({ type: AssetFileType.Preview }).path,
+    frameTimestamp: null,
+    videoStream: null,
+    format: null,
   }),
 };

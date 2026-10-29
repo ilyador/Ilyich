@@ -425,6 +425,7 @@ export class AssetRepository {
               metadataExtractedAt: eb.ref('excluded.metadataExtractedAt'),
               ocrAt: eb.ref('excluded.ocrAt'),
               development: eb.ref('excluded.development'),
+              videoFacesDetectedAt: eb.ref('excluded.videoFacesDetectedAt'),
             },
             values[0],
           ),

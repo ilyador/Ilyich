@@ -291,6 +291,7 @@ export type AssetFace = {
   ownerId: string;
   assetVisibility: AssetVisibility;
   assetDeletedAt: Date | null;
+  frameTimestamp: number | null;
 };
 
 export type Plugin = Selectable<PluginTable>;

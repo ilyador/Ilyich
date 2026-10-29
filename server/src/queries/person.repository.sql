@@ -829,9 +829,67 @@ select
   "asset_face"."boundingBoxY2" as "y2",
   "asset_face"."imageWidth" as "oldWidth",
   "asset_face"."imageHeight" as "oldHeight",
+  "asset_face"."frameTimestamp",
   "asset"."type",
   "asset"."originalPath",
   "asset_exif"."orientation" as "exifOrientation",
+  (
+    select
+      to_json(obj)
+    from
+      (
+        select
+          "asset_video"."index",
+          "asset_video"."codecName",
+          "asset_video"."profile",
+          "asset_video"."level",
+          "asset_video"."bitrate",
+          "asset_exif"."exifImageWidth" as "width",
+          "asset_exif"."exifImageHeight" as "height",
+          "asset_video"."pixelFormat",
+          "asset_video"."frameCount",
+          "asset_exif"."fps" as "frameRate",
+          "asset_video"."timeBase",
+          case
+            when "asset_exif"."orientation" = '6' then -90
+            when "asset_exif"."orientation" = '8' then 90
+            when "asset_exif"."orientation" = '3' then 180
+            else 0
+          end as "rotation",
+          "asset_video"."colorPrimaries",
+          "asset_video"."colorMatrix",
+          "asset_video"."colorTransfer",
+          "asset_video"."dvProfile",
+          "asset_video"."dvLevel",
+          "asset_video"."dvBlSignalCompatibilityId"
+        from
+          (
+            select
+              1
+          ) as "dummy"
+        where
+          "asset_video"."assetId" is not null
+      ) as obj
+  ) as "videoStream",
+  (
+    select
+      to_json(obj)
+    from
+      (
+        select
+          "asset_video"."formatName",
+          "asset_video"."formatLongName",
+          "asset"."duration",
+          "asset_video"."bitrate"
+        from
+          (
+            select
+              1
+          ) as "dummy"
+        where
+          "asset_video"."assetId" is not null
+      ) as obj
+  ) as "format",
   coalesce(
     (
       select
@@ -861,6 +919,7 @@ from
   inner join "asset_face" on "asset_face"."id" = "person"."faceAssetId"
   inner join "asset" on "asset_face"."assetId" = "asset"."id"
   left join "asset_exif" on "asset_exif"."assetId" = "asset"."id"
+  left join "asset_video" on "asset_video"."assetId" = "asset"."id"
 where
   "person"."ownerId" = $3
   and "person"."personGroupId" = $4
@@ -1424,7 +1483,12 @@ where
 
 -- PersonRepository.getLatestFaceDate
 select
-  max("asset_job_status"."facesRecognizedAt")::text as "latestDate"
+  max(
+    greatest(
+      "asset_job_status"."facesRecognizedAt",
+      "asset_job_status"."videoFacesDetectedAt"
+    )
+  )::text as "latestDate"
 from
   "asset_job_status"
 
