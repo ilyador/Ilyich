@@ -22,7 +22,7 @@ import Foundation
 }
 
 /// Turns notification_batches into notifications (B4). Each account's TransferRuntime runs one
-/// (B9); today's backup, on the way back, posts its own.
+/// (B9).
 ///
 /// It watches the database, never the engine's work: the engine wakes it through `changed()`, or a
 /// stream of its snapshots, and never waits for it, so a notification that hangs holds up nothing

@@ -8,14 +8,15 @@ import Foundation
 extension TransferStore {
     // MARK: Ownership
 
-    /// Hands a fresh database to the transfer engine: one no import ever wrote. A database holding
-    /// a shadow copy of state.json stays BackupCoordinator's, since the next shadow import would
-    /// replace what the engine wrote; B9 hands it over with an authoritative import instead.
-    /// Returns whether the engine owns the database now.
+    /// Hands the database to the transfer engine as it is: a fresh one, or a copy B1 made of an
+    /// earlier build's state.json that no import handed over. Nothing imports state.json since
+    /// B10, so nothing can write over what the engine writes; the import's digest and mode stay,
+    /// telling LegacyRetirement no import read the file. A database a later build made stays its
+    /// own. Returns whether the engine owns the database now.
     @discardableResult
     func claimForEngine() throws -> Bool {
         let db = try database()
-        try db.run("UPDATE meta SET engine=? WHERE id=1 AND legacy_import_digest IS NULL", [.text(Engine.transfer.rawValue)])
+        try db.run("UPDATE meta SET engine=? WHERE id=1 AND schema<=?", [.text(Engine.transfer.rawValue), .integer(Int64(Self.schemaVersion))])
         return try meta().engine == .transfer
     }
 

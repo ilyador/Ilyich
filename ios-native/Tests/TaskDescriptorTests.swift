@@ -5,24 +5,20 @@ import XCTest
 final class TaskDescriptorTests: XCTestCase {
     private typealias G = LegacyGoldens
 
-    func testLegacyDescriptorsAreAdoptedByTheirIDUnderEitherContainerPath() throws {
+    /// What builds before B9 wrote, under either container path, is told apart from another app's
+    /// task, and nothing more is read from it (B10): no attempt, no outcome file, no account, and
+    /// nothing is ever written in that shape again.
+    func testOlderBuildsDescriptorsAreRecognizedAndNeverRead() throws {
         for path in ["backup/descriptor-backup.json", "share/descriptor-share-var.json", "share/descriptor-share-private-var.json"] {
-            let text = String(decoding: try FixtureLoader.data(path), as: UTF8.self)
-            let legacy = try FixtureLoader.decode(Legacy.Descriptor.self, from: path)
-            let descriptor = TaskDescriptor(taskDescription: text)
-            XCTAssertEqual(descriptor, .legacy(id: legacy.id, receipt: legacy.receipt), path)
-            XCTAssertEqual(descriptor.attempt, AttemptID(legacy: legacy.id), "A legacy stage ID or share identity is kept verbatim.")
-            XCTAssertEqual(TaskDescriptor(taskDescription: descriptor.taskDescription), descriptor, path)
-            // Today's uploader matches its own tasks by decoding the same text.
-            let production = try JSONDecoder().decode(BackgroundUploads.Descriptor.self, from: Data(text.utf8))
-            XCTAssertEqual(production.id, legacy.id)
+            let descriptor = TaskDescriptor(taskDescription: String(decoding: try FixtureLoader.data(path), as: UTF8.self))
+            XCTAssertEqual(descriptor, .legacy, path)
+            XCTAssertNil(descriptor.attempt, path)
+            XCTAssertNil(descriptor.outcomePath, path)
+            XCTAssertNil(descriptor.scope, path)
+            XCTAssertNil(descriptor.taskDescription, path)
         }
-        let backup = TaskDescriptor(taskDescription: String(decoding: try FixtureLoader.data("backup/descriptor-backup.json"), as: UTF8.self))
-        XCTAssertEqual(backup.outcomePath, "Backup/\(G.digest)/\(G.currentFolder)/\(G.currentStage).receipt")
-        let plainVar = TaskDescriptor(taskDescription: String(decoding: try FixtureLoader.data("share/descriptor-share-var.json"), as: UTF8.self))
-        let privateVar = TaskDescriptor(taskDescription: String(decoding: try FixtureLoader.data("share/descriptor-share-private-var.json"), as: UTF8.self))
-        XCTAssertEqual(plainVar.outcomePath, "ShareInbox/\(G.batchID.uuidString)/\(plainVar.attempt!.rawValue).receipt")
-        XCTAssertEqual(privateVar.outcomePath, "ShareInbox/\(G.batchID.uuidString)/\(privateVar.attempt!.rawValue).receipt")
+        let outside = TaskDescriptor(taskDescription: #"{"id":"stage","receipt":"file:\/\/\/tmp\/stage.receipt"}"#)
+        XCTAssertEqual(outside, .legacy, "Wherever its outcome file was.")
     }
 
     func testVersion2RoundTripsAndIsWrittenTheSameWayEveryTime() {
@@ -62,16 +58,11 @@ final class TaskDescriptorTests: XCTestCase {
         XCTAssertNil(TaskDescriptor.foreign.taskDescription)
     }
 
-    func testLegacyDescriptorOutsideTheAppGroupIsKeptButUnresolved() {
-        let descriptor = TaskDescriptor(taskDescription: #"{"id":"stage","receipt":"file:\/\/\/tmp\/stage.receipt"}"#)
-        XCTAssertEqual(descriptor, .legacy(id: "stage", receipt: URL(fileURLWithPath: "/tmp/stage.receipt")))
-        XCTAssertEqual(descriptor.attempt, AttemptID(legacy: "stage"))
-        XCTAssertNil(descriptor.outcomePath)
-    }
-
     func testSessionIdentifiersFollowTheBundleIdentifier() {
-        XCTAssertEqual(TransferSessionID.backup.identifier, BackgroundUploads.identifier)
-        XCTAssertEqual(TransferSessionID.shareUpload.identifier, BackgroundUploads.shareIdentifier)
+        // The identifiers every build used, so iOS hands over the sessions earlier builds left.
+        let bundle = Bundle.main.bundleIdentifier ?? "app.alextran.immich"
+        XCTAssertEqual(TransferSessionID.backup.identifier, bundle + ".backup")
+        XCTAssertEqual(TransferSessionID.shareUpload.identifier, bundle + ".share-upload")
         XCTAssertEqual(TransferSessionID.backup.identifier(bundleIdentifier: "app.alextran.immich.H4K2MSF2SG"), "app.alextran.immich.H4K2MSF2SG.backup")
         XCTAssertEqual(TransferSessionID.shareUpload.identifier(bundleIdentifier: "app.alextran.immich.H4K2MSF2SG"), "app.alextran.immich.H4K2MSF2SG.share-upload")
         XCTAssertEqual(TransferSessionID.backup.identifier(bundleIdentifier: nil), "app.alextran.immich.backup")

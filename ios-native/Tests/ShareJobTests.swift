@@ -56,14 +56,12 @@ struct ShareJobHarness {
         return batch.attachments.map(\.id)
     }
 
-    /// The file's deterministic identity, and today's, as ShareInboxStore computes it.
-    func identities(_ name: String) throws -> (identity: AttemptID, legacy: AttemptID) {
+    /// The file's deterministic identity.
+    func identity(_ name: String) throws -> AttemptID {
         let path = batchFolder + "/" + name
         let checksum = try UploadBody.checksum(group.url(path))
-        let scope = Self.account.digest
-        return (AttemptID(legacy: ShareJobExecutor.identity(scope: scope, path: path, checksum: checksum, sidecarChecksum: "", livePhotoVideoID: "")),
-                AttemptID(legacy: ShareInboxStore.uploadIdentity(scope: scope, file: group.url(path), checksum: checksum, sidecarChecksum: "",
-                                                                  livePhotoVideoID: "")))
+        return AttemptID(legacy: ShareJobExecutor.identity(scope: Self.account.digest, path: path, checksum: checksum, sidecarChecksum: "",
+                                                           livePhotoVideoID: ""))
     }
 
     func tearDown(_ engines: TransferEngine<TestClock>...) async {
@@ -80,7 +78,7 @@ final class ShareJobTests: XCTestCase {
     func testUploadsInPlaceAndConsumesAfterTheCommit() async throws {
         let h = try await ShareJobHarness()
         try await h.share(["a", "b"])
-        let (identity, _) = try h.identities("a")
+        let identity = try h.identity("a")
         let engine = h.engine()
         let result = try await engine.enqueue([h.request("a")])
         XCTAssertEqual(result, .queued(1))
@@ -170,37 +168,29 @@ final class ShareJobTests: XCTestCase {
         await h.tearDown()
     }
 
-    func testLegacyIdentityAdoptsInFlightTask() async throws {
+    /// An upload of the file iOS still holds under its identity, from before a relaunch, is
+    /// adopted and its answer applied, never sent again.
+    func testAnUploadIOSStillHoldsIsAdopted() async throws {
         let h = try await ShareJobHarness()
         try await h.share(["a"])
-        // Today's build sent the file under its identity, and iOS still has the task.
-        let (_, legacy) = try h.identities("a")
-        h.uploads.holdTask(for: legacy)
+        let identity = try h.identity("a")
+        h.uploads.holdTask(for: identity)
         let engine = h.engine()
         _ = try await engine.enqueue([h.request("a")])
         try await engine.start()
 
         try await untilTransfers("the adopted upload consumed") { await h.listed() == nil }
-        XCTAssertEqual(h.uploads.adopted.map(\.attempt), [legacy])
+        XCTAssertEqual(h.uploads.adopted.map(\.attempt), [identity])
         XCTAssertEqual(h.uploads.adopted.first?.folder, h.batchFolder)
         XCTAssertTrue(h.uploads.uploads.isEmpty, "nothing is sent again")
         XCTAssertTrue(h.server.checks.isEmpty)
         await h.tearDown(engine)
     }
 
-    func testLegacyIdentityMatchesTodaysAndIsTheSameForBothPathForms() throws {
-        let file = URL(fileURLWithPath: "/private/var/mobile/Containers/Shared/AppGroup/X/ShareInbox/B/a")
-        XCTAssertEqual(ShareJobExecutor.legacyIdentity(scope: "s", path: file.path, checksum: "c", sidecarChecksum: "x", livePhotoVideoID: "v"),
-                       ShareInboxStore.uploadIdentity(scope: "s", file: file, checksum: "c", sidecarChecksum: "x", livePhotoVideoID: "v"))
-        XCTAssertEqual(ShareJobExecutor.legacyPaths(of: file),
-                       [file.path, "/var/mobile/Containers/Shared/AppGroup/X/ShareInbox/B/a"])
-        XCTAssertEqual(ShareJobExecutor.legacyPaths(of: URL(fileURLWithPath: "/var/mobile/a")), ["/var/mobile/a", "/private/var/mobile/a"])
-    }
-
     func testAStaleFailedOutcomeIsDeletedBeforeSendingAgain() async throws {
         let h = try await ShareJobHarness()
         try await h.share(["a"])
-        let (identity, _) = try h.identities("a")
+        let identity = try h.identity("a")
         // An earlier try of this identity failed and its answer is still on disk.
         h.uploads.record(OutcomeRecord(httpStatus: 500, v: 2), for: identity)
         let engine = h.engine()

@@ -5,73 +5,26 @@ import IlyichShareInbox
 import os
 import UIKit
 
-/// The process's backup engine (B9): the transfer engine for an account whose backup records the
-/// cutover imported, else today's BackupCoordinator, which stays as the way back if the import
-/// fails (it says so in Diagnostics). iOS allows one URLSession per background identifier and one
-/// launch handler per background task identifier, so a process runs exactly one of them: the
-/// first account activated decides, and the choice holds until the app ends.
+/// The process's backup engine: the transfer engine runs every account's backup (B9; the old
+/// engine it replaced is gone since B10). iOS allows one URLSession per background identifier and
+/// one launch handler per background task identifier, so the process starts the engine's sessions
+/// and lifecycle once, when the first account's backup starts, and hands them to each account's
+/// runtime in turn.
 ///
 /// At launch (architecture section 4): the background task identifiers are registered at once,
-/// through a router that holds a task until the engine is chosen; a background session's events
-/// are held the same way, their completion answered at the 20 s deadline if nothing is chosen by
-/// then, and a launch for either restores the account. Choosing the transfer engine creates the
-/// sessions (TransportRegistry), the completion queue (BackgroundEventAcks) and the lifecycle
-/// source, and from then on hands each to the account's TransferRuntime: a session's completion is
-/// registered before its session is touched and answered only after the runtime committed what it
-/// delivered.
+/// through a router that holds a task until the engine starts; a background session's events are
+/// held the same way, their completion answered at the 20 s deadline if the engine hasn't started
+/// by then, and a launch for either restores the account. Starting the engine creates the sessions
+/// (TransportRegistry), the completion queue (BackgroundEventAcks) and the lifecycle source, and
+/// from then on hands each to the account's TransferRuntime: a session's completion is registered
+/// before its session is touched and answered only after the runtime committed what it delivered.
 @MainActor final class TransferHost {
-    static let shared = TransferHost(legacy: .live, scheduler: SystemBackgroundTaskScheduler(), makeRegistry: { TransportRegistry.live() })
+    static let shared = TransferHost(scheduler: SystemBackgroundTaskScheduler(), makeRegistry: { TransportRegistry.live() })
 
-    enum Engine: Equatable, Sendable {
-        case undecided
-        /// The transfer engine.
-        case transfer
-        /// Today's BackupCoordinator, with the reason.
-        case legacy(String)
-    }
-
-    /// What today's backup does at each step, for the way back.
-    struct LegacyBackup {
-        var coordinator: @MainActor () -> BackupCoordinator
-        var inbox: @MainActor () -> ShareInboxStore
-        var registerLifecycle: @MainActor (BackgroundTaskRouter) -> Void
-        var handleEvents: @MainActor (String, @escaping @MainActor () -> Void) -> Void
-
-        static let live = LegacyBackup(
-            coordinator: { BackupCoordinator.shared }, inbox: { ShareInboxStore.shared },
-            registerLifecycle: { router in
-                // Upload progress reaches the backup and Shared files screens as the sessions report
-                // it. Neither session is made here: one relaunched for its events is made once its
-                // completion is in hand, or when backup or sharing first needs it.
-                BackgroundUploads.observeProgress(of: BackgroundUploads.identifier) { value in
-                    Task { @MainActor in BackupCoordinator.shared.applyProgress(value) }
-                }
-                BackgroundUploads.observeProgress(of: BackgroundUploads.shareIdentifier) { value in
-                    Task { @MainActor in ShareInboxStore.shared.applyProgress(value) }
-                }
-                BackupLifecycle.shared.register(using: router)
-            },
-            handleEvents: { identifier, completion in
-                let uploads: BackgroundUploads
-                switch identifier {
-                case BackgroundUploads.identifier: uploads = .shared
-                case BackgroundUploads.shareIdentifier: uploads = .sharing
-                default: completion(); return
-                }
-                let answer = MainActorCompletion(completion)
-                uploads.handleEvents { Task { @MainActor in answer.call() } }
-                if identifier == BackgroundUploads.identifier { Task { await BackupCoordinator.shared.activate() } }
-            })
-    }
-
-    private(set) var engine: Engine = .undecided
     /// What the backup and Shared files screens send their commands to.
     let backend: BackupBackendRouter
     let tasks: BackgroundTaskRouter
-    private let legacy: LegacyBackup
     private let makeRegistry: () -> TransportRegistry
-    /// False for tests that run today's backup only.
-    private let allowsTransferEngine: Bool
     private(set) var registry: TransportRegistry?
     private var acks: BackgroundEventAcks<ContinuousClock>?
     private(set) var source: LifecycleEventSource?
@@ -82,40 +35,20 @@ import UIKit
     private var drains: [(TransferSessionID, Int)] = []
     /// Window leases that came before a runtime could use them.
     private var windows: [BGTaskLease] = []
-    /// Background session events that came before the engine was chosen.
+    /// Background session events that came before the engine started.
     private var held: [(identifier: String, completion: OnceCompletion)] = []
     private var restore: (@MainActor () async -> Void)?
     private var usesDevicePhotos = false
-    /// Why the signed-in account's backup waits for the next launch, for Diagnostics.
-    private var waitingReason: String?
+    /// Why the signed-in account's backup can't start, for Diagnostics.
+    private var unavailableReason: String?
     private static let logger = Logger(subsystem: "app.ilyich.native", category: "Transfers")
 
-    init(legacy: LegacyBackup, scheduler: any BackgroundTaskScheduling, makeRegistry: @escaping () -> TransportRegistry,
-         allowsTransferEngine: Bool = true) {
-        self.legacy = legacy
+    init(scheduler: any BackgroundTaskScheduling, makeRegistry: @escaping () -> TransportRegistry) {
         self.makeRegistry = makeRegistry
-        self.allowsTransferEngine = allowsTransferEngine
         tasks = BackgroundTaskRouter(system: scheduler)
-        // Commands wait for the first account's backup; a host that runs only today's backup
-        // sends them there from the start.
-        backend = BackupBackendRouter(legacy: LegacyCoordinatorBackend(coordinator: legacy.coordinator(), inbox: legacy.inbox()),
-                                      route: allowsTransferEngine ? .preparing : .legacy)
+        // Commands wait for the first account's backup.
+        backend = BackupBackendRouter(route: .preparing)
     }
-
-    /// A host that only ever runs today's backup over `coordinator`, for tests of it: one per
-    /// coordinator.
-    static func legacyOnly(_ coordinator: BackupCoordinator) -> TransferHost {
-        if let host = legacyHosts[ObjectIdentifier(coordinator)] { return host }
-        var legacy = LegacyBackup.live
-        legacy.coordinator = { coordinator }
-        legacy.registerLifecycle = { _ in }
-        let host = TransferHost(legacy: legacy, scheduler: SystemBackgroundTaskScheduler(), makeRegistry: { TransportRegistry.live() },
-                                allowsTransferEngine: false)
-        legacyHosts[ObjectIdentifier(coordinator)] = host
-        return host
-    }
-
-    private static var legacyHosts: [ObjectIdentifier: TransferHost] = [:]
 
     // MARK: Launch
 
@@ -123,12 +56,12 @@ import UIKit
     func setRestore(_ restore: @escaping @MainActor () async -> Void) { self.restore = restore }
 
     /// In didFinishLaunching, synchronously: registers both background task identifiers, holding
-    /// any task until the engine is chosen.
+    /// any task until the engine starts.
     func launch(usesDevicePhotos: Bool) {
         self.usesDevicePhotos = usesDevicePhotos
         guard usesDevicePhotos else {
             // No backup runs in this process (UI tests): the screens' commands are refused.
-            if allowsTransferEngine { backend.deactivate() }
+            backend.deactivate()
             return
         }
         tasks.registerWithSystem { [weak self] in self?.restoreForBackgroundWork() }
@@ -136,29 +69,23 @@ import UIKit
 
     /// iOS relaunched the app, or woke it, for a background session's events.
     func handleEvents(identifier: String, completion: @escaping @MainActor () -> Void) {
-        switch engine {
-        case .transfer:
-            deliver(identifier: identifier, completion: completion)
-        case .legacy:
-            legacy.handleEvents(identifier, completion)
-        case .undecided:
-            guard TransferSessionID(identifier: identifier) != nil else { return completion() }
-            let once = OnceCompletion(completion)
-            held.append((identifier, once))
-            // Answered at iOS's deadline if no engine was chosen by then; the session's events stay
-            // with iOS until a session is made for them.
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(20))
-                guard let self, case .undecided = self.engine else { return }
-                self.held.removeAll { $0.completion === once }
-                once.call()
-            }
-            restoreForBackgroundWork()
+        guard registry == nil else { return deliver(identifier: identifier, completion: completion) }
+        guard TransferSessionID(identifier: identifier) != nil else { return completion() }
+        let once = OnceCompletion(completion)
+        held.append((identifier, once))
+        // Answered at iOS's deadline if the engine hasn't started by then; the session's events
+        // stay with iOS until a session is made for them.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(20))
+            guard let self, self.registry == nil else { return }
+            self.held.removeAll { $0.completion === once }
+            once.call()
         }
+        restoreForBackgroundWork()
     }
 
     private func restoreForBackgroundWork() {
-        guard case .undecided = engine, let restore else { return }
+        guard registry == nil, let restore else { return }
         Task { await restore() }
     }
 
@@ -169,40 +96,15 @@ import UIKit
         source?.urlSessionEvents(identifier)
     }
 
-    // MARK: Choosing
+    // MARK: Starting
 
-    /// Chooses the transfer engine for the process, unless today's backup already runs. Says
-    /// whether the transfer engine runs.
-    @discardableResult
-    func chooseTransfer() -> Bool {
-        switch engine {
-        case .transfer: return true
-        case .legacy: return false
-        case .undecided:
-            guard allowsTransferEngine else { return false }
-            engine = .transfer
-            startTransport()
-            for event in held { deliver(identifier: event.identifier) { event.completion.call() } }
-            held = []
-            return true
-        }
-    }
-
-    /// Chooses today's backup for the process, unless the transfer engine already runs. Says
-    /// whether today's backup runs.
-    @discardableResult
-    func chooseLegacy(_ reason: String) -> Bool {
-        switch engine {
-        case .legacy: return true
-        case .transfer: return false
-        case .undecided:
-            engine = .legacy(reason)
-            Self.logger.notice("Backup runs on the old engine: \(reason, privacy: .public)")
-            legacy.registerLifecycle(tasks)
-            for event in held { legacy.handleEvents(event.identifier) { event.completion.call() } }
-            held = []
-            return true
-        }
+    /// Starts the engine's sessions, completion queue and lifecycle source, once per process, and
+    /// hands them the events held for them.
+    func startEngine() {
+        guard registry == nil else { return }
+        startTransport()
+        for event in held { deliver(identifier: event.identifier) { event.completion.call() } }
+        held = []
     }
 
     /// Creates the sessions, the completion queue and the lifecycle source, and routes their
@@ -219,7 +121,7 @@ import UIKit
         guard usesDevicePhotos else { return }
         let source = LifecycleEventSource(initial: SystemLifecycleInputs.current(), scheduler: tasks)
         self.source = source
-        // iOS turning automatic backup's windows down shows on the backup screen, as it did.
+        // iOS turning automatic backup's windows down shows on the backup screen.
         let backend = self.backend
         source.schedulingErrorChanged = { backend.schedulingErrorChanged($0) }
         source.register()
@@ -250,55 +152,28 @@ import UIKit
 
     // MARK: Accounts
 
-    /// What an account's backup runs on, in a process that runs one engine.
-    enum Placement: Equatable {
-        case transferEngine
-        /// Today's backup, with the reason.
-        case legacy(String)
-        /// Nothing until the app's next launch, with the reason.
-        case nextLaunch(String)
-    }
-
-    /// The transfer engine when the account's import handed it the database and the process may
-    /// run it; today's backup when the import couldn't and the process doesn't run the transfer
-    /// engine; else nothing until the next launch. An account whose records the transfer engine
-    /// owns never runs on today's backup, whose state.json for it stopped at the cutover.
-    static func placement(_ decision: TransferCutover, running engine: Engine, allowsTransferEngine: Bool) -> Placement {
-        switch decision {
-        case .engine:
-            // A host that runs only today's backup, for tests of it.
-            guard allowsTransferEngine else {
-                if case .legacy(let reason) = engine { return .legacy(reason) }
-                return .legacy(engineCouldNotStart)
-            }
-            if case .legacy = engine { return .nextLaunch("The old engine runs for an account signed in earlier.") }
-            return .transferEngine
-        case .legacy(let reason):
-            if case .transfer = engine { return .nextLaunch(reason) }
-            return .legacy(reason)
-        }
-    }
-
     private static let engineCouldNotStart = "The transfer engine couldn’t start."
-    /// What the screens say while the account's backup waits for the next launch.
+    /// What the screens say while the account's backup can't start.
     static let nextLaunchMessage = "Quit and reopen Ilyich to back up this account."
 
-    /// The account's backup, each time it becomes active (Placement). The screens' commands wait
-    /// while the import runs and the engine starts, and reach the engine once it runs.
+    /// The account's backup, each time it becomes active: its transfers database is readied for
+    /// the engine (AccountRuntime.prepareTransfers), then the account's TransferRuntime starts. The
+    /// screens' commands wait meanwhile and reach the engine once it runs.
     func activate(_ runtime: AccountRuntime) async {
-        waitingReason = nil
-        if allowsTransferEngine { backend.prepare() }
+        unavailableReason = nil
+        backend.prepare()
         let decision = await runtime.prepareTransfers()
-        // The account ended while its records were imported: nothing is chosen for it.
+        // The account ended while its database was readied: nothing starts for it.
         guard !runtime.authorization.hasEnded else {
             runtime.cutover.decide(.unavailable)
-            if allowsTransferEngine { backend.deactivate() }
+            backend.deactivate()
             return
         }
-        switch Self.placement(decision, running: engine, allowsTransferEngine: allowsTransferEngine) {
-        case .transferEngine:
-            guard chooseTransfer(), let registry, let made = makeRuntime(for: runtime, registry: registry) else {
-                return waitForNextLaunch(runtime, reason: Self.engineCouldNotStart)
+        switch decision {
+        case .engine:
+            startEngine()
+            guard let registry, let made = makeRuntime(for: runtime, registry: registry) else {
+                return unavailable(runtime, reason: Self.engineCouldNotStart)
             }
             runtime.cutover.decide(.engine(made.receipts))
             attach(made)
@@ -307,31 +182,20 @@ import UIKit
                 if current === made { backend.use(made.backend) }
             } catch {
                 Self.logger.error("The transfer engine didn't start: \(String(describing: error), privacy: .public)")
-                if current === made { waitForNextLaunch(runtime, reason: "\(Self.engineCouldNotStart) \(error.localizedDescription)") }
+                if current === made { unavailable(runtime, reason: "\(Self.engineCouldNotStart) \(error.localizedDescription)") }
             }
-        case .legacy(let reason):
-            guard chooseLegacy(reason) else { return waitForNextLaunch(runtime, reason: reason) }
-            runtime.cutover.decide(.legacy)
-            let coordinator = legacy.coordinator()
-            // Whatever wakes today's backup takes up this account only.
-            coordinator.takesUp = .only(runtime.credential.scope)
-            let folder = (runtime.backupContainer ?? (try? AppGroupLayout.current().container))?
-                .appendingPathComponent(AccountStoragePaths(runtime.credential.account).backup, isDirectory: true)
-            await coordinator.activate(runtime.credential, folder: folder)
-            backend.useLegacy(LegacyCoordinatorBackend(coordinator: coordinator, inbox: legacy.inbox(), shareClient: runtime.api))
-        case .nextLaunch(let reason):
-            waitForNextLaunch(runtime, reason: reason)
+        case .unavailable(let reason):
+            unavailable(runtime, reason: reason)
         }
     }
 
-    /// The account's backup waits for the next launch, which chooses its engine afresh. Today's
-    /// backup, if it runs here, can't take the account up meanwhile.
-    private func waitForNextLaunch(_ runtime: AccountRuntime, reason: String) {
+    /// The account's backup can't start in this process; the screens say to reopen the app, which
+    /// tries again.
+    private func unavailable(_ runtime: AccountRuntime, reason: String) {
         runtime.cutover.decide(.unavailable)
-        waitingReason = reason
-        Self.logger.notice("Backup waits for the next launch: \(reason, privacy: .public)")
-        if case .legacy = engine { legacy.coordinator().takesUp = .only(nil) }
-        if allowsTransferEngine { backend.waitForNextLaunch(Self.nextLaunchMessage) }
+        unavailableReason = reason
+        Self.logger.notice("This account's backup can't start: \(reason, privacy: .public)")
+        backend.waitForNextLaunch(Self.nextLaunchMessage)
     }
 
     private func makeRuntime(for runtime: AccountRuntime, registry: TransportRegistry) -> TransferRuntime? {
@@ -373,67 +237,23 @@ import UIKit
         backend.deactivate()
     }
 
-    /// Stops uploads at sign-out. The transfer engine's account already did, as its runtime ended
-    /// (AccountRuntime.prepareForSignOut); today's backup stops here, as it always has.
-    func stopUploads(keepingAutomaticBackup: Bool) async {
-        guard reachesLegacy else { return }
-        await legacy.coordinator().disconnect(keepingAutomaticBackup: keepingAutomaticBackup)
-    }
-
-    /// Uploads follow a read-only change. The transfer engine follows the account's authorization
-    /// itself (TransferEngine.block); today's backup is paused here, as it always was.
-    func readOnlyChanged(_ enabled: Bool) async {
-        guard reachesLegacy else { return }
-        await AccountRuntime.uploadsFollow(readOnly: enabled, backup: legacy.coordinator(), shares: legacy.inbox())
-    }
-
-    /// Whether a command may reach today's backup: when the process runs it, or always in a host
-    /// that runs nothing else. Before the choice nothing runs, and touching today's sessions then
-    /// would make them beside the transfer engine's later.
-    private var reachesLegacy: Bool {
-        switch engine {
-        case .legacy: true
-        case .transfer: false
-        case .undecided: !allowsTransferEngine
-        }
-    }
-
     /// Photos access changed in the backup screen: automatic backup looks again.
-    func accessChanged() {
-        switch engine {
-        case .transfer: source?.preferencesChanged()
-        case .legacy: BackupLifecycle.shared.configure()
-        case .undecided: break
-        }
-    }
+    func accessChanged() { source?.preferencesChanged() }
 
-    /// The app came forward: Photos access may have changed in Settings meanwhile.
-    func becameActive() {
-        if case .legacy = engine { BackupLifecycle.shared.foregroundChanged() }
-    }
-
-    /// What Diagnostics says about the engine, and why the account's backup waits, if it does.
+    /// What Diagnostics says about the engine: whether it runs, why the account's backup can't
+    /// start if it can't, and why records an older build left stay on the phone if they do.
     var summary: String {
-        let process = switch engine {
-        case .undecided: "Not started"
-        case .transfer: "Transfer engine"
-        case .legacy(let reason): "Old engine: \(reason)"
-        }
-        guard let waitingReason else { return process }
-        return "\(process). This account’s backup waits for Ilyich to reopen: \(waitingReason)"
-    }
-
-    /// Whether today's BackupCoordinator runs backup in this process.
-    var runsLegacy: Bool {
-        if case .legacy = engine { return true }
-        return false
+        var text = registry == nil ? "Not started" : "Transfer engine"
+        if let unavailableReason { text += ". This account’s backup can’t start: \(unavailableReason)" }
+        if case .kept(let reason)? = current?.legacyRetirement { text += ". Old backup records kept: \(reason.text)" }
+        return text
     }
 }
 
 // MARK: - Background task router
 
 /// Registers the background task identifiers with iOS once, at launch, and hands each task to the
-/// engine's handler; a task that comes before the engine is chosen is held until it is, or until
+/// engine's handler; a task that comes before the engine starts is held until it does, or until
 /// iOS takes its time back. To LifecycleEventSource it is the scheduler: registering a handler
 /// here takes the place of registering with iOS, which happened already.
 @MainActor final class BackgroundTaskRouter: BackgroundTaskScheduling {
@@ -498,43 +318,32 @@ import UIKit
     }
 }
 
-@MainActor private final class MainActorCompletion: Sendable {
-    private let completion: @MainActor () -> Void
-    init(_ completion: @escaping @MainActor () -> Void) { self.completion = completion }
-    func call() { completion() }
-}
-
 // MARK: - The screens' backend
 
 /// The backend the backup and Shared files screens use (BackupStore.shared, ShareInboxModel). It
 /// follows the account whose backup the process runs: the account's transfer engine once that
-/// runs, today's backup once the process chose it for the account, and nothing otherwise. Today's
-/// backup is reached only when the process runs it: its sessions beside the transfer engine's
-/// would be a second engine in one process (BM9).
+/// runs, and nothing otherwise.
 ///
-/// While the account's backup is prepared (its import, then the engine's start), a command waits
-/// for it and reads find nothing. An edit of the preferences is taken only once the screen has
-/// read the preferences of the backup in use: one made before, against values that were never
-/// this account's, is not written (StalePreferencesEdit), and the screen shows the account's
-/// instead. When no backup runs, a command is refused, saying why. The snapshots follow whichever
-/// is in use, switching as the route changes; the engine's carry iOS's refusal to schedule
-/// automatic backup, as today's backup showed it, when there is no other message.
+/// While the account's backup is prepared (its database readied, then the engine's start), a
+/// command waits for it and reads find nothing. An edit of the preferences is taken only once the
+/// screen has read the preferences of the backup in use: one made before, against values that
+/// were never this account's, is not written (StalePreferencesEdit), and the screen shows the
+/// account's instead. When no backup runs, a command is refused, saying why. The snapshots follow
+/// the engine, switching as the route changes, and carry iOS's refusal to schedule automatic
+/// backup when there is no other message.
 @MainActor final class BackupBackendRouter: TransferControlling {
     enum Route {
         /// The account's backup is being prepared: commands wait.
         case preparing
         /// The account's transfer engine (EngineBackend).
         case engine(any TransferControlling)
-        /// Today's backup, which the process runs for the account.
-        case legacy
         /// No backup runs: nobody is signed in, or the process runs without the phone's photos.
         case inactive
-        /// The account's backup waits for the app's next launch, saying so.
+        /// The account's backup can't start until the app reopens, saying so.
         case waiting(String)
     }
 
     private(set) var route: Route
-    private var legacy: any TransferControlling
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var subscribers: [UUID: Subscriber] = [:]
     private var schedulingError: String?
@@ -548,15 +357,8 @@ import UIKit
         var last: TransferSnapshot?
     }
 
-    init(legacy: any TransferControlling, route: Route) {
-        self.legacy = legacy
+    init(route: Route) {
         self.route = route
-    }
-
-    /// Whether the screens reach today's backup.
-    var routesToLegacy: Bool {
-        if case .legacy = route { return true }
-        return false
     }
 
     // MARK: Routes (TransferHost)
@@ -565,17 +367,12 @@ import UIKit
     func prepare() { set(.preparing) }
     /// The account's transfer engine runs.
     func use(_ engine: any TransferControlling) { set(.engine(engine)) }
-    /// Today's backup runs the account's backup, reached through `backend`.
-    func useLegacy(_ backend: any TransferControlling) {
-        legacy = backend
-        set(.legacy)
-    }
     /// No backup runs.
     func deactivate() { set(.inactive) }
-    /// The account's backup waits for the next launch; `message` says so.
+    /// The account's backup can't start until the app reopens; `message` says so.
     func waitForNextLaunch(_ message: String) { set(.waiting(message)) }
 
-    /// iOS turned a background window of automatic backup down, with today's message, or took one
+    /// iOS turned a background window of automatic backup down, with its message, or took one
     /// again (nil).
     func schedulingErrorChanged(_ message: String?) {
         guard message != schedulingError else { return }
@@ -606,9 +403,8 @@ import UIKit
     func setPreferences(_ preferences: TransferPreferences) async throws {
         switch route {
         case .engine(let engine) where preferencesRead: try await engine.setPreferences(preferences)
-        case .legacy where preferencesRead: try await legacy.setPreferences(preferences)
         case .waiting(let message): throw BackupError.message(message)
-        case .preparing, .inactive, .engine, .legacy: throw StalePreferencesEdit()
+        case .preparing, .inactive, .engine: throw StalePreferencesEdit()
         }
     }
 
@@ -644,7 +440,6 @@ import UIKit
         }
         switch route {
         case .engine(let engine): return engine
-        case .legacy: return legacy
         case .waiting(let message): throw BackupError.message(message)
         case .preparing, .inactive: throw BackupError.message(AccountRestriction.signedOut.backupMessage)
         }
@@ -654,7 +449,6 @@ import UIKit
     private var reader: (any TransferControlling)? {
         switch route {
         case .engine(let engine): engine
-        case .legacy: legacy
         case .preparing, .inactive, .waiting: nil
         }
     }
@@ -672,14 +466,6 @@ import UIKit
                     guard !Task.isCancelled, let self else { return }
                     self.subscribers[id]?.last = snapshot
                     continuation.yield(self.shown(snapshot))
-                }
-            }
-        case .legacy:
-            let legacy = self.legacy
-            subscribers[id]?.task = Task {
-                for await snapshot in await legacy.snapshots() {
-                    guard !Task.isCancelled else { return }
-                    continuation.yield(snapshot)
                 }
             }
         case .preparing, .inactive, .waiting:
@@ -705,7 +491,7 @@ import UIKit
         case .waiting(let message):
             snapshot.activity = "Backup paused"
             snapshot.lastMessage = message
-        case .engine, .legacy, .inactive: break
+        case .engine, .inactive: break
         }
         return snapshot
     }

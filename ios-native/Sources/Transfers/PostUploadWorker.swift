@@ -27,7 +27,7 @@ enum FollowUpTrigger: Hashable, Sendable {
 /// 1. album destinations whose photo's server ID is known: one PUT albums/<id>/assets per album
 ///    with at most 500 IDs; an ID the server already had in the album (duplicate) counts as done;
 /// 2. stack tasks: a photo backed up again under a new server ID is stacked on its earlier copy,
-///    the new one on top, as BackupCoordinator does today;
+///    the new one on top, as the old backup did;
 /// 3. after a run, with Sync albums on, linked-album sync: each included phone album's backed-up
 ///    photos join the server album linked to it, found by name or made, each album on its own, so
 ///    one that fails doesn't stop the others.
@@ -37,7 +37,7 @@ enum FollowUpTrigger: Hashable, Sendable {
 /// (30 s, 1, 2 and 4 min) before a pass tries it again, so a short outage during a run doesn't
 /// use up its tries on the commits that follow. One about the account (an expired session,
 /// read-only mode) stops the pass and blames nothing, and so do the device's conditions (Require
-/// charging, a hot phone), checked before each request as BackupCoordinator does today.
+/// charging, a hot phone), checked before each request as the old backup did.
 actor PostUploadWorker {
     /// IDs per PUT albums/<id>/assets, as today's linked-album sync sends them.
     static let batchSize = 500
@@ -88,7 +88,7 @@ actor PostUploadWorker {
         tokenDigest = authorization.current()?.tokenDigest
     }
 
-    /// BackupLifecycle.conditionsPermitBackup: not while the phone is hot, and only while charging
+    /// As the old backup's conditionsPermitBackup: not while the phone is hot, and only while charging
     /// when Require charging is on.
     static let deviceConditionsPermit: @Sendable (Bool) async -> Bool = { requireCharging in
         let thermal = ProcessInfo.processInfo.thermalState
@@ -276,7 +276,7 @@ actor PostUploadWorker {
 
     // MARK: Linked albums
 
-    /// As BackupCoordinator.syncLinkedAlbums, but each album on its own: the server's owned albums,
+    /// As the old backup's syncLinkedAlbums, but each album on its own: the server's owned albums,
     /// then for each included phone album with backed-up photos the server album linked to it,
     /// else the one with its name, else a new one, linked, and its photos added 500 at a time.
     private func syncLinkedAlbums(_ report: inout PostUploadReport) async throws {

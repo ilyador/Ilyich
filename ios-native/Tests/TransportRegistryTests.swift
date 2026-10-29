@@ -3,8 +3,7 @@ import UIKit
 import XCTest
 @testable import Ilyich
 
-/// TransportRegistry and the session configuration it shares with today's BackgroundUploads
-/// (rebuild milestone B5).
+/// TransportRegistry and the background session configuration (rebuild milestone B5).
 final class TransportRegistryTests: XCTestCase {
     private var group: TemporaryAppGroup!
 
@@ -103,21 +102,12 @@ final class TransportRegistryTests: XCTestCase {
     }
 }
 
-/// One engine per process (B9): TransferHost starts exactly one of the transfer engine's sessions
-/// and today's BackgroundUploads, whichever the first account activated needs, and never the other.
-/// Background session events that come before the choice wait for it.
+/// One engine per process (B9, B10): TransferHost starts the transfer engine's sessions once, when
+/// the first account's backup starts. Background session events that come before wait for it.
 @MainActor final class TransferHostTests: XCTestCase {
-    private func host(registries: Locked<Int>, legacyEvents: Locked<[String]>, group: TemporaryAppGroup) -> TransferHost {
-        var legacy = TransferHost.LegacyBackup.live
-        legacy.coordinator = { BackupCoordinator() }
-        legacy.inbox = { ShareInboxStore() }
-        legacy.registerLifecycle = { _ in }
-        legacy.handleEvents = { identifier, completion in
-            legacyEvents.mutate { $0.append(identifier) }
-            completion()
-        }
+    private func host(registries: Locked<Int>, group: TemporaryAppGroup) -> TransferHost {
         let journal = group.journal
-        return TransferHost(legacy: legacy, scheduler: FakeTaskScheduler(), makeRegistry: {
+        return TransferHost(scheduler: FakeTaskScheduler(), makeRegistry: {
             registries.mutate { $0 += 1 }
             return TransportRegistry { session, emit in
                 BackgroundTransport(session: session, journal: journal, emit: emit) { _ in FakeTransportSession() }
@@ -125,45 +115,29 @@ final class TransportRegistryTests: XCTestCase {
         })
     }
 
-    func testEventsWaitForTheEngineAndOnlyTheTransferEngineGetsThem() async throws {
+    func testEventsWaitForTheEngineWhichStartsOnce() async throws {
         let group = try TemporaryAppGroup()
         defer { group.remove() }
-        let registries = Locked(0), legacyEvents = Locked<[String]>([])
-        let host = host(registries: registries, legacyEvents: legacyEvents, group: group)
+        let registries = Locked(0)
+        let host = host(registries: registries, group: group)
         var answered = 0
         host.handleEvents(identifier: TransferSessionID.backup.identifier) { answered += 1 }
         host.handleEvents(identifier: "com.example.downloads") { answered += 10 }
         XCTAssertEqual(answered, 10, "Another app's identifier is answered at once; ours waits for the engine.")
-        XCTAssertEqual(registries.value, 0, "No session is made before the engine is chosen.")
+        XCTAssertEqual(registries.value, 0, "No session is made before the engine starts.")
+        XCTAssertEqual(host.summary, "Not started")
 
-        XCTAssertTrue(host.chooseTransfer())
+        host.startEngine()
         XCTAssertEqual(registries.value, 1)
         XCTAssertEqual(host.registry?.connected, [.backup, .shareUpload], "Every session is made, so iOS delivers what it queued.")
-        XCTAssertFalse(host.chooseLegacy("test"), "Today's backup can't start beside the transfer engine.")
+        host.startEngine()
         host.handleEvents(identifier: TransferSessionID.shareUpload.identifier) {}
-        XCTAssertTrue(legacyEvents.value.isEmpty, "Today's sessions never see the events.")
-        XCTAssertEqual(registries.value, 1)
+        XCTAssertEqual(registries.value, 1, "The sessions are made once per process.")
         XCTAssertEqual(host.summary, "Transfer engine")
     }
 
-    func testTheWayBackStartsOnlyTodaysBackup() async throws {
-        let group = try TemporaryAppGroup()
-        defer { group.remove() }
-        let registries = Locked(0), legacyEvents = Locked<[String]>([])
-        let host = host(registries: registries, legacyEvents: legacyEvents, group: group)
-        var answered = 0
-        host.handleEvents(identifier: TransferSessionID.backup.identifier) { answered += 1 }
-
-        XCTAssertTrue(host.chooseLegacy("The backup records couldn’t be imported."))
-        XCTAssertEqual(answered, 1, "The held completion went to today's session.")
-        XCTAssertEqual(legacyEvents.value, [TransferSessionID.backup.identifier])
-        XCTAssertFalse(host.chooseTransfer())
-        XCTAssertEqual(registries.value, 0, "The transfer engine's sessions are never made.")
-        XCTAssertTrue(host.summary.hasPrefix("Old engine"), "Diagnostics says why.")
-    }
-
-    /// A background task that comes before the engine is chosen waits for the engine's handler.
-    func testBackgroundTasksWaitForTheChosenEnginesHandler() {
+    /// A background task that comes before the engine starts waits for the engine's handler.
+    func testBackgroundTasksWaitForTheEnginesHandler() {
         let scheduler = FakeTaskScheduler()
         let router = BackgroundTaskRouter(system: scheduler)
         var restores = 0

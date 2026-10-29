@@ -391,7 +391,7 @@ final class LibraryJobTests: XCTestCase {
         environment.usesDevicePhotos = false
         environment.syncsLibrary = false
         environment.validatesSession = false
-        environment.importsBackupState = false
+        environment.keepsTransfers = false
         let dependencies = AccountDependencies(credentials: TestCredentialStore(credential, log: log), mirror: nil, device: FakeAccountDevice(log: log),
                                                clients: clients, unlockEvents: { AsyncStream { $0.finish() } })
         let runtime = try await AccountRuntime.open(credential, environment: environment, dependencies: dependencies,

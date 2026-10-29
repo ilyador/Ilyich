@@ -1,29 +1,6 @@
 import Foundation
 
-struct BackupFailure: Codable, Identifiable, Sendable {
-    let id: String
-    let filename: String
-    let message: String
-    let date: Date
-}
-
-struct BackupReceipt: Codable, Sendable {
-    let modificationDate: Date
-    var original: BackupRemoteFile
-    var motion: BackupRemoteFile?
-    var confirmedAt: Date?
-}
-
-struct BackupRemoteFile: Codable, Sendable {
-    let id: String
-    let checksum: String
-    /// Original size reported by the server when the receipt was last verified; nil if unknown.
-    var byteCount: Int64? = nil
-    func matches(_ asset: BackupRemoteAsset, ownerID: String) -> Bool {
-        asset.id == id && asset.ownerId == ownerID && !asset.isTrashed && asset.visibility != "locked" && asset.isOffline != true && asset.checksum == checksum
-    }
-}
-
+/// A photo's copy on the server, as cleanup reads it to prove a backup before anything is removed.
 struct BackupRemoteAsset: Decodable, Sendable {
     let id: String
     let ownerId: String

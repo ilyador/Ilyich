@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import IlyichPlatform
 import IlyichShareInbox
@@ -65,79 +66,63 @@ enum LegacyGoldens {
         URL(fileURLWithPath: "\(container)/Backup/\(digest)/\(folder)/\(name)")
     }
 
-    /// A Live Photo with an XMP sidecar, its video already uploaded.
-    static let currentPhoto = PreparedPhoto(
-        localID: l1, modificationDate: Dates.current,
-        original: UploadFile(url: backupFile(currentFolder, "original"), filename: "IMG_0001.HEIC", contentType: "image/heic"),
-        motion: UploadFile(url: backupFile(currentFolder, "motion"), filename: "IMG_0001.MOV", contentType: "video/quicktime"),
-        sidecar: UploadFile(url: backupFile(currentFolder, "sidecar"), filename: "IMG_0001.xmp", contentType: "application/rdf+xml"),
-        fields: ["fileCreatedAt": "2025-10-18T09:41:12Z", "fileModifiedAt": "2025-10-18T10:53:54Z", "isFavorite": "true", "duration": "2933",
-                 "metadata": #"[{"key":"mobile-app","value":{"iCloudId":"0C2F3A1B-7D4E-4F5A-8B6C-9D0E1F2A3B4C:001:AbCdEfGhIjKlMnOpQrStUvWxYz01","createdAt":"2025-10-18T09:41:12Z","latitude":"38.7223","longitude":"-9.1393"}}]"#],
-        isVideo: false, livePhotoID: motionAsset, motionChecksum: "q83vEjRWeJq83vEjRWeJq83vEjQ=", stageID: currentStage)
+    /// The current stage: a Live Photo with an XMP sidecar, its video already uploaded, with no
+    /// checksum recorded for its still, as state-current.json records it.
+    static let currentMotionChecksum = "q83vEjRWeJq83vEjRWeJq83vEjQ="
+    static let currentFields = ["fileCreatedAt": "2025-10-18T09:41:12Z", "fileModifiedAt": "2025-10-18T10:53:54Z", "isFavorite": "true", "duration": "2933",
+                                "metadata": #"[{"key":"mobile-app","value":{"iCloudId":"0C2F3A1B-7D4E-4F5A-8B6C-9D0E1F2A3B4C:001:AbCdEfGhIjKlMnOpQrStUvWxYz01","createdAt":"2025-10-18T09:41:12Z","latitude":"38.7223","longitude":"-9.1393"}}]"#]
 
-    /// A video kept after its transfer completed but its album add failed.
-    static let suspendedVideo = PreparedPhoto(
-        localID: l6, modificationDate: Dates.l6,
-        original: UploadFile(url: backupFile(suspendedFolder, "original"), filename: "IMG_0006.MOV", contentType: "video/quicktime"),
-        motion: nil, sidecar: nil,
-        fields: ["fileCreatedAt": "2025-06-09T00:38:40Z", "fileModifiedAt": "2025-06-09T00:38:54Z", "isFavorite": "false", "duration": "15233"],
-        isVideo: true, stageID: suspendedStage)
-
-    /// state.json with every key present.
-    static func backupState() -> BackupState {
-        var preferences = BackupPreferences()
+    /// What B9's authoritative import of state-current.json wrote into the account's transfers
+    /// database, row for row: the phone's database still holds rows of this shape (B10 keeps
+    /// reading them; nothing imports state.json any more).
+    static func importedSeed() -> TransferSeed {
+        let current = "Backup/\(digest)/\(currentFolder)", suspended = "Backup/\(digest)/\(suspendedFolder)"
+        var preferences = TransferPreferences()
         preferences.includedAlbums = includedAlbums
         preferences.excludedAlbums = [excludedAlbum]
         preferences.cellularPhotos = true
-        preferences.cellularVideos = false
         preferences.downloadCloudOriginals = true
         preferences.automatic = true
         preferences.requireCharging = true
         preferences.triggerDelay = 120
         preferences.syncAlbums = true
-        var state = BackupState()
-        state.preferences = preferences
-        state.queue = [l1, l3, l6]
-        state.current = currentPhoto
-        state.confirmed = [l2: Dates.l2, l4: Dates.l4, l5: Dates.l5]
-        state.receipts = [
-            l2: BackupReceipt(modificationDate: Dates.l2,
-                              original: BackupRemoteFile(id: originalAsset, checksum: "2jmj7l5rSw0yVb/vlWAYkK/YBwk=", byteCount: 3_145_728),
-                              motion: BackupRemoteFile(id: pairedMotionAsset, checksum: "Vtn0aoJu2VTK9bjfr/yx/SprVGo=", byteCount: 1_843_200),
-                              confirmedAt: Dates.l2ConfirmedAt),
-            l4: BackupReceipt(modificationDate: Dates.l4, original: BackupRemoteFile(id: oldOriginalAsset, checksum: "fRFG0SH6nfZJt5SsRtJWzkOvsmk=")),
+        var seed = TransferSeed()
+        seed.preferences = preferences
+        seed.intent = .automatic
+        seed.lastMessage = ServerFailure.sessionExpired(nil).localizedDescription
+        seed.jobs = [
+            .init(localID: l1, state: .staged),
+            .init(localID: l3, state: .failed, failure: .init(
+                message: "The photo uploaded but could not be added to the selected album. Check album permissions and retry.",
+                date: Dates.failure, filename: "IMG_0003.HEIC")),
+            .init(localID: l6, state: .staged),
         ]
-        state.linkedAlbums = ["B7E2D9A0-55C1-4E3F-8A6B-1C2D3E4F5A6B/L0/040": serverAlbum]
-        state.pendingAlbumAdds = [l3: [serverAlbum, otherServerAlbum]]
-        state.suspended = [l6: suspendedVideo]
-        state.failures = [l3: BackupFailure(id: l3, filename: "IMG_0003.HEIC",
-                                            message: "The photo uploaded but could not be added to the selected album. Check album permissions and retry.",
-                                            date: Dates.failure)]
-        state.transferNotification = BackupTransferNotification(id: notificationID, total: 12, completed: 9, terminalFailures: 2)
-        state.paused = false
-        state.error = ServerFailure.sessionExpired(nil).localizedDescription
-        return state
+        seed.stages = [
+            .init(localID: l1, stageID: currentStage, folder: current, modified: Dates.current,
+                  original: StagedFile(path: current + "/original", filename: "IMG_0001.HEIC", contentType: "image/heic"),
+                  motion: StagedFile(path: current + "/motion", filename: "IMG_0001.MOV", contentType: "video/quicktime"),
+                  sidecar: StagedFile(path: current + "/sidecar", filename: "IMG_0001.xmp", contentType: "application/rdf+xml"),
+                  fields: currentFields, motionRemoteID: motionAsset, motionChecksum: currentMotionChecksum,
+                  bodyPath: current + "/\(currentStage).multipart"),
+            .init(localID: l6, stageID: suspendedStage, folder: suspended, modified: Dates.l6,
+                  original: StagedFile(path: suspended + "/original", filename: "IMG_0006.MOV", contentType: "video/quicktime"),
+                  fields: ["fileCreatedAt": "2025-06-09T00:38:40Z", "fileModifiedAt": "2025-06-09T00:38:54Z", "isFavorite": "false", "duration": "15233"],
+                  isVideo: true, suspended: true, bodyPath: suspended + "/\(suspendedStage).multipart"),
+        ]
+        seed.confirmations = [(l2, Dates.l2), (l4, Dates.l4), (l5, Dates.l5)]
+        seed.receipts = [
+            .init(localID: l2, modified: Dates.l2, originalID: originalAsset, originalChecksum: "2jmj7l5rSw0yVb/vlWAYkK/YBwk=", originalBytes: 3_145_728,
+                  motionID: pairedMotionAsset, motionChecksum: "Vtn0aoJu2VTK9bjfr/yx/SprVGo=", motionBytes: 1_843_200, confirmedAt: Dates.l2ConfirmedAt),
+            .init(localID: l4, modified: Dates.l4, originalID: oldOriginalAsset, originalChecksum: "fRFG0SH6nfZJt5SsRtJWzkOvsmk="),
+        ]
+        seed.destinations = [(l3, serverAlbum, nil), (l3, otherServerAlbum, nil)]
+        seed.linkedAlbums = [("B7E2D9A0-55C1-4E3F-8A6B-1C2D3E4F5A6B/L0/040", serverAlbum)]
+        seed.batch = (notificationID, 12, 9, 2)
+        return seed
     }
 
-    /// Arrays that encode a Set, so their order is the encoder's choice.
-    static let stateSets: Set<String> = ["preferences.includedAlbums", "preferences.excludedAlbums", "pendingAlbumAdds.*"]
-
-    /// Outcome files as BackgroundUploads' delegate writes them. The failure texts are the
-    /// English localized descriptions of the errors it saw; they are recorded, never parsed.
-    static let outcomes: [String: BackgroundUploads.Outcome] = [
-        "created": .init(receipt: UploadReceipt(id: originalAsset, status: "created"), error: nil),
-        "duplicate": .init(receipt: UploadReceipt(id: originalAsset, status: "duplicate"), error: nil),
-        "401": .init(receipt: nil, error: ServerFailure.sessionExpired(nil).localizedDescription, httpStatus: 401),
-        "lost": .init(receipt: nil, error: lostConnectionText),
-        "force-quit": .init(receipt: nil, error: forceQuitText),
-    ]
-    /// What CFNetwork calls a dropped connection (-1005) in English.
-    static let lostConnectionText = "The network connection was lost."
-    /// What CFNetwork calls a cancelled task (-999), as a force-quit leaves it, in English.
-    static let forceQuitText = "cancelled"
-
-    /// The backup task descriptor for the current stage.
-    static let backupDescriptor = BackgroundUploads.Descriptor(id: currentStage, receipt: backupFile(currentFolder, currentStage + ".receipt"))
+    /// The SHA-256 of a file's bytes, as B9's import recorded the state.json it read.
+    static func digest(of data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
     // MARK: Share inbox
 
@@ -177,17 +162,6 @@ enum LegacyGoldens {
             SharedAttachment(original: file(3, "DSC_0042.NEF", "image/x-nikon-nef"), sidecar: file(4, "DSC_0042.xmp", "application/rdf+xml")),
         ])
     }()
-
-    /// The first attachment's SHA-1, as ShareInboxStore computes it before uploading.
-    static let sharedChecksum = "3Hx2v0Vv7mbuIQ0lU2T8E6xgBNs="
-
-    /// The first attachment's upload descriptor, under each container form. The identity hashes
-    /// the path as the manifest recorded it.
-    static func shareDescriptor(container: String) -> BackgroundUploads.Descriptor {
-        let file = sharedFile(sharedFiles[0], container: container)
-        let identity = Legacy.shareIdentity(scope: digest, path: file.path, checksum: sharedChecksum)
-        return BackgroundUploads.Descriptor(id: identity, receipt: file.deletingLastPathComponent().appendingPathComponent(identity + ".receipt"))
-    }
 
     // MARK: Widget
 

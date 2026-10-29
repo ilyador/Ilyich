@@ -1,13 +1,15 @@
 import Foundation
 import IlyichPlatform
-import IlyichShareInbox
 import os
 
 /// Puts the transfers database back in step with what iOS and the disk hold after the app ended,
 /// for one account (B6), in each account's TransferRuntime (B9). It runs only on a database the
-/// transfer engine owns,
-/// never on the shadow copy B1 rebuilds, and it leaves every job a lease holds to the engine. It
-/// needs neither the server nor the network, so a launch in the background can run it at once.
+/// transfer engine owns, and it leaves every job a lease holds to the engine. It needs neither
+/// the server nor the network, so a launch in the background can run it at once.
+///
+/// First, R0 (B10): a task a build before B9 described, in either session and for any account, is
+/// cancelled and logged. Nothing reads its answer any more, so it is never adopted or sent again;
+/// a job whose stage it was uploading is checked again by its checksum, as below.
 ///
 /// For each library job with a stage, in queue order, each unanswered attempt (oldest first, so a
 /// Live Photo's video before its still):
@@ -21,10 +23,9 @@ import os
 ///   (a replayed 401) is reported and blames no photo. A photo that already failed stays failed:
 ///   its answers are recorded, and only a receipt changes it. An answer without a status is no
 ///   answer: the attempt is interrupted.
-/// - R2, a task iOS still holds for the attempt, from this build or an earlier one (a legacy task
-///   by its stage ID): the attempt is bound to it and the job waits for its outcome, never sent
-///   again. Live tasks of the account that no unanswered attempt owns are cancelled. A legacy share
-///   task is kept while its batch's manifest still lists files, and cancelled once it doesn't.
+/// - R2, a task iOS still holds for the attempt, from this launch or an earlier one: the attempt is
+///   bound to it and the job waits for its outcome, never sent again. Live tasks of the account
+///   that no unanswered attempt owns are cancelled.
 /// - R3, an interrupted attempt with nothing on iOS's side: its body, if it was written to its end
 ///   (closing boundary, recorded size), is kept for the executor, which checks again by the
 ///   persisted checksum (a duplicate completes; a sidecar still needs its own created outcome)
@@ -32,11 +33,12 @@ import os
 ///   attempt abandoned, so a new one is written.
 /// - R4, a job the transport had resumes from its stage; one whose staged files are gone (swept,
 ///   signed out, purged) returns to pending and stages again.
-/// - R5, StagingArea.sweep, keeping every stage, unanswered attempt and task of iOS's.
+/// - R5, StagingArea.sweep, keeping every stage, unanswered attempt and task of iOS's. It waits
+///   while iOS holds a task an older build described, whose files it can't tell.
 /// - R6, a report.
 struct Recovery: Sendable {
     enum ReconcileError: Error, Equatable {
-        /// The database is still BackupCoordinator's shadow copy.
+        /// The engine doesn't own the database.
         case notOwned
     }
 
@@ -45,7 +47,6 @@ struct Recovery: Sendable {
     private let layout: AppGroupLayout
     private let backup: any TransferTransport
     private let share: (any TransferTransport)?
-    private let shares: any ShareTaskListing
     /// The account digest, which names every task's scope.
     private let scope: String
     private let hashFile: @Sendable (URL) async throws -> String
@@ -54,14 +55,12 @@ struct Recovery: Sendable {
     private static let withTransport: Set<JobState> = [.submitting, .submitted, .finalizing]
 
     init(store: TransferStore, account: AccountID, layout: AppGroupLayout, backup: any TransferTransport, share: (any TransferTransport)? = nil,
-         shares: (any ShareTaskListing)? = nil,
          checksum: @escaping @Sendable (URL) async throws -> String = { url in try await UploadBody.work { try UploadBody.checksum(url) } },
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.store = store
         self.layout = layout
         self.backup = backup
         self.share = share
-        self.shares = shares ?? ManifestShareTaskListing(layout: layout)
         hashFile = checksum
         self.now = now
         scope = account.digest
@@ -73,6 +72,8 @@ struct Recovery: Sendable {
         guard try await store.meta().engine == .transfer else { throw ReconcileError.notOwned }
         var report = RecoveryReport()
         let inventory = await backup.inventory()
+        let shareInventory = await share?.inventory()
+        await cancelOlderBuildsTasks(backup: inventory, share: shareInventory, report: &report)
         for entry in try await store.recoveryJobs() where !entry.leased {
             try Task.checkCancellation()
             try await recover(entry, inventory: inventory, report: &report)
@@ -92,16 +93,37 @@ struct Recovery: Sendable {
             if let attempt = task.attempt { references.attempts.insert(attempt.rawValue) }
             if let folder = task.descriptor.outcomePath.flatMap(Self.folder(of:)) { references.folders.insert(folder) }
         }
-        if let share {
+        if let share, let shareInventory {
             report.resumedShares = try await store.resumeShareJobs()
-            await reconcileShares(share, references: references, report: &report)
+            await reconcileShares(share, inventory: shareInventory, references: references, report: &report)
         }
 
-        // R5.
-        let imported = try await store.meta().legacyImportMode == .authoritative
-        report.sweep = staging.sweep(keeping: references, legacyImported: imported, now: now())
+        // R5, unless iOS holds a task an older build described: its files are unknown.
+        if report.olderTasks > 0 {
+            report.sweep.skipped = .olderUploads
+        } else {
+            let imported = try await store.meta().legacyImportMode == .authoritative
+            report.sweep = staging.sweep(keeping: references, legacyImported: imported, now: now())
+        }
         Self.logger.notice("\(report.summary, privacy: .public)")
         return report
+    }
+
+    // MARK: R0: tasks an older build described
+
+    /// Cancels every live task a build before B9 described, in both sessions, and counts every
+    /// such task, live or ending, for the sweep and for retiring state.json.
+    private func cancelOlderBuildsTasks(backup inventory: TransportInventory, share shareInventory: TransportInventory?,
+                                        report: inout RecoveryReport) async {
+        let backupTasks = inventory.legacy, shareTasks = shareInventory?.legacy ?? []
+        report.olderTasks = backupTasks.count + shareTasks.count
+        guard report.olderTasks > 0 else { return }
+        let live = backupTasks.filter(\.isLive).map(\.taskID), liveShares = shareTasks.filter(\.isLive).map(\.taskID)
+        if !live.isEmpty { await backup.cancel(tasks: live) }
+        if let share, !liveShares.isEmpty { await share.cancel(tasks: liveShares) }
+        let found = report.olderTasks, cancelled = live.count + liveShares.count
+        report.cancelledOlder = cancelled
+        Self.logger.notice("Recovery found \(found) upload tasks an older version of Ilyich described and cancelled \(cancelled) still running; their answers aren't read")
     }
 
     // MARK: Jobs
@@ -319,26 +341,14 @@ struct Recovery: Sendable {
 
     // MARK: Shares
 
-    /// Legacy share tasks name no account: one is kept while a share job's try is bound to it or
-    /// its batch still has files to send, and cancelled once the batch is gone. A version 2 share
-    /// task of this account is kept while a share job's unanswered try is its (B4), and cancelled
-    /// otherwise; one of another account is left alone.
-    private func reconcileShares(_ share: any TransferTransport, references: StagingReferences, report: inout RecoveryReport) async {
+    /// A share task of this account is kept while a share job's unanswered try is its (B4), and
+    /// cancelled otherwise; one of another account is left alone.
+    private func reconcileShares(_ share: any TransferTransport, inventory: TransportInventory, references: StagingReferences,
+                                 report: inout RecoveryReport) async {
         var stale: [Int] = []
-        for task in await share.inventory().tasks where task.isLive {
-            if case .v2(let attempt, let owner, _) = task.descriptor {
-                guard owner == scope else { continue }
-                if references.attempts.contains(attempt.rawValue) { report.adoptedShares += 1 } else { stale.append(task.taskID) }
-                continue
-            }
-            guard case .legacy(let identity, _) = task.descriptor, let path = task.descriptor.outcomePath else { continue }
-            if references.attempts.contains(identity) {
-                report.adoptedShares += 1
-                continue
-            }
-            let parts = path.split(separator: "/")
-            guard parts.count == 3, parts[0] == "ShareInbox", let batch = UUID(uuidString: String(parts[1])) else { continue }
-            if shares.lists(batch: batch, identity: identity) { report.adoptedShares += 1 } else { stale.append(task.taskID) }
+        for task in inventory.tasks where task.isLive {
+            guard case .v2(let attempt, let owner, _) = task.descriptor, owner == scope else { continue }
+            if references.attempts.contains(attempt.rawValue) { report.adoptedShares += 1 } else { stale.append(task.taskID) }
         }
         guard !stale.isEmpty else { return }
         await share.cancel(tasks: stale)
@@ -347,7 +357,8 @@ struct Recovery: Sendable {
 
     // MARK: Files
 
-    /// The file a staged path names: relative to the App Group, or a legacy absolute URL.
+    /// The file a staged path names: relative to the App Group, or the absolute URL a stage B9
+    /// imported recorded.
     private func url(of file: StagedFile) -> URL {
         if file.path.contains("://"), let url = URL(string: file.path) { return url }
         return layout.url(forRelativePath: file.path)
@@ -384,6 +395,10 @@ struct RecoveryReport: Hashable, Sendable {
     var pending = 0
     /// Live tasks of the account no attempt waits for, cancelled.
     var cancelled = 0
+    /// Tasks a build before B9 described, live or ending, in either session (R0), and how many of
+    /// them were still running and cancelled.
+    var olderTasks = 0
+    var cancelledOlder = 0
     /// Share tasks kept, and cancelled.
     var adoptedShares = 0
     var cancelledShares = 0
@@ -401,33 +416,12 @@ struct RecoveryReport: Hashable, Sendable {
 
     var summary: String {
         var parts = ["committed \(committed)", "applied \(applied)", "deferred \(deferred)", "failed \(failed)", "retrying \(retrying)",
-                     "bound \(bound)", "pending \(pending)", "cancelled \(cancelled)", "shares \(adoptedShares)/-\(cancelledShares)",
+                     "bound \(bound)", "pending \(pending)", "cancelled \(cancelled)", "older tasks \(olderTasks)/-\(cancelledOlder)",
+                     "shares \(adoptedShares)/-\(cancelledShares)",
                      "resumable \(resumable)", "rebuilt \(rebuilt)", "resumed \(resumed)", "requeued \(requeued)",
                      "swept \(sweep.folders) folders \(sweep.files) files \(sweep.bytes) bytes"]
         if let skipped = sweep.skipped { parts.append("sweep skipped: \(skipped)") }
         if let restriction { parts.append("account: \(restriction.storedValue)") }
         return "Transfer recovery: " + parts.joined(separator: ", ")
-    }
-}
-
-/// Whether a share batch still has a file a legacy share task may be sending.
-protocol ShareTaskListing: Sendable {
-    func lists(batch: UUID, identity: String) -> Bool
-}
-
-/// Reads the batch's manifest. A legacy task's identity is a hash of the account, the file's path
-/// and its checksums, so it can't be matched to one attachment without hashing every file; B4's
-/// deterministic identity can. Until then a task is kept while its batch lists any file, and when
-/// the manifest can't be read now. Only a batch that is gone, or lists nothing, cancels it.
-struct ManifestShareTaskListing: ShareTaskListing {
-    let layout: AppGroupLayout
-
-    func lists(batch: UUID, identity: String) -> Bool {
-        let folder = layout.url(forRelativePath: "ShareInbox/" + batch.uuidString)
-        let manifest = folder.appendingPathComponent(ShareManifest.fileName, isDirectory: false)
-        guard FileManager.default.fileExists(atPath: manifest.path) else { return false }
-        guard let data = try? Data(contentsOf: manifest), data.count <= ShareManifest.maximumSize,
-              let decoded = try? ShareManifest.decode(data, batch: batch, folder: folder) else { return true }
-        return !decoded.attachments.isEmpty
     }
 }

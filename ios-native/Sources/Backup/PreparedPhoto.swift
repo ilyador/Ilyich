@@ -1,7 +1,8 @@
 import Foundation
 
-/// A photo staged for upload by PhotoKitAdapter.stage, kept in state.json while it uploads.
-struct PreparedPhoto: Codable, Sendable {
+/// A photo PhotoKitAdapter.stage copied out of Photos for upload: its files in the stage folder,
+/// the multipart fields and the stage ID that names the attempt.
+struct PreparedPhoto: Sendable {
     let localID: String
     let modificationDate: Date
     let original: UploadFile

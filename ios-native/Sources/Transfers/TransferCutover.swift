@@ -1,19 +1,20 @@
 import Foundation
 import Synchronization
 
-/// Which engine an account's backup can run on after its import (B9).
+/// Whether an account's backup can run on the transfer engine, once its transfers database is
+/// readied (AccountRuntime.prepareTransfers).
 enum TransferCutover: Equatable, Sendable {
     /// The transfers database is the engine's.
     case engine
-    /// Today's backup keeps running from state.json, for this reason, shown in Diagnostics.
-    case legacy(String)
+    /// The account's backup can't start, for this reason, shown in Diagnostics.
+    case unavailable(String)
 }
 
-/// Which engine runs an account's backup, as TransferHost decided it, and where its receipts are.
+/// Whether the account's backup runs on the transfer engine, as TransferHost decided it, and where
+/// its receipts are.
 enum CutoverChoice: Sendable {
     case engine(TransferReceiptSource)
-    case legacy
-    /// Neither: the account's runtime ended, or the other engine runs in this process.
+    /// The account's backup doesn't run: its runtime ended, or the engine couldn't start for it.
     case unavailable
 }
 
@@ -66,26 +67,17 @@ final class TransferCutoverState: Sendable {
 }
 
 /// The receipts cleanup and the device index read for an account (DS12): the transfers
-/// database's once the engine runs its backup, else today's backup state, until B10 retires it.
+/// database's, once the engine runs the account's backup. Readers that come first wait for it.
 struct CutoverReceipts: ReceiptRepository, DeviceIndexBackupSource {
     let cutover: TransferCutoverState
-    var legacyReceipts = LegacyStateReceipts()
-    var legacyInputs = LegacyBackupIndexInputs()
 
     func receipts(account: String) async -> [String: CleanupReceipt]? {
-        switch await cutover.choice() {
-        case .engine(let source): await source.receipts(account: account)
-        case .legacy: await legacyReceipts.receipts(account: account)
-        case .unavailable, nil: nil
-        }
+        guard case .engine(let source) = await cutover.choice() else { return nil }
+        return await source.receipts(account: account)
     }
 
     func recordSizes(_ sizes: [String: VerifiedSize], account: String) async {
-        switch await cutover.choice() {
-        case .engine(let source): await source.recordSizes(sizes, account: account)
-        case .legacy: await legacyReceipts.recordSizes(sizes, account: account)
-        case .unavailable, nil: break
-        }
+        if case .engine(let source) = await cutover.choice() { await source.recordSizes(sizes, account: account) }
     }
 
     func markLocallyDeleted(_ localIDs: [String], account: String) async {
@@ -93,18 +85,16 @@ struct CutoverReceipts: ReceiptRepository, DeviceIndexBackupSource {
     }
 
     func inputs(account: String) async -> DeviceIndexBackupInputs? {
-        switch await cutover.choice() {
-        case .engine(let source): await source.inputs(account: account)
-        case .legacy: await legacyInputs.inputs(account: account)
-        case .unavailable, nil: nil
-        }
+        guard case .engine(let source) = await cutover.choice() else { return nil }
+        return await source.inputs(account: account)
     }
 
-    /// Cleanup's and the device index's subscriptions come early; each waits for the choice.
+    /// Cleanup's and the device index's subscriptions come early; each waits for the choice. An
+    /// account whose backup doesn't run has no changes to tell of.
     func changes() async -> AsyncStream<Void> {
-        switch await cutover.choice(waitingAtMost: .seconds(3_600)) {
-        case .engine(let source): await source.changes()
-        case .legacy, .unavailable, nil: await legacyInputs.changes()
+        guard case .engine(let source) = await cutover.choice(waitingAtMost: .seconds(3_600)) else {
+            return AsyncStream { $0.finish() }
         }
+        return await source.changes()
     }
 }

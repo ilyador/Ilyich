@@ -7,8 +7,9 @@ import IlyichPlatform
 /// account's Backup folder are ever touched; state.json and anything else there stays, and so does
 /// every other account's folder and the share inbox.
 ///
-/// Until the transfers database has imported state.json authoritatively, a Backup folder holding
-/// state.json is BackupCoordinator's, and its stages are too: nothing is removed from it.
+/// A Backup folder holding a state.json no import read authoritatively (an account last signed in
+/// before B9) keeps that build's stages too: nothing is removed from it. Since B10 nothing reads
+/// such a file, so it stays for a later decision (LegacyRetirement).
 struct StagingArea: Sendable {
     /// A file or folder changed this recently may be one staging is still writing, so it stays.
     static let grace: TimeInterval = 15 * 60
@@ -16,6 +17,8 @@ struct StagingArea: Sendable {
     enum Skip: Hashable, Sendable {
         /// state.json is there and the database never imported it authoritatively.
         case legacyState
+        /// iOS holds an upload task a build before B9 described, whose files are unknown (Recovery).
+        case olderUploads
         /// The account's Backup folder could not be listed.
         case unavailable
     }
@@ -79,7 +82,7 @@ struct StagingArea: Sendable {
     private func stageFolders(legacyImported: Bool, into sweep: inout Sweep) -> [URL]? {
         let root = layout.url(forRelativePath: folder)
         guard FileManager.default.fileExists(atPath: root.path) else { return [] }
-        if !legacyImported, FileManager.default.fileExists(atPath: root.appendingPathComponent(LegacyBackupImporter.fileName).path) {
+        if !legacyImported, FileManager.default.fileExists(atPath: root.appendingPathComponent(LegacyRetirement.fileName).path) {
             sweep.skipped = .legacyState
             return nil
         }

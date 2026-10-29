@@ -367,7 +367,7 @@ struct LibraryJobHarness {
     }
 
     static func preferences(cellularPhotos: Bool = false, cellularVideos: Bool = false) -> TransferPreferences {
-        var preferences = TransferPreferences(Legacy.BackupPreferences())
+        var preferences = TransferPreferences()
         preferences.includedAlbums = [FakeStaging.album]
         preferences.cellularPhotos = cellularPhotos
         preferences.cellularVideos = cellularVideos

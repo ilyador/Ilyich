@@ -219,10 +219,13 @@ import XCTest
         XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing], "Only the request whose shape changed is replaced.")
     }
 
+    /// The identifiers every build registered, which Info.plist permits and iOS keeps requests under.
     func testIdentifiersAreTodays() {
-        XCTAssertEqual(BackgroundWindowKind.processing.identifier, BackupLifecycle.identifier)
-        XCTAssertEqual(BackgroundWindowKind.refresh.identifier, BackupLifecycle.refreshIdentifier)
-        let lease = BGTaskLease(identifier: BackupLifecycle.refreshIdentifier) { _ in }
+        XCTAssertEqual(BackgroundWindowKind.processing.identifier, "app.ilyich.native.backup.processing")
+        XCTAssertEqual(BackgroundWindowKind.refresh.identifier, "app.ilyich.native.backup.refresh")
+        let permitted = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String]
+        XCTAssertEqual(Set(permitted ?? []), Set(BackgroundWindowKind.allCases.map(\.identifier)))
+        let lease = BGTaskLease(identifier: "app.ilyich.native.backup.refresh") { _ in }
         XCTAssertEqual(lease.kind, .refresh)
     }
 
@@ -289,7 +292,7 @@ import XCTest
         try await h.engine.start()
         await untilTransfers("The first plan.") { scheduler.plans.count == 1 }
         try await h.engine.setIntent(.automatic)
-        var preferences = TransferPreferences(Legacy.BackupPreferences())
+        var preferences = TransferPreferences()
         preferences.automatic = true
         try await h.engine.setPreferences(preferences)
         await untilTransfers("Automatic backup's plan.") { scheduler.plans.count == 2 }

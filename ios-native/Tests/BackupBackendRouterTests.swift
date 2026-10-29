@@ -4,26 +4,24 @@ import IlyichShareInbox
 import XCTest
 @testable import Ilyich
 
-/// The screens' backend once the transfer engine can run backup (B9): a command reaches today's
-/// backup only when the process runs it, waits while the account's backup is prepared, and is
-/// refused, saying why, when no backup can run. Two engines in one process would share each
-/// background session's identifier (BM9).
+/// The screens' backend over the account's transfer engine (B9, B10): a command waits while the
+/// account's backup is prepared, reaches the engine once it runs, and is refused, saying why,
+/// when no backup can run.
 @MainActor final class BackupBackendRouterTests: XCTestCase {
     private let photo = TransferRequest(source: .photo(DeviceAssetID(rawValue: "photo")), origin: .selection, revision: nil)
 
-    /// The first launch after the update imports a large state.json for seconds while the library
-    /// is on screen. Back up selected tapped meanwhile waits for the account's engine and reaches
-    /// it; today's backup, whose sessions would open beside the engine's, is never touched. An
-    /// edit made against the screen's placeholder preferences is never written over the imported
-    /// ones, even once the engine runs, until the screen has read the engine's.
-    func testCommandsWaitForTheAccountsEngineAndNeverReachTodaysBackup() async throws {
-        let legacy = RecordingBackend(), engine = RecordingBackend()
-        let router = BackupBackendRouter(legacy: legacy, route: .preparing)
+    /// The account's backup is prepared for a moment at launch, while the library is on screen.
+    /// Back up selected tapped meanwhile waits for the account's engine and reaches it. An edit
+    /// made against the screen's placeholder preferences is never written over the account's,
+    /// even once the engine runs, until the screen has read the engine's.
+    func testCommandsWaitForTheAccountsEngine() async throws {
+        let engine = RecordingBackend()
+        let router = BackupBackendRouter(route: .preparing)
         let request = photo
         let command = Task { try await router.enqueue([request]) }
         try await Task.sleep(for: .milliseconds(50))
-        XCTAssertTrue(legacy.calls.isEmpty, "Nothing reaches today's backup while the account's backup is prepared.")
-        let edit = TransferPreferences(Legacy.BackupPreferences())
+        XCTAssertTrue(engine.calls.isEmpty, "Nothing is sent while the account's backup is prepared.")
+        let edit = TransferPreferences()
         do {
             try await router.setPreferences(edit)
             XCTFail("An edit made while the account's backup is prepared isn't written.")
@@ -42,9 +40,8 @@ import XCTest
         _ = try await router.preferences()
         try await router.setPreferences(edit)
         XCTAssertEqual(engine.calls, ["enqueue(1)", "setPreferences"], "Once the screen read them, its edits are written.")
-        XCTAssertTrue(legacy.calls.isEmpty)
 
-        // The account's backup waits for the next launch: a command is refused, saying so.
+        // The account's backup can't start until the app reopens: a command is refused, saying so.
         router.waitForNextLaunch(TransferHost.nextLaunchMessage)
         do {
             _ = try await router.enqueue([request])
@@ -56,24 +53,18 @@ import XCTest
             try await router.setIntent(.manual)
             XCTFail("A command is refused while no backup runs.")
         } catch { XCTAssertEqual(error.localizedDescription, AccountRestriction.signedOut.backupMessage) }
-        XCTAssertTrue(legacy.calls.isEmpty)
         XCTAssertEqual(engine.calls, ["enqueue(1)", "setPreferences"])
-
-        // The process runs today's backup for the account: commands reach it.
-        router.useLegacy(legacy)
-        try await router.setIntent(.manual)
-        XCTAssertEqual(legacy.calls, ["setIntent(manual)"])
     }
 
-    /// The same first launch, on the backup screen: an edit made on the placeholder whose write
-    /// comes once the engine runs is not written over the imported preferences, which then show.
-    func testAnEditMadeWhileBackupIsPreparedNeverOverwritesTheImportedPreferences() async throws {
+    /// The same moment, on the backup screen: an edit made on the placeholder whose write comes
+    /// once the engine runs is not written over the account's preferences, which then show.
+    func testAnEditMadeWhileBackupIsPreparedNeverOverwritesTheAccountsPreferences() async throws {
         let engine = RecordingBackend()
-        var imported = TransferPreferences(Legacy.BackupPreferences())
+        var imported = TransferPreferences()
         imported.includedAlbums = ["imported-album"]
         imported.automatic = true
         engine.storedPreferences = imported
-        let router = BackupBackendRouter(legacy: RecordingBackend(), route: .preparing)
+        let router = BackupBackendRouter(route: .preparing)
         let store = BackupStore(backend: router, photos: .unavailable, debounce: .milliseconds(300))
         await untilTransfers("The screen says backup is being prepared.") { store.activity == "Preparing backup" }
         store.preferences.cellularVideos = true
@@ -81,17 +72,17 @@ import XCTest
 
         router.use(engine)
         await untilTransfers("The engine's snapshot shows.") { store.confirmed == 3 }
-        await untilTransfers("The imported preferences show.") { store.preferences == imported }
+        await untilTransfers("The account's preferences show.") { store.preferences == imported }
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(engine.calls.contains("setPreferences"), "The edit made on the placeholder isn't written over them.")
         XCTAssertNil(store.error)
     }
 
-    /// iOS turning automatic backup's background windows down shows on the backup screen, as
-    /// BackupLifecycle's refusal did, unless the engine has a message of its own.
+    /// iOS turning automatic backup's background windows down shows on the backup screen, as the
+    /// old backup's refusal did, unless the engine has a message of its own.
     func testTheBackupScreenShowsWhenIOSRefusesAutomaticBackupsWindows() async throws {
         let engine = RecordingBackend()
-        let router = BackupBackendRouter(legacy: RecordingBackend(), route: .preparing)
+        let router = BackupBackendRouter(route: .preparing)
         let log = SnapshotLog(await router.snapshots())
         defer { log.stop() }
         await untilTransfers("The screen says backup is being prepared.") { log.last?.activity == "Preparing backup" }
@@ -110,33 +101,27 @@ import XCTest
         await untilTransfers("iOS took the request again.") { log.last?.lastMessage == nil }
     }
 
-    /// An account whose records the transfer engine owns never runs on today's backup, whose
-    /// state.json for it stopped at the cutover: in a process that runs today's backup for an
-    /// account signed in earlier, its backup waits for the next launch. Whatever wakes today's
-    /// backup then can't take the account up either.
-    func testAnAccountTheEngineOwnsNeverRunsOnTodaysBackup() async throws {
-        typealias Host = TransferHost
-        XCTAssertEqual(Host.placement(.engine, running: .undecided, allowsTransferEngine: true), .transferEngine)
-        XCTAssertEqual(Host.placement(.engine, running: .transfer, allowsTransferEngine: true), .transferEngine)
-        guard case .nextLaunch = Host.placement(.engine, running: .legacy("The first account's records couldn’t be imported."),
-                                                allowsTransferEngine: true) else {
-            return XCTFail("The account waits for the next launch, which runs the transfer engine for it.")
-        }
-        XCTAssertEqual(Host.placement(.legacy("Unreadable"), running: .undecided, allowsTransferEngine: true), .legacy("Unreadable"))
-        XCTAssertEqual(Host.placement(.legacy("Unreadable"), running: .legacy("Earlier"), allowsTransferEngine: true), .legacy("Unreadable"))
-        XCTAssertEqual(Host.placement(.legacy("Unreadable"), running: .transfer, allowsTransferEngine: true), .nextLaunch("Unreadable"))
-        XCTAssertEqual(Host.placement(.engine, running: .undecided, allowsTransferEngine: false), .legacy("The transfer engine couldn’t start."),
-                       "A host that runs only today's backup, for its tests, keeps running it.")
+    /// The backup screens follow the account whose backup runs (the critic's correction to B8): as
+    /// one account signs out and another signs in without a relaunch, they show the first
+    /// account's engine, then nothing, then the second's, with no screen asking.
+    func testTheScreensFollowEachAccountsEngineAcrossASignIn() async throws {
+        let alice = RecordingBackend(), bob = RecordingBackend()
+        alice.confirmed = 3
+        bob.confirmed = 1
+        var bobs = TransferPreferences()
+        bobs.triggerDelay = 300
+        bob.storedPreferences = bobs
+        let router = BackupBackendRouter(route: .preparing)
+        let store = BackupStore(backend: router, photos: .unavailable, debounce: .zero)
+        router.use(alice)
+        await untilTransfers("The screens show Alice's backup.") { store.confirmed == 3 }
 
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("TakeUp-" + UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let coordinator = BackupCoordinator()
-        coordinator.takesUp = .only(nil)
-        await coordinator.activate(LegacyGoldens.credential, folder: folder)
-        XCTAssertNil(coordinator.activeScope, "Today's backup takes up no account while the one signed in can't use it.")
-        coordinator.takesUp = .only(LegacyGoldens.credential.scope)
-        await coordinator.activate(LegacyGoldens.credential, folder: folder)
-        XCTAssertEqual(coordinator.activeScope, LegacyGoldens.credential.scope, "It takes up the account it was chosen for.")
+        router.deactivate()
+        await untilTransfers("Signing out empties the screens.") { store.confirmed == 0 }
+        router.prepare()
+        router.use(bob)
+        await untilTransfers("The screens show Bob's backup.") { store.confirmed == 1 && store.preferences.triggerDelay == 300 }
+        XCTAssertTrue(alice.calls.isEmpty && bob.calls.isEmpty, "Nothing was sent to either engine.")
     }
 
     /// The Shared files sheet over the engine's share lane: a file that failed shows its error,
@@ -163,7 +148,7 @@ import XCTest
         }
         let engine = RecordingBackend()
         engine.sharePage = [item(attachments[0]), item(attachments[1]), item(attachments[2], failed: true)]
-        let router = BackupBackendRouter(legacy: RecordingBackend(), route: .engine(engine))
+        let router = BackupBackendRouter(route: .engine(engine))
         let api = try APIClient(baseURL: URL(string: "https://photos.example/api")!, accessToken: "token", userID: "owner", networkConfiguration: .init())
         let model = ShareInboxModel(api: api, inbox: inbox, backend: router)
         await untilTransfers("The sheet reads the share lane.") { model.isRunning }
@@ -204,10 +189,12 @@ import XCTest
     private(set) var calls: [String] = []
     var sharePage: [TransferQueueItem] = []
     var storedPreferences: TransferPreferences?
+    /// The confirmed count its snapshots carry.
+    var confirmed = 3
     private var continuations: [AsyncStream<TransferSnapshot>.Continuation] = []
 
-    static func snapshot(lastMessage: String?) -> TransferSnapshot {
-        TransferSnapshot(intent: .automatic, phase: .idle, remaining: 0, confirmed: 3, failed: 0, fileProgress: nil, bytesSent: 0,
+    static func snapshot(lastMessage: String?, confirmed: Int = 3) -> TransferSnapshot {
+        TransferSnapshot(intent: .automatic, phase: .idle, remaining: 0, confirmed: confirmed, failed: 0, fileProgress: nil, bytesSent: 0,
                          bytesExpected: 0, bytesPerSecond: nil, lastMessage: lastMessage)
     }
 
@@ -231,7 +218,7 @@ import XCTest
     func snapshots() async -> AsyncStream<TransferSnapshot> {
         let (stream, continuation) = AsyncStream.makeStream(of: TransferSnapshot.self, bufferingPolicy: .bufferingNewest(1))
         continuations.append(continuation)
-        continuation.yield(Self.snapshot(lastMessage: nil))
+        continuation.yield(Self.snapshot(lastMessage: nil, confirmed: confirmed))
         return stream
     }
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem] { lane == .share ? sharePage : [] }

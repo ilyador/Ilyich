@@ -10,7 +10,7 @@ import XCTest
     private typealias G = LegacyGoldens
 
     /// The database is the account's, in Application Support (never the App Group), and opens
-    /// with the schema of architecture section 3, as a copy BackupCoordinator still runs beside.
+    /// with the schema of architecture section 3, owned by nobody until the engine claims it.
     func testDatabaseLivesInApplicationSupportPerAccount() async throws {
         let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "alice")
         let standard = TransferStore.url(for: account)
@@ -36,29 +36,23 @@ import XCTest
 
     /// BM2: every date comes back with the bits it went in with, through each table and query:
     /// fractions PhotoKit reports, a whole number of seconds, the smallest double, a negative
-    /// zero, which a REAL column would turn into 0, and the largest double.
+    /// zero, which a REAL column would turn into 0, and the largest double. The rows are those
+    /// B9's import wrote on the phone, and the engine's own writes after them.
     func testDatesRoundTripByBitPattern() async throws {
         let values: [Double] = [782_481_234.567_891, 781_234_567.123_456_7, 700_000_000, 0.1, -0.0, 5e-324, -1.5, 1.797_693_134_862_315_7e308]
-        var state = Legacy.BackupState()
-        var receipts: [String: Legacy.BackupReceipt] = [:]
-        var confirmed: [String: Date] = [:]
-        var failures: [String: Legacy.BackupFailure] = [:]
+        var seed = TransferSeed()
         for (index, value) in values.enumerated() {
             let id = "photo-\(index)"
             let date = Date(timeIntervalSinceReferenceDate: value)
-            confirmed[id] = date
-            receipts[id] = Legacy.BackupReceipt(modificationDate: date, original: Legacy.RemoteFile(id: "asset-\(index)", checksum: "sum-\(index)"),
-                                                motion: nil, confirmedAt: date)
-            failures["failed-\(index)"] = Legacy.BackupFailure(id: "failed-\(index)", filename: "IMG_\(index).HEIC", message: "Refused", date: date)
+            seed.confirmations.append((id, date))
+            seed.receipts.append(.init(localID: id, modified: date, originalID: "asset-\(index)", originalChecksum: "sum-\(index)", confirmedAt: date))
+            seed.jobs.append(.init(localID: "failed-\(index)", state: .failed, failure: .init(message: "Refused", date: date, filename: "IMG_\(index).HEIC")))
         }
-        state.confirmed = confirmed
-        state.receipts = receipts
-        state.failures = failures
-        state.queue = failures.keys.sorted()
-        state.current = Self.legacyPhoto(localID: "staged", modified: Date(timeIntervalSinceReferenceDate: -0.0))
+        seed.jobs.append(.init(localID: "staged", state: .staged))
+        seed.stages.append(Self.stage(localID: "staged", modified: Date(timeIntervalSinceReferenceDate: -0.0)))
 
         let store = TransferStore(url: temporaryDirectory().appendingPathComponent("transfers.sqlite"))
-        try await store.replace(with: LegacyBackupPlan(state), digest: "digest", mode: .shadow, at: Date(timeIntervalSinceReferenceDate: 5e-324))
+        try await store.seedForTest(seed, importedDigest: "digest", importedAt: Date(timeIntervalSinceReferenceDate: 5e-324))
         let contents = try await store.contents()
         for (index, value) in values.enumerated() {
             let receipt = try XCTUnwrap(contents.receipts.first { $0.localID == "photo-\(index)" })
@@ -68,11 +62,15 @@ import XCTest
             XCTAssertEqual(contents.jobs.first { $0.sourceKey == "failed-\(index)" }?.errorAt?.bitPattern, value.bitPattern, "\(value)")
             let read = try await store.receipts(for: ["photo-\(index)"])
             XCTAssertEqual(read["photo-\(index)"]?.revision, AssetRevision(referenceSeconds: value), "\(value)")
+            let failures = try await store.failures(lane: .library, limit: 100)
+            XCTAssertEqual(failures.first { $0.source == .photo(DeviceAssetID(rawValue: "failed-\(index)")) }?.failedAt?.timeIntervalSinceReferenceDate.bitPattern,
+                           value.bitPattern, "\(value)")
         }
         XCTAssertEqual(contents.stages.first?.modificationDate?.bitPattern, (-0.0).bitPattern, "A negative zero stays negative.")
         let meta = try await store.meta()
         XCTAssertEqual(meta.legacyImportedAt?.timeIntervalSinceReferenceDate.bitPattern, (5e-324).bitPattern)
-        XCTAssertEqual(LegacyBackupComparison.compare(state, with: contents).total, 0)
+        let staged = try await store.recoveryJobs().first { $0.job.source.key == "staged" }?.stage
+        XCTAssertEqual(staged?.revision.referenceSeconds.bitPattern, (-0.0).bitPattern, "The stage the engine reads keeps it too.")
 
         // And through a completion and a verification.
         let job = try XCTUnwrap(contents.jobs.first { $0.sourceKey == "staged" })
@@ -92,6 +90,11 @@ import XCTest
         XCTAssertEqual(verified, 1)
         let after = try await store.receipts(for: ["staged"])["staged"]
         XCTAssertEqual(after?.verifiedAt?.timeIntervalSinceReferenceDate.bitPattern, (-0.0).bitPattern)
+        let removed = Date(timeIntervalSinceReferenceDate: 5e-324)
+        let marked = try await store.markLocallyDeleted([LocalDeletion(localID: "staged", revision: revision, date: removed)])
+        XCTAssertEqual(marked, 1)
+        let deleted = try await store.receipts(for: ["staged"])["staged"]
+        XCTAssertEqual(deleted?.localDeletedAt?.timeIntervalSinceReferenceDate.bitPattern, (5e-324).bitPattern)
     }
 
     /// Confirming one more upload with 60,000 receipts on the phone writes only that photo's rows:
@@ -100,22 +103,17 @@ import XCTest
     func testCompletionIsIncrementalAndOffMainWith60kReceipts() async throws {
         func statementsToComplete(receipts count: Int) async throws -> (completion: Int, verification: Int, store: TransferStore) {
             let store = TransferStore(url: temporaryDirectory().appendingPathComponent("transfers.sqlite"))
-            var state = Legacy.BackupState()
-            var receipts: [String: Legacy.BackupReceipt] = [:]
-            var confirmed: [String: Date] = [:]
+            var seed = TransferSeed()
             for index in 0..<count {
                 let id = String(format: "%08X-0000-4000-8000-000000000000/L0/001", index)
                 let date = Date(timeIntervalSinceReferenceDate: 700_000_000 + Double(index) * 0.001)
-                confirmed[id] = date
-                receipts[id] = Legacy.BackupReceipt(modificationDate: date, original: Legacy.RemoteFile(id: "asset-\(index)", checksum: "sum-\(index)"),
-                                                    motion: nil, confirmedAt: date)
+                seed.confirmations.append((id, date))
+                seed.receipts.append(.init(localID: id, modified: date, originalID: "asset-\(index)", originalChecksum: "sum-\(index)", confirmedAt: date))
             }
-            state.receipts = receipts
-            state.confirmed = confirmed
-            state.queue = ["next", "after"]
-            state.pendingAlbumAdds = ["next": ["album"]]
-            state.transferNotification = Legacy.TransferNotification(id: G.notificationID, total: 2, completed: 0, terminalFailures: nil)
-            try await store.replace(with: LegacyBackupPlan(state), digest: "seed", mode: .shadow, at: Date())
+            seed.jobs = [.init(localID: "next", batch: G.notificationID), .init(localID: "after", batch: G.notificationID)]
+            seed.destinations = [("next", "album", nil)]
+            seed.batch = (G.notificationID, 2, 0, nil)
+            try await store.seedForTest(seed)
             let job = try unwrapped(try await store.contents().jobs.first { $0.sourceKey == "next" })
 
             let before = await store.statistics().statements
@@ -147,7 +145,7 @@ import XCTest
         XCTAssertEqual(large.verification, 3, "Begin, one update, commit.")
         XCTAssertLessThan(elapsed, .seconds(60), "Seeding and completing 60,000 receipts stays fast.")
         let statistics = await large.store.statistics()
-        XCTAssertGreaterThan(statistics.statements, 120_000)
+        XCTAssertGreaterThan(statistics.statements, 120_000, "Seeding wrote a row per statement.")
         XCTAssertEqual(statistics.onMainThread, 0, "Nothing ran on the main thread.")
 
         // The completion did what a commit does.
@@ -160,16 +158,15 @@ import XCTest
     }
 
     /// A completion applies only to the job it names while its lease holds; a re-upload of a photo
-    /// backed up before stacks the new copy with the old one, as BackupCoordinator does.
+    /// backed up before stacks the new copy with the old one, as the old backup did.
     func testCompletionNeedsItsLeaseAndStacksAReupload() async throws {
         let store = TransferStore(url: temporaryDirectory().appendingPathComponent("transfers.sqlite"))
-        var state = Legacy.BackupState()
+        var seed = TransferSeed()
         let old = Date(timeIntervalSinceReferenceDate: 700_000_000.25)
-        state.receipts = ["edited": Legacy.BackupReceipt(modificationDate: old, original: Legacy.RemoteFile(id: "old-asset", checksum: "old"),
-                                                         motion: nil, confirmedAt: nil)]
-        state.confirmed = ["edited": old]
-        state.queue = ["edited"]
-        try await store.replace(with: LegacyBackupPlan(state), digest: "seed", mode: .shadow, at: Date())
+        seed.receipts = [.init(localID: "edited", modified: old, originalID: "old-asset", originalChecksum: "old")]
+        seed.confirmations = [("edited", old)]
+        seed.jobs = [.init(localID: "edited")]
+        try await store.seedForTest(seed)
         let job = try unwrapped(try await store.contents().jobs.first)
         let revision = AssetRevision(referenceSeconds: 790_000_000.75)
         func completion(lease: UUID?, job id: Int64) -> TransferCompletion {
@@ -199,17 +196,15 @@ import XCTest
     /// recorded only for receipts that are still the ones checked.
     func testReceiptQueries() async throws {
         let store = TransferStore(url: temporaryDirectory().appendingPathComponent("transfers.sqlite"))
-        var state = Legacy.BackupState()
-        var receipts: [String: Legacy.BackupReceipt] = [:]
+        var seed = TransferSeed()
         let ids = (0..<2_500).map { String(format: "local-%05d", $0) }
         for (index, id) in ids.enumerated() {
-            let motion = index.isMultiple(of: 10) ? Legacy.RemoteFile(id: "motion-\(index)", checksum: "motion-sum-\(index)") : nil
-            receipts[id] = Legacy.BackupReceipt(modificationDate: Date(timeIntervalSinceReferenceDate: 700_000_000 + Double(index)),
-                                                original: Legacy.RemoteFile(id: "asset-\(index)", checksum: "sum-\(index)", byteCount: index == 1 ? 77 : nil),
-                                                motion: motion, confirmedAt: nil)
+            let video = index.isMultiple(of: 10)
+            seed.receipts.append(.init(localID: id, modified: Date(timeIntervalSinceReferenceDate: 700_000_000 + Double(index)), originalID: "asset-\(index)",
+                                       originalChecksum: "sum-\(index)", originalBytes: index == 1 ? 77 : nil,
+                                       motionID: video ? "motion-\(index)" : nil, motionChecksum: video ? "motion-sum-\(index)" : nil))
         }
-        state.receipts = receipts
-        try await store.replace(with: LegacyBackupPlan(state), digest: "seed", mode: .shadow, at: Date())
+        try await store.seedForTest(seed)
 
         let found = try await store.receipts(for: ids + ["missing"])
         XCTAssertEqual(found.count, 2_500, "Every ID is looked up, past the 2,000 a statement takes.")
@@ -264,16 +259,13 @@ import XCTest
         try XCTUnwrap(value, file: file, line: line)
     }
 
-    static func legacyPhoto(localID: String, modified: Date, folder: String = "F0F0F0F0-0000-4000-8000-000000000000",
-                            stage: String = "A0A0A0A0-0000-4000-8000-000000000000", motion: Bool = false, livePhotoID: String? = nil,
-                            motionChecksum: String? = nil) -> Legacy.PreparedPhoto {
-        func file(_ name: String, _ filename: String, _ type: String) -> Legacy.UploadFile {
-            Legacy.UploadFile(url: G.backupFile(folder, name), filename: filename, contentType: type)
-        }
-        return Legacy.PreparedPhoto(localID: localID, modificationDate: modified, original: file("original", "IMG_9000.HEIC", "image/heic"),
-                                    motion: motion ? file("motion", "IMG_9000.MOV", "video/quicktime") : nil, sidecar: nil,
-                                    fields: ["fileCreatedAt": "2025-10-18T09:41:12Z", "isFavorite": "false"], isVideo: false,
-                                    livePhotoID: livePhotoID, motionChecksum: motionChecksum, stageID: stage)
+    /// A stage as B9's import wrote one: files relative to the App Group, no checksum of the still.
+    static func stage(localID: String, modified: Date, folder: String = "F0F0F0F0-0000-4000-8000-000000000000",
+                      stage: String = "A0A0A0A0-0000-4000-8000-000000000000") -> TransferSeed.Stage {
+        let path = "Backup/\(G.digest)/\(folder)"
+        return TransferSeed.Stage(localID: localID, stageID: stage, folder: path, modified: modified,
+                                  original: StagedFile(path: path + "/original", filename: "IMG_9000.HEIC", contentType: "image/heic"),
+                                  fields: ["fileCreatedAt": "2025-10-18T09:41:12Z", "isFavorite": "false"], bodyPath: path + "/\(stage).multipart")
     }
 
     private func temporaryDirectory() -> URL {

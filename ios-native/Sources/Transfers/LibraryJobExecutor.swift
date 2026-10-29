@@ -75,7 +75,7 @@ final class LibraryJobExecutor: JobExecuting {
         guard case .photo(let id) = job.source else { throw TransferItemFailure.rejected("This transfer is not a photo backup.") }
         finishedFolders.withLock { _ = $0.removeValue(forKey: job.lease.job) }
         // The preferences as the lease is taken decide this job's network use.
-        let preferences = try await store.preferences() ?? TransferPreferences(Legacy.BackupPreferences())
+        let preferences = try await store.preferences() ?? TransferPreferences()
         try await context.ensureOwned()
         guard await conditionsPermit(preferences.requireCharging) else { throw TransferDeferral.deviceConditions }
         try await context.ensureOwned()

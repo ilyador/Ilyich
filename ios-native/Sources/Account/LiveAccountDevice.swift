@@ -5,27 +5,14 @@ import WidgetKit
 
 /// The device-wide services as they run in the app.
 struct LiveAccountDevice: AccountDevice {
-    /// The process's backup engine: the app's own, or in a test one that runs only today's backup
-    /// over a coordinator of the test's.
+    /// The process's backup engine.
     var host: @MainActor @Sendable () -> TransferHost = { .shared }
 
     init() {}
 
-    /// Today's backup only, over `backup`, for tests of it.
-    init(backup: @escaping @MainActor @Sendable () -> BackupCoordinator) {
-        host = { TransferHost.legacyOnly(backup()) }
-    }
-
     func activateBackup(_ runtime: AccountRuntime) async {
         let host = await host()
         await host.activate(runtime)
-    }
-
-    /// Today's backup pauses, switching automatic backup off unless `keepingAutomaticBackup`, and
-    /// stops shared uploads. The transfer engine already did as the account's runtime ended.
-    func stopUploads(keepingAutomaticBackup: Bool) async {
-        let host = await host()
-        await host.stopUploads(keepingAutomaticBackup: keepingAutomaticBackup)
     }
 
     func endCasting() async { await CastSessionService.shared.signOut() }
@@ -41,13 +28,6 @@ struct LiveAccountDevice: AccountDevice {
     func clearTimelineCaches(scope: String) async { LegacyPlacesImport.discard(scope: scope) }
 
     func clearDiagnostics() async { await DiagnosticsStore.shared.clear() }
-
-    func readOnlyChanged(_ enabled: Bool) async {
-        let host = await host()
-        await host.readOnlyChanged(enabled)
-    }
-
-    func recordTransferImport(_ report: LegacyImportReport) async { await DiagnosticsStore.shared.recordTransferImport(report) }
 
     /// Each time the phone's protected data becomes available after it was locked away, as after
     /// the first unlock since the phone started.

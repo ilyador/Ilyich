@@ -10,10 +10,8 @@ import SwiftUI
         PerfScenarioDriver.arm()
         let session = AccountSession(environment: .current)
         _session = State(initialValue: session)
-        // A launch for background work opens the saved account; today's backup, the way back,
-        // also syncs before its windows.
+        // A launch for background work opens the saved account.
         TransferHost.shared.setRestore { await session.restore() }
-        BackupLifecycle.shared.setBackgroundPreparation { await session.prepareForBackgroundBackup() }
         _ = CastSessionService.shared
         // The feed's whole-snapshot cache went in F2 (the index is the cache); its folder goes with it.
         Task.detached(priority: .utility) { TimelineFeed.deleteLegacySnapshots() }

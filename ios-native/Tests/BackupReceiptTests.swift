@@ -2,29 +2,11 @@ import XCTest
 @testable import Ilyich
 
 final class BackupReceiptTests: XCTestCase {
-    func testDeletionProofRequiresSameFileOwnerAndLiveAsset() throws {
-        let receipt = BackupRemoteFile(id: "asset", checksum: "original-sha1")
-        func asset(id: String = "asset", owner: String = "user", checksum: String = "original-sha1", trashed: Bool = false,
-                   visibility: String? = "timeline") -> BackupRemoteAsset {
-            BackupRemoteAsset(id: id, ownerId: owner, checksum: checksum, isTrashed: trashed, livePhotoVideoId: nil, visibility: visibility)
-        }
-        XCTAssertTrue(receipt.matches(asset(), ownerID: "user"))
-        XCTAssertFalse(receipt.matches(asset(id: "replacement"), ownerID: "user"))
-        XCTAssertFalse(receipt.matches(asset(owner: "other"), ownerID: "user"))
-        XCTAssertFalse(receipt.matches(asset(checksum: "changed-sha1"), ownerID: "user"))
-        XCTAssertFalse(receipt.matches(asset(trashed: true), ownerID: "user"))
-        XCTAssertTrue(receipt.matches(asset(visibility: "archive"), ownerID: "user"), "An archived copy is still a backup.")
-        XCTAssertFalse(receipt.matches(asset(visibility: "locked"), ownerID: "user"), "A copy in the Locked Folder is not one cleanup relies on.")
-    }
-
-    func testOldReceiptsDecodeAndMalformedSizeDoesNotAffectVerification() throws {
-        let old = #"{"modificationDate":0,"original":{"id":"asset","checksum":"sha1"}}"#
-        let receipt = try JSONDecoder().decode(BackupReceipt.self, from: Data(old.utf8))
-        XCTAssertNil(receipt.original.byteCount)
-
+    /// A size the server reports in a shape it shouldn't is ignored, never failing the decode.
+    func testMalformedSizeDoesNotAffectVerification() throws {
         let remote = #"{"id":"asset","ownerId":"user","checksum":"sha1","isTrashed":false,"exifInfo":{"fileSizeInByte":"oops"}}"#
         let asset = try JSONDecoder().decode(BackupRemoteAsset.self, from: Data(remote.utf8))
-        XCTAssertTrue(receipt.original.matches(asset, ownerID: "user"))
+        XCTAssertEqual(asset.checksum, "sha1")
         XCTAssertNil(asset.knownByteCount)
     }
 
@@ -46,13 +28,17 @@ final class BackupReceiptTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(BackupRemoteAsset.self, from: Data(missingChecksum.utf8)))
     }
 
-    func testSavedPreferencesKeepAutomaticAndCellularOffWhenMissing() throws {
-        let preferences = try JSONDecoder().decode(BackupPreferences.self, from: Data("{}".utf8))
+    /// Backup's defaults, which a new account's database starts from: automatic backup and
+    /// cellular off, a 30-second delay.
+    func testPreferencesDefaultToAutomaticAndCellularOff() throws {
+        let preferences = TransferPreferences()
         XCTAssertFalse(preferences.automatic)
         XCTAssertFalse(preferences.cellularPhotos)
         XCTAssertFalse(preferences.cellularVideos)
         XCTAssertEqual(preferences.triggerDelay, 30)
-        let restored = try JSONDecoder().decode(BackupPreferences.self, from: JSONEncoder().encode(preferences))
+        XCTAssertEqual(TransferJSON.encode(preferences),
+                       #"{"automatic":false,"cellularPhotos":false,"cellularVideos":false,"downloadCloudOriginals":false,"excludedAlbums":[],"includedAlbums":[],"requireCharging":false,"syncAlbums":false,"triggerDelay":30}"#)
+        let restored = try JSONDecoder().decode(TransferPreferences.self, from: Data(TransferJSON.encode(preferences).utf8))
         XCTAssertEqual(preferences, restored)
     }
 }

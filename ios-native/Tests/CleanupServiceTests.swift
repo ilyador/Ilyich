@@ -396,39 +396,42 @@ import XCTest
         XCTAssertEqual(h.receipts.recordedSizes[0]["live"]?.motion, 500)
     }
 
-    /// LegacyStateReceipts over today's backup state: receipts only for the account taken up,
-    /// and sizes kept only where the receipt is still the one verified.
+    /// The transfers database's receipts (TransferReceiptSource): sizes kept only where the receipt
+    /// is still the one verified, and a removal marked and told of.
     func testByteCountsAreRecordedOnlyForUnchangedReceipts() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("CleanupReceipts-" + UUID().uuidString, isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let store = TransferStore(url: folder.appendingPathComponent("transfers.sqlite"))
         let date = Date(timeIntervalSinceReferenceDate: 700_000_000.125)
-        var state = BackupState()
-        state.receipts = [
-            "same": BackupReceipt(modificationDate: date, original: BackupRemoteFile(id: "s1", checksum: "c1")),
-            "replaced": BackupReceipt(modificationDate: date, original: BackupRemoteFile(id: "r2", checksum: "c2")),
-        ]
-        try JSONEncoder().encode(state).write(to: folder.appendingPathComponent("state.json"))
-        let credential = StoredCredential(server: URL(string: "https://photos.example/api")!, token: "t", userID: "user", name: "User")
-        let coordinator = BackupCoordinator()
-        try coordinator.load(credential, folder: folder)
-        let repository = LegacyStateReceipts(coordinator: { coordinator })
+        var seed = TransferSeed()
+        seed.receipts = [.init(localID: "same", modified: date, originalID: "s1", originalChecksum: "c1"),
+                         .init(localID: "replaced", modified: date, originalID: "r2", originalChecksum: "c2")]
+        try await store.seedForTest(seed)
+        let broadcast = ChangeBroadcast()
+        let repository = TransferReceiptSource(store: store, broadcast: broadcast)
+        let changes = broadcast.stream()
 
-        let other = await repository.receipts(account: "someone-else")
-        XCTAssertNil(other, "Another account's receipts are never read.")
-        let maybeRead = await repository.receipts(account: credential.scope)
+        let maybeRead = await repository.receipts(account: "account")
         let read = try XCTUnwrap(maybeRead)
         XCTAssertEqual(read["same"]?.revision, AssetRevision(date))
         let replacedBefore = try XCTUnwrap(read["replaced"])
         let stale = CleanupReceipt(localID: "replaced", revision: replacedBefore.revision, original: .init(id: "older", checksum: "c2"), motion: nil)
 
         await repository.recordSizes(["same": VerifiedSize(receipt: try XCTUnwrap(read["same"]), original: 42, motion: nil),
-                                      "replaced": VerifiedSize(receipt: stale, original: 99, motion: nil)], account: credential.scope)
+                                      "replaced": VerifiedSize(receipt: stale, original: 99, motion: nil)], account: "account")
+        let stored = try await store.receipts(for: ["same", "replaced"])
+        XCTAssertEqual(stored["same"]?.original.byteCount, 42)
+        XCTAssertNil(stored["replaced"]?.original.byteCount, "A receipt replaced meanwhile keeps what it has.")
 
-        XCTAssertEqual(coordinator.associations["same"]?.original.byteCount, 42)
-        XCTAssertNil(coordinator.associations["replaced"]?.original.byteCount, "A receipt replaced meanwhile keeps what it has.")
-        let saved = try JSONDecoder().decode(BackupState.self, from: Data(contentsOf: folder.appendingPathComponent("state.json")))
-        XCTAssertEqual(saved.receipts?["same"]?.original.byteCount, 42)
+        await repository.markLocallyDeleted(["same"], account: "account")
+        var iterator = changes.makeAsyncIterator()
+        let told: Void? = await iterator.next()
+        XCTAssertNotNil(told, "The device index and cleanup hear of the removal.")
+        let after = await repository.receipts(account: "account")
+        XCTAssertEqual(after?["same"]?.locallyDeleted, true)
+        let inputs = await repository.inputs(account: "account")
+        XCTAssertEqual(inputs.map { Set($0.receipts.keys) }, ["replaced"], "The phone's timeline no longer counts a photo removed from it.")
+        await store.close()
     }
 
     /// The settings keys and defaults @AppStorage used, read as they were, and the messaging-album

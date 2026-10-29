@@ -5,9 +5,9 @@ import Foundation
 protocol TransferTransport: Sendable {
     var session: TransferSessionID { get }
     /// Uploads the attempt's body and returns the task's ID. A task iOS still holds for the attempt,
-    /// sent before a relaunch or by an earlier build, is adopted instead of sending a second one.
+    /// sent before a relaunch, is adopted instead of sending a second one.
     func submit(_ request: URLRequest, key: AttemptKey) async throws(TransportSubmitError) -> Int
-    /// The attempt's outcome file, legacy or version 2, or nil when there is none.
+    /// The attempt's outcome file, or nil when there is none.
     func outcome(for key: AttemptKey) throws -> OutcomeRecord?
     /// Deletes the attempt's outcome file once what it says is committed, and the body with it
     /// unless `keepingBody`: an interrupted attempt is sent again from the body it already has.
@@ -103,7 +103,7 @@ struct TransportCompletion: Equatable, Sendable {
 
     let taskID: Int
     let attempt: AttemptID
-    /// The outcome file relative to the App Group, or nil for a legacy task described outside it.
+    /// The outcome file relative to the App Group.
     let outcomePath: String?
     let journal: Journal
 }
@@ -127,31 +127,26 @@ struct TransportInventory: Equatable, Sendable {
     let session: TransferSessionID
     let tasks: [TransportTaskSnapshot]
 
-    /// The live task for an attempt, whichever build sent it. A legacy task is found by its stage ID
-    /// or share identity, whatever container path its descriptor recorded.
+    /// The live task for an attempt.
     func task(for attempt: AttemptID) -> TransportTaskSnapshot? { tasks(for: attempt).first(where: \.isLive) }
 
     /// Every task for an attempt, live or ending.
     func tasks(for attempt: AttemptID) -> [TransportTaskSnapshot] { tasks.filter { $0.attempt == attempt } }
 
-    /// Tasks of one account: version 2 by the scope they name, legacy backups by their Backup
-    /// folder. A legacy share task names no account and is never listed.
+    /// Tasks of one account, by the scope they name.
     func tasks(scope: String) -> [TransportTaskSnapshot] { tasks.filter { $0.descriptor.scope == scope } }
+
+    /// Tasks a build before B9 described, live or ending, whatever account they were for.
+    var legacy: [TransportTaskSnapshot] { tasks.filter { $0.descriptor == .legacy } }
 
     /// Tasks this app did not describe, or whose description is unreadable.
     var foreign: [TransportTaskSnapshot] { tasks.filter { $0.descriptor == .foreign } }
 }
 
 extension TaskDescriptor {
-    /// The account a task belongs to: a version 2 descriptor names it, and a legacy backup's
-    /// outcome sits in Backup/<digest>/. A legacy share descriptor names no account.
+    /// The account a version 2 task belongs to.
     var scope: String? {
-        switch self {
-        case .v2(_, let scope, _): return scope
-        case .legacy:
-            guard let parts = outcomePath?.split(separator: "/"), parts.count > 2, parts[0] == "Backup" else { return nil }
-            return String(parts[1])
-        case .foreign: return nil
-        }
+        guard case .v2(_, let scope, _) = self else { return nil }
+        return scope
     }
 }

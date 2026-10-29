@@ -115,26 +115,6 @@ final class AuthorizationTests: XCTestCase {
         XCTAssertGreaterThan(other.snapshot.writeGeneration, max(next.value, toggled.writeGeneration))
     }
 
-    /// Turning read-only mode on stops shared uploads and pauses backup, switching automatic
-    /// backup off, as the toggle always has; turning it off starts nothing again. Whether it
-    /// should carry on with them is an owner question, so neither may change before it is answered.
-    @MainActor func testReadOnlyModePausesUploadsAndSwitchesAutomaticBackupOff() async {
-        let backup = BackupCoordinator()
-        backup.preferences.automatic = true
-        let shares = ShareInboxStore(repository: ShareInboxRepository(root: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AuthorizationTests-\(UUID().uuidString)", isDirectory: true)))
-
-        await AccountRuntime.uploadsFollow(readOnly: true, backup: backup, shares: shares)
-        XCTAssertFalse(backup.preferences.automatic, "Turning read-only mode on switches automatic backup off.")
-        XCTAssertEqual(backup.activity, "Backup paused")
-        XCTAssertFalse(backup.isRunning)
-        XCTAssertFalse(shares.isRunning)
-
-        await AccountRuntime.uploadsFollow(readOnly: false, backup: backup, shares: shares)
-        XCTAssertFalse(backup.preferences.automatic, "Turning it off leaves automatic backup off until it is turned on again.")
-        XCTAssertEqual(backup.activity, "Backup paused", "Nor does it start backup.")
-    }
-
     /// Losing access to some photos makes what was read and kept stale, but not what may be written.
     func testAnAccessChangeMovesOnlyTheAccessEpoch() {
         let mirror = makeMirror()

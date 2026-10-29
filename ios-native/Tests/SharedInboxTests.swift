@@ -196,38 +196,6 @@ final class SharedInboxTests: XCTestCase {
         XCTAssertEqual(empty, [])
     }
 
-    func testUploadIdentityUnchangedAcrossVersions() async throws {
-        func identity(_ file: URL, checksum: String = G.sharedChecksum) -> String {
-            ShareInboxStore.uploadIdentity(scope: G.digest, file: file, checksum: checksum, sidecarChecksum: "", livePhotoVideoID: "")
-        }
-        // On the phone that wrote the golden manifest, the first attachment keeps the identity its
-        // upload task was given, read as version 1 or after a version 2 rewrite.
-        let pinned = G.shareDescriptor(container: G.container).id
-        XCTAssertEqual(pinned, "dfbde448be38350a366842d0eaaabd6467ad99d280e91b7fd7e6dfe14061f87b")
-        let v1 = try ShareManifest.decode(FixtureLoader.data("share/manifest-v1.json"), batch: G.batchID, folder: G.sharedFolder)
-        XCTAssertEqual(identity(v1.attachments[0].original.url), pinned)
-        let v2 = try ShareManifest.decode(ShareManifest.encode(v1), batch: G.batchID, folder: G.sharedFolder)
-        XCTAssertEqual(identity(v2.attachments[0].original.url), pinned)
-
-        // Through the repository: a manifest written here by a build before W3, then rewritten.
-        let folder = try makeFolder()
-        let recorded = G.legacyManifest(container: container.path)
-        try JSONEncoder().encode(recorded).write(to: folder.appendingPathComponent(ShareManifest.fileName))
-        let repository = ShareInboxRepository(root: root)
-        let loaded = try await repository.load()
-        let before = try XCTUnwrap(loaded.first?.batch)
-        for (attachment, legacy) in zip(before.attachments, recorded.attachments) {
-            XCTAssertEqual(identity(attachment.original.url), Legacy.shareIdentity(scope: G.digest, path: legacy.original.url.path, checksum: G.sharedChecksum))
-        }
-        XCTAssertEqual(before.attachments[1].motion.map { identity($0.url, checksum: "motion") },
-                       Legacy.shareIdentity(scope: G.digest, path: try XCTUnwrap(recorded.attachments[1].motion).url.path, checksum: "motion"))
-        try await repository.consume(G.sharedFiles[0], from: G.batchID)
-        let rewritten = try await repository.load()
-        let after = try XCTUnwrap(rewritten.first?.batch)
-        XCTAssertEqual(after.attachments.flatMap(\.files).map { identity($0.url) },
-                       before.attachments.dropFirst().flatMap(\.files).map { identity($0.url) })
-    }
-
     func testManifestlessFolderCollectedAfter24Hours() async throws {
         let abandoned = UUID(), staged = UUID()
         let abandonedFolder = try makeFolder(abandoned, names: ["half-copied"])

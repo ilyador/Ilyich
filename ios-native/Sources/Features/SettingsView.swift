@@ -113,8 +113,7 @@ private struct ReadOnlySettingsSection: View {
     var body: some View {
         Section {
             Toggle("Read-only mode", isOn: Binding(get: { authorization?.readOnly == true }, set: { session?.setReadOnly($0) }))
-                // Until uploads have paused, when the last change turned it on.
-                .disabled(session == nil || authorization == nil || session?.isApplyingReadOnly == true)
+                .disabled(session == nil || authorization == nil)
         } footer: { Text("Browse and search without changing photos, albums or account details. Turning this on pauses uploads. Backup stays paused until you start it again.") }
     }
 }

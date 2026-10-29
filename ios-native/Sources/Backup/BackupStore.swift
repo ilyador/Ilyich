@@ -3,6 +3,18 @@ import IlyichShareInbox
 import Observation
 import Photos
 
+/// What adding photos to backup came to: queued, or why not.
+enum BackupEnqueueOutcome: Equatable, Sendable {
+    /// Queued; backup starts or was already set to.
+    case queued
+    case failed(String)
+}
+
+/// Adds photos to the backup queue (BackupStore implements it, over TransferControlling).
+@MainActor protocol BackupEnqueuing: AnyObject {
+    func enqueue(localIDs: [String], albumID: String?) async -> BackupEnqueueOutcome
+}
+
 /// What the backup screens show and the commands they send (REBUILD_ROADMAP.md B8). It follows
 /// the backend's snapshots, which arrive as backup changes, never by polling, and rereads the
 /// failures, album counts and preferences with each. Preference edits are written once they
@@ -10,22 +22,20 @@ import Photos
 /// made before the backend's preferences were read (while the account's backup was prepared) is
 /// not taken (StalePreferencesEdit), and the backend's show instead.
 @MainActor @Observable final class BackupStore: BackupEnqueuing {
-    /// The app's store, over the process's backup engine: the account's transfer engine, or
-    /// today's backup (TransferHost).
+    /// The app's store, over the account's transfer engine (TransferHost).
     static let shared = BackupStore(backend: TransferHost.shared.backend)
 
     private(set) var snapshot = TransferSnapshot(intent: .paused, phase: .idle, remaining: 0, confirmed: 0, failed: 0, fileProgress: nil,
                                                  bytesSent: 0, bytesExpected: 0, bytesPerSecond: nil, lastMessage: nil)
     /// The preferences as the screen edits them. Call `preferencesChanged()` after an edit.
-    var preferences = TransferPreferences(Legacy.BackupPreferences())
+    var preferences = TransferPreferences()
     /// Failed photos, the latest failure first.
     private(set) var failures: [TransferQueueItem] = []
     /// Photos waiting for each server album after their backup.
     private(set) var albumUploads: [String: AlbumUploadCount] = [:]
     private(set) var permission: PHAuthorizationStatus
     private(set) var albums: [DeviceAlbum] = []
-    /// A command the backend couldn't carry out. Today's backup never throws; its own errors
-    /// arrive in the snapshot.
+    /// A command the backend couldn't carry out. The engine's own errors arrive in the snapshot.
     private(set) var commandError: String?
 
     var isRunning: Bool { snapshot.phase == .running || snapshot.phase == .discovering }
@@ -224,12 +234,9 @@ extension AccountRestriction {
 }
 
 /// What the Shared files sheet shows and the commands it sends (REBUILD_ROADMAP.md B8, B9).
-/// Uploads start and pause through the process's backend (TransferHost), which waits while the
-/// account's backup is prepared and never reaches today's uploads unless the process runs them.
-/// The inbox's batches are read from ShareInboxStore, the inbox's owner. While the transfer engine
-/// runs the account's uploads, what is uploading, its progress and each file's error come from the
-/// engine's share lane; while today's backup runs, from ShareInboxStore, whose progress arrives
-/// from the share session as it is sent.
+/// Uploads start and pause through the account's backend (TransferHost), which waits while the
+/// account's backup is prepared. The inbox's batches are read from ShareInboxStore, the inbox's
+/// owner; what is uploading, its progress and each file's error come from the engine's share lane.
 @MainActor @Observable final class ShareInboxModel {
     let api: APIClient
     @ObservationIgnored private let inbox: ShareInboxStore
@@ -259,18 +266,14 @@ extension AccountRestriction {
         follow()
     }
 
-    /// The engine's share lane is the source of the upload's state, unless the process runs
-    /// today's backup.
-    private var onEngine: Bool { !backend.routesToLegacy }
-
     var batches: [SharedBatch] { inbox.batches }
     var unreadableBatches: Int { inbox.unreadableBatches }
-    var isRunning: Bool { onEngine ? !engineState.queued.isEmpty : inbox.isRunning }
-    var currentID: String? { onEngine ? engineState.current : inbox.currentID }
-    var progress: Double? { onEngine ? engineState.progress : inbox.progress }
-    var completed: Int { onEngine ? engineState.completed : inbox.completed }
-    var errors: [String: String] { onEngine ? engineState.errors : inbox.errors }
-    var error: String? { onEngine ? engineState.error ?? commandError ?? inbox.error : commandError ?? inbox.error }
+    var isRunning: Bool { !engineState.queued.isEmpty }
+    var currentID: String? { engineState.current }
+    var progress: Double? { engineState.progress }
+    var completed: Int { engineState.completed }
+    var errors: [String: String] { engineState.errors }
+    var error: String? { engineState.error ?? commandError ?? inbox.error }
 
     func refresh() async { await inbox.refresh() }
 
@@ -285,7 +288,7 @@ extension AccountRestriction {
         guard !requests.isEmpty else { return }
         stopped.subtract(selected)
         commandError = nil
-        if onEngine { engineState.completed = 0 }
+        engineState.completed = 0
         do {
             if case .refused(let restriction) = try await backend.enqueue(requests) { commandError = restriction.backupMessage }
         } catch { commandError = error.localizedDescription }
@@ -313,7 +316,7 @@ extension AccountRestriction {
     }
 
     private func read(_ snapshot: TransferSnapshot) async {
-        guard onEngine, let page = try? await backend.queuePage(lane: .share, after: nil, limit: 1_000) else { return }
+        guard let page = try? await backend.queuePage(lane: .share, after: nil, limit: 1_000) else { return }
         var next = engineState
         var attachments: [String] = []
         var errors: [String: String] = [:]

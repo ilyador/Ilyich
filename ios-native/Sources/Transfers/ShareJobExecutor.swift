@@ -15,9 +15,9 @@ import Synchronization
 ///   share-upload session.
 /// - Deterministic identity: a part's identity hashes the account, the file's path relative to the
 ///   App Group, its checksum, its sidecar's checksum and the Live Photo video ID, so every retry
-///   reuses the same body and outcome files, multipart boundary and task. Today's identity hashed
-///   the absolute path instead: a task an earlier build still has in flight under it is adopted,
-///   whichever container path form it recorded, and its receipt applied, never sent again.
+///   reuses the same body and outcome files, multipart boundary and task. (Builds before B9
+///   hashed the absolute path; nothing adopts their tasks or answers since B10: recovery cancels
+///   such a task, and the file is checked again by its checksum.)
 /// - The bulk upload check's ID is the file's name, as today.
 /// - A failed outcome left on disk from an earlier try is deleted before the file is sent again, so
 ///   it is never replayed as the new try's answer.
@@ -64,25 +64,11 @@ final class ShareJobExecutor: JobExecuting {
     // MARK: Identity
 
     /// A part's upload identity: the account, the file's path relative to the App Group, its
-    /// checksum, its sidecar's checksum and the Live Photo video ID, hashed. The same on every
-    /// retry and whatever the container's path.
+    /// checksum, its sidecar's checksum and the Live Photo video ID, joined by bars and hashed. The
+    /// same on every retry and whatever the container's path.
     static func identity(scope: String, path: String, checksum: String, sidecarChecksum: String, livePhotoVideoID: String) -> String {
-        legacyIdentity(scope: scope, path: path, checksum: checksum, sidecarChecksum: sidecarChecksum, livePhotoVideoID: livePhotoVideoID)
-    }
-
-    /// Today's identity (ShareInboxStore.uploadIdentity), which hashed the file's absolute path.
-    static func legacyIdentity(scope: String, path: String, checksum: String, sidecarChecksum: String, livePhotoVideoID: String) -> String {
         let identity = [scope, path, checksum, sidecarChecksum, livePhotoVideoID].joined(separator: "|")
         return SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// The absolute paths an earlier build may have hashed for a file: the path as resolved now and
-    /// its other form on iOS, with or without /private.
-    static func legacyPaths(of url: URL) -> [String] {
-        let path = url.path
-        if path.hasPrefix("/private/var/") { return [path, String(path.dropFirst("/private".count))] }
-        if path.hasPrefix("/var/") { return [path, "/private" + path] }
-        return [path]
     }
 
     // MARK: Running a job
@@ -227,41 +213,34 @@ final class ShareJobExecutor: JobExecuting {
         let video = fields["livePhotoVideoId"] ?? ""
         let identity = AttemptID(legacy: Self.identity(scope: scope, path: file.path, checksum: checksum, sidecarChecksum: sidecarChecksum,
                                                        livePhotoVideoID: video))
-        let legacy = Self.legacyPaths(of: layout.url(forRelativePath: file.path)).map {
-            AttemptID(legacy: Self.legacyIdentity(scope: scope, path: $0, checksum: checksum, sidecarChecksum: sidecarChecksum, livePhotoVideoID: video))
-        }
         let attempts = try await store.libraryAttempts(job: job.lease.job)
         try await context.ensureOwned()
-        let unanswered = attempts.last { $0.part == part && $0.isUnanswered && ([identity] + legacy).contains($0.id) }
+        let unanswered = attempts.last { $0.part == part && $0.isUnanswered && $0.id == identity }
 
         // An answer nobody applied, for the try this job recorded.
         if let unanswered, let record = try uploader.recordedOutcome(for: key(unanswered.id, folder: folder)) {
             return try await apply(record, attempt: unanswered, part: part, sidecar: sidecar, fields: fields, run: run)
         }
 
-        // A task iOS still holds for this file: this job's, or one an earlier build sent under
-        // today's identity. Adopted, never sent again.
-        var candidates: [AttemptID] = []
-        for id in [unanswered?.id, identity].compactMap({ $0 }) + legacy where !candidates.contains(id) { candidates.append(id) }
-        for id in candidates {
-            guard await uploader.holdsTask(for: id) else { continue }
+        // A task iOS still holds for this file, under its identity: adopted, never sent again.
+        if await uploader.holdsTask(for: identity) {
             try await context.ensureOwned()
-            let attempt = unanswered?.id == id ? unanswered!
-                : LibraryAttempt(id: id, part: part, state: .bodyWritten, bodyPath: key(id, folder: folder).bodyPath, checksum: checksum)
+            let attempt = unanswered
+                ?? LibraryAttempt(id: identity, part: part, state: .bodyWritten, bodyPath: key(identity, folder: folder).bodyPath, checksum: checksum)
             return try await submit(attempt, part: part, sidecar: sidecar, fields: fields, run: run)
         }
 
-        // Outcome files no try of this job's waits for: an earlier build's, or one whose answer was
-        // recorded and not deleted. A receipt is this file's own upload, as the identity covers its
-        // checksums; a failure is stale, and goes before the file is sent again.
-        for id in candidates where id != unanswered?.id {
-            guard let record = try uploader.recordedOutcome(for: key(id, folder: folder)) else { continue }
+        // An outcome file no try of this job's waits for: one whose answer was recorded and not
+        // deleted, as when the app ended in between. A receipt is this file's own upload, as the
+        // identity covers its checksums; a failure is stale, and goes before the file is sent again.
+        if unanswered == nil, let record = try uploader.recordedOutcome(for: key(identity, folder: folder)) {
             if record.receipt != nil {
-                let attempt = LibraryAttempt(id: id, part: part, state: .submitted, bodyPath: key(id, folder: folder).bodyPath, checksum: checksum)
+                let attempt = LibraryAttempt(id: identity, part: part, state: .submitted, bodyPath: key(identity, folder: folder).bodyPath,
+                                             checksum: checksum)
                 guard try await store.saveAttempt(attempt, session: .shareUpload, job: job.lease.job, token: job.lease.token) else { throw LeaseLost() }
                 return try await apply(record, attempt: attempt, part: part, sidecar: sidecar, fields: fields, run: run)
             }
-            try? uploader.acknowledge(key(id, folder: folder), keepingBody: true)
+            try? uploader.acknowledge(key(identity, folder: folder), keepingBody: true)
         }
 
         // The bulk upload check, by the file's name.
@@ -284,13 +263,7 @@ final class ShareJobExecutor: JobExecuting {
         guard result.action == "accept" else { throw APIError.invalidResponse("The server returned an unknown upload decision.") }
 
         // The body, in place beside the files: kept when a try of this identity wrote it in full.
-        var attempt = unanswered?.id == identity ? unanswered! : LibraryAttempt(id: identity, part: part, state: .created)
-        if let unanswered, unanswered.id != identity {
-            // A legacy try whose task and answer are both gone: this identity takes over.
-            var abandoned = unanswered
-            abandoned.state = .abandoned
-            guard try await store.saveAttempt(abandoned, session: .shareUpload, job: job.lease.job, token: job.lease.token) else { throw LeaseLost() }
-        }
+        var attempt = unanswered ?? LibraryAttempt(id: identity, part: part, state: .created)
         let attemptKey = key(identity, folder: folder)
         let body = layout.url(forRelativePath: attemptKey.bodyPath)
         let written: Set<AttemptState> = [.bodyWritten, .submitted, .interrupted]

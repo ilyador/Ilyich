@@ -16,8 +16,6 @@ import IlyichPlatform
     /// What the signed-in account may do, for views: the app puts it in the environment, where
     /// the controls that change things read it. Nil while nobody is signed in.
     private(set) var authorization: AuthorizationSnapshot?
-    /// A read-only change is still pausing uploads.
-    private(set) var isApplyingReadOnly = false
     /// The open account's Free up space, which the app puts in the environment.
     private(set) var freeUpSpace: FreeUpSpaceStore?
     /// The open account's Locked Folder, which the app puts in the environment and which hears
@@ -25,7 +23,6 @@ import IlyichPlatform
     private(set) var lockedFolder: LockedFolderSession?
     @ObservationIgnored let manager: AccountManager
     @ObservationIgnored private let presence: AppPresence
-    @ObservationIgnored private var readOnlyChange: UUID?
     @ObservationIgnored private var following: Task<Void, Never>?
 
     init(environment: AccountEnvironment, dependencies: AccountDependencies, presence: AppPresence) {
@@ -81,8 +78,6 @@ import IlyichPlatform
 
     func restore() async { await manager.restore() }
 
-    func prepareForBackgroundBackup() async -> Bool { await manager.prepareForBackgroundBackup() }
-
     func signIn(server: String, email: String, password: String) async throws {
         try await manager.signIn(server: server, email: email, password: password)
     }
@@ -108,29 +103,14 @@ import IlyichPlatform
 
     func clearBrowsingCache() async { await manager.clearBrowsingCache() }
 
-    /// How the import of the backup records compares with state.json, for Diagnostics. Returns
-    /// once the report is recorded.
-    func compareBackupRecords() async {
-        guard let runtime, phase == .active || phase == .passwordChangeRequired else { return }
-        await runtime.compareBackupRecords()
-    }
-
     /// Turns read-only mode on or off for the signed-in account. The setting and the write
     /// generation change at once, so the controls follow straight away and writes still waiting to
-    /// be sent are refused. Then uploads follow, as `AccountRuntime.uploadsFollow(readOnly:)`
-    /// says. Changes are applied in the order they were made.
+    /// be sent are refused. The transfer engine follows the account's authorization itself: turning
+    /// it on pauses backup, with automatic backup off, and stops shared uploads.
     func setReadOnly(_ enabled: Bool) {
         guard let runtime, phase == .active || phase == .passwordChangeRequired,
               let snapshot = runtime.setReadOnly(enabled) else { return }
         authorization = snapshot
-        let change = UUID()
-        readOnlyChange = change
-        isApplyingReadOnly = true
-        runtime.uploadsFollowReadOnly(enabled) { [weak self] in
-            guard let self, self.readOnlyChange == change else { return }
-            self.readOnlyChange = nil
-            self.isApplyingReadOnly = false
-        }
     }
 
     func sceneChanged(_ scene: ScenePhase) {
@@ -165,7 +145,6 @@ import IlyichPlatform
     private func apply(_ state: AccountState) {
         if state.runtime?.id != runtime?.id {
             following?.cancel(); following = nil
-            readOnlyChange = nil; isApplyingReadOnly = false
             runtime = state.runtime
             freeUpSpace?.disappear()
             freeUpSpace = state.runtime.map { FreeUpSpaceStore(service: $0.cleanup) }
