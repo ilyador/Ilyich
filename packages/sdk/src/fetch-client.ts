@@ -1,5 +1,5 @@
 /**
- * Immich
+ * Ilyich
  * 3.3.5
  * DO NOT MODIFY - This file has been generated using oazapfts.
  * See https://www.npmjs.com/package/oazapfts
@@ -1290,7 +1290,7 @@ export type TagResponseDto = {
 export type AssetResponseDto = {
     /** Base64 encoded SHA1 hash */
     checksum: string;
-    /** The UTC timestamp when the asset was originally uploaded to Immich. */
+    /** The UTC timestamp when the asset was originally uploaded to Ilyich. */
     createdAt: string;
     /** Duplicate group ID */
     duplicateId?: string | null;
@@ -1394,7 +1394,7 @@ export type AssetEditActionItemResponseDto = {
 export type AssetEditsResponseDto = {
     /** Asset ID these edits belong to */
     assetId: string;
-    /** Dimensions of the published base image before Immich edits */
+    /** Dimensions of the published base image before Ilyich edits */
     baseDimensions?: {
         height: number;
         width: number;
@@ -3161,7 +3161,7 @@ export type TimeBucketAssetResponseDto = {
     city?: (string | null)[];
     /** Array of country names extracted from EXIF GPS data */
     country?: (string | null)[];
-    /** Array of UTC timestamps when each asset was originally uploaded to Immich */
+    /** Array of UTC timestamps when each asset was originally uploaded to Ilyich */
     createdAt: string[];
     /** Array of video/gif durations in milliseconds (null for static images) */
     duration: (number | null)[];
@@ -3594,7 +3594,7 @@ export type SyncAssetOcrV1 = {
 export type SyncAssetV1 = {
     /** Checksum */
     checksum: string;
-    /** Uploaded to Immich at */
+    /** Uploaded to Ilyich at */
     createdAt: string | null;
     /** Deleted at */
     deletedAt: string | null;
@@ -3638,7 +3638,7 @@ export type SyncAssetV1 = {
 export type SyncAssetV2 = {
     /** Checksum */
     checksum: string;
-    /** Uploaded to Immich at */
+    /** Uploaded to Ilyich at */
     createdAt: string | null;
     /** Deleted at */
     deletedAt: string | null;
@@ -7509,9 +7509,10 @@ export function tagAssets({ id, bulkIdsDto }: {
 /**
  * Get time bucket
  */
-export function getTimeBucket({ albumId, bbox, isFavorite, isTrashed, key, order, orderBy, personId, slug, tagId, timeBucket, userId, visibility, withCoordinates, withPartners, withStacked }: {
+export function getTimeBucket({ albumId, bbox, isDeveloped, isFavorite, isTrashed, key, order, orderBy, personId, slug, tagId, timeBucket, userId, visibility, withCoordinates, withPartners, withStacked }: {
     albumId?: string;
     bbox?: string;
+    isDeveloped?: boolean;
     isFavorite?: boolean;
     isTrashed?: boolean;
     key?: string;
@@ -7533,6 +7534,7 @@ export function getTimeBucket({ albumId, bbox, isFavorite, isTrashed, key, order
     }>(`/timeline/bucket${QS.query(QS.explode({
         albumId,
         bbox,
+        isDeveloped,
         isFavorite,
         isTrashed,
         key,
@@ -7554,9 +7556,10 @@ export function getTimeBucket({ albumId, bbox, isFavorite, isTrashed, key, order
 /**
  * Get time buckets
  */
-export function getTimeBuckets({ albumId, bbox, isFavorite, isTrashed, key, order, orderBy, personId, slug, tagId, userId, visibility, withCoordinates, withPartners, withStacked }: {
+export function getTimeBuckets({ albumId, bbox, isDeveloped, isFavorite, isTrashed, key, order, orderBy, personId, slug, tagId, userId, visibility, withCoordinates, withPartners, withStacked }: {
     albumId?: string;
     bbox?: string;
+    isDeveloped?: boolean;
     isFavorite?: boolean;
     isTrashed?: boolean;
     key?: string;
@@ -7577,6 +7580,7 @@ export function getTimeBuckets({ albumId, bbox, isFavorite, isTrashed, key, orde
     }>(`/timeline/buckets${QS.query(QS.explode({
         albumId,
         bbox,
+        isDeveloped,
         isFavorite,
         isTrashed,
         key,
