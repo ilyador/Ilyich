@@ -475,9 +475,9 @@ export class AssetRepository {
   }
 
   /**
-   * Locks the asset and checks that a generation was rendered from its current original, sidecar, observed input
-   * and edits. Returns null when the generation is stale.
-   */
+  Locks the asset and checks that a generation was rendered from its current original, sidecar, observed input
+  and edits. Returns null when the generation is stale.
+  */
   private async lockImageGeneration(tx: Kysely<DB>, input: ImageGenerationSource) {
     const asset = await tx
       .selectFrom('asset')
@@ -520,10 +520,10 @@ export class AssetRepository {
   }
 
   /**
-   * Records a current generation whose files reproduce the published ones, leaving those rows, the asset and every
-   * client cache key untouched. Returns false when the published state differs from what was compared, so the
-   * caller can publish normally.
-   */
+  Records a current generation whose files reproduce the published ones, leaving those rows, the asset and every
+  client cache key untouched. Returns false when the published state differs from what was compared, so the
+  caller can publish normally.
+  */
   async recordUnchangedImageGeneration(input: UnchangedImageGeneration): Promise<boolean> {
     return this.db.transaction().execute(async (tx) => {
       const current = await this.lockImageGeneration(tx, input);

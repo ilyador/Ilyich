@@ -27,9 +27,9 @@ export interface VideoFaceCluster {
 }
 
 /**
- * When to take the frames to analyse, in milliseconds. Each one sits in the middle of an equal slice of the video,
- * which keeps them away from the very first frames, where the preview comes from, and from the last one.
- */
+When to take the frames to analyse, in milliseconds. Each one sits in the middle of an equal slice of the video,
+which keeps them away from the very first frames, where the preview comes from, and from the last one.
+*/
 export const getVideoFaceTimestamps = (duration: number): number[] => {
   if (!Number.isFinite(duration) || duration <= 0) {
     return [];
@@ -72,10 +72,10 @@ const getQuality = ({ boundingBox: { x1, y1, x2, y2 }, imageWidth, imageHeight, 
   (Math.max(0, x2 - x1) * Math.max(0, y2 - y1) * score) / Math.max(1, imageWidth * imageHeight);
 
 /**
- * Groups the faces seen across a video by person. From the largest and clearest down, each face joins the nearest
- * group whose best face is within `maxDistance`, the threshold facial recognition matches faces to people with, and
- * otherwise starts a group of its own. Groups are returned best first.
- */
+Groups the faces seen across a video by person. From the largest and clearest down, each face joins the nearest
+group whose best face is within `maxDistance`, the threshold facial recognition matches faces to people with, and
+otherwise starts a group of its own. Groups are returned best first.
+*/
 export const clusterVideoFaces = (faces: VideoFace[], maxDistance: number): VideoFaceCluster[] => {
   const clusters: VideoFaceCluster[] = [];
   for (const face of faces.toSorted((a, b) => getQuality(b) - getQuality(a))) {

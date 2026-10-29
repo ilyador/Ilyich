@@ -454,10 +454,10 @@ export class MediaService extends BaseService {
   }
 
   /**
-   * Re-rendering unchanged inputs (or rendering with an upgraded renderer that produces the same result) usually
-   * reproduces the published files byte for byte. Keeping the published rows then preserves every client cache key
-   * (`asset_file.updateId`, thumbhash) and only the new input fingerprint is recorded.
-   */
+  Re-rendering unchanged inputs (or rendering with an upgraded renderer that produces the same result) usually
+  reproduces the published files byte for byte. Keeping the published rows then preserves every client cache key
+  (`asset_file.updateId`, thumbhash) and only the new input fingerprint is recorded.
+  */
   private async recordUnchangedImageSet(
     asset: ThumbnailAsset,
     output: {

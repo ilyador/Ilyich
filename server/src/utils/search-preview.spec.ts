@@ -29,13 +29,13 @@ describe(renderSearchPreview.name, () => {
     )
       .raw()
       .toBuffer();
-    const yellow = (x: number, y: number) => {
-      const index = (y * size + x) * channels;
-      return marked[index] > 150 && marked[index + 1] > 150 && marked[index + 2] < 100;
-    };
     const x = Math.round(left + innerWidth * 0.25);
     const y = Math.round(top + innerHeight * 0.5);
-    expect([-2, -1, 0, 1, 2].some((offset) => yellow(x + offset, y))).toBe(true);
-    expect(yellow(Math.round(left + innerWidth * 0.1), y)).toBe(false);
+    const yellow = (column: number) => {
+      const index = (y * size + column) * channels;
+      return marked[index] > 150 && marked[index + 1] > 150 && marked[index + 2] < 100;
+    };
+    expect([-2, -1, 0, 1, 2].some((offset) => yellow(x + offset))).toBe(true);
+    expect(yellow(Math.round(left + innerWidth * 0.1))).toBe(false);
   });
 });

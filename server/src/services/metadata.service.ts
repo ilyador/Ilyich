@@ -505,10 +505,10 @@ export class MetadataService extends BaseService {
   }
 
   /**
-   * Fingerprints stored before v2 also hashed the renderer build and every image setting. When the current photo
-   * and XMP reproduce the stored value, the published files already belong to them, so the record moves to the v2
-   * format without a render. Otherwise the asset renders as it would have before.
-   */
+  Fingerprints stored before v2 also hashed the renderer build and every image setting. When the current photo
+  and XMP reproduce the stored value, the published files already belong to them, so the record moves to the v2
+  format without a render. Otherwise the asset renders as it would have before.
+  */
   private async adoptLegacyDevelopmentInput(
     assetId: string,
     input: DevelopmentInput,

@@ -106,7 +106,9 @@ describe('sidecar development publication', () => {
     expect(published.mediaRevision).toContain(preview.updateId);
     expect(published.mediaRevision).toContain(input.thumbhash.toString('base64'));
     expect(mapAsset(published).mediaRevision).toBe(published.mediaRevision);
-    expect(mapAsset(published, { stripMetadata: true }).mediaRevision).toBe(published.mediaRevision);
+    expect(mapAsset(published, { auth: factory.auth({ sharedLink: { showExif: false } }) }).mediaRevision).toBe(
+      published.mediaRevision,
+    );
     for (const selection of [columns.syncAsset, columns.syncAlbumAsset, columns.syncPartnerAsset]) {
       const sync = await database
         .selectFrom('asset')

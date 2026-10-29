@@ -30,9 +30,9 @@ type VideoFaceAsset = NonNullable<Awaited<ReturnType<AssetJobRepository['getForD
 const MAX_FRAME_FAILURES = 3;
 
 /**
- * Face detection only looks at a video's preview, a single frame from its start. This looks at frames from the whole
- * video and adds one face, the best one, for each person who is seen there but is not on the video yet.
- */
+Face detection only looks at a video's preview, a single frame from its start. This looks at frames from the whole
+video and adds one face, the best one, for each person who is seen there but is not on the video yet.
+*/
 @Injectable()
 export class VideoFaceService extends BaseService {
   @OnJob({ name: JobName.AssetDetectVideoFacesQueueAll, queue: QueueName.VideoFaceDetection })
@@ -193,10 +193,10 @@ export class VideoFaceService extends BaseService {
   }
 
   /**
-   * One face for each person seen across the video who is not on it yet. Someone is on it already when one of its faces
-   * is within `maxDistance` of theirs, or when facial recognition put, or would put, one of its faces in the same person.
-   * Someone nobody knows yet also needs to be seen more than once, which leaves out passers-by and blurred frames.
-   */
+  One face for each person seen across the video who is not on it yet. Someone is on it already when one of its faces
+  is within `maxDistance` of theirs, or when facial recognition put, or would put, one of its faces in the same person.
+  Someone nobody knows yet also needs to be seen more than once, which leaves out passers-by and blurred frames.
+  */
   private async getNewFaces(asset: VideoFaceAsset, clusters: VideoFaceCluster[], maxDistance: number) {
     if (clusters.length === 0) {
       return [];
