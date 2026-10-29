@@ -110,6 +110,8 @@ enum ViewerConfirmation: Hashable {
     @ObservationIgnored private var started = false
     /// The pages are moving under a finger or an animation.
     @ObservationIgnored private var pagerMoving = false
+    /// The viewer is closing, by a drag or a button.
+    @ObservationIgnored private var closing = false
     /// How long the photos rest before the window is read again around the photo now on screen:
     /// the strip finishes following the photo first, so a strip laid out afresh looks the same.
     @ObservationIgnored private let settleDelay: Duration
@@ -236,7 +238,7 @@ enum ViewerConfirmation: Hashable {
         return [index - 1, index + 1].filter(assets.indices.contains).map { assets[$0].id }
     }
 
-    private var isMoving: Bool { pagerMoving || stripScrubbing }
+    private var isMoving: Bool { pagerMoving || stripScrubbing || closing }
 
     /// The photos have come to rest: once they stay at rest a moment, the window is read again
     /// around the photo now on screen.
@@ -311,6 +313,15 @@ enum ViewerConfirmation: Hashable {
     func setPagerMoving(_ moving: Bool) {
         guard pagerMoving != moving else { return }
         pagerMoving = moving
+        if !isMoving { settle() }
+    }
+
+    /// The viewer started closing, or a drag let go early left it open. While it closes the photos
+    /// stay as they are, as under a swipe, so nothing is laid out again under the photo going back
+    /// to its cell; a viewer left open reads the window again once it rests.
+    func setClosing(_ closing: Bool) {
+        guard self.closing != closing else { return }
+        self.closing = closing
         if !isMoving { settle() }
     }
 

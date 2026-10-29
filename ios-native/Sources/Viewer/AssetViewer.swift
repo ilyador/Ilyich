@@ -8,7 +8,7 @@ import SwiftUI
 struct AssetViewer: View {
     let pipeline: MediaPipeline
     /// Set when the viewer zooms out of a grid cell: it hears which photo is on screen, and the
-    /// system's drag to close replaces the viewer's own swipe down.
+    /// zoom's drag to close (ViewerZoomTransition) replaces the viewer's own swipe down.
     let transition: ViewerTransitionState?
     /// Closes the viewer when it was presented outside SwiftUI.
     let onClose: (() -> Void)?
@@ -52,9 +52,6 @@ struct AssetViewer: View {
     /// What the photo on screen offers. Every button and menu item renders from it.
     private var capabilities: AssetCapabilities { model.capabilities }
 
-    /// The bars, the strip, the video pill and the Live badge, put away while the viewer closes.
-    private var chromeShown: Bool { controls && !(transition?.dismissing ?? false) }
-
     private var canvas: some View {
         ZStack {
             // Under the zoom presenter the black is the presenter's, so it fades as the viewer closes.
@@ -71,10 +68,10 @@ struct AssetViewer: View {
             } else if model.working { ProgressView().padding(20).glassEffect(in: .circle).accessibilityLabel("Preparing photo") }
         }
         // The badge and the pill stay where the bars put them while the bars slide away.
-        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in if chromeShown { chromeInsets = insets } }
+        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in if controls { chromeInsets = insets } }
         .containerBackground(transition == nil ? Color.black : Color.clear, for: .navigation)
         .toolbar { viewerToolbar }
-        .toolbarVisibility(chromeShown ? .visible : .hidden, for: .navigationBar, .bottomBar)
+        .toolbarVisibility(controls ? .visible : .hidden, for: .navigationBar, .bottomBar)
         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
         .navigationBarTitleDisplayMode(.inline)
         // Monochrome glyphs, as in Photos, whatever the app's accent.
@@ -192,6 +189,9 @@ struct AssetViewer: View {
                 // The close handed over holds only what closing needs, not this view.
                 let onClose = onClose, dismiss = dismiss
                 model.start(mutations: mutations, bus: bus, close: { if let onClose { onClose() } else { dismiss() } })
+                // Nothing moves under the photo while the viewer closes.
+                let model = model
+                transition?.onClosing = { closing in model.setClosing(closing) }
             }
             .alert("Couldn’t complete action", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
                 Button("OK", role: .cancel) { }
@@ -374,19 +374,19 @@ struct AssetViewer: View {
     /// bottom bar a video's playback pill over the thumbnail strip.
     private var pageChrome: some View {
         VStack(spacing: 0) {
-            if current.livePhotoVideoId != nil, !(transition?.dismissing ?? false) {
+            if current.livePhotoVideoId != nil {
                 liveBadge.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.top, 6)
             }
             Spacer(minLength: 0)
             VStack(spacing: 12) {
                 if current.isVideo {
-                    ViewerVideoControls(playback: playback, visible: chromeShown)
+                    ViewerVideoControls(playback: playback, visible: controls)
                         .frame(maxWidth: 520).padding(.horizontal, 24)
                 }
                 if model.assets.count > 1 {
                     // The strip keeps its room while hidden, so nothing above it moves.
                     ZStack {
-                        if chromeShown {
+                        if controls {
                             ZStack {
                                 ViewerFilmstrip(pipeline: pipeline, assets: model.assets, replacements: model.replacements, selectedID: model.selectedID,
                                                 onSelect: { model.jump(to: $0) }, onScrubbingChange: { model.setStripScrubbing($0) })

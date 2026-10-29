@@ -1,23 +1,24 @@
-import AVFoundation
 import SwiftUI
 import UIKit
 
 /// What the zoom transition needs from the open viewer: the photo on screen and its shape, and
-/// whether the viewer is closing.
+/// whom to tell when the viewer starts closing.
 @MainActor @Observable final class ViewerTransitionState {
     var currentID: String
     /// Width over height of the photo on screen, so the zoom lines the cell up with the photo
     /// rather than with the whole screen.
     var aspectRatio: CGFloat?
-    /// The viewer is closing, by a drag or a button: its controls step aside so only the photo
-    /// goes back to its cell, as in Photos. A drag let go early brings them back.
-    var dismissing = false
+    /// Told when the viewer starts closing, by a drag or a button, and when a drag let go early
+    /// leaves it open: the viewer holds its photos still meanwhile. Not observed, so telling it
+    /// changes nothing in SwiftUI while the finger moves.
+    @ObservationIgnored var onClosing: ((Bool) -> Void)?
     init(currentID: String) { self.currentID = currentID }
 }
 
-/// Presents the viewer as Photos does: it zooms out of the photo's grid cell, follows the finger
-/// when dragged down, and zooms back into the cell of whichever photo it shows when it closes.
-/// Without a cell to go back to, it closes plainly.
+/// Presents the viewer as Photos does (ViewerZoomTransition): it zooms out of the photo's grid
+/// cell, only the photo follows the finger when dragged down, and the photo zooms back into the
+/// cell of whichever photo it shows when the viewer closes. Without a cell to go back to, it
+/// closes plainly.
 struct ViewerZoomPresenter: UIViewControllerRepresentable {
     /// The viewer to show: the photo it opens on and where its photos come from.
     @Binding var item: ViewerRoute?
@@ -61,30 +62,28 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
             let state = ViewerTransitionState(currentID: route.asset.id)
             let host = ViewerHostingController(rootView: AnyView(EmptyView()))
             self.state = state; self.host = host; presentedID = route.asset.id
+            state.aspectRatio = CGFloat(route.asset.aspectRatio)
             host.rootView = root(route)
-            host.modalPresentationStyle = .fullScreen
-            // The black behind the photo is the controller's, not the SwiftUI view's, so it can
-            // fade with the finger while a drag closes the viewer.
+            // Over the library, which stays in the window: as a drag begins it is already there,
+            // at its full size, behind the photo (ViewerZoomTransition). The viewer still decides
+            // the status bar, as a full-screen one does.
+            host.modalPresentationStyle = .overFullScreen
+            host.modalPresentationCapturesStatusBarAppearance = true
+            // A plain close, with Reduce Motion or the phone turned sideways, fades.
+            host.modalTransitionStyle = .crossDissolve
+            // The black behind the photo is the controller's, not the SwiftUI view's: closing hands
+            // it to a view of its own, which fades with the finger.
             host.view.backgroundColor = .black
-            host.onDismissing = { [weak state] closing in
-                withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.15)) { state?.dismissing = closing }
+            // A link that closed the viewer while a drag held it closes it once the drag lets go.
+            host.onDismissCancelled = { [weak self] in
+                Task { @MainActor [weak self] in if let self, self.parent?.item == nil { self.close() } }
             }
             // The viewer is always dark. Its own preference reaches this host only after SwiftUI's
             // first pass, which let the zoom start in the system's style and flicker.
             host.overrideUserInterfaceStyle = .dark
-            let options = UIViewController.Transition.ZoomOptions()
-            options.interactiveDismissShouldBegin = { [weak host] context in
-                guard let view = host?.view else { return false }
-                return Self.dragMayClose(context, in: view)
-            }
-            options.alignmentRectProvider = { [weak state] context in
-                guard let ratio = state?.aspectRatio, ratio > 0 else { return nil }
-                return AVMakeRect(aspectRatio: CGSize(width: ratio, height: 1), insideRect: context.zoomedViewController.view.bounds)
-            }
-            host.preferredTransition = .zoom(options: options) { [weak self, weak state] _ in
-                guard let state else { return nil }
-                return self?.parent?.sourceView(state.currentID)
-            }
+            let zoom = ViewerZoomTransition(state: state) { [weak self] id in self?.parent?.sourceView(id) }
+            zoom.attach(to: host)
+            host.zoom = zoom
             host.onDismissed = { [weak self, weak host] in
                 guard let self, let host else { return }
                 self.finish(host)
@@ -134,9 +133,11 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
         }
 
         /// Keeps the viewer's inputs current, as a cover's content would be; another photo opened
-        /// over the viewer replaces it.
+        /// over the viewer replaces it. A viewer on its way off the screen, under a drag or going
+        /// back to its cell, is left as it is: drawing it again then costs the frames the photo
+        /// needs, as the library behind it updates.
         func refresh(_ route: ViewerRoute) {
-            guard let host, let state else { return }
+            guard let host, let state, !host.isBeingDismissed else { return }
             if route.asset.id != presentedID { presentedID = route.asset.id; state.currentID = route.asset.id }
             host.rootView = root(route)
         }
@@ -166,18 +167,6 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
                                       settings: parent.settings, scenePhase: parent.scenePhase)
                 .id(route.asset.id))
         }
-
-        /// A drag closes the viewer when it goes down on a photo at normal size: a sideways drag
-        /// pages, an upward one shows the details, and a zoomed photo pans.
-        private static func dragMayClose(_ context: UIViewController.Transition.ZoomOptions.InteractionContext, in view: UIView) -> Bool {
-            guard context.velocity.dy > 0, context.velocity.dy > abs(context.velocity.dx) else { return false }
-            var hit = view.hitTest(context.location, with: nil)
-            while let current = hit {
-                if let photo = current as? ZoomPhotoScrollView { return photo.zoomScale <= 1.01 }
-                hit = current.superview
-            }
-            return true
-        }
     }
 }
 
@@ -185,24 +174,29 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
 /// halfway leaves the viewer open, so a dismissal counts only when its transition completes.
 final class ViewerHostingController: UIHostingController<AnyView> {
     var onDismissed: (() -> Void)?
-    /// Told when the viewer starts closing, and when a drag let go early leaves it open.
-    var onDismissing: ((Bool) -> Void)?
+    /// Told when a drag let go early leaves the viewer open.
+    var onDismissCancelled: (() -> Void)?
+    /// The viewer's zoom and drag to close, which UIKit holds only weakly.
+    var zoom: ViewerZoomTransition?
     private var dismissingWithoutTransition = false
+    /// The screen under the viewer while VoiceOver keeps to the viewer.
+    private weak var hiddenLibrary: UIView?
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // The library stays in the window under the viewer; VoiceOver keeps to the viewer, as it
+        // did when the library left the window.
+        setLibraryAccessible(false)
+    }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         guard isBeingDismissed else { return }
-        onDismissing?(true)
         if let coordinator = transitionCoordinator {
-            // The black fades as the photo goes back to its cell; on a drag it follows the finger.
-            coordinator.animate(alongsideTransition: { [weak self] _ in self?.view.backgroundColor = .clear }) { [weak self] context in
-                guard let self else { return }
-                if context.isCancelled {
-                    self.view.backgroundColor = .black
-                    self.onDismissing?(false)
-                } else {
-                    self.onDismissed?()
-                }
+            coordinator.animate(alongsideTransition: nil) { [weak self] context in
+                if context.isCancelled { self?.onDismissCancelled?(); return }
+                self?.setLibraryAccessible(true)
+                self?.onDismissed?()
             }
         } else {
             dismissingWithoutTransition = true
@@ -211,7 +205,20 @@ final class ViewerHostingController: UIHostingController<AnyView> {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        if isBeingDismissed { setLibraryAccessible(true) }
         if dismissingWithoutTransition { dismissingWithoutTransition = false; onDismissed?() }
+    }
+
+    /// The screen the viewer is presented over, for VoiceOver and UI tests: hidden while the
+    /// viewer is up, back once it has closed.
+    private func setLibraryAccessible(_ accessible: Bool) {
+        if accessible {
+            hiddenLibrary?.accessibilityElementsHidden = false
+            hiddenLibrary = nil
+        } else if let library = view.window?.rootViewController?.view, !view.isDescendant(of: library) {
+            library.accessibilityElementsHidden = true
+            hiddenLibrary = library
+        }
     }
 }
 
