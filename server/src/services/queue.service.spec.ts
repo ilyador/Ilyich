@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { SystemConfig, defaults } from 'src/dtos/config.dto.js';
-import { ImmichWorker, JobName, QueueCommand, QueueName } from 'src/enum.js';
+import { BootstrapEventPriority, ImmichWorker, JobName, QueueCommand, QueueName } from 'src/enum.js';
 import { QueueService } from 'src/services/queue.service.js';
 import { factory } from 'test/small.factory.js';
 import { ServiceMocks, newTestService } from 'test/utils.js';
@@ -17,6 +17,26 @@ describe(QueueService.name, () => {
 
   it('should work', () => {
     expect(sut).toBeDefined();
+  });
+
+  describe('onBootstrap', () => {
+    it('should set up the queues without taking jobs yet', () => {
+      sut.onBootstrap();
+
+      expect(mocks.job.setup).toHaveBeenCalledTimes(1);
+      expect(mocks.job.startWorkers).not.toHaveBeenCalled();
+    });
+
+    it('should take jobs only after every other bootstrap step', () => {
+      const others = Object.values(BootstrapEventPriority).filter(
+        (priority) => typeof priority === 'number' && priority !== BootstrapEventPriority.JobWorkers,
+      ) as number[];
+      expect(BootstrapEventPriority.JobWorkers).toBeGreaterThan(Math.max(...others));
+
+      sut.onBootstrapComplete();
+
+      expect(mocks.job.startWorkers).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('onConfigUpdate', () => {

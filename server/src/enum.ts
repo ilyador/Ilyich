@@ -836,6 +836,9 @@ export enum BootstrapEventPriority {
   PluginSync = 190,
   // Load plugins into memory after sync
   PluginLoad = 200,
+  // Take jobs only once every other service has bootstrapped: a job taken before ConfigInit found the machine learning
+  // repository not set up, failed and was dropped
+  JobWorkers = 300,
 }
 
 export enum QueueName {

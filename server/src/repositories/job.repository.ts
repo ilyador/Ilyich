@@ -268,6 +268,10 @@ export class JobRepository {
       case JobName.PersonGenerateThumbnail: {
         return { priority: 1 };
       }
+      case JobName.AssetDetectVideoFaces: {
+        // one pass per video at a time, however it was queued: Missing, All, or after its preview's face detection
+        return { deduplication: { id: `${JobName.AssetDetectVideoFaces}/${item.data.id}` } };
+      }
       case JobName.FacialRecognitionQueueAll: {
         return { deduplication: { id: JobName.FacialRecognitionQueueAll } };
       }
