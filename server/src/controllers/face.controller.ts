@@ -1,4 +1,17 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Put, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Header,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Put,
+  Query,
+  StreamableFile,
+} from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { Endpoint, HistoryBuilder } from 'src/decorators.js';
@@ -10,14 +23,18 @@ import {
   PersonResponseDto,
 } from 'src/dtos/person.dto.js';
 import { ApiTag, Permission } from 'src/enum.js';
-import { Auth, Authenticated } from 'src/middleware/auth.guard.js';
+import { Auth, Authenticated, FileResponse } from 'src/middleware/auth.guard.js';
+import { MediaService } from 'src/services/media.service.js';
 import { PersonService } from 'src/services/person.service.js';
 import { UUIDParamDto } from 'src/validation.js';
 
 @ApiTags(ApiTag.Faces)
 @Controller('faces')
 export class FaceController {
-  constructor(private service: PersonService) {}
+  constructor(
+    private service: PersonService,
+    private mediaService: MediaService,
+  ) {}
 
   @Post()
   @Authenticated({ permission: Permission.FaceCreate })
@@ -40,6 +57,21 @@ export class FaceController {
   })
   getFaces(@Auth() auth: AuthDto, @Query() dto: FaceDto): Promise<AssetFaceResponseDto[]> {
     return this.service.getFacesById(auth, dto);
+  }
+
+  @Get(':id/thumbnail')
+  @FileResponse()
+  @Authenticated({ permission: Permission.FaceRead })
+  @Header('Content-Type', 'image/jpeg')
+  @Header('Cache-Control', 'private, max-age=86400, no-transform')
+  @Endpoint({
+    summary: 'Retrieve a face thumbnail',
+    description:
+      'Retrieve a square image of the face, cut as a person thumbnail is. A face found further into a video than its preview is cut from the frame it was found in.',
+    history: new HistoryBuilder().added('v3.3.3').alpha('v3.3.3'),
+  })
+  async getFaceThumbnail(@Auth() auth: AuthDto, @Param() { id }: UUIDParamDto): Promise<StreamableFile> {
+    return new StreamableFile(await this.mediaService.getFaceThumbnail(auth, id));
   }
 
   @Put(':id')

@@ -7,6 +7,7 @@ import {
   getAssetPlaybackPath,
   getAssetThumbnailPath,
   getBaseUrl,
+  getFaceThumbnailPath,
   getPeopleThumbnailPath,
   getUserProfileImagePath,
   linkOAuthAccount,
@@ -262,6 +263,8 @@ export const getProfileImageUrl = (user: UserResponseDto) =>
 
 export const getPeopleThumbnailUrl = (person: PersonResponseDto, updatedAt?: string) =>
   createUrl(getPeopleThumbnailPath(person.id), { updatedAt: updatedAt ?? person.updatedAt });
+
+export const getFaceThumbnailUrl = (faceId: string) => createUrl(getFaceThumbnailPath(faceId));
 
 export const copyToClipboard = async (secret: string | unknown) => {
   const $t = get(t);

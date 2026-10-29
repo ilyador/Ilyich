@@ -925,6 +925,109 @@ where
   and "person"."personGroupId" = $4
   and "asset_face"."deletedAt" is null
 
+-- PersonRepository.getDataForFaceThumbnail
+select
+  "asset"."id" as "assetId",
+  "asset_face"."boundingBoxX1" as "x1",
+  "asset_face"."boundingBoxY1" as "y1",
+  "asset_face"."boundingBoxX2" as "x2",
+  "asset_face"."boundingBoxY2" as "y2",
+  "asset_face"."imageWidth" as "oldWidth",
+  "asset_face"."imageHeight" as "oldHeight",
+  "asset_face"."frameTimestamp",
+  "asset"."type",
+  "asset"."originalPath",
+  "asset_exif"."orientation" as "exifOrientation",
+  (
+    select
+      to_json(obj)
+    from
+      (
+        select
+          "asset_video"."index",
+          "asset_video"."codecName",
+          "asset_video"."profile",
+          "asset_video"."level",
+          "asset_video"."bitrate",
+          "asset_exif"."exifImageWidth" as "width",
+          "asset_exif"."exifImageHeight" as "height",
+          "asset_video"."pixelFormat",
+          "asset_video"."frameCount",
+          "asset_exif"."fps" as "frameRate",
+          "asset_video"."timeBase",
+          case
+            when "asset_exif"."orientation" = '6' then -90
+            when "asset_exif"."orientation" = '8' then 90
+            when "asset_exif"."orientation" = '3' then 180
+            else 0
+          end as "rotation",
+          "asset_video"."colorPrimaries",
+          "asset_video"."colorMatrix",
+          "asset_video"."colorTransfer",
+          "asset_video"."dvProfile",
+          "asset_video"."dvLevel",
+          "asset_video"."dvBlSignalCompatibilityId"
+        from
+          (
+            select
+              1
+          ) as "dummy"
+        where
+          "asset_video"."assetId" is not null
+      ) as obj
+  ) as "videoStream",
+  (
+    select
+      to_json(obj)
+    from
+      (
+        select
+          "asset_video"."formatName",
+          "asset_video"."formatLongName",
+          "asset"."duration",
+          "asset_video"."bitrate"
+        from
+          (
+            select
+              1
+          ) as "dummy"
+        where
+          "asset_video"."assetId" is not null
+      ) as obj
+  ) as "format",
+  coalesce(
+    (
+      select
+        "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
+      from
+        "asset_job_status"
+      where
+        "assetId" = "asset"."id"
+    ),
+    false
+  ) as "isDeveloped",
+  (
+    select
+      "path"
+    from
+      "asset_file"
+    where
+      "asset_file"."assetId" = "asset"."id"
+      and "asset_file"."type" = $1
+    order by
+      "asset_file"."isEdited" desc
+    limit
+      $2
+  ) as "previewPath"
+from
+  "asset_face"
+  inner join "asset" on "asset_face"."assetId" = "asset"."id"
+  left join "asset_exif" on "asset_exif"."assetId" = "asset"."id"
+  left join "asset_video" on "asset_video"."assetId" = "asset"."id"
+where
+  "asset_face"."id" = $3
+  and "asset_face"."deletedAt" is null
+
 -- PersonRepository.reassignFace
 update "asset_face"
 set

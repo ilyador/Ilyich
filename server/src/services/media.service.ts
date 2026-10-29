@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, parse } from 'node:path';
+import type { AuthDto } from 'src/dtos/auth.dto.js';
+import type { PersonRepository } from 'src/repositories/person.repository.js';
 import type {
   AudioStreamInfo,
   Bitmap,
@@ -31,6 +33,7 @@ import {
   ImmichWorker,
   JobName,
   JobStatus,
+  Permission,
   QueueName,
   RawExtractedFormat,
   StorageFolder,
@@ -66,6 +69,11 @@ type ImageGenerationJob = Extract<
   { name: JobName.AssetGenerateThumbnails | JobName.AssetEditThumbnailGeneration }
 >;
 type ImageGeneration = { id: string; files: UpsertFileOptions[]; retry: ImageGenerationJob };
+/** Where a face is and what it was found in, for a person's thumbnail or one face's. */
+type FaceImageData = Omit<
+  NonNullable<Awaited<ReturnType<PersonRepository['getDataForThumbnailGenerationJob']>>>,
+  'ownerId'
+>;
 
 @Injectable()
 export class MediaService extends BaseService {
@@ -718,44 +726,84 @@ export class MediaService extends BaseService {
     personGroupId,
   }: JobOf<JobName.PersonGenerateThumbnail>): Promise<JobStatus> {
     const config = await this.getConfig({ withCache: true });
-    const { image } = config;
     const data = await this.personRepository.getDataForThumbnailGenerationJob({ ownerId, personGroupId });
     if (!data) {
       this.logger.error(`Could not generate person thumbnail for ${personGroupId}: missing data`);
       return JobStatus.Failed;
     }
 
-    const { x1, y1, x2, y2, oldWidth, oldHeight, exifOrientation, previewPath, originalPath, frameTimestamp } = data;
-    let decoded: Bitmap;
-    if (data.type === AssetType.Video && frameTimestamp !== null) {
-      // the face was found further into the video than its preview, so it is cut from that frame
-      decoded = await this.decodeVideoFrame(data, frameTimestamp, config);
-    } else {
-      let inputImage: string | Buffer;
-      if (data.type === AssetType.Video || data.isDeveloped) {
-        if (!previewPath) {
-          this.logger.error(`Could not generate person thumbnail for ${personGroupId}: missing preview path`);
-          return JobStatus.Failed;
-        }
-        inputImage = previewPath;
-      } else if (image.extractEmbedded && mimeTypes.isRaw(originalPath)) {
-        const extracted = await this.extractImage(originalPath, image.preview.size);
-        inputImage = extracted ? extracted.buffer : originalPath;
-      } else {
-        inputImage = originalPath;
-      }
-
-      decoded = await this.mediaRepository.decodeImage(inputImage, {
-        colorspace: image.colorspace,
-        processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
-        // if this is an extracted image, it may not have orientation metadata
-        orientation: Buffer.isBuffer(inputImage) && exifOrientation ? Number(exifOrientation) : undefined,
-      });
+    const decoded = await this.decodeFaceImage(data, config);
+    if (!decoded) {
+      this.logger.error(`Could not generate person thumbnail for ${personGroupId}: missing preview path`);
+      return JobStatus.Failed;
     }
 
     const thumbnailPath = StorageCore.getPersonThumbnailPath({ ownerId, personGroupId });
     this.storageCore.ensureFolders(thumbnailPath);
 
+    await this.writeFaceThumbnail(data, decoded, config, thumbnailPath);
+    await this.personRepository.update({ ownerId, personGroupId, thumbnailPath });
+
+    return JobStatus.Success;
+  }
+
+  /** One face, cut as a person's thumbnail is: from the video frame it was found in, when that isn't the preview. */
+  async getFaceThumbnail(auth: AuthDto, id: string): Promise<Buffer> {
+    const data = await this.personRepository.getDataForFaceThumbnail(id);
+    if (!data) {
+      throw new NotFoundException('Face not found');
+    }
+    await this.requireAccess({ auth, permission: Permission.AssetRead, ids: [data.assetId] });
+
+    const config = await this.getConfig({ withCache: true });
+    const decoded = await this.decodeFaceImage(data, config);
+    if (!decoded) {
+      throw new NotFoundException('Face image not found');
+    }
+
+    const folder = join(tmpdir(), 'immich-face-thumbnails', randomUUID());
+    this.storageRepository.mkdirSync(folder);
+    try {
+      const path = join(folder, 'face.jpeg');
+      await this.writeFaceThumbnail(data, decoded, config, path);
+      return await this.storageRepository.readFile(path);
+    } finally {
+      await this.storageRepository.unlinkDir(folder, { recursive: true, force: true });
+    }
+  }
+
+  /** The image a face was found in, or nothing when a video or developed photo has no preview yet. */
+  private async decodeFaceImage(data: FaceImageData, config: SystemConfig): Promise<Bitmap | undefined> {
+    const { image } = config;
+    const { exifOrientation, previewPath, originalPath, frameTimestamp } = data;
+    if (data.type === AssetType.Video && frameTimestamp !== null) {
+      // the face was found further into the video than its preview, so it is cut from that frame
+      return this.decodeVideoFrame(data, frameTimestamp, config);
+    }
+
+    let inputImage: string | Buffer;
+    if (data.type === AssetType.Video || data.isDeveloped) {
+      if (!previewPath) {
+        return;
+      }
+      inputImage = previewPath;
+    } else if (image.extractEmbedded && mimeTypes.isRaw(originalPath)) {
+      const extracted = await this.extractImage(originalPath, image.preview.size);
+      inputImage = extracted ? extracted.buffer : originalPath;
+    } else {
+      inputImage = originalPath;
+    }
+
+    return this.mediaRepository.decodeImage(inputImage, {
+      colorspace: image.colorspace,
+      processInvalidImages: process.env.IMMICH_PROCESS_INVALID_IMAGES === 'true',
+      // if this is an extracted image, it may not have orientation metadata
+      orientation: Buffer.isBuffer(inputImage) && exifOrientation ? Number(exifOrientation) : undefined,
+    });
+  }
+
+  private async writeFaceThumbnail(data: FaceImageData, decoded: Bitmap, { image }: SystemConfig, path: string) {
+    const { x1, y1, x2, y2, oldWidth, oldHeight } = data;
     const thumbnailOptions: GenerateThumbnailOptions = {
       colorspace: image.colorspace,
       format: ImageFormat.Jpeg,
@@ -777,10 +825,7 @@ export class MediaService extends BaseService {
       ],
     };
 
-    await this.mediaRepository.generateThumbnail(decoded, thumbnailOptions, thumbnailPath);
-    await this.personRepository.update({ ownerId, personGroupId, thumbnailPath });
-
-    return JobStatus.Success;
+    await this.mediaRepository.generateThumbnail(decoded, thumbnailOptions, path);
   }
 
   /** The frame `timestamp` milliseconds into a video, as large as the video's preview. */

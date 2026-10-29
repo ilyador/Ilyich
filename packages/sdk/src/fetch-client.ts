@@ -1718,6 +1718,8 @@ export type AssetFaceResponseDto = {
     boundingBoxY1: number;
     /** Bounding box Y2 coordinate */
     boundingBoxY2: number;
+    /** Milliseconds into the video of the frame the face was found in, when that is not the preview. Its bounding box is in that frame, so its image comes from GET /faces/{id}/thumbnail. */
+    frameTimestamp?: number | null;
     /** Face ID */
     id: string;
     /** Image height in pixels */
@@ -5572,6 +5574,19 @@ export function reassignFacesById({ id, faceDto }: {
         method: "PUT",
         body: faceDto
     })));
+}
+/**
+ * Retrieve a face thumbnail
+ */
+export function getFaceThumbnail({ id }: {
+    id: string;
+}, opts?: Oazapfts.RequestOpts) {
+    return oazapfts.ok(oazapfts.fetchBlob<{
+        status: 200;
+        data: Blob;
+    }>(`/faces/${encodeURIComponent(id)}/thumbnail`, {
+        ...opts
+    }));
 }
 /**
  * Retrieve queue counts and status

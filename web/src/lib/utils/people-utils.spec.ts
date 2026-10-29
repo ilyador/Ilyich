@@ -1,6 +1,7 @@
+import { AssetTypeEnum, type AssetFaceResponseDto } from '@immich/sdk';
 import type { Faces } from '$lib/managers/asset-viewer-manager.svelte';
 import type { Size } from '$lib/utils/container-utils';
-import { getBoundingBox } from '$lib/utils/people-utils';
+import { getBoundingBox, zoomImageToBase64 } from '$lib/utils/people-utils';
 
 const makeFace = (overrides: Partial<Faces> = {}): Faces => ({
   id: 'face-1',
@@ -68,5 +69,15 @@ describe('getBoundingBox', () => {
 
     expect(boxes).toHaveLength(2);
     expect(boxes[0].left).toBeLessThan(boxes[1].left);
+  });
+});
+
+describe('zoomImageToBase64', () => {
+  it('should take a face found further into a video from the server, cut from its frame', async () => {
+    const face = { ...makeFace({ id: 'frame-face' }), frameTimestamp: 7000, person: null } as AssetFaceResponseDto;
+
+    const url = await zoomImageToBase64(face, 'asset-1', AssetTypeEnum.Video, undefined);
+
+    expect(url).toContain('/faces/frame-face/thumbnail');
   });
 });

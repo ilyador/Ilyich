@@ -1,3 +1,4 @@
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ShallowDehydrateObject } from 'kysely';
 import { OutputInfo } from 'sharp';
 import type { AudioStreamInfo, JobCounts, RawImageInfo, VideoFormat, VideoStreamInfo } from 'src/types.js';
@@ -26,6 +27,7 @@ import { MediaService } from 'src/services/media.service.js';
 import { AssetFaceFactory } from 'test/factories/asset-face.factory.js';
 import { AssetFileFactory } from 'test/factories/asset-file.factory.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
+import { AuthFactory } from 'test/factories/auth.factory.js';
 import { PersonFactory } from 'test/factories/person.factory.js';
 import { probeStub, videoInfoStub } from 'test/fixtures/media.stub.js';
 import { personThumbnailStub } from 'test/fixtures/person.stub.js';
@@ -2675,6 +2677,111 @@ describe(MediaService.name, () => {
         processInvalidImages: false,
       });
       expect(mocks.media.generateThumbnail).toHaveBeenCalled();
+    });
+  });
+
+  describe('getFaceThumbnail', () => {
+    it('should cut a face found further into a video from the frame it was found in', async () => {
+      const auth = AuthFactory.create();
+      const assetId = newUuid();
+      mocks.person.getDataForFaceThumbnail.mockResolvedValue({
+        ...personThumbnailStub.videoThumbnail,
+        ...probeStub.videoStream2160p,
+        assetId,
+        x1: 1000,
+        y1: 500,
+        x2: 1200,
+        y2: 700,
+        oldWidth: 2560,
+        oldHeight: 1440,
+        frameTimestamp: 7000,
+      });
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
+      const data = Buffer.from('');
+      const info = { width: 2560, height: 1440 } as OutputInfo;
+      mocks.media.decodeImage.mockResolvedValue({ data, info });
+      mocks.storage.readFile.mockResolvedValue(Buffer.from('face'));
+
+      await expect(sut.getFaceThumbnail(auth, 'face-1')).resolves.toEqual(Buffer.from('face'));
+
+      expect(mocks.person.getDataForFaceThumbnail).toHaveBeenCalledWith('face-1');
+      expect(mocks.media.transcode).toHaveBeenCalledWith(
+        '/original/path.mp4',
+        expect.stringMatching(/immich-video-frames\/[\w-]+\/7000\.jpg$/),
+        expect.objectContaining({ inputOptions: ['-ss', '7.000', '-sws_flags', 'accurate_rnd+full_chroma_int'] }),
+      );
+      const facePath = mocks.media.generateThumbnail.mock.calls[0][2];
+      expect(facePath).toMatch(/immich-face-thumbnails\/[\w-]+\/face\.jpeg$/);
+      expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
+        { data, info },
+        expect.objectContaining({
+          format: ImageFormat.Jpeg,
+          edits: [{ action: AssetEditAction.Crop, parameters: { x: 990, y: 490, width: 220, height: 220 } }],
+        }),
+        facePath,
+      );
+      expect(mocks.storage.readFile).toHaveBeenCalledWith(facePath);
+      expect(mocks.storage.unlinkDir).toHaveBeenCalledWith(facePath.slice(0, facePath.lastIndexOf('/')), {
+        recursive: true,
+        force: true,
+      });
+      expect(mocks.person.update).not.toHaveBeenCalled();
+    });
+
+    it("should cut a photo's face from the original", async () => {
+      const auth = AuthFactory.create();
+      const assetId = newUuid();
+      mocks.person.getDataForFaceThumbnail.mockResolvedValue({ ...personThumbnailStub.newThumbnailMiddle, assetId });
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
+      mocks.media.decodeImage.mockResolvedValue({
+        data: Buffer.from(''),
+        info: { width: 1000, height: 1000 } as OutputInfo,
+      });
+      mocks.storage.readFile.mockResolvedValue(Buffer.from('face'));
+
+      await expect(sut.getFaceThumbnail(auth, 'face-1')).resolves.toEqual(Buffer.from('face'));
+
+      expect(mocks.media.transcode).not.toHaveBeenCalled();
+      expect(mocks.media.decodeImage).toHaveBeenCalledWith(personThumbnailStub.newThumbnailMiddle.originalPath, {
+        colorspace: Colorspace.P3,
+        orientation: undefined,
+        processInvalidImages: false,
+      });
+    });
+
+    it("should require access to the face's asset", async () => {
+      mocks.person.getDataForFaceThumbnail.mockResolvedValue({
+        ...personThumbnailStub.newThumbnailMiddle,
+        assetId: newUuid(),
+      });
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set());
+
+      await expect(sut.getFaceThumbnail(AuthFactory.create(), 'face-1')).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(mocks.media.decodeImage).not.toHaveBeenCalled();
+      expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();
+    });
+
+    it('should not find a face that is gone', async () => {
+      mocks.person.getDataForFaceThumbnail.mockResolvedValue(void 0);
+
+      await expect(sut.getFaceThumbnail(AuthFactory.create(), 'face-1')).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(mocks.media.decodeImage).not.toHaveBeenCalled();
+    });
+
+    it('should not find the image of a video face before the video has a preview', async () => {
+      const assetId = newUuid();
+      mocks.person.getDataForFaceThumbnail.mockResolvedValue({
+        ...personThumbnailStub.videoThumbnail,
+        assetId,
+        previewPath: null,
+      });
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([assetId]));
+
+      await expect(sut.getFaceThumbnail(AuthFactory.create(), 'face-1')).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();
     });
   });
 

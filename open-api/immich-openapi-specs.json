@@ -7226,6 +7226,64 @@
         "x-immich-state": "Stable"
       }
     },
+    "/faces/{id}/thumbnail": {
+      "get": {
+        "description": "Retrieve a square image of the face, cut as a person thumbnail is. A face found further into a video than its preview is cut from the frame it was found in.",
+        "operationId": "getFaceThumbnail",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "cookie": []
+          },
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Retrieve a face thumbnail",
+        "tags": [
+          "Faces"
+        ],
+        "x-immich-history": [
+          {
+            "version": "v3.3.3",
+            "state": "Added"
+          },
+          {
+            "version": "v3.3.3",
+            "state": "Alpha"
+          }
+        ],
+        "x-immich-permission": "face.read",
+        "x-immich-state": "Alpha"
+      }
+    },
     "/jobs": {
       "get": {
         "deprecated": true,
@@ -20631,6 +20689,13 @@
             "description": "Bounding box Y2 coordinate",
             "maximum": 9007199254740991,
             "minimum": -9007199254740991,
+            "type": "integer"
+          },
+          "frameTimestamp": {
+            "description": "Milliseconds into the video of the frame the face was found in, when that is not the preview. Its bounding box is in that frame, so its image comes from GET /faces/{id}/thumbnail.",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "nullable": true,
             "type": "integer"
           },
           "id": {

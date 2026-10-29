@@ -621,6 +621,44 @@ export class PersonRepository {
       .executeTakeFirst();
   }
 
+  @GenerateSql({ params: [DummyValue.UUID] })
+  getDataForFaceThumbnail(faceId: string) {
+    return this.db
+      .selectFrom('asset_face')
+      .innerJoin('asset', 'asset_face.assetId', 'asset.id')
+      .leftJoin('asset_exif', 'asset_exif.assetId', 'asset.id')
+      .leftJoin('asset_video', 'asset_video.assetId', 'asset.id')
+      .select([
+        'asset.id as assetId',
+        'asset_face.boundingBoxX1 as x1',
+        'asset_face.boundingBoxY1 as y1',
+        'asset_face.boundingBoxX2 as x2',
+        'asset_face.boundingBoxY2 as y2',
+        'asset_face.imageWidth as oldWidth',
+        'asset_face.imageHeight as oldHeight',
+        'asset_face.frameTimestamp',
+        'asset.type',
+        'asset.originalPath',
+        'asset_exif.orientation as exifOrientation',
+      ])
+      .select((eb) => withVideoStream(eb).as('videoStream'))
+      .select((eb) => withVideoFormat(eb).as('format'))
+      .select(assetIsDeveloped)
+      .select((eb) =>
+        eb
+          .selectFrom('asset_file')
+          .select('path')
+          .whereRef('asset_file.assetId', '=', 'asset.id')
+          .where('asset_file.type', '=', AssetFileType.Preview)
+          .orderBy('asset_file.isEdited', 'desc')
+          .limit(1)
+          .as('previewPath'),
+      )
+      .where('asset_face.id', '=', faceId)
+      .where('asset_face.deletedAt', 'is', null)
+      .executeTakeFirst();
+  }
+
   @GenerateSql({ params: [DummyValue.UUID, DummyValue.UUID] })
   async reassignFace(assetFaceId: string, newPersonGroupId: string): Promise<number> {
     const result = await this.db
