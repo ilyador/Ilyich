@@ -601,31 +601,41 @@ private struct GlobeSurface: UIViewRepresentable {
     struct Meshes { let land: [MeshResource]; let lakes: MeshResource?; let roads: GlobeRoads? }
     struct Earth: Sendable { let layers: [Layer]; let roads: [[SIMD3<Float>]] }
     struct Layer: Sendable { let positions: [SIMD3<Float>]; let indices: [UInt32] }
-    private static var meshes: Meshes?
-    private static var loading: Task<Meshes?, Never>?
+    /// The app's one build, which every globe and the library's warm-up share.
+    private static let shared = Builder()
 
-    static var loaded: Meshes? { meshes }
+    static var loaded: Meshes? { shared.meshes }
 
-    /// One shared build; a caller that goes away does not cancel it for the others. Everything
-    /// runs off the main thread, in pieces, so a first cold build never freezes the shelves.
-    static func prepare() async -> Meshes? {
-        if let meshes { return meshes }
-        let task = loading ?? Task.detached(priority: .utility) { () -> Meshes? in
-            guard let earth = GlobeLand.decode(), let land = earth.layers.first else { return nil }
-            let layers = earth.layers
-            var pieces: [MeshResource] = []
-            for (index, piece) in GlobeLand.pieces(of: land).enumerated() {
-                if let mesh = await GlobeLand.mesh(piece, name: "Land \(index)") { pieces.append(mesh) }
-                await Task.yield()
+    /// One shared build; a caller that goes away does not cancel it for the others.
+    static func prepare() async -> Meshes? { await shared.prepare() }
+
+    /// Builds the land once for everyone who asks. Everything runs off the main thread, in pieces,
+    /// so a first cold build never freezes the shelves (build 3040030: built while a finger crossed
+    /// Places, the land stalled the first cold use of the shelves). The app has one, `shared`; a
+    /// test makes its own to watch a cold build.
+    @MainActor final class Builder {
+        private(set) var meshes: Meshes?
+        private var loading: Task<Meshes?, Never>?
+
+        func prepare() async -> Meshes? {
+            if let meshes { return meshes }
+            let task = loading ?? Task.detached(priority: .utility) { () -> Meshes? in
+                guard let earth = GlobeLand.decode(), let land = earth.layers.first else { return nil }
+                let layers = earth.layers
+                var pieces: [MeshResource] = []
+                for (index, piece) in GlobeLand.pieces(of: land).enumerated() {
+                    if let mesh = await GlobeLand.mesh(piece, name: "Land \(index)") { pieces.append(mesh) }
+                    await Task.yield()
+                }
+                guard !pieces.isEmpty else { return nil }
+                return Meshes(land: pieces, lakes: layers.count > 1 ? await GlobeLand.mesh(layers[1], name: "Lakes") : nil,
+                              roads: earth.roads.isEmpty ? nil : GlobeRoads(earth.roads))
             }
-            guard !pieces.isEmpty else { return nil }
-            return Meshes(land: pieces, lakes: layers.count > 1 ? await GlobeLand.mesh(layers[1], name: "Lakes") : nil,
-                          roads: earth.roads.isEmpty ? nil : GlobeRoads(earth.roads))
+            loading = task
+            let result = await task.value
+            if let result { meshes = result } else { loading = nil }
+            return result
         }
-        loading = task
-        let result = await task.value
-        if let result { meshes = result } else { loading = nil }
-        return result
     }
 
     nonisolated private static func mesh(_ layer: Layer, name: String) async -> MeshResource? {
