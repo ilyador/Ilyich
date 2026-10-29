@@ -1,5 +1,5 @@
 import type { Faces } from '#lib/managers/asset-viewer-manager.svelte.ts';
-import { getAssetMediaUrl } from '#lib/utils.ts';
+import { getAssetMediaUrl, getFaceThumbnailUrl } from '#lib/utils.ts';
 import { mapNormalizedRectToContent, type Rect, type Size } from '#lib/utils/container-utils.ts';
 import { AssetTypeEnum, type AssetFaceResponseDto } from '@immich/sdk';
 
@@ -27,6 +27,11 @@ export const zoomImageToBase64 = async (
   assetType: AssetTypeEnum,
   photoViewer: HTMLImageElement | undefined,
 ): Promise<string | null> => {
+  if (typeof face.frameTimestamp === 'number') {
+    // found further into the video than its preview, so the server cuts it from that frame
+    return getFaceThumbnailUrl(face.id);
+  }
+
   let image: HTMLImageElement | undefined;
   if (assetType === AssetTypeEnum.Image) {
     image = photoViewer;

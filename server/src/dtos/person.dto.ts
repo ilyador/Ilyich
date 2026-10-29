@@ -167,6 +167,14 @@ const AssetFaceResponseSchema = z
     boundingBoxY1: z.int().describe('Bounding box Y1 coordinate'),
     boundingBoxY2: z.int().describe('Bounding box Y2 coordinate'),
     sourceType: SourceTypeSchema.optional(),
+    frameTimestamp: z
+      .int()
+      .min(0)
+      .nullable()
+      .optional()
+      .describe(
+        'Milliseconds into the video of the frame the face was found in, when that is not the preview. Its bounding box is in that frame, so its image comes from GET /faces/{id}/thumbnail.',
+      ),
     person: PersonResponseSchema.nullable(),
   })
   .describe('Asset face with person')
@@ -351,6 +359,7 @@ function mapFacesWithoutPerson(
       assetDimensions ?? { width: face.imageWidth, height: face.imageHeight },
     ),
     sourceType: face.sourceType,
+    frameTimestamp: face.frameTimestamp,
   };
 }
 

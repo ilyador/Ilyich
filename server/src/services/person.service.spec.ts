@@ -1716,6 +1716,7 @@ describe(PersonService.name, () => {
         imageHeight: 500,
         imageWidth: 400,
         sourceType: SourceType.MachineLearning,
+        frameTimestamp: null,
         person: mapPerson(person),
       });
     });
