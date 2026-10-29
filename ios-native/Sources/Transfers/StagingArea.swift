@@ -7,9 +7,10 @@ import IlyichPlatform
 /// account's Backup folder are ever touched; state.json and anything else there stays, and so does
 /// every other account's folder and the share inbox.
 ///
-/// A Backup folder holding a state.json no import read authoritatively (an account last signed in
-/// before B9) keeps that build's stages too: nothing is removed from it. Since B10 nothing reads
-/// such a file, so it stays for a later decision (LegacyRetirement).
+/// A Backup folder holding a state.json no import read authoritatively keeps that build's stages
+/// too: nothing is removed from it. The engine imports such a file before it starts
+/// (LegacyBackupImporter), so this can only be one an older build wrote after the engine took the
+/// database over without a file, and no older build will be reinstalled (B10).
 struct StagingArea: Sendable {
     /// A file or folder changed this recently may be one staging is still writing, so it stays.
     static let grace: TimeInterval = 15 * 60

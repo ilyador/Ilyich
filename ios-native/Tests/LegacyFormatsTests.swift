@@ -7,30 +7,13 @@ import XCTest
 /// Pins every format a later milestone imports. Each fixture in Tests/Fixtures was written by
 /// the production encoder of its day; the oldest backup state by commit 9780e9625's own types.
 /// JSONEncoder orders keys differently from one process to the next, so encodings are compared as
-/// JSON. The backup formats were retired in B10 (nothing reads state.json, an outcome file without
-/// a version or a task description an older build wrote): their fixtures stay for the dates B9's
-/// import carried into the transfers database bit for bit, and for the task descriptions recovery
-/// still recognizes, to cancel.
+/// JSON. Outcome files without a version and task descriptions an older build wrote were retired
+/// in B10: their fixtures stay for the task descriptions recovery still recognizes, to cancel.
+/// state.json stays readable for an account whose file no import read (LegacyBackupImporter).
 final class LegacyFormatsTests: XCTestCase {
     private typealias G = LegacyGoldens
     private func bits(_ date: Date?) -> UInt64? { date?.timeIntervalSinceReferenceDate.bitPattern }
     private var widgetFolder: String { "widget/" + AccountStoragePaths(G.account).widgetCache }
-
-    /// The dates of a state.json, under the keys its writer used, decoded as B9's import decoded
-    /// them (JSONDecoder's defaults).
-    private struct StateDates: Decodable {
-        struct Stage: Decodable { let modificationDate: Date }
-        struct Receipt: Decodable {
-            let modificationDate: Date
-            let confirmedAt: Date?
-        }
-        struct Failure: Decodable { let date: Date }
-        let current: Stage?
-        let confirmed: [String: Date]?
-        let receipts: [String: Receipt]?
-        let suspended: [String: Stage]?
-        let failures: [String: Failure]?
-    }
 
     func testEveryFixtureDecodes() throws {
         let files = try FixtureLoader.files(in: "")
@@ -39,7 +22,7 @@ final class LegacyFormatsTests: XCTestCase {
             let data = try FixtureLoader.data(path)
             let name = (path as NSString).lastPathComponent
             switch path {
-            case _ where path.hasPrefix("backup/state-"): _ = try Legacy.decoder().decode(StateDates.self, from: data)
+            case _ where path.hasPrefix("backup/state-"): _ = try Legacy.decoder().decode(Legacy.BackupState.self, from: data)
             case _ where name.hasPrefix("descriptor-"): XCTAssertEqual(TaskDescriptor(taskDescription: String(decoding: data, as: UTF8.self)), .legacy, path)
             case "share/manifest-v1.json": _ = try Legacy.decoder().decode(Legacy.SharedBatch.self, from: data)
             case "share/manifest-v2.json": _ = try ShareManifest.decode(data, batch: G.batchID, folder: G.sharedFolder)
@@ -56,8 +39,65 @@ final class LegacyFormatsTests: XCTestCase {
         }
     }
 
+    func testCurrentBackupStateHasEveryKey() throws {
+        let data = try FixtureLoader.data("backup/state-current.json")
+        let keys = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any]).keys
+        XCTAssertEqual(Set(keys), ["preferences", "queue", "current", "confirmed", "receipts", "linkedAlbums", "pendingAlbumAdds",
+                                   "suspended", "failures", "transferNotification", "paused", "error"])
+        let state = try Legacy.decoder().decode(Legacy.BackupState.self, from: data)
+        var preferences = Legacy.BackupPreferences()
+        preferences.includedAlbums = G.includedAlbums; preferences.excludedAlbums = [G.excludedAlbum]
+        preferences.cellularPhotos = true; preferences.downloadCloudOriginals = true; preferences.automatic = true
+        preferences.requireCharging = true; preferences.triggerDelay = 120; preferences.syncAlbums = true
+        XCTAssertEqual(state.preferences, preferences)
+        XCTAssertEqual(state.queue, [G.l1, G.l3, G.l6], "Queue order is kept, the current stage first.")
+        let current = try XCTUnwrap(state.current)
+        XCTAssertEqual(current.localID, G.l1)
+        XCTAssertEqual(current.stageID, G.currentStage)
+        XCTAssertEqual(current.livePhotoID, G.motionAsset)
+        XCTAssertEqual(current.motionChecksum, "q83vEjRWeJq83vEjRWeJq83vEjQ=")
+        XCTAssertEqual(current.original.url.path, "\(G.container)/Backup/\(G.digest)/\(G.currentFolder)/original")
+        XCTAssertEqual(current.sidecar?.filename, "IMG_0001.xmp")
+        XCTAssertEqual(current.fields, G.currentFields)
+        XCTAssertEqual(state.confirmed.map { Set($0.keys) }, [G.l2, G.l4, G.l5])
+        let receipt = try XCTUnwrap(state.receipts?[G.l2])
+        XCTAssertEqual(receipt.original.id, G.originalAsset)
+        XCTAssertEqual(receipt.original.byteCount, 3_145_728)
+        XCTAssertEqual(receipt.motion?.id, G.pairedMotionAsset)
+        let older = try XCTUnwrap(state.receipts?[G.l4])
+        XCTAssertNil(older.motion); XCTAssertNil(older.confirmedAt); XCTAssertNil(older.original.byteCount)
+        XCTAssertEqual(state.linkedAlbums, ["B7E2D9A0-55C1-4E3F-8A6B-1C2D3E4F5A6B/L0/040": G.serverAlbum])
+        XCTAssertEqual(state.pendingAlbumAdds, [G.l3: [G.serverAlbum, G.otherServerAlbum]])
+        XCTAssertEqual(state.suspended?[G.l6]?.stageID, G.suspendedStage)
+        XCTAssertNil(state.suspended?[G.l6]?.livePhotoID)
+        XCTAssertEqual(state.failures?[G.l3]?.filename, "IMG_0003.HEIC")
+        XCTAssertEqual(state.transferNotification?.id, G.notificationID)
+        XCTAssertEqual(state.transferNotification?.completed, 9)
+        XCTAssertEqual(state.transferNotification?.terminalFailures, 2)
+        XCTAssertEqual(state.paused, false)
+        XCTAssertEqual(state.error, ServerFailure.sessionExpired(nil).localizedDescription)
+    }
+
+    func testOldestBackupStateShapeDecodes() throws {
+        let data = try FixtureLoader.data("backup/state-9780e9625.json")
+        let keys = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any]).keys
+        XCTAssertEqual(Set(keys), ["preferences", "queue", "current", "confirmed", "paused", "error"])
+        let state = try Legacy.decoder().decode(Legacy.BackupState.self, from: data)
+        XCTAssertEqual(state.queue, [G.l1, G.l3])
+        XCTAssertEqual(state.paused, true)
+        XCTAssertNil(state.receipts); XCTAssertNil(state.linkedAlbums); XCTAssertNil(state.pendingAlbumAdds)
+        XCTAssertNil(state.suspended); XCTAssertNil(state.failures); XCTAssertNil(state.transferNotification)
+        let preferences = try XCTUnwrap(state.preferences)
+        XCTAssertEqual(preferences.includedAlbums, ["3B1A8F4C-1D5E-4F7A-9C2B-6E8D0A1B2C3D/L0/040"])
+        XCTAssertFalse(preferences.automatic, "Keys added later take today's defaults.")
+        XCTAssertEqual(preferences.triggerDelay, 30)
+        XCTAssertEqual(state.current?.livePhotoID, G.motionAsset)
+        XCTAssertNil(state.current?.motionChecksum, "The oldest stages record no video checksum.")
+        XCTAssertNil(state.current?.sidecar)
+    }
+
     func testDatesMatchByBitPattern() throws {
-        let state = try FixtureLoader.decode(StateDates.self, from: "backup/state-current.json")
+        let state = try FixtureLoader.decode(Legacy.BackupState.self, from: "backup/state-current.json")
         XCTAssertEqual(bits(state.current?.modificationDate), G.Bits.current)
         XCTAssertEqual(bits(state.confirmed?[G.l2]), G.Bits.l2)
         XCTAssertEqual(bits(state.confirmed?[G.l4]), G.Bits.l4)
@@ -81,7 +121,7 @@ final class LegacyFormatsTests: XCTestCase {
         let fingerprints = try FixtureLoader.decode([String: Legacy.Fingerprint].self, from: "caches/" + Legacy.fingerprintsPath(scope: G.account.cacheScope))
         XCTAssertEqual(bits(fingerprints[G.l4]?.modified), G.Bits.l4)
         XCTAssertEqual(bits(fingerprints[G.l5]?.modified), G.Bits.l5)
-        let old = try FixtureLoader.decode(StateDates.self, from: "backup/state-9780e9625.json")
+        let old = try FixtureLoader.decode(Legacy.BackupState.self, from: "backup/state-9780e9625.json")
         XCTAssertEqual(bits(old.current?.modificationDate), G.Bits.current)
         XCTAssertEqual(bits(old.confirmed?[G.l2]), G.Bits.l2)
         // The goldens' literals are those bits.
