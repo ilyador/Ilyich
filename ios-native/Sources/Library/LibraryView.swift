@@ -213,6 +213,9 @@ struct LibraryView: View {
                 }.zIndex(1)
                 if !shelves && !searchFocused && store.canScrubTimeline && store.query.isEmpty {
                     TimeRail(store: store, rail: rail, pipeline: pipeline, viewportWidth: geometry.size.width)
+                        // While selecting the rail can't be scrubbed (its edge pan is off), and its strip
+                        // would swallow a range drag that starts on the last column (owner report).
+                        .allowsHitTesting(!store.isSelecting)
                         .frame(width: 44).padding(.top, max(52, chromeHeight + 16)).padding(.bottom, showPlaces ? geometry.size.height * 0.42 : 100)
                         .frame(maxWidth: .infinity, alignment: .trailing).zIndex(2)
                 }

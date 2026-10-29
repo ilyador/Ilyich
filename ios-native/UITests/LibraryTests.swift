@@ -167,6 +167,33 @@ final class LibraryTests: XCTestCase {
         let moved = grid.cells.matching(NSPredicate(format: "label == %@", label)).firstMatch
         XCTAssertTrue(!moved.exists || moved.frame.minY < rows[0][0].minY - 40, "A vertical drag scrolls the grid.")
     }
+    /// A drag the other way, from right to left starting on the last photo of a row, selects its
+    /// range too (owner report: only left to right worked).
+    @MainActor func testDraggingRightToLeftWhileSelectingSelectsARange() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 15))
+        pressPhoto(grid.cells.element(boundBy: 1))
+        XCTAssertTrue(app.staticTexts["1 selected"].waitForExistence(timeout: 5))
+        let height = app.frame.height
+        let cells = grid.cells.allElementsBoundByIndex.map(\.frame)
+            .filter { $0.midY > height * 0.35 && $0.midY < height * 0.7 }
+        let rows = Dictionary(grouping: cells) { Int($0.minY.rounded()) }.sorted { $0.key < $1.key }.map { $0.value.sorted { $0.minX < $1.minX } }
+        guard rows.count >= 2 else { return XCTFail("Two rows of photos should fill the middle of the screen.") }
+        let columns = rows[0].count
+        func point(_ frame: CGRect) -> XCUICoordinate {
+            app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: frame.midX, dy: frame.midY))
+        }
+        // From the last photo of the lower row, starting near the screen's edge where a thumb does,
+        // back to the first photo of the row above.
+        let last = rows[1][columns - 1]
+        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: last.maxX - 16, dy: last.midY))
+        let end = point(rows[0][0])
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertTrue(app.staticTexts["\(1 + 2 * columns) selected"].waitForExistence(timeout: 5),
+                      "A drag from right to left selects the range from the photo it started on to the one under the finger.")
+    }
+
     /// Selecting the month under the viewport selects every photo of it, read through the feed,
     /// not only the photos the screen holds; deselecting it takes them all out again (F6).
     @MainActor func testSelectingTheMonthSelectsEveryPhotoOfItNotOnlyThoseOnScreen() {
@@ -1665,4 +1692,5 @@ final class LibraryTests: XCTestCase {
             grid.swipeUp(velocity: .fast); grid.swipeDown(velocity: .fast)
         }
     }
+
 }
