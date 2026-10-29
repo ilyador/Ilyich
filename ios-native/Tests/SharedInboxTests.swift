@@ -4,8 +4,8 @@ import UniformTypeIdentifiers
 import XCTest
 @testable import Ilyich
 
-/// The share inbox on disk: manifests, path confinement, damaged batches, the version 2 rewrite,
-/// upload identities and staging leftovers. Each test gets its own container.
+/// The share inbox on disk: manifests, path confinement, damaged batches, the rewrite after an
+/// upload, upload identities and staging leftovers. Each test gets its own container.
 final class SharedInboxTests: XCTestCase {
     private typealias G = LegacyGoldens
     private var container: URL!
@@ -44,24 +44,17 @@ final class SharedInboxTests: XCTestCase {
         let repository = ShareInboxRepository(root: root)
         let manifest = folder.appendingPathComponent(ShareManifest.fileName)
         func state() async throws -> ShareBatchState? { try await repository.load().first { $0.id == id } }
-        func writeV1(_ url: URL) throws {
-            let batch = Legacy.SharedBatch(id: id, createdAt: Date(), attachments: [.init(original: .init(url: url, filename: "image.jpg", contentType: "image/jpeg"))])
-            try JSONEncoder().encode(batch).write(to: manifest)
+        func write(name: String) throws {
+            let json = #"{"v":2,"id":"\#(id.uuidString)","createdAt":0,"attachments":[{"original":{"name":"\#(name)","filename":"a.jpg","contentType":"image/jpeg"}}]}"#
+            try Data(json.utf8).write(to: manifest)
         }
 
-        try writeV1(folder.appendingPathComponent("photo"))
+        try write(name: "photo")
         let inside = try await state()
         XCTAssertEqual(inside?.batch?.attachments.map(\.original.url), [folder.appendingPathComponent("photo", isDirectory: false)])
-        for (url, reason) in [(outside, "a file outside the inbox"), (other.appendingPathComponent("photo"), "another batch's file"),
-                              (folder.appendingPathComponent("symlink"), "a link to a file outside")] {
-            try writeV1(url)
-            let refused = try await state()
-            XCTAssertEqual(refused, .damaged(id: id, reason: .invalid), reason)
-        }
-        // Version 2 names files, and a name can't leave the folder.
-        for name in ["../private-photo", "..", "manifest.json", ""] {
-            let json = #"{"v":2,"id":"\#(id.uuidString)","createdAt":0,"attachments":[{"original":{"name":"\#(name)","url":"file:///photo","filename":"a.jpg","contentType":"image/jpeg"}}]}"#
-            try Data(json.utf8).write(to: manifest)
+        // A name can't leave the folder, stand for the manifest, or be a link to a file outside.
+        for name in ["../private-photo", "../\(other.lastPathComponent)/photo", "..", "manifest.json", "", "symlink"] {
+            try write(name: name)
             let refused = try await state()
             XCTAssertEqual(refused, .damaged(id: id, reason: .invalid), name)
         }
@@ -84,11 +77,15 @@ final class SharedInboxTests: XCTestCase {
         let restored = try ShareManifest.decode(data, batch: batch.id, folder: moved)
         XCTAssertEqual(restored.attachments.first?.motion?.url.path, moved.path + "/motion", "Files are found in the folder the manifest is read from.")
         XCTAssertEqual(restored.attachments.first?.sidecar?.filename, "photo.xmp")
-        // Version 2 readers need only names, so a later writer may drop the URLs kept for older builds.
+        // Files are written by name alone: no URL, which only builds before W3 read.
+        XCTAssertNil(String(decoding: data, as: UTF8.self).range(of: "url"), "No URL is written.")
         let named = #"{"v":2,"id":"\#(G.batchID.uuidString)","createdAt":0,"attachments":[{"original":{"name":"still","filename":"photo.heic","contentType":"image/heic"}}]}"#
         XCTAssertEqual(try ShareManifest.decode(Data(named.utf8), batch: G.batchID, folder: moved).attachments.map(\.original.url.path), [moved.path + "/still"])
-        let unnamed = #"{"id":"\#(G.batchID.uuidString)","createdAt":0,"attachments":[{"original":{"name":"still","filename":"photo.heic","contentType":"image/heic"}}]}"#
-        XCTAssertThrowsError(try ShareManifest.decode(Data(unnamed.utf8), batch: G.batchID, folder: moved), "Version 1 needs its URLs.")
+        // A manifest without a version is a version 1 manifest, which no build since C8 reads.
+        let unversioned = #"{"id":"\#(G.batchID.uuidString)","createdAt":0,"attachments":[{"original":{"name":"still","url":"file:///test/ShareInbox/\#(G.batchID.uuidString)/still","filename":"photo.heic","contentType":"image/heic"}}]}"#
+        XCTAssertThrowsError(try ShareManifest.decode(Data(unversioned.utf8), batch: G.batchID, folder: moved)) { error in
+            XCTAssertEqual(error as? ShareBatchDamage, .undecodable)
+        }
     }
 
     func testDamagedBatchDoesNotHideHealthyBatches() async throws {
@@ -151,10 +148,14 @@ final class SharedInboxTests: XCTestCase {
         XCTAssertEqual(store.batches.map(\.id), [id])
     }
 
-    func testV1ManifestLoadsAndRewritesAsV2() async throws {
-        // The golden manifest, written by a build before W3 on a phone whose container had another path.
+    /// The manifests builds from W3 to 3040093 wrote, with each file's URL beside its name, load as
+    /// any other and are never rewritten by a read. Consuming an attachment rewrites the manifest
+    /// with names alone and deletes only its files; the last one takes the batch with it. A
+    /// version 1 manifest is no longer read: its batch is damaged and stays on disk.
+    func testAManifestWithURLsLoadsAndIsRewrittenWithNamesOnly() async throws {
+        // The golden manifest, written on a phone whose container had another path.
         let folder = try makeFolder()
-        try FixtureLoader.data("share/manifest-v1.json").write(to: folder.appendingPathComponent(ShareManifest.fileName))
+        try FixtureLoader.data("share/manifest-v2-with-urls.json").write(to: folder.appendingPathComponent(ShareManifest.fileName))
         let repository = ShareInboxRepository(root: root)
         let loaded = try await repository.load()
         let batch = try XCTUnwrap(loaded.first?.batch)
@@ -166,25 +167,21 @@ final class SharedInboxTests: XCTestCase {
         XCTAssertEqual(batch.attachments[1].motion?.url.path, folder.appendingPathComponent(G.sharedFiles[2]).path, "Files resolve into this container.")
         XCTAssertEqual(batch.attachments[2].sidecar?.contentType, "application/rdf+xml")
         let unchanged = try Data(contentsOf: folder.appendingPathComponent(ShareManifest.fileName))
-        XCTAssertEqual(unchanged, try FixtureLoader.data("share/manifest-v1.json"), "Reading never rewrites a manifest.")
+        XCTAssertEqual(unchanged, try FixtureLoader.data("share/manifest-v2-with-urls.json"), "Reading never rewrites a manifest.")
 
-        // Consuming the first attachment rewrites the manifest as version 2 and deletes only its file.
+        // Consuming the first attachment rewrites the manifest with names alone and deletes only its file.
         try await repository.consume(G.sharedFiles[0], from: G.batchID)
         let data = try Data(contentsOf: folder.appendingPathComponent(ShareManifest.fileName))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(json["v"] as? Int, 2)
         let attachments = try XCTUnwrap(json["attachments"] as? [[String: Any]])
         XCTAssertEqual(attachments.compactMap { ($0["original"] as? [String: Any])?["name"] as? String }, [G.sharedFiles[1], G.sharedFiles[3]])
+        XCTAssertEqual(attachments.flatMap { $0.values.compactMap { ($0 as? [String: Any]).map { Set($0.keys) } } },
+                       Array(repeating: Set(["contentType", "filename", "name"]), count: 4), "No URL is written.")
         XCTAssertFalse(exists(folder.appendingPathComponent(G.sharedFiles[0])))
         for name in G.sharedFiles.dropFirst() { XCTAssertTrue(exists(folder.appendingPathComponent(name)), name) }
         let reloaded = try await repository.load()
         XCTAssertEqual(reloaded, [.ready(SharedBatch(id: batch.id, createdAt: batch.createdAt, attachments: Array(batch.attachments.dropFirst())))])
-
-        // A build before W3 still reads the rewritten manifest and finds the files where they are now.
-        let old = try Legacy.decoder().decode(Legacy.SharedBatch.self, from: data)
-        XCTAssertEqual(old.attachments.map(\.original.url.path), batch.attachments.dropFirst().map(\.original.url.path))
-        XCTAssertEqual(old.attachments.first?.motion?.filename, "IMG_2002.MOV")
-        XCTAssertEqual(old.createdAt.timeIntervalSinceReferenceDate.bitPattern, G.Bits.manifest)
 
         // Consuming again is harmless, and the last attachment takes the batch with it.
         try await repository.consume(G.sharedFiles[0], from: G.batchID)
@@ -194,6 +191,14 @@ final class SharedInboxTests: XCTestCase {
         try await repository.consume(G.sharedFiles[3], from: G.batchID)
         let empty = try await repository.load()
         XCTAssertEqual(empty, [])
+
+        // A version 1 manifest, without a version and with URLs alone, is a damaged batch, kept.
+        let old = try makeFolder()
+        let unversioned = #"{"createdAt":0,"id":"\#(G.batchID.uuidString)","attachments":[{"original":{"url":"file:///private/var/mobile/Containers/Shared/AppGroup/x/ShareInbox/\#(G.batchID.uuidString)/\#(G.sharedFiles[0])","filename":"IMG_2001.JPG","contentType":"image/jpeg"}}]}"#
+        try Data(unversioned.utf8).write(to: old.appendingPathComponent(ShareManifest.fileName))
+        let refused = try await repository.load()
+        XCTAssertEqual(refused, [.damaged(id: G.batchID, reason: .undecodable)])
+        XCTAssertTrue(exists(old.appendingPathComponent(G.sharedFiles[0])), "Its files stay.")
     }
 
     func testManifestlessFolderCollectedAfter24Hours() async throws {
@@ -260,7 +265,9 @@ final class SharedInboxTests: XCTestCase {
         let loaded = try await repository.load()
         XCTAssertEqual(loaded, [.ready(batch)])
         let manifest = try Data(contentsOf: repository.folder(for: batch.id).appendingPathComponent(ShareManifest.fileName))
+        XCTAssertEqual(manifest, try ShareManifest.encode(batch), "The extension writes what the app reads: version 2, by name.")
         XCTAssertEqual(try XCTUnwrap(JSONSerialization.jsonObject(with: manifest) as? [String: Any])["v"] as? Int, 2, "New batches are version 2.")
+        XCTAssertNil(String(decoding: manifest, as: UTF8.self).range(of: "url"), "No URL is written.")
         await staging.discard()
         XCTAssertTrue(exists(repository.folder(for: batch.id)), "A saved batch stays when the share sheet closes.")
 

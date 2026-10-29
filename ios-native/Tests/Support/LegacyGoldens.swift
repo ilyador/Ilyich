@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import IlyichPlatform
 import IlyichShareInbox
@@ -6,14 +5,14 @@ import IlyichShareInbox
 
 /// The values behind the golden fixtures in Tests/Fixtures, built with today's production types.
 /// Encoding them as each writer does gives the fixture files (in some key order). They describe
-/// one account on a phone whose App Group container is `container`.
+/// one account on a phone whose App Group container is `container`, and the rows B9's import wrote
+/// into its transfers database, which the phone's database still holds.
 enum LegacyGoldens {
     static let account = AccountID(server: URL(string: "https://photos.example.org/api")!, userID: "5f3c9a1e-7b2d-4c8e-9f10-2a3b4c5d6e7f")
     /// sha256(account.cacheScope), pinned.
     static let digest = "af60ad43866ab2fed0ab93fc6aa03bdeaaa5e190dca5884d2f57af6919b19395"
-    /// The App Group container as iOS reported it to the writer, in its two forms.
+    /// The App Group container as iOS reported it to the writer.
     static let container = "/private/var/mobile/Containers/Shared/AppGroup/0E4C1B7A-9D2F-4A63-8B5E-7C1D2E3F4A5B"
-    static let varContainer = "/var/mobile/Containers/Shared/AppGroup/0E4C1B7A-9D2F-4A63-8B5E-7C1D2E3F4A5B"
 
     /// Modification dates as PhotoKit reports them, with fractions; one is a whole number of
     /// seconds, which JSONEncoder writes without a decimal point.
@@ -62,19 +61,15 @@ enum LegacyGoldens {
     static let oldOriginalAsset = "a0b1c2d3-e4f5-4607-8819-2a3b4c5d6e7f"
     static let notificationID = UUID(uuidString: "5E4D3C2B-1A09-4F8E-9D7C-6B5A49382716")!
 
-    static func backupFile(_ folder: String, _ name: String, container: String = container) -> URL {
-        URL(fileURLWithPath: "\(container)/Backup/\(digest)/\(folder)/\(name)")
-    }
-
     /// The current stage: a Live Photo with an XMP sidecar, its video already uploaded, with no
-    /// checksum recorded for its still, as state-current.json records it.
+    /// checksum recorded for its still, as the state.json B9 imported recorded it.
     static let currentMotionChecksum = "q83vEjRWeJq83vEjRWeJq83vEjQ="
     static let currentFields = ["fileCreatedAt": "2025-10-18T09:41:12Z", "fileModifiedAt": "2025-10-18T10:53:54Z", "isFavorite": "true", "duration": "2933",
                                 "metadata": #"[{"key":"mobile-app","value":{"iCloudId":"0C2F3A1B-7D4E-4F5A-8B6C-9D0E1F2A3B4C:001:AbCdEfGhIjKlMnOpQrStUvWxYz01","createdAt":"2025-10-18T09:41:12Z","latitude":"38.7223","longitude":"-9.1393"}}]"#]
 
-    /// What B9's authoritative import of state-current.json wrote into the account's transfers
-    /// database, row for row: the phone's database still holds rows of this shape, and the import
-    /// B10 keeps for an account no import read writes them the same (LegacyBackupImportTests).
+    /// What B9's authoritative import of a state.json wrote into the account's transfers database,
+    /// row for row: the phone's database still holds rows of this shape (jobs of origin legacy,
+    /// stage IDs as interrupted attempts, confirmations without a time).
     static func importedSeed() -> TransferSeed {
         let current = "Backup/\(digest)/\(currentFolder)", suspended = "Backup/\(digest)/\(suspendedFolder)"
         var preferences = TransferPreferences()
@@ -121,37 +116,17 @@ enum LegacyGoldens {
         return seed
     }
 
-    /// The SHA-256 of a file's bytes, as B9's import recorded the state.json it read.
-    static func digest(of data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-
     // MARK: Share inbox
 
     static let batchID = UUID(uuidString: "A9B8C7D6-E5F4-4321-9876-543210FEDCBA")!
     static let sharedFiles = ["1D0C9B8A-7F6E-4D5C-B4A3-928170615243", "2E1D0C9B-8A7F-4E6D-9C5B-A49382716051", "3F2E1D0C-9B8A-4F7E-8D6C-5B4A39281706",
                               "4A3F2E1D-0C9B-4A8F-B7E6-D5C4B3A29180", "5B4A3F2E-1D0C-4B9A-8F7E-6D5C4B3A2918"]
 
-    static func sharedFile(_ name: String, container: String = container) -> URL {
-        URL(fileURLWithPath: "\(container)/ShareInbox/\(batchID.uuidString)/\(name)")
-    }
-
-    /// A plain photo, a Live Photo, and a RAW file with its XMP sidecar, as a build before W3 wrote
-    /// their version 1 manifest on a phone whose container is `container`.
-    static func legacyManifest(container: String = container) -> Legacy.SharedBatch {
-        func file(_ index: Int, _ filename: String, _ type: String) -> Legacy.UploadFile {
-            Legacy.UploadFile(url: sharedFile(sharedFiles[index], container: container), filename: filename, contentType: type)
-        }
-        return Legacy.SharedBatch(id: batchID, createdAt: Dates.manifest, attachments: [
-            Legacy.SharedAttachment(original: file(0, "IMG_2001.JPG", "image/jpeg")),
-            Legacy.SharedAttachment(original: file(1, "IMG_2002.HEIC", "image/heic"), motion: file(2, "IMG_2002.MOV", "video/quicktime")),
-            Legacy.SharedAttachment(original: file(3, "DSC_0042.NEF", "image/x-nikon-nef"), sidecar: file(4, "DSC_0042.xmp", "application/rdf+xml")),
-        ])
-    }
-    static let manifest = legacyManifest()
-
-    /// The same batch's folder on that phone.
+    /// A share batch's folder on that phone.
     static let sharedFolder = URL(fileURLWithPath: "\(container)/ShareInbox/\(batchID.uuidString)", isDirectory: true)
 
-    /// The same batch as today's types hold it, which the version 2 manifest fixture encodes.
+    /// A plain photo, a Live Photo, and a RAW file with its XMP sidecar, shared together, as
+    /// today's types hold them: the batch both version 2 manifest fixtures hold.
     static let manifestV2: SharedBatch = {
         func file(_ index: Int, _ filename: String, _ type: String) -> SharedFile {
             SharedFile(name: sharedFiles[index], filename: filename, contentType: type, folder: sharedFolder)
@@ -189,22 +164,6 @@ enum LegacyGoldens {
                                              requiresPasswordChange: false)
 
     // MARK: Caches
-
-    static let fingerprints: [String: Legacy.Fingerprint] = [
-        l4: .init(modified: Dates.l4, checksum: "fRFG0SH6nfZJt5SsRtJWzkOvsmk="),
-        l5: .init(modified: Dates.l5, checksum: "L9ThxnotKPzthJ7hu3bnORuT6xI="),
-        "7B6A5948-3726-4150-8F6E-5D4C3B2A1908/L0/001": .init(modified: nil, checksum: "qUqP5cyxm6YcTAhz05Hph5gvu9M="),
-    ]
-
-    static let person = "7c6b5a49-3827-4165-9f8e-7d6c5b4a3928"
-    /// The places of the library feed and of one person's, by their feed keys (written by
-    /// TimelineFilter.cacheKey before Q5, and by LibraryQuery.stableKey since, byte for byte).
-    static let places: [(query: LibraryQuery, places: Legacy.TimelinePlaces)] = [
-        (.library, Legacy.TimelinePlaces(months: ["2025-10-01": [.init(name: "Lisbon", count: 42), .init(name: "Sintra", count: 7)],
-                                                  "2025-09-01": [.init(name: "London", count: 12)]],
-                                         trips: ["2025-10-01": "Lisbon"])),
-        (.person(person), Legacy.TimelinePlaces(months: ["2025-10-01": [.init(name: "Lisbon", count: 5)]], trips: [:])),
-    ]
 
     /// Thumbnails by asset and revision: a media revision, a thumbhash, none at all, and an ID
     /// the store must hash.

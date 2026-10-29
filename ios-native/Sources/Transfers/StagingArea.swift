@@ -4,22 +4,13 @@ import IlyichPlatform
 /// One account's staging folders in the App Group (B6): Backup/<digest>/<uuid>/,
 /// each holding a stage's files (original, motion, sidecar) and its attempts' bodies and outcome
 /// files (<attempt>.multipart, <attempt>.receipt). Only folders named by a UUID directly inside the
-/// account's Backup folder are ever touched; state.json and anything else there stays, and so does
-/// every other account's folder and the share inbox.
-///
-/// A Backup folder holding a state.json no import read authoritatively keeps that build's stages
-/// too: nothing is removed from it. The engine imports such a file before it starts
-/// (LegacyBackupImporter), so this can only be one an older build wrote after the engine took the
-/// database over without a file, and no older build will be reinstalled (B10).
+/// account's Backup folder are ever touched; anything else there stays, and so does every other
+/// account's folder and the share inbox.
 struct StagingArea: Sendable {
     /// A file or folder changed this recently may be one staging is still writing, so it stays.
     static let grace: TimeInterval = 15 * 60
 
     enum Skip: Hashable, Sendable {
-        /// state.json is there and the database never imported it authoritatively.
-        case legacyState
-        /// iOS holds an upload task a build before B9 described, whose files are unknown (Recovery).
-        case olderUploads
         /// The account's Backup folder could not be listed.
         case unavailable
     }
@@ -43,9 +34,9 @@ struct StagingArea: Sendable {
     /// Removes what nothing needs: stage folders no stage, unanswered attempt or task of iOS's
     /// refers to, and in the folders that stay, the bodies and outcome files of attempts that are
     /// answered, abandoned or gone. Anything changed within the grace period stays.
-    func sweep(keeping references: StagingReferences, legacyImported: Bool, now: Date) -> Sweep {
+    func sweep(keeping references: StagingReferences, now: Date) -> Sweep {
         var sweep = Sweep()
-        guard let folders = stageFolders(legacyImported: legacyImported, into: &sweep) else { return sweep }
+        guard let folders = stageFolders(into: &sweep) else { return sweep }
         let cutoff = now.addingTimeInterval(-Self.grace)
         for url in folders {
             let path = folder + "/" + url.lastPathComponent
@@ -71,22 +62,18 @@ struct StagingArea: Sendable {
 
     /// Removes every stage folder of the account, as signing out does once its tasks are cancelled.
     /// The transfers database stays, and the next reconcile stages its jobs again.
-    func removeAll(legacyImported: Bool) -> Sweep {
+    func removeAll() -> Sweep {
         var sweep = Sweep()
-        guard let folders = stageFolders(legacyImported: legacyImported, into: &sweep) else { return sweep }
+        guard let folders = stageFolders(into: &sweep) else { return sweep }
         for url in folders { remove(url, into: &sweep) }
         return sweep
     }
 
     // MARK: -
 
-    private func stageFolders(legacyImported: Bool, into sweep: inout Sweep) -> [URL]? {
+    private func stageFolders(into sweep: inout Sweep) -> [URL]? {
         let root = layout.url(forRelativePath: folder)
         guard FileManager.default.fileExists(atPath: root.path) else { return [] }
-        if !legacyImported, FileManager.default.fileExists(atPath: root.appendingPathComponent(LegacyRetirement.fileName).path) {
-            sweep.skipped = .legacyState
-            return nil
-        }
         guard let entries = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else {
             sweep.skipped = .unavailable
             return nil

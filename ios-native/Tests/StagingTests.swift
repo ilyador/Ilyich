@@ -17,7 +17,7 @@ final class StagingTests: XCTestCase {
     private let now = Date().addingTimeInterval(3_600)
 
     /// Only stage folders nothing refers to go, and in the folders that stay, only the bodies and
-    /// outcomes of attempts nobody waits for. state.json, other folders, other accounts, the share
+    /// outcomes of attempts nobody waits for. Other files and folders, other accounts, the share
     /// inbox and anything changed within the grace period stay.
     func testSweepRemovesOnlyUnreferencedFolders() throws {
         let referenced = Self.backup + "/" + UUID().uuidString
@@ -27,7 +27,7 @@ final class StagingTests: XCTestCase {
         let otherAccount = "Backup/\(String(repeating: "0", count: 64))/\(UUID().uuidString)"
         let share = "ShareInbox/\(UUID().uuidString)"
         let waiting = UUID().uuidString, answered = UUID().uuidString
-        try group.write("{}", to: Self.backup + "/state.json")
+        try group.write("{}", to: Self.backup + "/readme.txt")
         try group.write("still", to: referenced + "/original")
         try group.write("body", to: referenced + "/\(waiting).multipart")
         try group.write("body", to: referenced + "/\(answered).multipart")
@@ -41,13 +41,8 @@ final class StagingTests: XCTestCase {
         try group.write("{}", to: share + "/manifest.json")
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-60)], ofItemAtPath: group.url(recent + "/original").path)
 
-        // A state.json no import read keeps its build's stages until it is imported (LegacyBackupImporter).
-        let before = area.sweep(keeping: StagingReferences(), legacyImported: false, now: now)
-        XCTAssertEqual(before, StagingArea.Sweep(skipped: .legacyState))
-        XCTAssertTrue(group.exists(orphan))
-
         let references = StagingReferences(folders: [referenced, bound], attempts: [waiting, "task"])
-        let sweep = area.sweep(keeping: references, legacyImported: true, now: now)
+        let sweep = area.sweep(keeping: references, now: now)
         XCTAssertEqual(sweep.folders, 1)
         XCTAssertEqual(sweep.files, 4, "The orphan's two files, and the answered attempt's body and outcome.")
         XCTAssertEqual(sweep.bytes, 10 + 2 + 4 + 2)
@@ -56,51 +51,39 @@ final class StagingTests: XCTestCase {
         XCTAssertFalse(group.exists(referenced + "/\(answered).multipart"))
         XCTAssertFalse(group.exists(referenced + "/\(answered).receipt"))
         for kept in [referenced + "/original", referenced + "/\(waiting).multipart", bound + "/task.multipart", recent + "/original",
-                     Self.backup + "/state.json", Self.backup + "/notes/file", otherAccount + "/original", share + "/manifest.json"] {
+                     Self.backup + "/readme.txt", Self.backup + "/notes/file", otherAccount + "/original", share + "/manifest.json"] {
             XCTAssertTrue(group.exists(kept), kept)
         }
 
         // Once the grace period has passed, the recent folder goes too.
-        let later = area.sweep(keeping: references, legacyImported: true, now: now.addingTimeInterval(StagingArea.grace))
+        let later = area.sweep(keeping: references, now: now.addingTimeInterval(StagingArea.grace))
         XCTAssertEqual(later.folders, 1)
         XCTAssertFalse(group.exists(recent))
-
-        // A state.json moved aside as unreadable holds nothing an import could read: the engine
-        // takes the database over without it, and the sweep runs.
-        try FileManager.default.moveItem(at: group.url(Self.backup + "/state.json"), to: group.url(Self.backup + "/state.json.unreadable-1"))
-        let stray = Self.backup + "/" + UUID().uuidString
-        try group.write("still", to: stray + "/original")
-        let aside = area.sweep(keeping: references, legacyImported: false, now: now.addingTimeInterval(StagingArea.grace))
-        XCTAssertNil(aside.skipped)
-        XCTAssertFalse(group.exists(stray))
-        XCTAssertTrue(group.exists(Self.backup + "/state.json.unreadable-1"))
+        XCTAssertTrue(group.exists(Self.backup + "/readme.txt"), "A file beside the stage folders stays.")
     }
 
     /// Signing out removes every stage folder of the account and nothing else; the database keeps
-    /// the jobs, which stage again. A state.json no import read keeps its build's stages.
+    /// the jobs, which stage again.
     func testSignOutRemovesScopeStaging() throws {
         let stages = (0..<3).map { _ in Self.backup + "/" + UUID().uuidString }
         for stage in stages { try group.write("still", to: stage + "/original") }
-        try group.write("{}", to: Self.backup + "/state.json")
+        try group.write("notes", to: Self.backup + "/notes/file")
         let otherAccount = "Backup/\(String(repeating: "1", count: 64))/\(UUID().uuidString)"
         try group.write("theirs", to: otherAccount + "/original")
         try group.write("{}", to: "ShareInbox/\(UUID().uuidString)/manifest.json")
 
-        XCTAssertEqual(area.removeAll(legacyImported: false).skipped, .legacyState)
-        XCTAssertTrue(stages.allSatisfy { group.exists($0) })
-
-        let removed = area.removeAll(legacyImported: true)
+        let removed = area.removeAll()
         XCTAssertEqual(removed.folders, 3)
         XCTAssertEqual(removed.files, 3)
         XCTAssertTrue(stages.allSatisfy { !group.exists($0) })
-        XCTAssertTrue(group.exists(Self.backup + "/state.json"), "state.json survives sign-out.")
+        XCTAssertTrue(group.exists(Self.backup + "/notes/file"), "Only stage folders go.")
         XCTAssertTrue(group.exists(otherAccount + "/original"))
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: group.url("ShareInbox").path).count, 1)
 
         // An account without a Backup folder has nothing to remove.
         let bare = try TemporaryAppGroup()
         defer { bare.remove() }
-        XCTAssertEqual(StagingArea(layout: bare.layout, account: G.account).removeAll(legacyImported: false), StagingArea.Sweep())
+        XCTAssertEqual(StagingArea(layout: bare.layout, account: G.account).removeAll(), StagingArea.Sweep())
     }
 
     /// A body counts as written only when it ends with its closing boundary and has the size

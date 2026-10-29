@@ -12,6 +12,10 @@ final class BackgroundTransportTests: XCTestCase {
     private static let newAttempt = "0F1E2D3C-4B5A-4697-8877-665544332211"
     private static let otherAttempt = "1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D"
     private static let receiptJSON = #"{"id":"e1f2a3b4-c5d6-4e7f-8091-a2b3c4d5e6f7","status":"created"}"#
+    /// Descriptions builds before B9 wrote, {id, receipt}: a stage ID and a share identity, under
+    /// either container path.
+    private static let olderBackup = #"{"receipt":"file:\/\/\/private\/var\/mobile\/Containers\/Shared\/AppGroup\/0E4C1B7A-9D2F-4A63-8B5E-7C1D2E3F4A5B\/Backup\/af60ad43866ab2fed0ab93fc6aa03bdeaaa5e190dca5884d2f57af6919b19395\/2B7D4E91-6A3C-4F08-9E15-3C4D5E6F7A8B\/7F3E2D1C-0B9A-4876-A5B4-C3D2E1F0A9B8.receipt","id":"7F3E2D1C-0B9A-4876-A5B4-C3D2E1F0A9B8"}"#
+    private static let olderShare = #"{"receipt":"file:\/\/\/var\/mobile\/Containers\/Shared\/AppGroup\/0E4C1B7A-9D2F-4A63-8B5E-7C1D2E3F4A5B\/ShareInbox\/A9B8C7D6-E5F4-4321-9876-543210FEDCBA\/84190c3b90652749141de444753379393b8c4e800494669c7739f3e01b790b8a.receipt","id":"84190c3b90652749141de444753379393b8c4e800494669c7739f3e01b790b8a"}"#
 
     private var group: TemporaryAppGroup!
 
@@ -42,12 +46,11 @@ final class BackgroundTransportTests: XCTestCase {
         XCTAssertEqual(inventory.tasks(scope: G.digest).map(\.taskID), [id])
     }
 
-    /// Tasks builds before B9 described, under either container path, belong to no attempt and no
-    /// account (B10): submitting the attempt their stage ID named never adopts one, and when one
-    /// ends, no outcome is written and nothing is reported. Recovery cancels them.
-    func testOlderBuildsTasksAreNeverAdoptedOrAnswered() async throws {
-        let backupText = try fixtureText("backup/descriptor-backup.json")
-        let shareText = try fixtureText("share/descriptor-share-var.json")
+    /// Tasks this build didn't describe, such as those builds before B9 described, belong to no
+    /// attempt and no account: submitting the attempt their stage ID named never adopts one, and
+    /// when one ends, no outcome is written and nothing is reported. Nothing cancels them.
+    func testTasksThisBuildDidNotDescribeAreNeverAdoptedOrAnswered() async throws {
+        let backupText = Self.olderBackup, shareText = Self.olderShare
         let backups = FakeTransportSession(tasks: [SessionTask(id: 7, description: backupText, state: .running, sent: 1_000, expected: 9_000)])
         let shares = FakeTransportSession(tasks: [SessionTask(id: 9, description: shareText, state: .suspended, sent: 0, expected: 4_000)])
         let log = TransportEventLog()
@@ -57,13 +60,13 @@ final class BackgroundTransportTests: XCTestCase {
         try group.write("body", to: stageKey.bodyPath)
 
         let inventory = await backup.inventory()
-        XCTAssertEqual(inventory.legacy.map(\.taskID), [7])
+        XCTAssertEqual(inventory.foreign.map(\.taskID), [7])
         XCTAssertNil(inventory.task(for: stageKey.attempt), "Not matched to the stage ID it named.")
         XCTAssertTrue(inventory.tasks(scope: G.digest).isEmpty, "Nor to an account.")
         let shareInventory = await sharing.inventory()
-        XCTAssertEqual(shareInventory.legacy.map(\.taskID), [9])
+        XCTAssertEqual(shareInventory.foreign.map(\.taskID), [9])
         let cancelled = await backup.cancel(scope: G.digest)
-        XCTAssertEqual(cancelled, 0, "Signing out cancels the account's own tasks; recovery cancels these.")
+        XCTAssertEqual(cancelled, 0, "Signing out cancels only the account's own tasks.")
 
         // When it ends, its answer is neither written nor reported.
         XCTAssertTrue(backups.handler.task(7, didReceive: Data(Self.receiptJSON.utf8)))
@@ -189,8 +192,8 @@ final class BackgroundTransportTests: XCTestCase {
         let fake = FakeTransportSession(tasks: [
             SessionTask(id: 1, description: key().descriptor.taskDescription, state: .running, sent: 0, expected: 10),
             SessionTask(id: 2, description: theirs.descriptor.taskDescription, state: .running, sent: 0, expected: 10),
-            SessionTask(id: 3, description: try fixtureText("backup/descriptor-backup.json"), state: .suspended, sent: 0, expected: 10),
-            SessionTask(id: 4, description: try fixtureText("share/descriptor-share-var.json"), state: .running, sent: 0, expected: 10),
+            SessionTask(id: 3, description: Self.olderBackup, state: .suspended, sent: 0, expected: 10),
+            SessionTask(id: 4, description: Self.olderShare, state: .running, sent: 0, expected: 10),
             SessionTask(id: 5, description: key(Self.otherAttempt).descriptor.taskDescription, state: .canceling, sent: 0, expected: 10),
             SessionTask(id: 6, description: "upload", state: .running, sent: 0, expected: 10),
         ])
@@ -199,8 +202,7 @@ final class BackgroundTransportTests: XCTestCase {
         XCTAssertEqual(cancelled, 1)
         XCTAssertEqual(fake.cancelled, [1], "The account's live version 2 task; tasks older builds described name no account.")
         let inventory = await transport.inventory()
-        XCTAssertEqual(inventory.legacy.map(\.taskID), [3, 4])
-        XCTAssertEqual(inventory.foreign.map(\.taskID), [6])
+        XCTAssertEqual(inventory.foreign.map(\.taskID), [3, 4, 6])
     }
 
     // MARK: The delegate's work
@@ -449,7 +451,6 @@ final class BackgroundTransportTests: XCTestCase {
         BackgroundTransport(session: session, journal: group.journal, emit: log.emit, uptime: uptime) { fake.attach($0) }
     }
 
-    private func fixtureText(_ path: String) throws -> String { String(decoding: try FixtureLoader.data(path), as: UTF8.self) }
 
     private func assertSubmit(_ transport: BackgroundTransport, _ key: AttemptKey, throws expected: TransportSubmitError,
                               line: UInt = #line) async {

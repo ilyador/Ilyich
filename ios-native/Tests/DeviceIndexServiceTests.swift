@@ -5,8 +5,8 @@ import XCTest
 @testable import Ilyich
 
 /// The device index (REBUILD_ROADMAP.md P5): phone photos are read once and then only as Photos
-/// names them, fingerprints live in device.sqlite after the legacy files are imported, and only
-/// server photos the timeline shows can claim a phone photo.
+/// names them, fingerprints live in device.sqlite and are never hashed again for the same
+/// revision, and only server photos the timeline shows can claim a phone photo.
 final class DeviceIndexServiceTests: XCTestCase {
     private let album = "album"
     private let taken = Date(timeIntervalSinceReferenceDate: 790_000_000)
@@ -41,31 +41,25 @@ final class DeviceIndexServiceTests: XCTestCase {
         await service.shutdown()
     }
 
-    func testLegacyFingerprintCacheIsImportedAndNotRehashed() async throws {
-        let caches = temporaryDirectory()
-        let folder = caches.appendingPathComponent("IlyichFingerprints", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    /// Fingerprints kept in device.sqlite are used as they are: only a photo without one for its
+    /// revision is hashed, and the next launch hashes nothing.
+    func testKeptFingerprintsAreNotRehashed() async throws {
         let a = item("a", offset: 0), b = item("b", offset: 1), c = item("c", offset: 2)
-        // As LocalFingerprintCache wrote it: one file per account, JSONEncoder's defaults.
-        let legacy: [String: Legacy.Fingerprint] = [
-            "a": .init(modified: a.photo.modified, checksum: "hash-a"),
-            "c": .init(modified: c.photo.modified, checksum: "hash-c"),
-        ]
-        try JSONEncoder().encode(legacy).write(to: folder.appendingPathComponent(Legacy.sha256("server|alice") + ".json"))
+        let database = DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite"))
+        try await database.saveFingerprints(["a": DeviceFingerprint(modified: a.photo.modified, checksum: "hash-a"),
+                                             "c": DeviceFingerprint(modified: c.photo.modified, checksum: "hash-c")])
 
         let photos = FakeIndexReader()
         for value in [a, b, c] { photos.add(value, in: album) }
         photos.checksums = ["a": "hash-a", "b": "hash-b", "c": "hash-c"]
         let server = FakeIndexServer(rows: [match("server-a", checksum: "hash-a"), match("server-b", checksum: "hash-b")])
-        let database = DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite"))
-        let service = makeService(photos: photos, server: server, database: database, legacy: folder)
+        let service = makeService(photos: photos, server: server, database: database)
         let snapshots = listen(await service.snapshots())
 
         try await until("The phone photos were not matched.") {
             snapshots.last?.associations == ["a": "server-a", "b": "server-b"]
         }
         XCTAssertEqual(photos.hashed, ["b"], "Only the photo without a fingerprint is hashed.")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), "The imported file is deleted.")
         XCTAssertEqual(snapshots.last?.timeline.localOnly.values.joined().map(\.id), ["c"])
         await service.shutdown()
         let kept = try await database.fingerprints()
@@ -75,7 +69,7 @@ final class DeviceIndexServiceTests: XCTestCase {
         let next = FakeIndexReader()
         for value in [a, b, c] { next.add(value, in: album) }
         next.checksums = photos.checksums
-        let relaunched = makeService(photos: next, server: server, database: database, legacy: folder)
+        let relaunched = makeService(photos: next, server: server, database: database)
         let again = listen(await relaunched.snapshots())
         try await until("The relaunch did not match.") { again.last?.associations == ["a": "server-a", "b": "server-b"] }
         try await Task.sleep(for: .milliseconds(100))
@@ -228,12 +222,12 @@ final class DeviceIndexServiceTests: XCTestCase {
     // MARK: - Support
 
     private func makeService(photos: FakeIndexReader, server: (any DeviceIndexServer)?, backup: FakeBackupSource? = nil,
-                             database: DeviceDatabase? = nil, legacy: URL? = nil,
+                             database: DeviceDatabase? = nil,
                              presence: AppPresence = AppPresence(isForeground: true)) -> DeviceIndexService {
         DeviceIndexService(account: "digest", reader: photos, server: server,
                            backup: backup ?? FakeBackupSource(DeviceIndexBackupInputs(included: [album])),
                            database: database ?? DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite")),
-                           legacyFingerprints: legacy, presence: presence, pause: .zero, coalescing: .zero, powerAllowsHashing: { true })
+                           presence: presence, pause: .zero, coalescing: .zero, powerAllowsHashing: { true })
     }
 
     private func item(_ id: String, offset: Int, favorite: Bool = false) -> DeviceTimelineItem {

@@ -8,10 +8,9 @@ import Foundation
 extension TransferStore {
     // MARK: Ownership
 
-    /// Hands the database to the transfer engine without an import: a fresh one, or a copy B1 made
-    /// of an earlier build's state.json when there is no file left to import (LegacyBackupImporter
-    /// imports one that is there, and moves an unreadable one aside). Such a copy is as old as the
-    /// last time its account opened in front, so it never saw how that session ended: signing out
+    /// Hands the database to the transfer engine as it is: a fresh one, or a copy B1 made of an
+    /// earlier build's state.json that no import handed over. Such a copy is as old as the last
+    /// time its account opened in front, so it never saw how that session ended: signing out
     /// switched automatic backup off and paused, and the copy may still have it on. Its records
     /// stay, but automatic backup goes off and it waits, paused, until the user starts it, so an
     /// account never starts uploading by itself from such a copy. The import's digest and mode stay.

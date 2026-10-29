@@ -103,15 +103,14 @@ actor DeviceDatabase {
         return result
     }
 
-    /// Keeps `values`, all in one transaction, each replacing the photo's row, or with
-    /// `keepingExisting` only where the photo has none.
-    func saveFingerprints(_ values: [String: DeviceFingerprint], keepingExisting: Bool = false) throws {
+    /// Keeps `values`, all in one transaction, each replacing the photo's row.
+    func saveFingerprints(_ values: [String: DeviceFingerprint]) throws {
         guard !values.isEmpty else { return }
         let connection = try database()
-        let statement = "INSERT OR \(keepingExisting ? "IGNORE" : "REPLACE") INTO device_fingerprint(local_id,revision,checksum) VALUES(?,?,?)"
         try connection.transaction {
             for (id, value) in values.sorted(by: { $0.key < $1.key }) {
-                try connection.execute(statement, [.text(id), value.revision.map { .real($0) } ?? .null, .text(value.checksum)])
+                try connection.execute("INSERT OR REPLACE INTO device_fingerprint(local_id,revision,checksum) VALUES(?,?,?)",
+                                       [.text(id), value.revision.map { .real($0) } ?? .null, .text(value.checksum)])
             }
         }
     }
@@ -123,35 +122,6 @@ actor DeviceDatabase {
         try connection.transaction {
             for id in ids { try connection.execute("DELETE FROM device_fingerprint WHERE local_id=?", [.text(id)]) }
         }
-    }
-
-    /// Moves every fingerprint file earlier builds kept below Caches/IlyichFingerprints, one per
-    /// account, into the table, then deletes each file once its rows are committed, and the
-    /// folder once it is empty. Every account's file is taken, as checksums don't depend on the
-    /// account. A row already in the table, hashed by this build, is kept. A file that can't be
-    /// read is deleted too: it was a disposable cache, and the photos it named are hashed again.
-    /// Running it again finds nothing to do. Returns the rows read.
-    @discardableResult
-    func importLegacyFingerprints(from folder: URL) throws -> Int {
-        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-        var imported = 0
-        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) where file.pathExtension == "json" {
-            if let data = try? Data(contentsOf: file),
-               let values = try? Legacy.decoder().decode([String: Legacy.Fingerprint].self, from: data) {
-                try saveFingerprints(values.mapValues { DeviceFingerprint(modified: $0.modified, checksum: $0.checksum) }, keepingExisting: true)
-                imported += values.count
-            }
-            try? FileManager.default.removeItem(at: file)
-        }
-        if let left = try? FileManager.default.contentsOfDirectory(atPath: folder.path), left.isEmpty {
-            try? FileManager.default.removeItem(at: folder)
-        }
-        return imported
-    }
-
-    /// Caches/IlyichFingerprints, where builds before P5 kept fingerprints.
-    static var legacyFingerprintsFolder: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("IlyichFingerprints", isDirectory: true)
     }
 
     private func database() throws -> DeviceSQLite {

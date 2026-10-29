@@ -12,11 +12,9 @@ import Synchronization
 /// feeds it the background sessions' events and the lifecycle's.
 ///
 /// Start (architecture section 4, step 5): recovery reconciles what the sessions and the disk hold
-/// (binding the tasks iOS still has, applying outcomes nobody applied, BM5, and cancelling tasks a
-/// build before B9 described), the share executor settles what a crash left, the state.json an
-/// older build left goes if nothing can need it (LegacyRetirement, B10), and only then does the
-/// engine's loop start. A session's drain is acknowledged to iOS once a reconcile that began after
-/// it has committed what it delivered (BM11).
+/// (binding the tasks iOS still has and applying outcomes nobody applied, BM5), the share executor
+/// settles what a crash left, and only then does the engine's loop start. A session's drain is
+/// acknowledged to iOS once a reconcile that began after it has committed what it delivered (BM11).
 final class TransferRuntime: Sendable {
     let account: AccountID
     let store: TransferStore
@@ -38,8 +36,6 @@ final class TransferRuntime: Sendable {
     private let receiptChanges: ChangeBroadcast
     private let tasks = Mutex<[Task<Void, Never>]>([])
     private let stopped = Mutex(false)
-    private let layout: AppGroupLayout
-    private let retirement = Mutex<LegacyRetirement.Outcome?>(nil)
     fileprivate static let logger = Logger(subsystem: "app.ilyich.native", category: "Transfers")
 
     /// What the runtime is made from. The registry, scheduler and time are the device's; the rest
@@ -71,7 +67,6 @@ final class TransferRuntime: Sendable {
         account = parts.account
         store = parts.store
         registry = parts.registry
-        layout = parts.layout
         let (events, continuation) = AsyncStream.makeStream(of: TransportEvent.self)
         transportEvents = continuation
         let outcomes = TransportOutcomes(events: events)
@@ -128,17 +123,13 @@ final class TransferRuntime: Sendable {
 
     // MARK: Lifecycle
 
-    /// Reconciles, settles shares a crash left, retires the state.json an older build left, then
-    /// starts the engine, the worker's first pass, the notifier and the lifecycle. Returns once
-    /// the engine runs.
+    /// Reconciles, settles shares a crash left, then starts the engine, the worker's first pass,
+    /// the notifier and the lifecycle. Returns once the engine runs.
     func start() async throws {
         // Leases of the process that ended are free, so recovery sees every job it left.
         try await store.releaseAllLeases()
         await reconciler.request(drain: nil).value
         await shares.replayConsumed()
-        let retired = await LegacyRetirement.run(store: store, layout: layout, account: account,
-                                                 transports: [registry.transport(.backup), registry.transport(.shareUpload)])
-        retirement.withLock { $0 = retired }
         try await engine.start()
         let commits = await engine.snapshots()
         let receiptChanges = self.receiptChanges
@@ -227,10 +218,6 @@ final class TransferRuntime: Sendable {
 
     /// Reconciles now and waits for it, as a background window does first.
     func reconcile() async { await reconciler.request(drain: nil).value }
-
-    /// What became of the state.json an older build left in the account's Backup folder, once the
-    /// start looked (B10).
-    var legacyRetirement: LegacyRetirement.Outcome? { retirement.withLock { $0 } }
 
     // MARK: Receipts
 
