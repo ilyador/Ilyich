@@ -305,7 +305,7 @@ struct Memory: Decodable, Identifiable, Sendable {
     let id: String
     let type: String
     let memoryAt: Date
-    let isSaved: Bool
+    var isSaved: Bool
     var assets: [Asset]
     let data: MemoryData
     var seenAt: Date? = nil

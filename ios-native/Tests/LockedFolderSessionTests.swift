@@ -478,6 +478,76 @@ import XCTest
         XCTAssertEqual(server.requests("GET", "timeline/bucket").count, 1, "Nothing is read again.")
     }
 
+    /// G1, plan line 78: the sync's changes reach the folder while it is open. The offline library
+    /// holds no locked photo, so a photo of the folder moved to the timeline elsewhere comes as a
+    /// change to it: it leaves in place, and nothing is read. A photo locked elsewhere, and one of
+    /// the folder's deleted elsewhere, come only as removals: the folder is read again quietly,
+    /// newer months included, and the grid reads on from there.
+    func testTheFolderFollowsPhotosMovedInAndOutElsewhere() async throws {
+        let server = lockedServer([("2026-03-01", ["a", "b", "c"])])
+        let folder = try makeFolder(server)
+        let session = folder.session
+        await unlock(session)
+        XCTAssertEqual(session.photos.assets.map(\.id), ["a", "b", "c"])
+        let reads = server.requests("GET", "timeline/bucket").count
+
+        folder.mutations.bus.post(.changed(Self.change(upserted: ["a"]), accessChanged: false))
+        try await until("The photo moved out elsewhere stayed.") { session.photos.assets.map(\.id) == ["b", "c"] }
+        XCTAssertEqual(server.requests("GET", "timeline/bucket").count, reads, "Nothing is read again.")
+
+        // d, taken in April, is locked on the web, and c is deleted for good.
+        server.route("GET", "timeline/buckets", Self.buckets([("2026-04-01", ["d"]), ("2026-03-01", ["b"])]))
+        server.route("GET", "timeline/bucket", Self.month("2026-04-01", ["d"]), Self.month("2026-03-01", ["b"]))
+        folder.mutations.bus.post(.changed(Self.change(removed: ["c", "d"], accessLost: ["d"]), accessChanged: true))
+        try await until("The folder was not read again.") { session.photos.assets.map(\.id) == ["d", "b"] }
+        XCTAssertFalse(session.hasMore)
+        XCTAssertFalse(session.isLoading)
+
+        // Locked, the folder hears nothing.
+        session.lock()
+        folder.mutations.bus.post(.changed(Self.change(removed: ["b"]), accessChanged: false))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(session.photos.assets.isEmpty)
+        XCTAssertEqual(server.requests("GET", "timeline/bucket").count, reads + 2, "A locked folder is not read.")
+    }
+
+    /// A quiet read that began before a photo was moved out here would bring it back: it is read
+    /// again instead, and the photo stays out.
+    func testAQuietReadOfTheFolderNeverBringsBackAPhotoMovedOutMeanwhile() async throws {
+        let server = lockedServer([("2026-03-01", ["a", "b"])])
+        let folder = try makeFolder(server)
+        let session = folder.session
+        await unlock(session)
+        XCTAssertEqual(session.photos.assets.map(\.id), ["a", "b"])
+
+        let gate = StubServer.Gate()
+        server.route("GET", "timeline/buckets", Self.buckets([("2026-03-01", ["a", "b"])]).waiting(for: gate),
+                     Self.buckets([("2026-03-01", ["b"])]))
+        server.route("GET", "timeline/bucket", Self.month("2026-03-01", ["a", "b"]), Self.month("2026-03-01", ["b"]))
+        let summaries = server.requests("GET", "timeline/buckets").count
+        folder.mutations.bus.post(.changed(Self.change(removed: ["elsewhere"]), accessChanged: false))
+        try await until("The quiet read did not start.") { server.requests("GET", "timeline/buckets").count > summaries }
+
+        var moved = try XCTUnwrap(session.photos.assets.first { $0.id == "a" })
+        moved.visibility = .timeline
+        folder.mutations.bus.post(.mutation(.applied(MutationResult(operation: OperationID(), request: .visibility(["a"], .timeline),
+                                                                    succeeded: ["a"], failed: [:], fresh: ["a": moved], followUp: nil))))
+        try await until("The photo moved out stayed.") { session.photos.assets.map(\.id) == ["b"] }
+        gate.open()
+        try await until("The read overtaken was not read again.") { server.requests("GET", "timeline/buckets").count == summaries + 2 }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(session.photos.assets.map(\.id), ["b"], "The read that began before the move never shows the photo again.")
+    }
+
+    private static func change(upserted: Set<String> = [], removed: Set<String> = [], accessLost: Set<String> = []) -> LibraryChange {
+        let account = AccountID(server: URL(string: "https://photos.example.test/api")!, userID: "me")
+        var change = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1), indexRevision: 2, origin: .sync)
+        change.upserted = Dictionary(uniqueKeysWithValues: upserted.map { ($0, LibraryChange.MonthMove()) })
+        change.removed = removed
+        change.accessLost = accessLost
+        return change
+    }
+
     // MARK: - The viewer
 
     /// The folder's viewer reads its photo from the server alone, wherever it reads one: on
