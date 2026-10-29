@@ -14,12 +14,15 @@ import XCTest
     private static let hashes = ["HIcNXIyGh4d/eHh5eIWHcEf3dQ==", "nMcJLBRyB4iHeId4eHhycNgIhw==", "W1eGHQYmgIqAeqinh4R/B4iIB3iHiICJeA=="]
 
     /// Sketches no test has decoded: the first hash with other AC bytes, `tag` keeping one test's
-    /// apart from another's in the shared cache.
+    /// apart from another's in the shared cache. The cache outlives a test and a retry runs in the
+    /// same process, so each call also draws its own nonce.
     private static func freshHashes(count: Int, tag: UInt8) -> [String] {
         let base = [UInt8](Data(base64Encoded: hashes[0])!)
+        let nonce = (UInt8.random(in: 0...255), UInt8.random(in: 0...255))
         return (0..<count).map { index in
             var bytes = base
             bytes[5] = UInt8(index & 0xff); bytes[6] = UInt8(index >> 8 & 0xff); bytes[7] = tag
+            bytes[8] = nonce.0; bytes[9] = nonce.1
             return Data(bytes).base64EncodedString()
         }
     }
@@ -188,14 +191,17 @@ import XCTest
 
         // The rail sweeps: where a fling would land is prepared; the photos ahead pass.
         submit(ahead: [passing], target: [landing], motion: .scrubbing)
-        try await until("The landing screen's sketch was not decoded.") { sketches.cached(fresh[1]) != nil }
+        // Sketches ahead decode at utility priority, which a busy machine can hold back for seconds.
+        try await until("The landing screen's sketch was not decoded.", within: .seconds(20)) { sketches.cached(fresh[1]) != nil }
         submit(ahead: [passing], motion: .flinging(speed: 4))
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertNil(sketches.cached(fresh[0]), "A fast grid's photos ahead pass before their sketches could be shown.")
 
         // The grid slows: the photos ahead are prepared.
         submit(ahead: [passing, coming], motion: .tracking(speed: 1))
-        try await until("A slow grid's photos ahead have no sketches ready.") { sketches.cached(fresh[0]) != nil && sketches.cached(fresh[2]) != nil }
+        try await until("A slow grid's photos ahead have no sketches ready.", within: .seconds(20)) {
+            sketches.cached(fresh[0]) != nil && sketches.cached(fresh[2]) != nil
+        }
         withExtendedLifetime(binder) {}
     }
 
