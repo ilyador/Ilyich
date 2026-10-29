@@ -82,11 +82,14 @@ export class QueueService extends BaseService {
   @OnEvent({ name: 'AppBootstrap', priority: BootstrapEventPriority.JobService })
   onBootstrap() {
     this.jobRepository.setup(this.services);
-    if (this.worker === ImmichWorker.Microservices) {
-      this.jobRepository.startWorkers();
-    } else if (this.worker === ImmichWorker.Api) {
+    if (this.worker === ImmichWorker.Api) {
       this.jobRepository.watchWorkers();
     }
+  }
+
+  @OnEvent({ name: 'AppBootstrap', priority: BootstrapEventPriority.JobWorkers, workers: [ImmichWorker.Microservices] })
+  onBootstrapComplete() {
+    this.jobRepository.startWorkers();
   }
 
   @OnEvent({ name: 'AppShutdown' })
