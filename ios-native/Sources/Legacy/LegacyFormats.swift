@@ -248,7 +248,8 @@ enum Legacy {
     /// The fingerprint file of one account, below Caches.
     static func fingerprintsPath(scope: String) -> String { "IlyichFingerprints/\(sha256(scope)).json" }
 
-    /// A grid thumbnail written by ThumbnailDiskStore, below Caches:
+    /// A grid thumbnail written by ThumbnailDiskStore, below Caches before T8 and below Application
+    /// Support since, where T8 moved the same tree by renaming it:
     /// IlyichThumbnails/<32 digits of sha256(cache scope)>/<stem's first 2>/<stem>.<16 digits of
     /// sha256(revision)>. The stem is the lowercased asset ID, or 32 digits of its SHA-256 when the
     /// ID holds anything but ASCII letters, digits and hyphens. The revision is the asset's media

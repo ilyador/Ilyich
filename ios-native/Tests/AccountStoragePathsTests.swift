@@ -31,6 +31,9 @@ final class AccountStoragePathsTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("AccountStoragePathsTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         XCTAssertEqual(ThumbnailDiskStore.shared(scope: client.cacheScope, root: root).directory.path, root.appendingPathComponent(paths.thumbnails).path)
+        // Since T8 the app keeps the folder in Application Support; builds before kept it in Caches.
+        XCTAssertTrue(ThumbnailDiskStore.directory(scope: client.cacheScope, root: nil).path.hasSuffix("/Library/Application Support/" + paths.thumbnails))
+        XCTAssertTrue(ThumbnailDiskStore.cachesRoot.path.hasSuffix("/Library/Caches"))
         _ = try LibraryIndex(scope: client.cacheScope, userID: "alice", directory: root.appendingPathComponent("IlyichEntities", isDirectory: true))
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(paths.entitiesDatabase).path))
 
