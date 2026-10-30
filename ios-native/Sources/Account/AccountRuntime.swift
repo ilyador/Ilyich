@@ -29,8 +29,6 @@ final class AccountRuntime: Sendable {
     let check: SessionCheck
     /// The account's tasks, cancelled and waited for at shutdown.
     let work: OwnedWork
-    /// The child sessions Cast receivers are given; sign-out revokes them before it logs out.
-    let castGrants: CastGrantStore
     /// Free up space's checks and removals (REBUILD_ROADMAP.md P4). Shut down right after the
     /// mutations at teardown.
     let cleanup: CleanupService
@@ -81,9 +79,6 @@ final class AccountRuntime: Sendable {
     /// The account's transfer engine, while it runs.
     var transferRuntime: TransferRuntime? { engine.withLock { $0?.runtime } }
 
-    /// What Cast works with for this account.
-    var cast: CastAccount { CastAccount(scope: api.cacheScope, grants: castGrants, resolver: CastMediaResolver(api: api)) }
-
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
                  cleanup: CleanupService, deviceIndex: DeviceIndexService?, mutations: LibraryMutationService, collections: CollectionsService,
@@ -99,7 +94,6 @@ final class AccountRuntime: Sendable {
         self.transfers = transfers
         self.check = check
         self.work = work
-        self.castGrants = CastGrantStore(server: api)
         self.cleanup = cleanup
         self.deviceIndex = deviceIndex
         self.mutations = mutations

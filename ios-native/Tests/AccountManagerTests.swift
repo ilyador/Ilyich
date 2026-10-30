@@ -237,29 +237,21 @@ import XCTest
 
     // MARK: - Sign-out
 
-    /// The cast session is revoked and the session logged out while the token still works, before
-    /// the credential goes.
-    func testSignOutRevokesCastAndLogsOutBeforeTheCredentialIsRemoved() async throws {
+    /// The session is logged out while the token still works, before the credential goes.
+    func testSignOutLogsOutBeforeTheCredentialIsRemoved() async throws {
         let server = makeStubServer()
         server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
-        server.route("POST", "sessions", .json(#"{"id":"cast-1","token":"cast-token","expiresAt":"2099-01-01T00:00:00.000Z"}"#))
-        server.route("DELETE", "sessions/cast-1", .empty())
         server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
         let harness = makeHarness(credential("alice", on: server), server: server)
         let seenAtRemoval = Mutex<[String]>([])
         harness.credentials.onRemove { seenAtRemoval.withLock { $0 = server.requests.map { $0.method + " " + $0.path } } }
         await harness.manager.restore()
         let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
-        _ = try await runtime.castGrants.grant(covering: 0)
 
         await harness.manager.signOut(.user)
 
         let seen = seenAtRemoval.withLock { $0 }
-        let revoke = try XCTUnwrap(seen.firstIndex(of: "DELETE sessions/cast-1"), "The cast session was revoked before the credential went: \(seen)")
-        let logout = try XCTUnwrap(seen.firstIndex(of: "POST auth/logout"), "The session was logged out before the credential went: \(seen)")
-        XCTAssertLessThan(revoke, logout, "The revoke needs the token, so it goes first.")
-        let log = harness.log.all
-        XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "endCasting")), try XCTUnwrap(log.firstIndex(of: "removeCredential")))
+        XCTAssertTrue(seen.contains("POST auth/logout"), "The session was logged out before the credential went: \(seen)")
         XCTAssertTrue(runtime.api.transport.isShutDown)
     }
 
@@ -401,9 +393,9 @@ import XCTest
         XCTAssertTrue(server.requests("POST", "auth/logout").isEmpty, "Nothing is sent once the budget is spent.")
     }
 
-    /// The address the logout goes to is chosen while the account's work ends, before casting
-    /// stops, so the budget goes to the logout rather than to checking every address, which can
-    /// take longer than the budget.
+    /// The address the logout goes to is chosen while the account's work ends, before the logout's
+    /// budget starts, so the budget goes to the logout rather than to checking every address,
+    /// which can take longer than the budget.
     func testSignOutChoosesTheServersAddressWhileTheAccountsWorkEnds() async throws {
         let server = answeringAddressChecks(makeStubServer()), away = makeStubServer()
         let unreachable = StubServer.Gate(), stopping = StubServer.Gate()
@@ -411,12 +403,14 @@ import XCTest
         away.route("GET", "server/ping", StubServer.Response.transportFailure(.cannotConnectToHost).waiting(for: unreachable))
         server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
         let harness = makeHarness(credential("alice", on: server), server: server, environment: environment(validatesSession: false),
-                                  holdingCastingStop: stopping,
                                   network: NetworkConfiguration(alternateEndpoints: [away.baseURL], automaticallySwitchEndpoints: true))
         await harness.manager.restore()
+        // The account's work ends only once the test opens `stopping`.
+        let runtime = try await XCTUnwrapAsync(await harness.manager.runtime)
+        runtime.work.put(Task { await stopping.wait() }, in: "held", cancelling: false)
 
         let signingOut = Task { await harness.manager.signOut(.user) }
-        try await until("The address was not checked before casting stopped.") {
+        try await until("The address was not checked while the account's work ended.") {
             stopping.waiting == 1 && away.requests("GET", "server/ping").count == 1
         }
         unreachable.open()
@@ -763,8 +757,8 @@ import XCTest
     // MARK: - Support
 
     /// What an ordinary sign-out records, in order.
-    private static let signOutSteps = ["endCasting", "removeCredential", "clearNotifications", "removeLockedPIN",
-                                       "removeNetworkSettings", "clearDiagnostics"]
+    private static let signOutSteps = ["removeCredential", "clearNotifications", "removeLockedPIN", "removeNetworkSettings",
+                                       "clearDiagnostics"]
 
     private static let completeStream = #"{"type":"SyncCompleteV1","data":{},"ack":"SyncCompleteV1|done"}"# + "\n"
 
@@ -803,10 +797,8 @@ import XCTest
         return environment
     }
 
-    /// `castingStop` holds ending casting back until the test opens it.
     private func dependencies(_ credential: StoredCredential?, server: StubServer, log: AccountEventLog, locked: Bool = false,
                               mirror: AuthorizationMirror? = nil, unlockEvents: AsyncStream<Void> = AsyncStream { $0.finish() },
-                              castingStop: StubServer.Gate? = nil,
                               network: NetworkConfiguration = NetworkConfiguration(), serverSignOutBudget: Duration = .seconds(3)) -> AccountDependencies {
         let store = TestCredentialStore(credential, log: log, locked: locked)
         let clients = AccountClients { address, credential, purpose in
@@ -814,19 +806,18 @@ import XCTest
             return try APIClient(baseURL: address, accessToken: credential?.token, userID: credential?.userID, sessionConfiguration: server.configuration(),
                                  networkConfiguration: network, wifiName: NoWiFi(), authorization: authorization)
         }
-        return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log, castingStop: castingStop),
+        return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log),
                                    clients: clients, unlockEvents: { unlockEvents }, expiryRecheckDelay: .milliseconds(20),
                                    serverSignOutBudget: serverSignOutBudget)
     }
 
     private func makeHarness(_ credential: StoredCredential?, server: StubServer, environment: AccountEnvironment? = nil,
                              locked: Bool = false, foreground: Bool = false, mirror: AuthorizationMirror? = nil,
-                             holdingCastingStop castingStop: StubServer.Gate? = nil,
                              network: NetworkConfiguration = NetworkConfiguration(), serverSignOutBudget: Duration = .seconds(3)) -> AccountHarness {
         let log = AccountEventLog()
         let (events, unlock) = AsyncStream.makeStream(of: Void.self)
         let dependencies = dependencies(credential, server: server, log: log, locked: locked, mirror: mirror, unlockEvents: events,
-                                        castingStop: castingStop, network: network, serverSignOutBudget: serverSignOutBudget)
+                                        network: network, serverSignOutBudget: serverSignOutBudget)
         let harness = AccountHarness(log: log, credentials: dependencies.credentials as! TestCredentialStore, unlock: unlock)
         harness.presence.isForeground = foreground
         let recorder = harness.recorder
@@ -922,22 +913,13 @@ final class AccountEventLog: Sendable {
     var all: [String] { events.withLock { $0 } }
 }
 
-/// The device-wide services, recording what they are asked. With `castingStop`, casting ends
-/// only once the test opens it.
+/// The device-wide services, recording what they are asked.
 final class FakeAccountDevice: AccountDevice {
     let log: AccountEventLog
-    private let castingStop: StubServer.Gate?
 
-    init(log: AccountEventLog, castingStop: StubServer.Gate? = nil) {
-        self.log = log
-        self.castingStop = castingStop
-    }
+    init(log: AccountEventLog) { self.log = log }
 
     func activateBackup(_ runtime: AccountRuntime) async { log.append("activateBackup(\(runtime.credential.userID))") }
-    func endCasting() async {
-        log.append("endCasting")
-        await castingStop?.wait()
-    }
     func clearNotifications() async { log.append("clearNotifications") }
     func removeLockedPIN(scope: String) async { log.append("removeLockedPIN") }
     func removeNetworkSettings(server: URL) async throws { log.append("removeNetworkSettings") }

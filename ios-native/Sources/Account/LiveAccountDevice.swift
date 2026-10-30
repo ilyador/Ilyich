@@ -14,8 +14,6 @@ struct LiveAccountDevice: AccountDevice {
         await host.activate(runtime)
     }
 
-    func endCasting() async { await CastSessionService.shared.signOut() }
-
     func clearNotifications() async { await TransferNotifications.clearAll() }
 
     func removeLockedPIN(scope: String) async { LockedPINStore.remove(cacheScope: scope) }

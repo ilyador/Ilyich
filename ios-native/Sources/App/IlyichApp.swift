@@ -13,7 +13,6 @@ import SwiftUI
         _session = State(initialValue: session)
         // A launch for background work opens the saved account.
         TransferHost.shared.setRestore { await session.restore() }
-        _ = CastSessionService.shared
         // The feed's whole-snapshot cache went in F2 (the index is the cache); its folder goes with it.
         Task.detached(priority: .utility) { TimelineFeed.deleteLegacySnapshots() }
         // The widget went in A1; the photos it kept in the App Group go with it, and so do the keys
@@ -59,8 +58,6 @@ import SwiftUI
             .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
             .task { await session.restore() }
             .onOpenURL { session.open($0) }
-            // Cast works for the signed-in account; another account, or none, stops it.
-            .onChange(of: session.runtime?.id, initial: true) { CastSessionService.shared.attach(session.runtime?.cast) }
             .onChange(of: scenePhase, initial: true) { _, phase in session.sceneChanged(phase) }
         }
     }

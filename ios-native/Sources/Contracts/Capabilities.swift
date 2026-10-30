@@ -4,7 +4,7 @@ import Foundation
 enum AssetAction: String, CaseIterable, Hashable, Sendable {
     case favorite, archive, lock, trash, deletePermanently, restore
     case addToAlbum, albumCover, profilePhoto, sharedLink, stack
-    case edit, findSimilar, cast, openInBrowser, comments
+    case edit, findSimilar, openInBrowser, comments
     case download, share, saveToPhotos
     /// Reading the photo's text.
     case selectText

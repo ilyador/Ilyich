@@ -39,7 +39,6 @@ enum AssetCapabilityPolicy {
         change(.albumCover, when: context.album != nil && !locked)
         change(.profilePhoto, when: asset.type == .image && !locked)
         view(.comments, when: context.album != nil && !locked)
-        view(.cast, when: !locked)
         view(.openInBrowser, when: !locked)
         view(.findSimilar, when: context.features?.smartSearch == true && !locked)
         view(.selectText, when: context.features?.ocr == true && asset.type == .image)
