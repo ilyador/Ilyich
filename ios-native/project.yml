@@ -55,7 +55,7 @@ targets:
     platform: iOS
     sources:
       - path: Extensions/Share
-        excludes: [Info.plist, PrivacyInfo.xcprivacy]
+        excludes: [Info.plist, PrivacyInfo.xcprivacy, ShareExtension.entitlements]
       - path: Extensions/Share/PrivacyInfo.xcprivacy
         buildPhase: resources
     dependencies:
@@ -68,7 +68,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).ShareExtension
         INFOPLIST_FILE: Extensions/Share/Info.plist
         GENERATE_INFOPLIST_FILE: YES
-        CODE_SIGN_ENTITLEMENTS: Config/Ilyich.entitlements
+        # The App Group alone: the extension stages files and reads no Wi-Fi name.
+        CODE_SIGN_ENTITLEMENTS: Extensions/Share/ShareExtension.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
   IlyichTests:
     type: bundle.unit-test
