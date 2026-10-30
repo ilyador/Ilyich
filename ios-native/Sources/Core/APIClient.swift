@@ -123,11 +123,24 @@ actor APIClient {
             return saved
         }
     }
+    /// The server's features as this client last read them, or read now if it hasn't yet.
+    func knownServerFeatures() async throws -> ServerFeatures {
+        if let cachedServerFeatures { return cachedServerFeatures }
+        return try await serverFeatures()
+    }
     func persistCachedServerFeatures() async {
         guard let cachedServerFeatures, let entityStore else { return }
         try? await entityStore.persistCachedServerFeatures(cachedServerFeatures)
     }
     func serverConfig() async throws -> ServerConfig { try await request(.get, path: "server/config") }
+    func serverVersion() async throws -> ServerVersion { try await request(.get, path: "server/version") }
+    /// Refuses a server older than the app needs, with UnsupportedServer; one too old to say its
+    /// version answers 404.
+    func requireSupportedVersion() async throws {
+        let version: ServerVersion
+        do { version = try await serverVersion() } catch ServerFailure.notFound { throw UnsupportedServer(version: nil) }
+        guard version.isSupported else { throw UnsupportedServer(version: version) }
+    }
     func authStatus() async throws -> AuthStatus { try await request(.get, path: "auth/status") }
     func unlock(pin: String) async throws { try await requestVoid(.post, path: "auth/session/unlock", body: ["pinCode": pin]) }
     func lock() async throws { try await requestVoid(.post, path: "auth/session/lock") }

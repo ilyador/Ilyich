@@ -3,6 +3,8 @@ import SwiftUI
 struct MoreCollectionsView: View {
     let api: APIClient
     let pipeline: MediaPipeline
+    /// What the server offers: Lightroom shows only on the owner's fork, as on the More shelf.
+    let features: ServerFeatures?
     let onOpenAsset: (Asset) -> Void
     /// Shows a feed: one of More's collections, which the library stacks with its other filters
     /// (REBUILD_ROADMAP.md N6), or a partner's.
@@ -21,7 +23,9 @@ struct MoreCollectionsView: View {
                 Button { onFilter(.favorites, "Favorites") } label: { Label("Favorites", systemImage: "heart") }
                 Button { onFilter(.videos, "Videos") } label: { Label("Videos", systemImage: "video") }
                 Button { onFilter(.motion, "Motion") } label: { Label("Motion", systemImage: "livephoto") }
-                Button { onFilter(.lightroom, "Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
+                if features?.isFork == true {
+                    Button { onFilter(.lightroom, "Lightroom") } label: { Label("Lightroom", systemImage: "slider.horizontal.3") }
+                }
                 NavigationLink { MemoriesView(api: api, pipeline: pipeline, onOpenAsset: onOpenAsset, onPlay: onPlayMemory) } label: { Label("On this day", systemImage: "clock.arrow.circlepath") }
             }
             Section("Shared") {

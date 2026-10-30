@@ -97,15 +97,7 @@ struct PhotoEditor: View {
         loading = true; defer { loading = false }
         do {
             let existing = try await api.assetEdits(id: asset.id)
-            let base: PixelDimensions
-            if let published = existing.baseDimensions { base = published }
-            else {
-                guard !asset.isDeveloped else { throw APIError.invalidResponse("The server has not published the developed image dimensions yet. Try again when preview processing finishes.") }
-                let flipped = ["5", "6", "7", "8"].contains(asset.exifInfo?.orientation ?? "")
-                let rawWidth = asset.exifInfo?.exifImageWidth ?? asset.width ?? 0
-                let rawHeight = asset.exifInfo?.exifImageHeight ?? asset.height ?? 0
-                base = .init(width: flipped ? rawHeight : rawWidth, height: flipped ? rawWidth : rawHeight)
-            }
+            let base = try existing.base(of: asset)
             guard base.width > 0, base.height > 0 else { throw APIError.invalidResponse("The photo has no dimensions for cropping.") }
             dimensions = base
             if let cropEdit = existing.edits.compactMap({ edit -> PixelCrop? in if case .crop(let value) = edit { return value }; return nil }).first {

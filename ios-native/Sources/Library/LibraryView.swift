@@ -548,11 +548,12 @@ struct LibraryView: View {
     }
 
     /// The AI check, More, and a chip for each mode and filter chosen there. A chip's tap
-    /// removes it. The AI check belongs to Photo content, so another mode's chip takes its place.
+    /// removes it. The AI check belongs to Photo content, so another mode's chip takes its place,
+    /// and to a server that checks results: a stock server has none.
     private var searchChoicesRow: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
-                if store.searchMode == .context { aiCheckSwitch }
+                if store.searchMode == .context && features?.searchVerification == true { aiCheckSwitch }
                 Button { searchFocused = false; navigator.present(.searchOptions) } label: {
                     Label("More", systemImage: "slider.horizontal.3").font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 16).frame(minHeight: 44)
@@ -967,7 +968,7 @@ struct LibraryView: View {
             // A photo opened from More closes it first, then opens in the viewer.
             // Its collections stack as the More shelf's do (N6); a partner's feed is no layer and
             // replaces the filters.
-            MoreCollectionsView(api: api, pipeline: pipeline, onOpenAsset: { navigator.send(.openAsset($0)) }, onFilter: { query, title in
+            MoreCollectionsView(api: api, pipeline: pipeline, features: features, onOpenAsset: { navigator.send(.openAsset($0)) }, onFilter: { query, title in
                 if let collection = LibraryCollection.more(showing: query) { store.show(collection) } else { store.setFeed(query, title: title) }
                 searchText = ""; navigator.dismiss(level: level)
             }, onPlayMemory: { navigator.present(.memoryPlayer($0), from: level + 1) })

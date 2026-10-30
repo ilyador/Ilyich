@@ -147,6 +147,94 @@ import XCTest
         XCTAssertNil(harness.recorder.states.last?.runtime)
     }
 
+    // MARK: - Server version
+
+    /// Sign-in refuses a server older than the app needs, before the password goes out: an older
+    /// release, a release candidate of the oldest one, and one too old to say its version. The
+    /// oldest release itself, and a newer one, sign in.
+    func testSignInRefusesAServerOlderThanTheAppNeeds() async throws {
+        let refused: [(String, StubServer.Response, ServerVersion?)] = [
+            ("older", .json(#"{"major":3,"minor":2,"patch":4,"prerelease":null}"#), ServerVersion(major: 3, minor: 2, patch: 4)),
+            ("candidate", .json(#"{"major":3,"minor":3,"patch":0,"prerelease":2}"#), ServerVersion(major: 3, minor: 3, patch: 0, prerelease: 2)),
+            ("unversioned", .immichError(404, message: "Cannot GET /api/server/version"), nil),
+        ]
+        for (name, answer, version) in refused {
+            let server = makeStubServer()
+            server.route("GET", "server/version", answer)
+            server.route("POST", "auth/login", .json(Self.loginJSON("carol"), status: 201))
+            let harness = makeHarness(nil, server: server)
+            await harness.manager.restore()
+            do {
+                try await harness.manager.signIn(server: server.baseURL.absoluteString, email: "carol@example.test", password: "secret")
+                XCTFail("\(name): an older server was signed in to.")
+            } catch let error as UnsupportedServer {
+                XCTAssertEqual(error, UnsupportedServer(version: version), name)
+                XCTAssertTrue(error.localizedDescription.contains("needs version 3.3.0 or later"), name)
+            }
+            do {
+                _ = try await harness.manager.signInClient(for: server.baseURL)
+                XCTFail("\(name): single sign-on started on an older server.")
+            } catch is UnsupportedServer {}
+            XCTAssertTrue(server.requests("POST", "auth/login").isEmpty, "\(name): the password never goes out.")
+            XCTAssertNil(harness.credentials.credential, name)
+            let phase = await harness.manager.phase
+            XCTAssertEqual(phase, .signedOut(nil), name)
+        }
+        for (name, answer) in [("oldest", #"{"major":3,"minor":3,"patch":0,"prerelease":null}"#), ("old server's shape", #"{"major":4,"minor":0,"patch":0}"#)] {
+            let server = makeStubServer()
+            server.route("GET", "server/version", .json(answer))
+            server.route("POST", "auth/login", .json(Self.loginJSON("carol"), status: 201))
+            server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+            let harness = makeHarness(nil, server: server)
+            await harness.manager.restore()
+            let client = try await harness.manager.signInClient(for: server.baseURL)
+            await client.shutdown()
+            try await harness.manager.signIn(server: server.baseURL.absoluteString, email: "carol@example.test", password: "secret")
+            let phase = await harness.manager.phase
+            XCTAssertEqual(phase, .active, name)
+            await signOutAfterwards(harness)
+        }
+    }
+
+    /// A saved session whose server now runs an older release is refused when its check reaches
+    /// the server: the account closes with the sign-in screen naming the release needed, and
+    /// keeps its saved session and everything else for the next launch. Nothing signs out.
+    func testAReconnectingSessionRefusesAnOlderServerAndKeepsEverything() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+        server.route("GET", "server/version", .json(#"{"major":3,"minor":2,"patch":4,"prerelease":null}"#))
+        let saved = credential("alice", on: server)
+        let harness = makeHarness(saved, server: server)
+
+        await harness.manager.restore()
+        try await until("The older server was not refused.") { await harness.manager.phase == .signedOut(nil) }
+
+        let message = harness.recorder.states.last?.message
+        XCTAssertEqual(message, "This server runs version 3.2.4. Ilyich needs version 3.3.0 or later.")
+        XCTAssertFalse(message?.contains("Immich") ?? true)
+        XCTAssertNil(harness.recorder.states.last?.runtime)
+        XCTAssertEqual(harness.credentials.credential, saved, "The saved session stays for the next launch.")
+        XCTAssertTrue(server.requests("POST", "auth/logout").isEmpty, "Nothing signs out.")
+        XCTAssertTrue(harness.log.all.isEmpty, "Nothing of the account is removed: \(harness.log.all)")
+    }
+
+    /// A session whose server can't say its version, or can't be asked, is let be.
+    func testAReconnectingSessionKeepsAServerThatCantSayItsVersion() async throws {
+        for (name, answer) in [("unversioned", StubServer.Response.immichError(404, message: "Not found")),
+                               ("offline", .transportFailure(.notConnectedToInternet))] {
+            let server = makeStubServer()
+            server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
+            server.route("GET", "server/version", answer)
+            let harness = makeHarness(credential("alice", on: server), server: server)
+            await harness.manager.restore()
+            try await until("\(name): the version was not asked.") { !server.requests("GET", "server/version").isEmpty }
+            try await Task.sleep(for: .milliseconds(200))
+            let phase = await harness.manager.phase
+            XCTAssertEqual(phase, .active, name)
+            await signOutAfterwards(harness)
+        }
+    }
+
     // MARK: - Sign-out
 
     /// The cast session is revoked and the session logged out while the token still works, before
@@ -569,6 +657,7 @@ import XCTest
         server.route("POST", "auth/login", .json(#"{"accessToken":"carol-session","userId":"carol","userEmail":"carol@example.test","name":"Carol","isAdmin":false,"shouldChangePassword":false,"profileImagePath":"","isOnboarded":true}"#, status: 201))
         server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
         server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        server.route("GET", "server/version", .json(#"{"major":3,"minor":3,"patch":5,"prerelease":null}"#))
         let session = AccountSession(environment: environment(), dependencies: dependencies(nil, server: server, log: AccountEventLog()),
                                      presence: AppPresence(isForeground: false))
         await session.restore()
@@ -676,6 +765,10 @@ import XCTest
 
     private func credential(_ user: String, on server: StubServer) -> StoredCredential {
         StoredCredential(server: server.baseURL, token: user + "-session", userID: user, name: user.capitalized)
+    }
+
+    private static func loginJSON(_ user: String) -> String {
+        #"{"accessToken":"\#(user)-session","userId":"\#(user)","userEmail":"\#(user)@example.test","name":"\#(user.capitalized)","isAdmin":false,"shouldChangePassword":false,"profileImagePath":"","isOnboarded":true}"#
     }
 
     private func login(_ user: String) -> LoginResponse {
