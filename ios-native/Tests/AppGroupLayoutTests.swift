@@ -54,4 +54,22 @@ final class AppGroupLayoutTests: XCTestCase {
             for path in kept { XCTAssertTrue(FileManager.default.fileExists(atPath: container.appendingPathComponent(path).path), path) }
         }
     }
+
+    /// The keys the Flutter app left in the App Group's preferences for its widget, one of them an
+    /// old token, go at each launch too; the app's own keys stay.
+    func testTheFlutterWidgetsKeysAreRemovedAtLaunchAndNothingElse() throws {
+        let suite = "AppGroupLayoutTests.flutter"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("https://photos.example.org/api", forKey: "widget_server_url")
+        defaults.set("flutter-session-token", forKey: "widget_auth_token")
+        defaults.set(#"{"CF-Access-Client-Id":"client.access"}"#, forKey: "widget_custom_headers")
+        defaults.set(true, forKey: "session.signedOut")
+        for _ in 0..<2 {
+            IlyichApp.removeFlutterWidgetKeys(from: defaults)
+            for key in ["widget_server_url", "widget_auth_token", "widget_custom_headers"] { XCTAssertNil(defaults.object(forKey: key), key) }
+            XCTAssertTrue(defaults.bool(forKey: "session.signedOut"), "The app's own keys stay.")
+        }
+    }
 }
