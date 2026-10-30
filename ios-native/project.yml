@@ -36,7 +36,6 @@ targets:
       - package: IlyichKit
         product: IlyichShareInbox
       - target: ShareExtension
-      - target: WidgetExtension
     preBuildScripts:
       # One upload engine at a time: fails the build if a second background session could appear.
       - name: Check single upload engine
@@ -67,27 +66,6 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: Config/Ilyich.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
-  WidgetExtension:
-    type: app-extension
-    platform: iOS
-    sources:
-      - path: Extensions/Widget
-        excludes: [Info.plist]
-      - path: ../mobile/ios/WidgetExtension/widgets
-      - ../mobile/ios/WidgetExtension/WidgetBundle.swift
-      - ../mobile/ios/WidgetExtension/UIImage+Resize.swift
-      - Assets.xcassets
-    dependencies:
-      - package: IlyichKit
-        product: IlyichPlatform
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(APP_BUNDLE_ID).WidgetExtension
-        INFOPLIST_FILE: Extensions/Widget/Info.plist
-        GENERATE_INFOPLIST_FILE: YES
-        CODE_SIGN_ENTITLEMENTS: Config/Ilyich.entitlements
-        APPLICATION_EXTENSION_API_ONLY: YES
-        SWIFT_VERSION: '5.0'
   IlyichTests:
     type: bundle.unit-test
     platform: iOS

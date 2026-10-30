@@ -24,9 +24,6 @@ public struct AccountStoragePaths: Sendable {
     /// at suspension gets the app killed.
     public var transfersDatabase: String { "IlyichTransfers/\(account.digest).sqlite" }
 
-    /// Widget snapshots, in the App Group container.
-    public var widgetCache: String { "WidgetCache2/\(account.digest)" }
-
     /// The read-only flag, in the App Group's preferences.
     public var readOnlyKey: String { "readOnly.\(account.digest)" }
 

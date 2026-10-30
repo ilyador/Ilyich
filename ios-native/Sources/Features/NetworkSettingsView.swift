@@ -1,7 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
-import WidgetKit
 import IlyichPlatform
 
 struct NetworkSettingsView: View {
@@ -145,7 +144,6 @@ struct NetworkSettingsView: View {
                                                           automaticallySwitchEndpoints: switchEndpoints,
                                                           preferredWifiName: preferredWifiName, localEndpoint: localURL).validated()
             try await service.save(configuration, server: server, client: api)
-            WidgetCenter.shared.reloadAllTimelines()
             dismiss()
         } catch { failure = .init(error) }
     }

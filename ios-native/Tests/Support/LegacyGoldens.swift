@@ -138,22 +138,6 @@ enum LegacyGoldens {
         ])
     }()
 
-    // MARK: Widget
-
-    static let widgetAsset = "c7d8e9f0-a1b2-4c3d-8e4f-5a6b7c8d9e0f"
-    static let memoryID = "e9f0a1b2-c3d4-4e5f-9a6b-7c8d9e0f1a2b"
-    static let widgetMetadata: [String: Legacy.WidgetMetadata] = [
-        "random_NONE_0": .init(deepLink: URL(string: "immich://asset?id=\(widgetAsset)"), forceFullColor: false, accountScope: digest),
-        "memory_1": .init(subtitle: "3 years ago", deepLink: URL(string: "immich://memory?id=\(memoryID)"), accountScope: digest),
-    ]
-    /// The Flutter widget's snapshot, at the container's root and without an account.
-    static let flutterMetadata = Legacy.WidgetMetadata(deepLink: URL(string: "immich://asset?id=\(widgetAsset)"))
-    static let flutterDefaults: [String: String] = [
-        Legacy.FlutterWidgetCredentials.serverURLKey: "https://photos.example.org/api",
-        Legacy.FlutterWidgetCredentials.tokenKey: "flutter-session-token",
-        Legacy.FlutterWidgetCredentials.customHeadersKey: #"{"CF-Access-Client-Id":"client.access","CF-Access-Client-Secret":"access-secret"}"#,
-    ]
-
     // MARK: Session
 
     static let networkConfiguration = NetworkConfiguration(

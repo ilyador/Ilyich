@@ -4,28 +4,23 @@ import UIKit
 import XCTest
 @testable import Ilyich
 
-/// Pins the formats on disk that outlive a build: share manifests, the widget's snapshots, the
-/// thumbnail store's layout, the network settings and the saved session. Each fixture in
-/// Tests/Fixtures was written by the production encoder of its day. JSONEncoder orders keys
-/// differently from one process to the next, so encodings are compared as JSON. The formats only
-/// older builds wrote (backup state, task descriptions and outcomes, version 1 manifests, places
-/// and fingerprint caches) went with their readers in B10 and C8.
+/// Pins the formats on disk that outlive a build: share manifests, the thumbnail store's layout,
+/// the network settings and the saved session. Each fixture in Tests/Fixtures was written by the
+/// production encoder of its day. JSONEncoder orders keys differently from one process to the
+/// next, so encodings are compared as JSON. The formats only older builds wrote (backup state, task
+/// descriptions and outcomes, version 1 manifests, places and fingerprint caches) went with their
+/// readers in B10 and C8, and the widget's snapshots with the widget in A1.
 final class LegacyFormatsTests: XCTestCase {
     private typealias G = LegacyGoldens
     private func bits(_ date: Date?) -> UInt64? { date?.timeIntervalSinceReferenceDate.bitPattern }
-    private var widgetFolder: String { "widget/" + AccountStoragePaths(G.account).widgetCache }
 
     func testEveryFixtureDecodes() throws {
         let files = try FixtureLoader.files(in: "")
-        XCTAssertEqual(files.count, 15, "Every fixture reached the test bundle.")
+        XCTAssertEqual(files.count, 8, "Every fixture reached the test bundle.")
         for path in files {
             let data = try FixtureLoader.data(path)
-            let name = (path as NSString).lastPathComponent
             switch path {
             case "share/manifest-v2.json", "share/manifest-v2-with-urls.json": _ = try ShareManifest.decode(data, batch: G.batchID, folder: G.sharedFolder)
-            case _ where path.hasPrefix("widget/") && name.hasSuffix("_metadata.json"): _ = try Legacy.decoder().decode(Legacy.WidgetMetadata.self, from: data)
-            case _ where path.hasPrefix("widget/") && name.hasSuffix(".png"): XCTAssertNotNil(UIImage(data: data), path)
-            case "widget/flutter/defaults.json": _ = try JSONDecoder().decode([String: String].self, from: data)
             case "session/network-config-v1.json": _ = try JSONDecoder().decode(NetworkConfiguration.self, from: data)
             case "session/saved-session-v1.json": _ = try JSONDecoder().decode(StoredCredential.self, from: data)
             case _ where path.hasPrefix("caches/IlyichThumbnails/"): XCTAssertNotNil(UIImage(data: data), path)
@@ -55,14 +50,11 @@ final class LegacyFormatsTests: XCTestCase {
 
     func testProductionEncodersWriteTheFixtures() throws {
         let encoder = JSONEncoder()
-        var table: [(path: String, produced: Data, sets: Set<String>)] = [
+        let table: [(path: String, produced: Data, sets: Set<String>)] = [
             ("share/manifest-v2.json", try ShareManifest.encode(G.manifestV2), []),
             ("session/network-config-v1.json", try encoder.encode(G.networkConfiguration.validated()), []),
             ("session/saved-session-v1.json", try encoder.encode(G.credential), []),
-            // The widget's writer is compiled only into the Swift 5 widget extension; its verbatim mirror stands in.
-            ("widget/flutter/random_NONE_0_metadata.json", try encoder.encode(G.flutterMetadata), []),
         ]
-        for (key, metadata) in G.widgetMetadata { table.append(("\(widgetFolder)/\(key)_metadata.json", try encoder.encode(metadata), [])) }
         for entry in table {
             XCTAssertEqual(try FixtureLoader.canonicalJSON(entry.produced, unorderedArrays: entry.sets),
                            try FixtureLoader.canonicalJSON(FixtureLoader.data(entry.path), unorderedArrays: entry.sets), entry.path)
@@ -90,50 +82,6 @@ final class LegacyFormatsTests: XCTestCase {
                            moved.path + "/" + G.sharedFiles[0])
         }
         XCTAssertThrowsError(try ShareManifest.decode(data, batch: UUID(), folder: G.sharedFolder), "A manifest belongs to its own folder.")
-    }
-
-    func testWidgetCacheV1AndFlutterWidgetKeys() throws {
-        XCTAssertEqual(try FixtureLoader.files(in: widgetFolder),
-                       ["memory_1_image.png", "memory_1_metadata.json", "random_NONE_0_image.png", "random_NONE_0_metadata.json"])
-        XCTAssertEqual(widgetFolder, "widget/WidgetCache2/\(G.digest)")
-        let random = try FixtureLoader.decode(Legacy.WidgetMetadata.self, from: "\(widgetFolder)/random_NONE_0_metadata.json")
-        XCTAssertEqual(random.accountScope, G.digest, "A snapshot is shown only to the account that cached it.")
-        XCTAssertEqual(random.deepLink?.absoluteString, "immich://asset?id=\(G.widgetAsset)")
-        XCTAssertFalse(random.forceFullColor)
-        XCTAssertNil(random.subtitle); XCTAssertNil(random.error)
-        let memory = try FixtureLoader.decode(Legacy.WidgetMetadata.self, from: "\(widgetFolder)/memory_1_metadata.json")
-        XCTAssertEqual(memory.subtitle, "3 years ago")
-        XCTAssertEqual(memory.deepLink?.absoluteString, "immich://memory?id=\(G.memoryID)")
-        XCTAssertTrue(memory.forceFullColor)
-        for path in ["\(widgetFolder)/random_NONE_0_image.png", "\(widgetFolder)/memory_1_image.png", "widget/flutter/random_NONE_0_image.png"] {
-            let png = try FixtureLoader.data(path)
-            XCTAssertEqual(Array(png.prefix(8)), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], path)
-            XCTAssertNil(png.range(of: Data("CgBI".utf8)), "\(path) was copied into the bundle unchanged.")
-        }
-        // An error encodes as Swift encodes a case without values.
-        XCTAssertEqual(String(decoding: try JSONEncoder().encode(Legacy.WidgetError.fetchFailed), as: UTF8.self), #"{"fetchFailed":{}}"#)
-        XCTAssertEqual(try JSONDecoder().decode(Legacy.WidgetMetadata.self, from: Data(#"{"error":{"noLogin":{}}}"#.utf8)).error, .noLogin)
-
-        // The Flutter app's widget: its credentials in the App Group's preferences and a snapshot
-        // at the container's root, without an account.
-        let flutter = try FixtureLoader.decode(Legacy.WidgetMetadata.self, from: "widget/flutter/random_NONE_0_metadata.json")
-        XCTAssertNil(flutter.accountScope)
-        XCTAssertTrue(flutter.forceFullColor)
-        XCTAssertEqual(flutter.deepLink?.absoluteString, "immich://asset?id=\(G.widgetAsset)")
-        let values = try JSONDecoder().decode([String: String].self, from: FixtureLoader.data("widget/flutter/defaults.json"))
-        XCTAssertEqual(Set(values.keys), Set(Legacy.FlutterWidgetCredentials.keys))
-        let suite = "LegacyFormatsTests.flutter"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defaults.removePersistentDomain(forName: suite)
-        defer { defaults.removePersistentDomain(forName: suite) }
-        for (key, value) in values { defaults.set(value, forKey: key) }
-        let credentials = try XCTUnwrap(Legacy.FlutterWidgetCredentials(defaults: defaults))
-        XCTAssertEqual(credentials.serverURL, "https://photos.example.org/api")
-        XCTAssertEqual(credentials.token, "flutter-session-token")
-        XCTAssertEqual(credentials.customHeaders, ["CF-Access-Client-Id": "client.access", "CF-Access-Client-Secret": "access-secret"])
-        // Flutter's sign-out wrote empty strings.
-        defaults.set("", forKey: Legacy.FlutterWidgetCredentials.tokenKey)
-        XCTAssertNil(Legacy.FlutterWidgetCredentials(defaults: defaults))
     }
 
     func testThumbnailTreeV1IsTheStoreLayout() async throws {
