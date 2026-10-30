@@ -345,11 +345,17 @@ final class LibraryTests: XCTestCase {
         for row in ["Diagnostics", "About", "Sign out"] {
             XCTAssertTrue(app.buttons[row].waitForExistence(timeout: 5), "\(row) has its own row on the Settings shelf.")
         }
-        // About names the license and links the owner's fork as the source code and server (A1).
+        // About names the license, links the owner's fork as the source code and server, and shows
+        // ThumbHash's MIT notice under Licenses (A1).
         app.buttons["About"].tap()
         XCTAssertTrue(app.staticTexts["Open source under the GNU AGPL v3."].waitForExistence(timeout: 5), "About names the license.")
         XCTAssertTrue(app.descendants(matching: .any)["Source code and server"].exists, "About links the source code and server.")
         capture(app, "About — license and source")
+        app.buttons["Licenses"].tap()
+        XCTAssertTrue(app.staticTexts["Copyright (c) 2023 Evan Wallace"].waitForExistence(timeout: 5), "Licenses shows ThumbHash's notice.")
+        capture(app, "About — licenses")
+        app.navigationBars["Licenses"].buttons.firstMatch.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5), "Back in About.")
         app.buttons["Done"].tap()
         openShelves(app)
         app.buttons["Settings"].tap()
