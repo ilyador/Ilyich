@@ -12,7 +12,8 @@ enum LibraryEvent: Sendable {
     case mutation(MutationEvent)
     /// One of the account's albums, people, partners or memories changed on the server.
     case collection(CollectionChange)
-    /// The account's downloaded previews were cleared, from Diagnostics.
+    /// The account's downloaded previews and decoded images were cleared, from Diagnostics. The
+    /// thumbnails kept offline stay on disk.
     case cachesCleared
 }
 

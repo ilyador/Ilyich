@@ -377,9 +377,10 @@ import XCTest
         await worker.stop()
     }
 
-    /// Clear browsing cache in the middle of a pass: the page under way is not saved into the
+    /// The store emptied in the middle of a pass: the page under way is not saved into the
     /// emptied store, and the next pass starts from the newest photo with fresh counts, so every
-    /// file is there in the end and the counts say so.
+    /// file is there in the end and the counts say so. Only sign-out empties it, once coverage has
+    /// stopped; Clear browsing cache keeps it (G2, MediaPipelineTests).
     func testClearingTheStoreDuringAPassStartsItOver() async throws {
         let h = try await makeHarness(photos: Self.six)
         h.server.block(["p3"])
@@ -388,7 +389,7 @@ import XCTest
         try await until("Page two did not start.") { h.server.requested.contains("p4") }
         let underWay = await h.store.coverageState()
         XCTAssertNotNil(underWay.cursor, "Page one is saved.")
-        // The user clears the cache while page two downloads.
+        // The store is emptied while page two downloads.
         await h.store.removeAll()
         XCTAssertFalse(h.store.contains(assetID: "p1", revision: "r1"))
         h.server.block([])

@@ -9,8 +9,9 @@ import Observation
 /// again. A sync's change takes out at once the photos the offline library let go (deleted for
 /// good, locked, out of reach); a change that names any photo, which is how a photo restored or put
 /// in Trash elsewhere arrives, has the months shown read again quietly, so the photo leaves or
-/// joins and the selection keeps what is still there. A quiet read that something shown here
-/// overtook, a change applied or a month loaded, is read again rather than shown, so it never
+/// joins and the selection keeps what is still there. A quiet read waits a moment first, so the
+/// changes a sync reports one after another are read once (G2). A quiet read that something shown
+/// here overtook, a change applied or a month loaded, is read again rather than shown, so it never
 /// brings back a photo restored or deleted meanwhile.
 @MainActor @Observable final class TrashModel {
     private(set) var assets: [Asset] = []
@@ -29,13 +30,21 @@ import Observation
     @ObservationIgnored private let api: APIClient
     @ObservationIgnored private var mutations: LibraryMutationService?
     @ObservationIgnored private let follower = LibraryFollower()
-    /// The quiet read under way; another is owed when a change came in while it ran.
+    /// The quiet read under way, or waiting to begin; another is owed when a change came in while
+    /// it read.
     @ObservationIgnored private var refreshing: Task<Void, Never>?
     @ObservationIgnored private var refreshOwed = false
+    /// How long a quiet read waits before it reads: the changes a sync reports one after another
+    /// come within it, and are read with it.
+    @ObservationIgnored private let refreshDelay: Duration
     /// Moves whenever what is shown changes here, so a read begun before is not shown.
     @ObservationIgnored private var version = 0
 
-    init(api: APIClient) { self.api = api }
+    /// `refreshDelay` is for tests.
+    init(api: APIClient, refreshDelay: Duration = .seconds(1)) {
+        self.api = api
+        self.refreshDelay = refreshDelay
+    }
 
     isolated deinit { refreshing?.cancel() }
 
@@ -165,10 +174,14 @@ import Observation
 
     /// Reads again, quietly, the months shown and any newer month: their photos replace those
     /// shown in one go, the selection keeps what is still there, and Load more goes on after them.
-    /// One read at a time; a change that comes in meanwhile has it read once more when it ends.
+    /// One read at a time, each after `refreshDelay`: a change that comes in while it waits is in
+    /// it, and one that comes in while it reads has it read once more, after the same wait. The
+    /// wait doesn't hold the model, so a Trash closed meanwhile reads nothing.
     private func refresh() {
         guard refreshing == nil else { refreshOwed = true; return }
-        refreshing = Task { [weak self] in await self?.refreshShown() }
+        refreshing = Task { [weak self, refreshDelay] in
+            repeat { try? await Task.sleep(for: refreshDelay) } while await self?.refreshShown() == true
+        }
     }
 
     /// A read or a change of the screen's own ended: a quiet read owed meanwhile runs now.
@@ -177,30 +190,38 @@ import Observation
         if refreshOwed, refreshing == nil { refresh() }
     }
 
-    private func refreshShown() async {
-        defer { refreshing = nil }
-        repeat {
-            refreshOwed = false
-            let started = version
-            // The oldest month shown; the months are newest first.
-            let reach = nextBucket > 0 && buckets.indices.contains(nextBucket - 1) ? buckets[nextBucket - 1].timeBucket : nil
-            do {
-                let months = try await api.timeBuckets(try timeline)
-                let shown = reach.map { reach in Array(months.prefix { $0.timeBucket >= reach }) } ?? Array(months.prefix(1))
-                var read: [Asset] = []
-                for month in shown { read += try await api.timeBucket(month.timeBucket, of: try timeline) }
-                try Task.checkCancellation()
-                // A read or a change of the screen's own is under way: it reads again once that ends.
-                guard !loading else { refreshOwed = true; return }
-                // Something shown changed while this read ran: it reads again rather than undo it.
-                guard version == started else { refreshOwed = true; continue }
-                buckets = months; assets = read; nextBucket = shown.count
-                selection.formIntersection(read.map(\.id))
-                version += 1
-            } catch {
-                // A quiet read that fails changes nothing; the next change, or a pull, reads again.
-                return
-            }
-        } while refreshOwed && !Task.isCancelled
+    /// One quiet read. Whether another is owed; when none is, the quiet reads end here.
+    private func refreshShown() async -> Bool {
+        guard !Task.isCancelled else { return refreshEnded() }
+        refreshOwed = false
+        let started = version
+        // The oldest month shown; the months are newest first.
+        let reach = nextBucket > 0 && buckets.indices.contains(nextBucket - 1) ? buckets[nextBucket - 1].timeBucket : nil
+        do {
+            let months = try await api.timeBuckets(try timeline)
+            let shown = reach.map { reach in Array(months.prefix { $0.timeBucket >= reach }) } ?? Array(months.prefix(1))
+            var read: [Asset] = []
+            for month in shown { read += try await api.timeBucket(month.timeBucket, of: try timeline) }
+            try Task.checkCancellation()
+            // A read or a change of the screen's own is under way: it reads again once that ends.
+            guard !loading else { refreshOwed = true; return refreshEnded() }
+            // Something shown changed while this read ran: it reads again rather than undo it.
+            guard version == started else { return true }
+            buckets = months; assets = read; nextBucket = shown.count
+            selection.formIntersection(read.map(\.id))
+            version += 1
+        } catch {
+            // A quiet read that fails changes nothing; the next change, or a pull, reads again.
+            return refreshEnded()
+        }
+        // A change came in while this read ran.
+        if refreshOwed { return true }
+        return refreshEnded()
+    }
+
+    /// No quiet read is under way or waiting any more.
+    private func refreshEnded() -> Bool {
+        refreshing = nil
+        return false
     }
 }

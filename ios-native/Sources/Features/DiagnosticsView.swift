@@ -62,6 +62,8 @@ struct DiagnosticsView: View {
                     LabeledContent("Thumbnails kept offline", value: "\(progress.stored.formatted()) of \(progress.total.formatted())")
                 }
                 if let media {
+                    // In binary units, which the cap is set in, so it reads as it was set.
+                    LabeledContent("Offline thumbnails", value: "\(bytes(media.thumbnailBytes, .binary)) of \(bytes(media.thumbnailLimit, .binary))")
                     LabeledContent("Photo download cache", value: bytes(media.diskBytes))
                     LabeledContent("Downloads held in memory", value: bytes(media.memoryBytes))
                     LabeledContent("Decoded image memory limit", value: bytes(media.decodedMemoryLimit))
@@ -70,7 +72,7 @@ struct DiagnosticsView: View {
                 if let resetMessage { Text(resetMessage).font(.footnote).foregroundStyle(.secondary) }
                 if session != nil { Button("Clear browsing cache", role: .destructive) { confirmReset = true }.disabled(clearing) }
             } header: { Text("Browsing cache") } footer: {
-                Text("Clears downloaded previews for this account. Offline previews will need to download again. Originals, backup receipts, your upload queue and photos on the server stay intact.")
+                Text("Clears this account’s downloaded previews and the images held in memory; previews download again when you view them. Offline thumbnails stay. Originals, backup receipts, your upload queue and photos on the server stay intact.")
             }
             Section {
                 Picker("Record", selection: $level) { ForEach(DiagnosticLevel.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) } }
@@ -100,12 +102,14 @@ struct DiagnosticsView: View {
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }.disabled(clearing) } }
         .confirmationDialog("Clear this account’s browsing cache?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Clear browsing cache", role: .destructive) { Task { await clearCache() } }
-        } message: { Text("Downloaded previews will be unavailable offline until you view them again. Your photos and backup records are kept.") }
+        } message: { Text("Downloaded previews will be unavailable offline until you view them again. Offline thumbnails, your photos and backup records are kept.") }
         .confirmationDialog("Reset local library metadata?", isPresented: $confirmMetadataReset, titleVisibility: .visible) {
             Button("Reset metadata", role: .destructive) { Task { await resetLibraryMetadata() } }
         } message: { Text("Library metadata will be recreated from your server.") }
     }
-    private func bytes(_ count: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file) }
+    private func bytes(_ count: Int, _ style: ByteCountFormatter.CountStyle = .file) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: style)
+    }
     private var entityLabels: [(key: String, name: String)] {
         [("asset", "Photos and videos"), ("exif", "EXIF records"), ("album", "Albums"), ("albumAsset", "Album items"),
          ("albumUser", "Album memberships"), ("person", "People"), ("face", "Face associations"), ("ocr", "Text regions"),
@@ -129,7 +133,7 @@ struct DiagnosticsView: View {
         guard let session, !clearing else { return }
         clearing = true; defer { clearing = false }
         await session.clearBrowsingCache()
-        resetMessage = "Browsing cache cleared. Visible photos may download again immediately."
+        resetMessage = "Browsing cache cleared. Offline thumbnails were kept."
         await refresh()
     }
     private func resetLibraryMetadata() async {
