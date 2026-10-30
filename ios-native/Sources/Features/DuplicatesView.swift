@@ -46,10 +46,14 @@ struct DuplicatesView: View {
         .task { await load() }.refreshable { await load() }
         // A group resolved or dismissed goes, and a photo deleted elsewhere leaves its group.
         .onMutationApplied { groups = DuplicateGroups.applying($0, to: groups) }
-        .confirmationDialog("Move \(confirming.map { $0.assets.count - selected($0).count } ?? 0) items to trash?", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }), titleVisibility: .visible) {
+        .confirmationDialog(moveToTrashTitle, isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }), titleVisibility: .visible) {
             Button("Move to trash", role: .destructive) { if let group = confirming { Task { await resolve(group) } } }.requiresWriteAccess()
         } message: { Text("The items marked Keep will remain in your library.") }
         .alert("Couldn’t update duplicates", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(failure?.message ?? "") }
+    }
+    private var moveToTrashTitle: String {
+        let count = confirming.map { $0.assets.count - selected($0).count } ?? 0
+        return "Move \(count) item\(count == 1 ? "" : "s") to trash?"
     }
     private func selected(_ group: DuplicateGroup) -> Set<String> { keep[group.id] ?? Set(group.suggestedKeepAssetIds.isEmpty ? Array(group.assets.prefix(1).map(\.id)) : group.suggestedKeepAssetIds) }
     private func toggle(_ asset: Asset, in group: DuplicateGroup) { var ids = selected(group); if !ids.insert(asset.id).inserted { ids.remove(asset.id) }; keep[group.id] = ids }
@@ -131,7 +135,7 @@ struct TrashView: View {
         // Photos restored, deleted or put in Trash, here, from their viewer or anywhere else the
         // account changes them, leave or join in place.
         .task { trash.follow(mutations: mutations, bus: bus); await trash.reload() }.refreshable { await trash.reload() }
-        .confirmationDialog("Permanently delete \(trash.selection.count) items?", isPresented: $confirmPermanent, titleVisibility: .visible) {
+        .confirmationDialog("Permanently delete \(trash.selection.count) item\(trash.selection.count == 1 ? "" : "s")?", isPresented: $confirmPermanent, titleVisibility: .visible) {
             Button("Delete forever", role: .destructive) { Task { await trash.deleteSelected() } }.requiresWriteAccess()
         } message: { Text("These photos and videos will be permanently removed from your server. This cannot be undone.") }
         .confirmationDialog(emptyAll ? "Permanently delete everything in trash?" : "Restore every item in trash?", isPresented: $confirmAll, titleVisibility: .visible) {

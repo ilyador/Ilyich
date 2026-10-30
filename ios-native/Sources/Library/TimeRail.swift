@@ -229,7 +229,7 @@ private struct TimeRailLens: View {
                 HStack(spacing: 8) {
                     Text(places ?? " ").font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.78)).lineLimit(1)
                     Spacer(minLength: 0)
-                    Text("\(count.formatted()) items").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.66))
+                    Text("\(count.formatted()) item\(count == 1 ? "" : "s")").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.white.opacity(0.66))
                 }
                 HStack(spacing: 6) {
                     ForEach(previews) { asset in

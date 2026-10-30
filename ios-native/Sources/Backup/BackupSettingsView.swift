@@ -50,7 +50,7 @@ struct BackupSettingsView: View {
                         } label: {
                             VStack(alignment: .leading) {
                                 Text(album.title)
-                                Text("\(album.count.formatted()) items\(album.isShared ? " · Shared album" : "")")
+                                Text("\(album.count.formatted()) item\(album.count == 1 ? "" : "s")\(album.isShared ? " · Shared album" : "")")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }

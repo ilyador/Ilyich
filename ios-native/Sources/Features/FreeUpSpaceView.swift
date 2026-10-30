@@ -102,7 +102,7 @@ private struct FreeUpSpaceContent: View {
         .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await store.refreshFilters() } } }
         .onDisappear { store.disappear() }
         .fullScreenCover(item: $viewing) { LocalPhotoViewer(photo: $0) }
-        .confirmationDialog("Remove \(store.selection.count) items from Apple Photos?", isPresented: $confirming, titleVisibility: .visible) {
+        .confirmationDialog("Remove \(store.selection.count) item\(store.selection.count == 1 ? "" : "s") from Apple Photos?", isPresented: $confirming, titleVisibility: .visible) {
             Button("Remove from Photos", role: .destructive) { store.remove() }.requiresWriteAccess()
         } message: { Text("Their verified server copies will be kept. iCloud Photos will remove them from your other synced devices too. Apple will ask you to confirm.") }
         .alert("Couldn’t free up space", isPresented: Binding(get: { store.failure != nil }, set: { if !$0 { store.failure = nil } })) { Button("OK", role: .cancel) { } } message: { Text(store.failure ?? "") }

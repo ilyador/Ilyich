@@ -91,7 +91,7 @@ struct BulkActionsView: View {
             ShareSheet(urls: files.urls).onDisappear { files.remove() }
         }
         .sheet(isPresented: $publicLink) { NavigationStack { SharedLinkEditor(api: api, album: nil, assetIDs: ids) } }
-        .confirmationDialog(permanently ? "Permanently delete \(assets.count) items?" : "Move \(assets.count) items to Trash?", isPresented: $confirmTrash) {
+        .confirmationDialog(permanently ? "Permanently delete \(assets.count) item\(assets.count == 1 ? "" : "s")?" : "Move \(assets.count) item\(assets.count == 1 ? "" : "s") to Trash?", isPresented: $confirmTrash) {
             Button(permanently ? "Delete permanently" : "Move to Trash", role: .destructive) {
                 run(permanently ? .deletePermanently(ids) : .trash(ids))
             }

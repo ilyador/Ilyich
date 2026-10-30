@@ -107,7 +107,7 @@ struct PlacesView: View {
                 if let selected {
                     HStack(spacing: 14) {
                         FeatureThumbnail(api: api, pipeline: pipeline, assetID: selected.assetIDs.first).frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 9))
-                        VStack(alignment: .leading) { Text(selected.title).font(.headline); Text("\(selected.assetIDs.count.formatted()) items").font(.caption).foregroundStyle(.secondary) }
+                        VStack(alignment: .leading) { Text(selected.title).font(.headline); Text("\(selected.assetIDs.count.formatted()) item\(selected.assetIDs.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary) }
                         Spacer()
                         Button("Open photos") { onSelect(selected) }.buttonStyle(.borderedProminent)
                     }.padding(.horizontal, 20).padding(.bottom, 12)
@@ -120,7 +120,7 @@ struct PlacesView: View {
                             Button { selected = place } label: {
                                 HStack(spacing: 14) {
                                     FeatureThumbnail(api: api, pipeline: pipeline, assetID: place.assetIDs.first).frame(width: 52, height: 52).clipShape(.rect(cornerRadius: 9))
-                                    VStack(alignment: .leading, spacing: 3) { Text(place.title).font(.headline); Text([place.country, "\(place.assetIDs.count.formatted()) items"].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }
+                                    VStack(alignment: .leading, spacing: 3) { Text(place.title).font(.headline); Text([place.country, "\(place.assetIDs.count.formatted()) item\(place.assetIDs.count == 1 ? "" : "s")"].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }
                                     Spacer()
                                 }.contentShape(Rectangle())
                             }.buttonStyle(.plain)
@@ -281,7 +281,7 @@ private struct PlacesListView: View {
                         FeatureThumbnail(api: api, pipeline: pipeline, assetID: place.assetIDs.first).frame(width: 48, height: 48).clipShape(.rect(cornerRadius: 10))
                         VStack(alignment: .leading, spacing: 4) {
                             Text(place.title).font(.headline).foregroundStyle(.primary)
-                            Text([place.country, "\(place.assetIDs.count.formatted()) items"].compactMap { $0 }.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
+                            Text([place.country, "\(place.assetIDs.count.formatted()) item\(place.assetIDs.count == 1 ? "" : "s")"].compactMap { $0 }.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
                         }
                     }.padding(.vertical, 4)
                 }.accessibilityElement(children: .combine)

@@ -140,7 +140,7 @@ import XCTest
         trash.selection = ["t1"]
         await trash.restoreSelected()
         try await until("The restored photo stayed in the Trash.") { trash.assets.map(\.id) == ["t2"] }
-        XCTAssertEqual(trash.resultMessage, "Restored 1 items.")
+        XCTAssertEqual(trash.resultMessage, "Restored 1 item.")
         XCTAssertTrue(trash.selection.isEmpty)
         let body = try XCTUnwrap(server.requests("POST", "trash/restore/assets").first?.body)
         XCTAssertEqual((try JSONSerialization.jsonObject(with: body) as? [String: [String]])?["ids"], ["t1"])

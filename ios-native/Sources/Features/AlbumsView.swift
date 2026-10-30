@@ -89,7 +89,7 @@ struct AlbumsView: View {
                 Text(album.albumName).font(.headline).lineLimit(2)
                 if album.shared { Image(systemName: "person.2.fill").font(.caption).foregroundStyle(.secondary) }
             }
-            Text("\(album.assetCount.formatted()) items").font(.caption).foregroundStyle(.secondary)
+            Text("\(album.assetCount.formatted()) item\(album.assetCount == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
             if let dates = albumDateRange(album) { Text(dates).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
