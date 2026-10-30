@@ -3,8 +3,9 @@ import Foundation
 /// One search's results, read page by page through the server's cursors. LibraryFeedStore asks it
 /// for the first pages, more, a retry or a refresh, and shows the State each one returns.
 ///
-/// - Smart search reads pages of 10 (SearchQuery's size); metadata search pages of 100, or 500
-///   when the phone filters what the server returns (owner or developed).
+/// - Smart search reads pages of 10 (SearchQuery's size), or, from a stock server, which pages
+///   none, one page of 100; metadata search pages of 100, or 500 when the phone filters what the
+///   server returns (owner or developed).
 /// - A verified page can be empty and still continue: the first pages, more and a retry follow
 ///   up to 3 pages until one has results, or up to 40 (20,000 photos) when the phone filters.
 /// - A partial or unavailable verification stops there with a RetryPoint at that page's cursor,

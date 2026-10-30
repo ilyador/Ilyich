@@ -374,7 +374,10 @@ actor IndexWriter {
             touched.assets.insert(id)
             let inMonth = ["timeline", "archive"].contains(object["visibility"]?.string ?? "")
             change.upsert(id, from: before.month, to: inMonth ? before.newMonth : nil)
-            if before.exists, let revision = object["mediaRevision"]?.string, revision != before.revision { change.mediaRevisions[id] = revision }
+            // The revision as Asset.cacheRevision names it: a stock server versions media by
+            // thumbhash alone, which its edits change.
+            let revision = object["mediaRevision"]?.string ?? object["thumbhash"]?.string ?? "unversioned"
+            if before.exists, revision != before.revision { change.mediaRevisions[id] = revision }
             var repair = wasLocked
             if !before.exists {
                 if try promoteOrphans(of: id, month: before.newMonth, change: &change) { repair = true }
@@ -511,13 +514,13 @@ actor IndexWriter {
                              [.text(kind), .text(id), .text(String(decoding: encoded, as: UTF8.self))])
     }
     /// Where an asset is before it is written: whether the index holds it, the month it shows in
-    /// (nil when it shows in none), its media revision, and the month `localDateTime` falls in,
-    /// worked out by SQLite as the feeds' months are.
+    /// (nil when it shows in none), its media revision as Asset.cacheRevision names it, and the
+    /// month `localDateTime` falls in, worked out by SQLite as the feeds' months are.
     private func placement(of id: String, localDateTime: String?) throws -> (exists: Bool, month: MonthKey?, revision: String?, newMonth: MonthKey?) {
         let row = try database.query("""
         SELECT e.id IS NOT NULL,
                CASE WHEN json_extract(e.payload,'$.visibility') IN ('timeline','archive') THEN strftime('%Y-%m',json_extract(e.payload,'$.localDateTime')) END,
-               json_extract(e.payload,'$.mediaRevision'), strftime('%Y-%m',?2)
+               coalesce(json_extract(e.payload,'$.mediaRevision'),json_extract(e.payload,'$.thumbhash'),'unversioned'), strftime('%Y-%m',?2)
         FROM (SELECT 1) LEFT JOIN entities e ON e.kind='asset' AND e.id=?1
         """, [id, localDateTime], cancellable: false).first
         return (row?[0] == "1", row?[1].flatMap(Self.month), row?[2], row?[3].flatMap(Self.month))

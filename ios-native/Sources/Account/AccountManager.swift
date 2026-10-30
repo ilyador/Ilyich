@@ -208,14 +208,16 @@ actor AccountManager {
 
     // MARK: Sign in
 
-    /// Signs in with a password. The login goes out at once; the session it returns opens only
-    /// once any sign-out in progress has finished.
+    /// Signs in with a password, to a server no older than the app needs. The login goes out at
+    /// once; the session it returns opens only once any sign-out in progress has finished.
     func signIn(server: String, email: String, password: String) async throws {
         guard let url = URL(string: server.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw APIError.invalidServerURL }
         let client = try dependencies.clients.make(url, nil, .signIn)
         let login: LoginResponse
-        do { login = try await client.login(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password) }
-        catch { await client.shutdown(); throw error }
+        do {
+            try await client.requireSupportedVersion()
+            login = try await client.login(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
+        } catch { await client.shutdown(); throw error }
         await client.shutdown()
         try await completeSignIn(login, server: client.baseURL)
     }
@@ -225,9 +227,12 @@ actor AccountManager {
         try await completeSignIn(login, server: server)
     }
 
-    /// A client for signing in to `server`, made off the main actor. The caller shuts it down.
-    func signInClient(for server: URL) throws -> APIClient {
-        try dependencies.clients.make(server, nil, .signIn)
+    /// A client for signing in to `server`, made off the main actor, once the server proved no
+    /// older than the app needs. The caller shuts it down.
+    func signInClient(for server: URL) async throws -> APIClient {
+        let client = try dependencies.clients.make(server, nil, .signIn)
+        do { try await client.requireSupportedVersion() } catch { await client.shutdown(); throw error }
+        return client
     }
 
     /// How `server` lets people sign in, or nil when it can't be asked.
@@ -266,7 +271,9 @@ actor AccountManager {
     private func open(_ credential: StoredCredential) async {
         do {
             let runtime = try await AccountRuntime.open(credential, environment: environment, dependencies: dependencies,
-                                                        presence: presence, expired: { [weak self] id, error in
+                                                        presence: presence, refused: { [weak self] id, unsupported in
+                await self?.serverRefused(id, unsupported)
+            }, expired: { [weak self] id, error in
                 await self?.sessionMayHaveExpired(id, after: error) ?? false
             })
             self.runtime = runtime
@@ -363,6 +370,23 @@ actor AccountManager {
               self.runtime?.id == runtimeID else { return false }
         Task { await self.transition { await $0.performSignOut(.sessionExpired, runtimeID: runtimeID) } }
         return true
+    }
+
+    /// The server runtime `runtimeID` checks with runs a release older than the app needs: the
+    /// runtime closes, its data and the saved session kept, and the sign-in screen says which
+    /// release the app needs. The next launch asks the server again. As with an expiry, closing
+    /// waits for the check that found it, so it runs as a transition of its own.
+    func serverRefused(_ runtimeID: UUID, _ unsupported: UnsupportedServer) async {
+        guard runtime?.id == runtimeID else { return }
+        Task { await self.transition { await $0.performRefusal(unsupported, runtimeID: runtimeID) } }
+    }
+
+    private func performRefusal(_ unsupported: UnsupportedServer, runtimeID: UUID) async {
+        guard let runtime, runtime.id == runtimeID else { return }
+        await close(runtime)
+        phase = .signedOut(nil)
+        message = unsupported.localizedDescription
+        await publish()
     }
 
     // MARK: Library

@@ -114,9 +114,11 @@ final class AccountRuntime: Sendable {
     /// Opens `credential`'s services. The client reads the server's saved network settings from
     /// the Keychain and the offline library opens its database, so this never runs on the main
     /// actor; only the pieces that live there are made there. `expired` decides whether a failure
-    /// that the account's work met ends the session.
+    /// that the account's work met ends the session; `refused` hears that the server the session
+    /// checks with runs a release older than the app needs.
     static func open(_ credential: StoredCredential, environment: AccountEnvironment, dependencies: AccountDependencies,
-                     presence: AppPresence, expired: @escaping @Sendable (UUID, any Error) async -> Bool) async throws -> AccountRuntime {
+                     presence: AppPresence, refused: @escaping @Sendable (UUID, UnsupportedServer) async -> Void = { _, _ in },
+                     expired: @escaping @Sendable (UUID, any Error) async -> Bool) async throws -> AccountRuntime {
         let id = UUID()
         // The App Group mirror is written here for the saved credential, which stays untouched.
         let authorization = AuthorizationState(account: credential.account, token: credential.token,
@@ -131,7 +133,8 @@ final class AccountRuntime: Sendable {
                                      device: environment.usesDevicePhotos ? DeviceThumbnailSource(imaging: PhotoKitAdapter.thumbnails) : nil)
         let work = OwnedWork()
         let bus = LibraryBus()
-        let check = SessionCheck(api: api, work: work, enabled: environment.validatesSession) { error in await expired(id, error) }
+        let check = SessionCheck(api: api, work: work, enabled: environment.validatesSession,
+                                 refused: { unsupported in await refused(id, unsupported) }) { error in await expired(id, error) }
         var library: LibraryServices?
         var libraryError: String?
         if environment.syncsLibrary, credential.requiresPasswordChange != true {
@@ -342,28 +345,39 @@ final class AccountRuntime: Sendable {
 /// Checks the session with the server: when it opens, whenever the app comes forward and when
 /// the server's configuration changes. A newer check replaces an older one. A temporary network
 /// failure, a proxy or a forbidden answer keeps the session, and with it the offline library.
+/// A session the server still accepts is checked against the release the server says it runs,
+/// which may have been replaced by an older one; one that can't say is let be.
 final class SessionCheck: Sendable {
     private let api: APIClient
     private let work: OwnedWork
     private let enabled: Bool
+    private let refused: @Sendable (UnsupportedServer) async -> Void
     private let expired: @Sendable (any Error) async -> Bool
 
-    init(api: APIClient, work: OwnedWork, enabled: Bool, expired: @escaping @Sendable (any Error) async -> Bool) {
+    init(api: APIClient, work: OwnedWork, enabled: Bool, refused: @escaping @Sendable (UnsupportedServer) async -> Void = { _ in },
+         expired: @escaping @Sendable (any Error) async -> Bool) {
         self.api = api
         self.work = work
         self.enabled = enabled
+        self.refused = refused
         self.expired = expired
     }
 
     func validate() {
         guard enabled else { return }
-        let api = api, expired = expired
+        let api = api, expired = expired, refused = refused
         let check = Task {
             do { try await api.validateToken() }
             catch {
                 guard !Task.isCancelled else { return }
                 _ = await expired(error)
+                return
             }
+            do { try await api.requireSupportedVersion() }
+            catch let unsupported as UnsupportedServer where unsupported.version != nil {
+                guard !Task.isCancelled else { return }
+                await refused(unsupported)
+            } catch {}
         }
         work.put(check, in: "validation", cancelling: true)
     }
