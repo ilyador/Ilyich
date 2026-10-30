@@ -366,8 +366,8 @@ final class ThumbnailDiskStore: Sendable {
         }
     }
 
-    /// Sign-out and Clear browsing cache: every file and the index go, and whatever of the folder a
-    /// move left in Caches. A write begun before is refused.
+    /// Sign-out: every file and the index go, and whatever of the folder a move left in Caches. A
+    /// write begun before is refused. Clear browsing cache keeps the store (G2).
     func removeAll() async {
         fence.forgetAll()
         state.withLock { state in state.pending.removeAll() }

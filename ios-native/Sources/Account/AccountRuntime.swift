@@ -313,10 +313,10 @@ final class AccountRuntime: Sendable {
             remote: remote, credentialIsCurrent: credentialIsCurrent, serverChanges: serverChanges)
     }
 
-    /// Clears the account's downloaded previews, and tells the screens, whose feed reads its
-    /// months again.
+    /// Clears the account's downloaded previews and decoded images, and tells the screens, whose
+    /// feed reads its months again. The thumbnails kept offline stay (G2).
     func clearBrowsingCache() async {
-        await pipeline.removeAll()
+        await pipeline.clearBrowsingCache()
         bus.post(.cachesCleared)
     }
 

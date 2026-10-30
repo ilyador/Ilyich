@@ -331,6 +331,31 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 10), .completed,
                        "A trailing inward and vertical drag should scrub to a different timeline month.")
     }
+    /// G2: Diagnostics shows the thumbnails kept offline against their 1.5 GB cap, beside the
+    /// photo download cache that Clear browsing cache clears.
+    @MainActor func testDiagnosticsShowsTheOfflineThumbnailsAgainstTheirCap() {
+        let app = launch()
+        openShelves(app)
+        app.buttons["Settings"].tap()
+        // Twelve rows do not fit; holding near the bottom brings the rest.
+        let origin = app.coordinate(withNormalizedOffset: .zero), height = app.frame.height
+        origin.withOffset(CGVector(dx: 120, dy: height * 0.5))
+            .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: 120, dy: height - 70)), withVelocity: .slow, thenHoldForDuration: 2)
+        let diagnostics = app.buttons["Diagnostics"]
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 5))
+        requireHittable(diagnostics, in: app); diagnostics.tap()
+        XCTAssertTrue(app.navigationBars["Diagnostics"].waitForExistence(timeout: 10))
+        func labeled(_ predicate: NSPredicate) -> XCUIElement { app.descendants(matching: .any).matching(predicate).firstMatch }
+        let row = labeled(NSPredicate(format: "label BEGINSWITH %@", "Offline thumbnails"))
+        for _ in 0..<6 where !row.exists { app.swipeUp() }
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Diagnostics shows the offline thumbnails.")
+        // The size is the row's value, or a text of its own beside the title.
+        let value = row.value as? String ?? ""
+        let text = labeled(NSPredicate(format: "label CONTAINS %@ AND label ENDSWITH %@", " of 1.5", "GB"))
+        XCTAssertTrue((value.contains(" of 1.5") && value.hasSuffix("GB")) || text.exists, "Against their 1.5 GB cap.")
+        XCTAssertTrue(labeled(NSPredicate(format: "label BEGINSWITH %@", "Photo download cache")).exists)
+        capture(app, "Diagnostics — offline thumbnails against their cap")
+    }
     @MainActor func testEverySettingIsReachableFromTheSettingsShelf() {
         let app = launch()
         openShelves(app)

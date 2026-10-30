@@ -55,7 +55,7 @@ import XCTest
         for asset in [locked, kept] { try await pipeline.cacheForTesting(png, asset: asset, size: .preview) }
         let held = try await pipeline.urlCacheHolds(kept, size: .preview)
         XCTAssertTrue(held, "The preview is in the URL cache.")
-        let before = await pipeline.cacheUsage().diskBytes
+        let before = await pipeline.cacheUsage().thumbnailBytes
 
         await pipeline.forget(assetIDs: ["locked"], revoked: true)
 
@@ -65,7 +65,7 @@ import XCTest
         XCTAssertTrue(isFullyCached(kept, in: pipeline), "Every other photo stays, at every size.")
         let keptPreview = try await pipeline.urlCacheHolds(kept, size: .preview)
         XCTAssertTrue(keptPreview, "The URL cache is not cleared for one photo.")
-        let after = await pipeline.cacheUsage().diskBytes
+        let after = await pipeline.cacheUsage().thumbnailBytes
         XCTAssertLessThanOrEqual(before - after, 8 * 1024, "About one file goes, not the store.")
         XCTAssertGreaterThan(after, 0)
     }
