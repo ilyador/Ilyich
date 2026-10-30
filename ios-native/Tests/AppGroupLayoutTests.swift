@@ -1,6 +1,7 @@
 import Foundation
 import IlyichPlatform
 import XCTest
+@testable import Ilyich
 
 final class AppGroupLayoutTests: XCTestCase {
     private let current = "/private/var/mobile/Containers/Shared/AppGroup/0E7C2C1B-5A57-4D2C-9A8E-2D4C1C0F8A11"
@@ -19,7 +20,7 @@ final class AppGroupLayoutTests: XCTestCase {
         let manifest = "ShareInbox/6D3A1E0B-2C4F-4B8A-9D7E-0A1B2C3D4E5F/manifest.json"
         XCTAssertEqual(layout.resolve(URL(fileURLWithPath: previous + "/" + manifest))?.path, current + "/" + manifest)
         XCTAssertEqual(layout.url(forRelativePath: manifest).path, current + "/" + manifest)
-        XCTAssertNil(AppGroupLayout.relativePath(of: URL(fileURLWithPath: current + "/WidgetCache2/scope/random_image.png")),
+        XCTAssertNil(AppGroupLayout.relativePath(of: URL(fileURLWithPath: current + "/Library/Preferences/settings.plist")),
                      "Only folders that earlier formats recorded by absolute path are resolved.")
         XCTAssertNil(AppGroupLayout.relativePath(of: URL(string: "https://photos.example/Backup/scope/stage")!))
     }
@@ -31,6 +32,26 @@ final class AppGroupLayoutTests: XCTestCase {
             XCTAssertThrowsError(try AppGroup.identifier(from: value)) { error in
                 XCTAssertEqual(error as? AppGroupError, .unavailable)
             }
+        }
+    }
+
+    /// The widget went in A1. Each launch deletes the photos it kept in the container, in either of
+    /// its folders, and nothing else; once they are gone, deleting again changes nothing.
+    func testTheWidgetsFoldersAreDeletedAtLaunchAndNothingElse() throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent("AppGroupLayoutTests-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: container) }
+        let kept = ["ShareInbox/6D3A1E0B-2C4F-4B8A-9D7E-0A1B2C3D4E5F/manifest.json", "Library/Preferences/settings.plist"]
+        for path in ["WidgetCache/scope/random_NONE_0_image.png", "WidgetCache2/scope/memory_1_metadata.json"] + kept {
+            let file = container.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: file)
+        }
+        for _ in 0..<2 {
+            IlyichApp.deleteWidgetSnapshots(in: container)
+            for folder in ["WidgetCache", "WidgetCache2"] {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: container.appendingPathComponent(folder).path), folder)
+            }
+            for path in kept { XCTAssertTrue(FileManager.default.fileExists(atPath: container.appendingPathComponent(path).path), path) }
         }
     }
 }

@@ -1,3 +1,4 @@
+import IlyichPlatform
 import SwiftUI
 
 @main struct IlyichApp: App {
@@ -15,6 +16,10 @@ import SwiftUI
         _ = CastSessionService.shared
         // The feed's whole-snapshot cache went in F2 (the index is the cache); its folder goes with it.
         Task.detached(priority: .utility) { TimelineFeed.deleteLegacySnapshots() }
+        // The widget went in A1; the photos it kept in the App Group go with it.
+        Task.detached(priority: .utility) {
+            if let layout = try? AppGroupLayout.current() { IlyichApp.deleteWidgetSnapshots(in: layout.container) }
+        }
     }
     var body: some Scene {
         WindowGroup {
@@ -55,6 +60,14 @@ import SwiftUI
             // Cast works for the signed-in account; another account, or none, stops it.
             .onChange(of: session.runtime?.id, initial: true) { CastSessionService.shared.attach(session.runtime?.cast) }
             .onChange(of: scenePhase, initial: true) { _, phase in session.sceneChanged(phase) }
+        }
+    }
+
+    /// The folders the widget kept its photos in until A1 removed it: WidgetCache2, and WidgetCache
+    /// from builds before 3040055. They go at launch; deleting them again finds nothing.
+    nonisolated static func deleteWidgetSnapshots(in container: URL) {
+        for folder in ["WidgetCache", "WidgetCache2"] {
+            try? FileManager.default.removeItem(at: container.appendingPathComponent(folder, isDirectory: true))
         }
     }
 }

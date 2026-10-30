@@ -7,7 +7,7 @@ import Synchronization
 /// no service looks at the process itself.
 struct AccountEnvironment: Sendable {
     /// Credentials are kept in the Keychain, the App Group mirror is written, and sign-out removes
-    /// the server's saved network settings and reloads the widgets.
+    /// the server's saved network settings.
     var usesDeviceStorage = true
     /// The credential a UI test starts signed in with, instead of the Keychain's.
     var fixtureCredential: StoredCredential?

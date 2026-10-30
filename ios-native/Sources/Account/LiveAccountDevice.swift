@@ -1,7 +1,6 @@
 import Foundation
 import IlyichPlatform
 import UIKit
-import WidgetKit
 
 /// The device-wide services as they run in the app.
 struct LiveAccountDevice: AccountDevice {
@@ -16,8 +15,6 @@ struct LiveAccountDevice: AccountDevice {
     }
 
     func endCasting() async { await CastSessionService.shared.signOut() }
-
-    func reloadWidgets() async { await MainActor.run { WidgetCenter.shared.reloadAllTimelines() } }
 
     func clearNotifications() async { await TransferNotifications.clearAll() }
 
