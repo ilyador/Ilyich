@@ -1,6 +1,7 @@
 import Foundation
 import IlyichPlatform
 
+/// A link the app opens: its own ilyich:// links, and web links to the account's server.
 enum AppLink: Hashable, Sendable {
     case asset(String, albumID: String? = nil), album(String), person(String), memory(String?), activity(String), sharedFiles
 
@@ -10,7 +11,7 @@ enum AppLink: Hashable, Sendable {
         var route: String?
         var identifier: String?
         var albumID: String?
-        if components.scheme == "immich" {
+        if components.scheme == "ilyich" {
             route = components.host
             if route == "share", components.path.isEmpty || components.path == "/" {
                 self = .sharedFiles

@@ -132,7 +132,7 @@ final class SharedInboxTests: XCTestCase {
     }
 
     /// Screens read `batches` straight after `await refresh()`: Shared files selects every file
-    /// in it, and the immich://share link marks its batches seen. So a refresh returns with the
+    /// in it, and the ilyich://share link marks its batches seen. So a refresh returns with the
     /// read it made, even while another refresh, from coming forward or the upload worker, is
     /// still reading.
     @MainActor func testRefreshReturnsWithItsReadWhileAnotherOverlaps() async throws {
