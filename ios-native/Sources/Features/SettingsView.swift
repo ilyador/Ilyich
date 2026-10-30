@@ -292,10 +292,10 @@ private struct AboutIlyichView: View {
                 HStack(spacing: 16) { Image("IlyichLogo").resizable().scaledToFit().frame(width: 48, height: 48); VStack(alignment: .leading) { Text("Ilyich").font(.headline); Text("Your memories, with you.").foregroundStyle(.secondary) } }
                 LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
                 LabeledContent("Build", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")
-                Link("Source code", destination: URL(string: "https://github.com/ilyador/Ilyich")!)
             }
             Section("Credits") {
-                Text("Based on Immich. Licensed under the GNU AGPL v3.")
+                Text("Open source under the GNU AGPL v3.")
+                Link("Source code and server", destination: URL(string: "https://github.com/ilyador/Ilyich")!)
                 Text("Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com.").font(.footnote).foregroundStyle(.secondary)
             }
         }.navigationTitle("About")
