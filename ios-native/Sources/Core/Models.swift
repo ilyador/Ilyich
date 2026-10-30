@@ -51,6 +51,7 @@ struct ServerFeatures: Codable, Sendable {
     let passwordLogin: Bool
     let oauth: Bool
     let smartSearch: Bool
+    /// Whether the server checks smart search results; only the owner's fork says.
     let searchVerification: Bool?
     let ocr: Bool
     let facialRecognition: Bool
@@ -58,6 +59,11 @@ struct ServerFeatures: Codable, Sendable {
     let trash: Bool
     let sidecar: Bool
     let realtimeTranscoding: Bool
+
+    /// The owner's fork of the server, which develops Lightroom sidecars, versions media, pages
+    /// and checks smart search and cuts face images. Its features always name searchVerification;
+    /// a stock release's never do.
+    var isFork: Bool { searchVerification != nil }
 }
 
 struct MapMarkerQuery: Hashable, Sendable {
@@ -138,7 +144,9 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
     var isEdited: Bool
     var isDeveloped: Bool
     /// Timeline columns omit edit state. Only detailed/API sync records can
-    /// authorize substituting a local original for the server's rendition.
+    /// authorize substituting a local original for the server's rendition: the fork's carry
+    /// isEdited with isDeveloped, and a stock server's isEdited alone, with no media revision,
+    /// since it develops nothing.
     var hasKnownEditState: Bool
     var visibility: AssetVisibility
     var mediaRevision: String?
@@ -191,7 +199,8 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
         isTrashed = try c.decodeIfPresent(Bool.self, forKey: .isTrashed) ?? false
         isEdited = try c.decodeIfPresent(Bool.self, forKey: .isEdited) ?? false
         isDeveloped = try c.decodeIfPresent(Bool.self, forKey: .isDeveloped) ?? false
-        hasKnownEditState = try c.decodeIfPresent(Bool.self, forKey: .hasKnownEditState) ?? (c.contains(.isEdited) && c.contains(.isDeveloped))
+        hasKnownEditState = try c.decodeIfPresent(Bool.self, forKey: .hasKnownEditState)
+            ?? (c.contains(.isEdited) && (c.contains(.isDeveloped) || !c.contains(.mediaRevision)))
         visibility = try c.decodeIfPresent(AssetVisibility.self, forKey: .visibility) ?? .timeline
         mediaRevision = try c.decodeIfPresent(String.self, forKey: .mediaRevision)
         thumbhash = try c.decodeIfPresent(String.self, forKey: .thumbhash)

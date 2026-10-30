@@ -388,13 +388,20 @@ struct ServerSearchRequest: Sendable {
         owner != nil || query.predicates.developed != nil ? QueryPlanner.postFilterScanBudget : nil
     }
 
-    func smartBody(cursor: String?) -> SearchQuery {
-        var body = SearchQuery(filter: filter, cursor: cursor)
+    /// How many results a stock server's smart search gives: it pages none, so one longer page is
+    /// all there is.
+    static let unpagedSmartSize = 100
+
+    /// `pages` is false for a stock server, whose smart search takes no cursor and checks nothing:
+    /// the body then asks for one page of `unpagedSmartSize`, without either.
+    func smartBody(cursor: String?, pages: Bool = true) -> SearchQuery {
+        var body = SearchQuery(filter: filter, cursor: pages ? cursor : nil)
+        if !pages { body.size = Self.unpagedSmartSize }
         switch query.ranking {
         case .relevance(.text(let text, let language)):
             body.query = text
             if let language { body.language = language }
-            if !checksContent { body.verify = false }
+            if pages && !checksContent { body.verify = false }
         case .relevance(.similar(let id)): body.queryAssetId = id
         case .chronological: break
         }

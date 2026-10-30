@@ -76,7 +76,20 @@ enum PhotoEdit: Codable, Equatable, Sendable {
 struct AssetEdits: Decodable, Sendable {
     let assetId: String
     let edits: [PhotoEdit]
+    /// The size of the image the edits apply to, which only the owner's fork publishes.
     let baseDimensions: PixelDimensions?
+
+    /// The size of the image the edits apply to: the one published, or else the original's EXIF
+    /// size turned by its orientation, as a stock server measures it. A developed photo's base
+    /// can't be told without the one published.
+    func base(of asset: Asset) throws -> PixelDimensions {
+        if let baseDimensions { return baseDimensions }
+        guard !asset.isDeveloped else { throw APIError.invalidResponse("The server has not published the developed image dimensions yet. Try again when preview processing finishes.") }
+        let flipped = ["5", "6", "7", "8"].contains(asset.exifInfo?.orientation ?? "")
+        let width = asset.exifInfo?.exifImageWidth ?? asset.width ?? 0
+        let height = asset.exifInfo?.exifImageHeight ?? asset.height ?? 0
+        return .init(width: flipped ? height : width, height: flipped ? width : height)
+    }
 }
 struct EditSubmission: Encodable, Sendable { let edits: [PhotoEdit] }
 

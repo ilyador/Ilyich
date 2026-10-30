@@ -71,8 +71,11 @@ final class LibraryRepository: LibraryFeedSource {
 
     // MARK: SearchSource
 
+    /// Only the owner's fork pages and checks smart search; a stock server answers one page.
+    /// Features that can't be read leave the fork's request, which a stock server reads as one.
     func smart(_ request: ServerSearchRequest, cursor: String?) async throws -> SearchResponse {
-        request.page(try await client.search(request.smartBody(cursor: cursor)))
+        let pages = (try? await client.knownServerFeatures())?.isFork ?? true
+        return request.page(try await client.search(request.smartBody(cursor: cursor, pages: pages)))
     }
 
     func metadata(_ request: ServerSearchRequest, cursor: String?, size: Int) async throws -> SearchResponse {

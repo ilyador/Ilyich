@@ -272,11 +272,9 @@ private struct ServerSettingsView: View {
             ServerStorageSection(api: api)
         }.navigationTitle("Server")
         .task {
-            struct Version: Decodable, Sendable { let major: Int; let minor: Int; let patch: Int }
             do {
                 stats = try await api.assetStatistics()
-                let response: Version = try await api.request(.get, path: "server/version")
-                version = "\(response.major).\(response.minor).\(response.patch)"
+                version = try await api.serverVersion().name
             } catch { failure = .init(error) }
         }
         .alert("Couldn’t load server details", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
