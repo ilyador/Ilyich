@@ -485,8 +485,11 @@ final class LibraryJobTests: XCTestCase {
         XCTAssertEqual(snapshot.phase, .idle, "Only that job waits; the engine doesn't.")
         let job = try await h.job("cloud")
         XCTAssertEqual(job?.retryCount, 0)
-        let leftovers = try FileManager.default.contentsOfDirectory(atPath: h.group.url(AccountStoragePaths(LibraryJobHarness.account).backup).path)
-        XCTAssertTrue(leftovers.isEmpty, "A stage that failed leaves no files.")
+        // The failed stage's folder went before the job waited; the local photo's goes just after
+        // its receipt is stored.
+        await untilTransfers("A stage that failed leaves no files.") {
+            (try? FileManager.default.contentsOfDirectory(atPath: h.group.url(AccountStoragePaths(LibraryJobHarness.account).backup).path))?.isEmpty ?? true
+        }
         await h.engine.conditionsChanged()
         try await untilTransfers("It runs once conditions change.") { try await h.receipt("cloud") != nil }
         await h.tearDown()
