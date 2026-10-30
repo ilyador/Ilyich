@@ -16,9 +16,11 @@ import SwiftUI
         _ = CastSessionService.shared
         // The feed's whole-snapshot cache went in F2 (the index is the cache); its folder goes with it.
         Task.detached(priority: .utility) { TimelineFeed.deleteLegacySnapshots() }
-        // The widget went in A1; the photos it kept in the App Group go with it.
+        // The widget went in A1; the photos it kept in the App Group go with it, and so do the keys
+        // the Flutter app left there for its widget.
         Task.detached(priority: .utility) {
             if let layout = try? AppGroupLayout.current() { IlyichApp.deleteWidgetSnapshots(in: layout.container) }
+            if let defaults = AppGroup.defaults { IlyichApp.removeFlutterWidgetKeys(from: defaults) }
         }
     }
     var body: some Scene {
@@ -69,6 +71,13 @@ import SwiftUI
         for folder in ["WidgetCache", "WidgetCache2"] {
             try? FileManager.default.removeItem(at: container.appendingPathComponent(folder, isDirectory: true))
         }
+    }
+
+    /// The keys the Flutter app left in the App Group's preferences for its widget, which may hold
+    /// an old session token and which nothing reads. They go at launch; removing them again finds
+    /// nothing.
+    nonisolated static func removeFlutterWidgetKeys(from defaults: UserDefaults) {
+        for key in ["widget_server_url", "widget_auth_token", "widget_custom_headers"] { defaults.removeObject(forKey: key) }
     }
 }
 
