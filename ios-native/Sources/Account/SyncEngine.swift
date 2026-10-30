@@ -51,7 +51,6 @@ actor SyncEngine {
     private let presence: AppPresence
     private let check: SessionCheck
     private let authorization: AuthorizationState
-    private let device: any AccountDevice
     private let board: SyncStatusBoard
     private let connect: @Sendable () async throws -> ServerEventConnection
     private let debounce: Duration
@@ -88,8 +87,8 @@ actor SyncEngine {
     /// `connect` opens the live connection, the client's own by default. `hub` takes the engine's
     /// changes to the screens and the account's services; one that tells no screen by default.
     init(client: APIClient, entities: LibraryIndex, native: NativeSync, pipeline: MediaPipeline,
-         presence: AppPresence, check: SessionCheck, authorization: AuthorizationState, device: any AccountDevice,
-         status: SyncStatusBoard, connect: (@Sendable () async throws -> ServerEventConnection)? = nil,
+         presence: AppPresence, check: SessionCheck, authorization: AuthorizationState, status: SyncStatusBoard,
+         connect: (@Sendable () async throws -> ServerEventConnection)? = nil,
          debounce: Duration = .milliseconds(350), dependents: (any DependentFetching)? = nil, hub: LibraryChangeHub? = nil) {
         self.client = client
         self.entities = entities
@@ -99,7 +98,6 @@ actor SyncEngine {
         self.presence = presence
         self.check = check
         self.authorization = authorization
-        self.device = device
         board = status
         self.connect = connect ?? { try await client.serverEvents() }
         self.debounce = debounce
@@ -302,8 +300,6 @@ actor SyncEngine {
         await client.persistCachedServerFeatures()
         // Coverage learns of a completed first sync from the change published below.
         await publish(settled.change, accessChanged: settled.accessChanged)
-        // The widgets pick their photos again after every pass that succeeds, as they always have.
-        if isOpen { await device.reloadWidgets() }
         startRepairs()
         return settled.change
     }

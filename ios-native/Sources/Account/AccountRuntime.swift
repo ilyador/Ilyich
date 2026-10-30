@@ -141,12 +141,11 @@ final class AccountRuntime: Sendable {
                 // with its revision, instead of asking the server for it first (T6).
                 pipeline.setIndexedAssets { id in try? await entities.asset(id: id) }
                 let native = NativeSync(api: api, store: entities)
-                let device = dependencies.device
                 // Only the boards the screens observe are made on the main actor.
                 let (status, board) = await MainActor.run { (SyncStatusBoard(), CoverageBoard()) }
                 // The sync's changes reach media first, then the screens on the account's bus.
                 let sync = SyncEngine(client: api, entities: entities, native: native, pipeline: pipeline,
-                                      presence: presence, check: check, authorization: authorization, device: device, status: status,
+                                      presence: presence, check: check, authorization: authorization, status: status,
                                       hub: LibraryChangeHub(pipeline: pipeline, bus: bus))
                 let coverage = CoverageWorker(index: entities, store: pipeline.thumbnails, scheduler: pipeline.scheduler,
                                               conditions: CoverageConditions(followingSystemWithAppActive: presence.isForeground), board: board,

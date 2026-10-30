@@ -1,7 +1,7 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// Code the app shares with its Share and Widget extensions. IlyichPlatform: account identity
+// Code the app shares with its Share extension. IlyichPlatform: account identity
 // and storage names, the App Group, the saved session and the server connection.
 // IlyichShareInbox: the share inbox the Share extension stages into and the app uploads from.
 // Everything here must be usable from an app extension.

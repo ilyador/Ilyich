@@ -18,7 +18,6 @@ final class AccountStoragePathsTests: XCTestCase {
         XCTAssertEqual(paths.backup, "Backup/\(digest)")
         XCTAssertEqual(paths.transfersDatabase, "IlyichTransfers/\(digest).sqlite")
         XCTAssertTrue(TransferStore.url(for: account).path.hasSuffix("/Library/Application Support/" + paths.transfersDatabase))
-        XCTAssertEqual(paths.widgetCache, "WidgetCache2/\(digest)")
         XCTAssertEqual(paths.readOnlyKey, "readOnly.\(digest)")
         XCTAssertEqual(paths.lockedPINAccount, digest)
         XCTAssertEqual(paths.shelfOrderKey("people"), "shelfOrder.people.https://photos.example/api|alice")

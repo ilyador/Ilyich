@@ -27,7 +27,7 @@ public actor ShareInboxRepository {
     public static let folderName = "ShareInbox"
     /// The link the Share extension opens once it has staged a batch; the app answers it with
     /// Shared files.
-    public static let appLink = URL(string: "immich://share")!
+    public static let appLink = URL(string: "ilyich://share")!
     /// A batch folder still without a manifest after this long was left by a staging that never
     /// finished.
     public static let abandonedAge: TimeInterval = 24 * 3600

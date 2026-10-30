@@ -151,8 +151,10 @@ jobs:
           app="$DERIVED_DATA/Build/Products/Release-iphoneos/Ilyich.app"
           test -f "$app/Info.plist"
           test ! -e "$app/embedded.mobileprovision"
-          for bundle in "$app" "$app/PlugIns/ShareExtension.appex" "$app/PlugIns/WidgetExtension.appex"; do
+          test ! -e "$app/PlugIns/WidgetExtension.appex"
+          for bundle in "$app" "$app/PlugIns/ShareExtension.appex"; do
             test -f "$bundle/Info.plist"
+            test -f "$bundle/PrivacyInfo.xcprivacy"
             executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")
             xcrun lipo "$bundle/$executable" -verify_arch arm64
           done
@@ -183,7 +185,7 @@ jobs:
               assert info['CFBundleShortVersionString'] == os.environ['APP_VERSION']
               assert info['CFBundleVersion'] == os.environ['APP_BUILD']
               assert f"Payload/Ilyich.app/{info['CFBundleExecutable']}" in archive.namelist()
-              for extension in ('ShareExtension', 'WidgetExtension'):
+              for extension in ('ShareExtension',):
                   extension_path = f'Payload/Ilyich.app/PlugIns/{extension}.appex'
                   extension_info = plistlib.loads(archive.read(f'{extension_path}/Info.plist'))
                   assert extension_info['CFBundleVersion'] == info['CFBundleVersion']

@@ -419,7 +419,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/users/me':return self.send({'id':OWNER,'name':'Test library','email':'fixture@example.test'})
         if path=='/users/me/preferences':return self.send({'memories':{'enabled':True,'duration':5},'people':{'enabled':True,'sidebarWeb':False}})
         if path=='/memories':return self.send(memories())
-        # One memory, as the memory widget's link opens it.
+        # One memory, as a memory's link opens it.
         if path.startswith('/memories/') and path.count('/')==2:
             found=[m for m in memories() if m['id']==path.split('/')[2]]
             return self.send(found[0]) if found else self.send_immich_error(400,'Not found or no memory.read access')
