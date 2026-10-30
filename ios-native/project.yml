@@ -28,6 +28,8 @@ targets:
     sources:
       - Sources
       - Assets.xcassets
+      - path: Config/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: GoogleCast
         product: GoogleCastDynamic
@@ -53,7 +55,9 @@ targets:
     platform: iOS
     sources:
       - path: Extensions/Share
-        excludes: [Info.plist]
+        excludes: [Info.plist, PrivacyInfo.xcprivacy]
+      - path: Extensions/Share/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: IlyichKit
         product: IlyichPlatform
