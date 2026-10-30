@@ -43,9 +43,15 @@ struct AccountEnvironment: Sendable {
     /// This process's environment.
     static let current: AccountEnvironment = {
         #if DEBUG
-        if let test = uiTest(arguments: ProcessInfo.processInfo.arguments) { return test }
-        #endif
+        let arguments = ProcessInfo.processInfo.arguments
+        if let test = uiTest(arguments: arguments) { return test }
+        // A live UI test against a real server (StockServerLiveTests) taps the shelves' rows.
+        var live = AccountEnvironment.live
+        live.keepsShelvesOpen = arguments.contains("--ui-testing-shelves-stay-open")
+        return live
+        #else
         return .live
+        #endif
     }()
 
     #if DEBUG
