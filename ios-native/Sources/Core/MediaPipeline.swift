@@ -606,7 +606,7 @@ actor MediaPipeline {
         }
     }
 
-    /// Sign-out and Clear browsing cache only: every image of the account, on disk too.
+    /// Sign-out only: every image of the account, on disk too.
     func removeAll() async {
         removeAllButStoredThumbnails()
         await thumbnails.removeAll()
@@ -616,10 +616,18 @@ actor MediaPipeline {
     /// on disk stay. For a sync reset, whose sweep then removes the files the index no longer
     /// vouches for.
     func removeAllButStoredThumbnails() {
-        privateMedia.purge()
-        generation = UUID()
         fence.forgetAll()
         scheduler.reset()
+        clearBrowsingCache()
+    }
+
+    /// Clear browsing cache (Diagnostics): the URL cache and every decoded image go, and the
+    /// previews and faces still downloading with them. Grid thumbnails on disk stay, and so does
+    /// the work that keeps them: a thumbnail downloading is still stored, and coverage's position
+    /// stays good, so nothing kept offline is downloaded again (REBUILD_ROADMAP.md G2).
+    func clearBrowsingCache() {
+        privateMedia.purge()
+        generation = UUID()
         for flight in flights.values { flight.task.cancel() }
         flights.removeAll()
         for flight in faceFlights.values { flight.cancel() }
@@ -708,7 +716,8 @@ actor MediaPipeline {
     }
 
     func cacheUsage() async -> MediaCacheUsage {
-        MediaCacheUsage(memoryBytes: byteCache.currentMemoryUsage, diskBytes: byteCache.currentDiskUsage + (await thumbnails.currentUsage()),
+        MediaCacheUsage(memoryBytes: byteCache.currentMemoryUsage, diskBytes: byteCache.currentDiskUsage,
+                        thumbnailBytes: await thumbnails.currentUsage(), thumbnailLimit: thumbnails.limit,
                         pendingLoads: flights.count + scheduler.pendingCount + scheduler.downloadsRunning,
                         decodedMemoryLimit: decoded.totalCostLimit + thumbs.budget)
     }
@@ -760,7 +769,11 @@ actor MediaPipeline {
 
 struct MediaCacheUsage: Sendable {
     let memoryBytes: Int
+    /// The URL cache on disk (IlyichMedia, in Caches): what Clear browsing cache empties.
     let diskBytes: Int
+    /// The grid thumbnails kept offline, and the cap they are trimmed to stay under.
+    let thumbnailBytes: Int
+    let thumbnailLimit: Int
     let pendingLoads: Int
     let decodedMemoryLimit: Int
 }
