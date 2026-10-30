@@ -13,15 +13,12 @@ Ilyich is an app for a photo server that you run or choose yourself. The develop
 
 - **Photos:** to show the photos on your iPhone, back them up to your server, and save photos you download.
 - **Location:** only when you set a photo's location from where you are, or ask the app to read your Wi-Fi network's name so it can use your server's home address. Your location is sent nowhere unless you save it to a photo.
-- **Local network:** to reach a server on your home network and find Chromecast devices.
+- **Local network:** to reach a server on your home network.
 - **Face ID:** to unlock your Locked Folder. Face ID data stays with iOS.
 
 ## Other services
 
-- Maps and place search use Apple Maps, under Apple's privacy policy.
-- For Chromecast, the app includes Google's Cast SDK. It sends Google a device identifier, diagnostic data and how casting is used, under [Google's privacy policy](https://policies.google.com/privacy). This data is not linked to you and is not used for tracking.
-
-The app has no ads, analytics or tracking.
+Maps and place search use Apple Maps, under Apple's privacy policy. The app has no ads, analytics or tracking, and includes no third-party SDKs.
 
 ## Contact
 

@@ -29,7 +29,6 @@ Ilyich is a fast, native iPhone app for the photo library you host yourself. You
 • Favorites, archive, trash, duplicates, and a Locked Folder with Face ID
 • Crop, rotate and flip without touching the original
 • Free up space on your phone once photos are backed up
-• Play your photos and videos on a Chromecast
 
 Ilyich works with Immich servers, version 3.3.0 or later. Its own server, an open-source fork you can run instead, adds previews developed from your Lightroom edits and a natural-language search that double-checks its results: github.com/ilyador/Ilyich
 
@@ -49,31 +48,25 @@ The demo account holds sample photos. Backups and edits made while reviewing go 
 
 - The app connects only to the server address the user enters. NSAllowsArbitraryLoads is on because self-hosted servers often run on a home network over plain HTTP, at an address we can't know in advance.
 - Location is asked for only when the user sets a photo's location from where they are, or asks the app to read the Wi-Fi name (iOS requires location permission for it) to use the server's home address.
-- Local network access reaches a server on the home network and finds Chromecast devices.
+- Local network access reaches a server on the home network.
 ```
 
 ## App Privacy
 
-- **Tracking:** no.
-- **Data collected:** only by Google's Cast SDK, as its privacy manifest declares. Enter each type as not linked to the user, not used for tracking, for Analytics and App Functionality:
-  - Identifiers: Device ID
-  - Usage Data: Product Interaction
-  - Diagnostics: Other Diagnostic Data
-- Without the Cast SDK the answer is "Data Not Collected".
+- **Data collection:** "No, we do not collect data from this app." The app has no analytics, ads or third-party SDKs.
 - Photos, account details and searches are not "collected" in Apple's sense: they go only to the user's own server, which the developer can't reach.
 
 ## Compliance already in the app
 
 - **Export compliance:** Info.plist sets `ITSAppUsesNonExemptEncryption` to NO (HTTPS only), so App Store Connect doesn't ask.
-- **Privacy manifests:** `Config/PrivacyInfo.xcprivacy` and `Extensions/Share/PrivacyInfo.xcprivacy` declare the required-reason APIs; the Cast SDK ships its own.
+- **Privacy manifests:** `Config/PrivacyInfo.xcprivacy` and `Extensions/Share/PrivacyInfo.xcprivacy` declare the required-reason APIs.
 - **Content rights:** answer No. The app shows the user's own photos; the map data is Natural Earth's public domain data, credited under About.
-- **Licenses:** the app ships your code, ThumbHash (MIT, credited under About > Licenses) and the Cast SDK. Nothing outside `ios-native` is compiled in.
+- **Licenses:** the app ships your code and ThumbHash (MIT, credited under About > Licenses). Nothing outside `ios-native` is compiled in.
 - **Bundle ID:** `app.alextran.immich.H4K2MSF2SG`, kept so the store build replaces the installed app and keeps its data. Users never see it.
 
 ## Left before submitting
 
-1. Keep or remove Google Cast. The privacy answers and the policy above assume it stays.
-2. A demo account on a server App Review can reach from the internet: a non-admin account with a few sample photos and a storage quota is enough. Fill its details into the review notes.
-3. The App Store Connect record (paid Apple Developer Program on team H4K2MSF2SG), with the bundle ID above.
-4. Screenshots for the 6.9-inch iPhone (1320 × 2868), at least three. iPhone 15 Pro screenshots are too small.
-5. Archive and upload: Xcode's Organizer, or `xcodebuild archive` and `-exportArchive` on the Mac with an App Store Connect API key.
+1. A demo account on a server App Review can reach from the internet: a non-admin account with a few sample photos and a storage quota is enough. Fill its details into the review notes.
+2. The App Store Connect record (paid Apple Developer Program on team H4K2MSF2SG), with the bundle ID above.
+3. Screenshots for the 6.9-inch iPhone (1320 × 2868), at least three. iPhone 15 Pro screenshots are too small.
+4. Archive and upload: Xcode's Organizer, or `xcodebuild archive` and `-exportArchive` on the Mac with an App Store Connect API key.

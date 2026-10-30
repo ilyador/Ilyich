@@ -1206,6 +1206,7 @@ CastEligibility: locked assets are ineligible. CastMediaResolver preflights HEAD
 - **Acceptance:**
   - On the owner's Chromecast: a photo and a long video cast; Stop removes the Cast session from the web session list
 - **As built:** Build 3040072, which never reached the phone; 3040074 first installed it. Each Cast session gets its own child-session grant sized to the media (15 min to 6 h), revoked on Stop, at the session's end, on an account change and before sign-out logs out; locked photos are never cast. It awaits a check on the owner's Chromecast.
+- **Removed:** build 3040096, at the owner's request: Sources/Cast, its tests and the GoogleCast package went, with the viewer's Cast item, sign-out's revoke step and the Bonjour entries. The App Store build ships no Google code, so its privacy label is Data Not Collected.
 
 ### W4 — Widget core package
 
@@ -1434,7 +1435,7 @@ App side: WidgetRefreshCoordinator (typed changes, 60 s debounce, skipped in the
 - Widget cache. <AppGroup>/WidgetCache2/<digest>/<key>_image.png and _metadata.json, and WidgetCache/<digest> from builds before 3040055. DELETED at every launch since A1, which removed the widget (owner decision for the App Store); W4's import into a v2 layout was never built.
 - WidgetKit configurations: kinds com.immich.widget.random and com.immich.widget.memory, intent and entity type names, parameters album, showAlbumName and forceFullColor, IDs NONE and FAVORITES. GONE with the widget in A1: widgets placed on the home screen go with the update.
 - Legacy Flutter widget keys widget_server_url, widget_auth_token and widget_custom_headers, plus root cache files. REMOVED from the App Group's preferences at every launch since A1, with a plain removeObject and no flag: the token may be an old session's, and nothing reads them (W4's purge behind legacyWidgetCleanup.v1 was never built). Their mirrors and fixtures went in A1. The phone's App Group held no root cache files on 2026-10-29 (C8).
-- Cast child session. Server-side only, never on disk. Revoked on stop, end and sign-out (W2). The GCK SDK's resume data is untouched.
+- Cast child session. Server-side only, never on disk. Revoked on stop, end and sign-out (W2). Gone with Cast in 3040096; a grant left on a server expires on its own.
 - Mutation journal outcomes and receipts.local_deleted_at. NEW (P1, P4). Keep versus prune receipts after local deletion is an owner question.
 
 ## Risks
@@ -1575,7 +1576,7 @@ Should a proxy 401 (no Immich error body) stop signing you out and show a connec
 - web links are parsed but have no Associated Domains entitlement.
 Change any?
 - Locked media in the viewer: keep Download original, Share and Save to Photos (default), or hide them as Flutter does? Should album widgets include archived photos (default no)?
-- Cast: is a grant cap of 6 h for long videos acceptable? Locked assets stay non-castable until the server offers asset-scoped grants.
+- Cast: is a grant cap of 6 h for long videos acceptable? Locked assets stay non-castable until the server offers asset-scoped grants. Moot: the owner removed Cast in 3040096.
 - Will an older build ever be reinstalled after the backup cutover (B9)? This decides when state.json.imported can be deleted (B10, default 7 days after confirmation). Answered 2026-10-29: no build older than 3040092 will be reinstalled (B10 and C8 acted on it). Use iOS 27 BGContinuedProcessingTask for user-started backups? It shows system UI; default no.
 - Other accounts' old backup records (B10): B9 moved an account's backup records to the new engine only when that account signed in, so an account last signed in on this phone before build 3040077 still has the records an older version kept (state.json). B10 keeps B9's import for them: if such an account signs in again, it comes back as it was left (backup paused, automatic backup off, nothing it backed up checked or hashed again), and the importer stays in the app. Default: keep it until you confirm no such account will sign in on this phone again. Then it can go, and such an account would check its photos with the server again (hashing them, not uploading them twice) the next time it backs up. Answered by the phone check on 2026-10-29: the App Group holds no state.json, and this is the only device, so C8 removed the importer.
 - Are server changes acceptable (isDeveloped and ownerId in the V3 search filter, a per-asset dependent backfill), or must the client keep post-filters and per-asset repair (default)?
