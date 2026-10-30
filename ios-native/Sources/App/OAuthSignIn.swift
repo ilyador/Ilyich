@@ -12,6 +12,9 @@ import UIKit
         let challenge = Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
         struct Start: Encodable, Sendable { let redirectUri: String; let state: String; let codeChallenge: String }
         struct Authorization: Decodable, Sendable { let url: URL }
+        // Immich servers send a phone's sign-in back to app.immich:///oauth-callback. The web
+        // session catches that redirect itself, so the app doesn't register app.immich, which the
+        // official Immich app does.
         let authorization: Authorization = try await api.request(.post, path: "oauth/authorize",
             body: Start(redirectUri: "app.immich:///oauth-callback", state: state, codeChallenge: challenge))
         guard ["https", "http"].contains(authorization.url.scheme?.lowercased() ?? "") else { throw APIError.invalidResponse("The sign-in provider returned an invalid address.") }

@@ -370,7 +370,18 @@ final class LibraryTests: XCTestCase {
         for row in ["Diagnostics", "About", "Sign out"] {
             XCTAssertTrue(app.buttons[row].waitForExistence(timeout: 5), "\(row) has its own row on the Settings shelf.")
         }
-        tapBesideShelves(app)
+        // About names the license, links the owner's fork as the source code and server, and shows
+        // ThumbHash's MIT notice under Licenses (A1).
+        app.buttons["About"].tap()
+        XCTAssertTrue(app.staticTexts["Open source under the GNU AGPL v3."].waitForExistence(timeout: 5), "About names the license.")
+        XCTAssertTrue(app.descendants(matching: .any)["Source code and server"].exists, "About links the source code and server.")
+        capture(app, "About — license and source")
+        app.buttons["Licenses"].tap()
+        XCTAssertTrue(app.staticTexts["Copyright (c) 2023 Evan Wallace"].waitForExistence(timeout: 5), "Licenses shows ThumbHash's notice.")
+        capture(app, "About — licenses")
+        app.navigationBars["Licenses"].buttons.firstMatch.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5), "Back in About.")
+        app.buttons["Done"].tap()
         openShelves(app)
         app.buttons["Settings"].tap()
         XCTAssertTrue(app.buttons["Read-only mode"].waitForExistence(timeout: 5))
@@ -1029,15 +1040,15 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.otherElements["Interactive Earth"].waitForExistence(timeout: 15))
         capture(app, "Photo location — focused interactive Earth")
     }
-    /// Opens a link the way a widget or another app does: through the system, to the app already
-    /// running. (XCUIApplication.open relaunches the app instead.) iOS may ask first.
+    /// Opens a link the way another app does: through the system, to the app already running.
+    /// (XCUIApplication.open relaunches the app instead.) iOS may ask first.
     @MainActor private func openLink(_ link: String) {
         XCUIDevice.shared.system.open(URL(string: link)!)
         let open = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Open"]
         if open.waitForExistence(timeout: 2) { open.tap() }
     }
-    /// A widget's link opens its photo even with a sheet open: the sheet closes, then the photo
-    /// opens over the feed as it was, and the library presents as before once it closes.
+    /// A photo's link opens it even with a sheet open: the sheet closes, then the photo opens over
+    /// the feed as it was, and the library presents as before once it closes.
     @MainActor func testDeepLinkOpensAssetOverOpenSheet() {
         let app = launch()
         // An album in the feed shows the app was not started again by the link.
@@ -1052,7 +1063,7 @@ final class LibraryTests: XCTestCase {
         requireHittable(options, in: app); options.tap()
         XCTAssertTrue(app.navigationBars["Search options"].waitForExistence(timeout: 5))
         let id = "00000000-0000-4000-8000-00000000a5e7"
-        openLink("immich://asset?id=\(id)")
+        openLink("ilyich://asset?id=\(id)")
         XCTAssertTrue(app.descendants(matching: .any)["viewer.photo.\(id)"].waitForExistence(timeout: 15), "The link's photo opens.")
         XCTAssertFalse(app.navigationBars["Search options"].exists, "The sheet closed first.")
         capture(app, "Link — photo opened over a sheet")
@@ -1071,21 +1082,21 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.buttons["Coast"].waitForExistence(timeout: 10))
         tapBesideShelves(app)
 
-        openLink("immich://memory")
+        openLink("ilyich://memory")
         XCTAssertTrue(app.navigationBars["On this day"].waitForExistence(timeout: 10), "A memory link opens the memories.")
-        openLink("immich://share")
+        openLink("ilyich://share")
         XCTAssertTrue(app.navigationBars["Shared files"].waitForExistence(timeout: 10), "The share extension's link opens Shared files.")
         XCTAssertFalse(app.navigationBars["On this day"].exists, "Shared files replaced the memories.")
-        openLink("immich://album?id=00000000-0000-4000-8000-000000000003")
+        openLink("ilyich://album?id=00000000-0000-4000-8000-000000000003")
         let filter = app.otherElements["library.filterPills"]
         XCTAssertTrue(filter.staticTexts["Coast"].waitForExistence(timeout: 10), "An album link shows the album in the feed.")
         XCTAssertFalse(app.navigationBars["Shared files"].exists, "Shared files closed first.")
-        openLink("immich://person?id=00000000-0000-4000-8000-000000000002")
+        openLink("ilyich://person?id=00000000-0000-4000-8000-000000000002")
         XCTAssertTrue(filter.staticTexts["Maya"].waitForExistence(timeout: 10), "A person link shows the person in the feed.")
         XCTAssertFalse(filter.staticTexts["Coast"].exists, "A link shows its person alone, as before.")
         // A photo linked inside an album keeps the album's actions, though the feed shows a person.
         let linked = "00000000-0000-4000-8000-00000000a1b2"
-        openLink("immich://asset?id=\(linked)&albumId=00000000-0000-4000-8000-000000000003")
+        openLink("ilyich://asset?id=\(linked)&albumId=00000000-0000-4000-8000-000000000003")
         let photo = app.descendants(matching: .any)["viewer.photo.\(linked)"]
         XCTAssertTrue(photo.waitForExistence(timeout: 15), "A photo linked in an album opens.")
         let actions = app.buttons["Photo actions"]
@@ -1095,7 +1106,7 @@ final class LibraryTests: XCTestCase {
         comments.tap()
         XCTAssertTrue(app.navigationBars["Comments and likes"].waitForExistence(timeout: 10), "The photo's comments open over the viewer.")
         // An activity link closes the photo's comments and the viewer under them, then opens the album's.
-        openLink("immich://activity?albumId=00000000-0000-4000-8000-000000000003")
+        openLink("ilyich://activity?albumId=00000000-0000-4000-8000-000000000003")
         XCTAssertTrue(photo.waitForNonExistence(timeout: 15), "The viewer closed, with the sheet it had open.")
         XCTAssertTrue(app.navigationBars["Comments and likes"].waitForExistence(timeout: 10), "An activity link opens the album's comments and likes.")
         capture(app, "Link — album activity")
@@ -1107,7 +1118,7 @@ final class LibraryTests: XCTestCase {
         let heading = app.staticTexts["library.heading"]
         XCTAssertTrue(heading.waitForExistence(timeout: 10))
         func playFirstMemory() {
-            openLink("immich://memory")
+            openLink("ilyich://memory")
             XCTAssertTrue(app.navigationBars["On this day"].waitForExistence(timeout: 10))
             let play = app.buttons["Play memory"].firstMatch
             requireHittable(play, in: app); play.tap()
@@ -1134,38 +1145,38 @@ final class LibraryTests: XCTestCase {
         app.buttons["Close"].tap()
         requireHittable(app.textFields["library.search"], in: app)
 
-        // A widget tap while a memory plays closes the player and the memories, then opens its photo.
+        // A photo's link while a memory plays closes the player and the memories, then opens the photo.
         playFirstMemory()
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
         let id = "00000000-0000-4000-8000-00000000b0b0"
-        openLink("immich://asset?id=\(id)")
+        openLink("ilyich://asset?id=\(id)")
         XCTAssertTrue(app.descendants(matching: .any)["viewer.photo.\(id)"].waitForExistence(timeout: 15), "The link's photo opens over the memory.")
         XCTAssertFalse(app.buttons["Memory photo actions"].exists, "The player closed.")
         XCTAssertFalse(app.navigationBars["On this day"].exists, "The memories closed.")
     }
     /// A link that starts the app opens its photo once the library is up. XCUIApplication.open
-    /// launches the app afresh with the link, as a widget tap does when the app isn't running.
+    /// launches the app afresh with the link, as tapping a link does when the app isn't running.
     @MainActor func testALinkThatStartsTheAppOpensItsPhoto() {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--ui-testing", "--ui-testing-library", "-appearance", "light", "--ui-testing-shelves-stay-open"]
         app.terminate()
         let id = "00000000-0000-4000-8000-00000000c01d"
-        app.open(URL(string: "immich://asset?id=\(id)")!)
+        app.open(URL(string: "ilyich://asset?id=\(id)")!)
         XCTAssertTrue(app.descendants(matching: .any)["viewer.photo.\(id)"].waitForExistence(timeout: 30), "The link's photo opens on launch.")
         capture(app, "Link — photo opened on launch")
         app.buttons["Close"].tap()
         XCTAssertTrue(app.collectionViews["library.grid"].waitForExistence(timeout: 10))
         requireHittable(app.textFields["library.search"], in: app)
     }
-    /// G1: the memory widget's link names its memory. Starting the app, it plays that memory once
-    /// the library is up, from its first photo, and closing the player leaves the memory under it.
-    @MainActor func testAMemoryWidgetLinkThatStartsTheAppPlaysItsMemory() {
+    /// G1: a memory's link names its memory. Starting the app, it plays that memory once the
+    /// library is up, from its first photo, and closing the player leaves the memory under it.
+    @MainActor func testAMemoryLinkThatStartsTheAppPlaysItsMemory() {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--ui-testing", "--ui-testing-library", "-appearance", "light", "--ui-testing-shelves-stay-open"]
         app.terminate()
-        app.open(URL(string: "immich://memory?id=00000000-0000-4000-8000-0000000000a2")!)
+        app.open(URL(string: "ilyich://memory?id=00000000-0000-4000-8000-0000000000a2")!)
         XCTAssertTrue(app.staticTexts["Maya Memory Two"].waitForExistence(timeout: 30), "The link's memory plays on launch.")
         XCTAssertTrue(app.staticTexts["1 of 2"].exists, "From its first photo.")
         capture(app, "Link — memory played on launch")

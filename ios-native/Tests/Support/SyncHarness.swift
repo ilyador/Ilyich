@@ -77,7 +77,7 @@ extension XCTestCase {
         let bus = LibraryBus()
         let engine = SyncEngine(client: api, entities: entities, native: NativeSync(api: api, store: entities, acks: acks),
                                 pipeline: pipeline, presence: presence, check: check,
-                                authorization: authorization, device: FakeAccountDevice(log: AccountEventLog()), status: status,
+                                authorization: authorization, status: status,
                                 connect: connect ?? { live.connect() }, debounce: debounce, hub: LibraryChangeHub(pipeline: pipeline, bus: bus))
         let busChanges = Recorded<[String: Bool]>()
         // Each change is recorded as the bus takes it, before the engine's publish returns: the

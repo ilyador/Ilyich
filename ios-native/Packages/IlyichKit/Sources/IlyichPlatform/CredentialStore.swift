@@ -20,7 +20,7 @@ public struct StoredCredential: Codable, Equatable, Sendable {
 
     public var account: AccountID { AccountID(server: server, userID: userID) }
 
-    /// The account digest, which names the account's Backup folder and widget snapshots.
+    /// The account digest, which names the account's Backup folder.
     public var scope: String { account.digest }
 }
 
@@ -116,10 +116,6 @@ public struct KeychainCredentialStore: CredentialStore {
         let group = try appGroup()
         UserDefaults(suiteName: group)?.set(true, forKey: Self.signedOutKey)
         let status = keychain.delete(Self.query(group: group))
-        // Signing out leaves no widget photos behind, in today's cache or the one before it.
-        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) {
-            for cache in ["WidgetCache", "WidgetCache2"] { try? FileManager.default.removeItem(at: container.appendingPathComponent(cache)) }
-        }
         guard status == errSecSuccess || status == errSecItemNotFound else { throw CredentialError(status: status) }
     }
 

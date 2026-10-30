@@ -62,7 +62,6 @@ protocol AccountDevice: Sendable {
     func activateBackup(_ runtime: AccountRuntime) async
     /// Stops casting and revokes the grants the receiver was given.
     func endCasting() async
-    func reloadWidgets() async
     func clearNotifications() async
     /// Forgets the Locked Folder PIN kept for biometric unlock.
     func removeLockedPIN(scope: String) async
@@ -256,7 +255,6 @@ actor AccountManager {
             await publish()
         }
         do { try dependencies.credentials.save(credential) } catch { return .failure(error) }
-        if environment.usesDeviceStorage { await dependencies.device.reloadWidgets() }
         stopWatchingForUnlock()
         await open(credential)
         return .success(())
@@ -329,10 +327,9 @@ actor AccountManager {
             try? await runtime.api.logout()
         }
         // 4. The extensions and upload delegates stop seeing the session: the tombstone first, then
-        //    the Keychain item and the widget snapshots.
+        //    the Keychain item.
         var problem: String?
         do { try dependencies.credentials.remove() } catch { problem = error.localizedDescription }
-        if environment.usesDeviceStorage { await device.reloadWidgets() }
         await device.clearNotifications()
         await device.removeLockedPIN(scope: scope)
         // 5. What the account kept on the phone, as the policy for the reason says.
