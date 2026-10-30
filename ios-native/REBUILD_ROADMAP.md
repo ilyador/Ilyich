@@ -1304,6 +1304,53 @@ App side: WidgetRefreshCoordinator (typed changes, 60 s debounce, skipped in the
   - Unchanged: a photo restored elsewhere returns to an open search, Info grid or memory only when it is read again; photos removed in the album editor leave the album feed at the next sync.
   - The fixture serves people a page at a time, a Trash holding photos in three months and a single memory; every earlier answer is unchanged.
 
+### A2 — Works with stock Immich
+
+- **Workstreams:** 1, 5, 9. **Depends on:** C8. **Risk:** medium.
+- **Scope:** App Store users will run stock releases, while the app was built against the owner's fork (3.3.3, on upstream main). Audit every server call the app and its share extension make against v3.3.5's spec, and its server code where behavior matters. Make every feature work on stock as far as stock allows, and hide what it can't do: no broken controls, wrong results or error spam. Refuse a server older than the oldest release the app works with, at sign-in and when a saved session reconnects, with a plain message naming the version; no UI text names Immich. Check it end to end in the simulator against stock v3.3.5.
+- **Migration:** None.
+- **Tests:**
+  - StockServerTests, on stock 3.3.5's own payloads: testFeaturesTellTheForkFromAStockRelease, testAStockAssetKnowsItsEditStateAndIsVersionedByThumbhash, testAStockTimelineMonthIsVersionedByThumbhash, testAStockThumbhashChangeIsAMediaRevisionChange, testAStockServerIsAskedForOneLongerSmartSearchPage, testLightroomIsOfferedOnlyOnTheFork, testTheEditorMeasuresAStockOriginalAsStockDoes, testAStockSearchPageHasNoVerificationOrMore, testTheOldestSupportedReleaseIs330, testTheRefusalNamesTheReleaseNeeded
+  - AccountManagerTests: testSignInRefusesAServerOlderThanTheAppNeeds, testAReconnectingSessionRefusesAnOlderServerAndKeepsEverything, testAReconnectingSessionKeepsAServerThatCantSayItsVersion
+  - ShelfCatalogTests give the shelves the fork's features; the UI fixture's features name searchVerification, as the fork's do
+  - UI, opt-in and live: StockServerLiveTests
+- **Acceptance:**
+  - Unit and UI suites pass; the live run passes against stock v3.3.5
+- **As built:**
+  - Build: the integrator's next build.
+  - The fork is told by what it has and stock lacks: its `server/features` always names searchVerification (true or false), and a stock release's never do (`ServerFeatures.isFork`). Searches read the features a client last read (`knownServerFeatures`), so they ask the server once.
+  - Audit. The app's calls (paths, query parameters, body fields, the response fields its decoders need and the sync types it asks for) all exist in v3.3.5 with the fork's shape, but for the fork's own additions. Each, and what stock does now:
+    - `GET faces/{id}/thumbnail` and `AssetFaceResponseDto.frameTimestamp` (Fix faces): only for a face found further into a video than its preview, which stock never finds. Every stock face is cut from the preview, as before. Unchanged.
+    - `mediaRevision` on assets, sync records, timeline columns and socket events: media are versioned by thumbhash instead, which stock changes when it renders an edit (its edit-thumbnail job writes the new thumbhash and size). Fixed: the index compared and published only media revisions, so an edit made elsewhere never reached the media layer as a new revision; it now compares the revision as Asset.cacheRevision names it.
+    - `isDeveloped` on assets and sync records: stock develops nothing. Fixed: a record knew its edit state only with isDeveloped, so on stock Edit stayed disabled ("This photo's details are still loading."), the phone's original never stood in offline and GIFs never animated. A record with isEdited and no media revision now knows its edit state; a fork record from before isDeveloped, which has a media revision, still doesn't.
+    - `isDeveloped` on `timeline/bucket(s)`: stock drops it, so Lightroom showed every photo from the server timeline and none from the offline library. Fixed: Lightroom shows only on the fork, on the More shelf and in Browse more, and not while the features are unknown.
+    - `SmartSearchDto.cursor` and `verify`, `SearchResponseDto.verification`, `ServerFeaturesDto.searchVerification`: stock's structured smart search pages nothing. It answers `size` results with neither a cursor nor a page, and drops cursor and verify silently, so the fork's pages of 10 found 10 photos. Fixed: stock is asked once for 100 (`ServerSearchRequest.unpagedSmartSize`), without cursor or verify, and the AI check shows only where the server verifies. Metadata searches page by cursor on stock as on the fork.
+    - `AssetEditsResponseDto.baseDimensions`: the editor measures the base as stock checks a crop, the EXIF size turned by its orientation (`AssetEdits.base(of:)`, moved out of the editor). Unchanged.
+    - Passkeys and `ServerVersionResponseDto.featureLevel`: unused by the app.
+    - The rest of the spec diff (admin and job settings, queues, JXL, notification and theme settings, the OAuth account URL, permissions, workflows) is unused by the app.
+    - The share extension calls no server; the app uploads what it stages. Unknown fields are dropped silently on stock as on the fork: the media URLs' `c` revision and, on stock, verify and cursor (checked live).
+  - Minimum version: 3.3.0. The sync stream asks for AuthUsersV2, MemoriesV2, MemoryToAssetsV2 and AssetFacesV3, which came in 3.3.0 (its release candidates lacked the memories types), and a server refuses a stream that asks for a type it doesn't know; the people list's name filter also came in 3.3.0. Checked by running the app's calls against every release's spec from v2.0.0 to v3.3.5: 3.3.0 is the first with none missing.
+    - Sign-in, with a password or single sign-on, asks `server/version` first. An older release, a release candidate of 3.3.0 or a server too old to answer is refused before the password goes out: "This server runs version 3.2.4. Ilyich needs version 3.3.0 or later." (or "a prerelease of version 3.3.0", or "This server is too old for Ilyich, which needs version 3.3.0 or later.").
+    - A saved session's check, when it opens, comes forward or the server restarts, asks the version once the server accepts the session. An older release closes the account to the sign-in screen with the message, keeping the saved session, the offline library and the backup records, so the next launch tries again. A server that can't say, or can't be reached, is let be.
+    - Settings' Server screen reads the version through the same call.
+  - Live run, 2026-10-30. Stock v3.3.5 ran in Docker on the Linux machine: its server, its CPU machine learning, and the postgres and valkey images its compose file names, in a project, network and data of their own. The simulator reached it through an ssh reverse tunnel. Its first account held, from the API: five public-domain photos, four with one person, placed in Wellington, Tbilisi, Prague and Washington, one taken on this date in 2021, which made a memory, and the fifth in the Locked Folder, behind a PIN; a generated video; and a Live Photo paired through the API. StockServerLiveTests drives the app as it ships (Keychain, sync, offline library, the simulator's photos, backup), signed in through the sign-in screen and out from the Settings shelf. The last run passed all 13 of its tests, from signed out; the earlier runs' failures were the test's own steps. It covered:
+    - sign-in and the first sync; reopened, the saved session's check accepted 3.3.5 and every photo showed by name;
+    - the viewer: a photo with Edit offered, the video playing in ranges (206), the Live Photo marked LIVE with its motion; Info with place, camera and the person's face; Fix faces cutting all six faces from the preview; favorite and archive, both ways;
+    - albums: one created, a photo added from the viewer, the album's feed, the photo removed in its details (the server's album empty);
+    - people: the shelf, the person's feed (their four photos, not the video), the people list; places: the Earth with its photo lights, the list of locations from the server's markers and reverse geocoding, and a photo's place from its Info, the Earth turned to it over its photos;
+    - On this day's memory playing;
+    - search: smart (one page, no AI check) and by file name (by cursor); no Lightroom on the More shelf or in Browse more;
+    - a quarter turn saved in the editor: the viewer and the grid showed the new preview under its new thumbhash;
+    - Trash: a photo put there from the viewer, then restored from the Trash;
+    - the Locked Folder opened with the account's PIN, its photo opening;
+    - backup: Recents chosen and Back up now; the server held the simulator's photos (16 confirmed, 8 new assets, since its 10 PNGs are two images the server took as duplicates);
+    - the share extension: a photo shared from Photos, staged, and uploaded from Shared files when the app opened (the extension says the files are saved, since it can't bring the app forward);
+    - Diagnostics: the request log, recording errors, empty.
+  - The server's log, at debug level, had no 5xx. From the app it had only 404s for thumbnails of photos backed up seconds before, asked under the revision "unversioned" before the server had rendered them; they loaded under their thumbhash once rendered, as on the fork, where the first revision is the photo's ID.
+  - Not covered live: single sign-on, a RAW (no public-domain sample easy to fetch), partners and shared albums (one account), duplicates, Cast, the widget (being removed), the refusal of an older server (the unit tests cover it) and a place's map sheet, which only a viewer outside the library opens.
+  - A DEBUG build launched without --ui-testing, live, honors --ui-testing-shelves-stay-open, so the live test can tap the shelves' rows.
+  - To run the live test: serve a stock release on 127.0.0.1:2290 (for the simulator, through `ssh -N -R 2290:127.0.0.1:2290 <mac>`) with its first account holding that media, then run `xcodebuild test … -only-testing:IlyichUITests/StockServerLiveTests` with TEST_RUNNER_ILYICH_STOCK_SERVER=http://127.0.0.1:2290, TEST_RUNNER_ILYICH_STOCK_EMAIL, TEST_RUNNER_ILYICH_STOCK_PASSWORD and TEST_RUNNER_ILYICH_STOCK_PIN; without them every test skips.
+
 ## Persisted state
 
 - Session credential. Keychain service app.ilyich.native.session, account current, access group AppGroupId, AfterFirstUnlockThisDeviceOnly; SavedSession v1 JSON. KEEP byte-identical; read through CredentialStore (C1). Read by the app, the widget and upload delegates.
