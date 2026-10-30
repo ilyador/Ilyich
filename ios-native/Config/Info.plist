@@ -28,6 +28,8 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIApplicationSceneManifest</key>
@@ -42,11 +44,11 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Connect to your Ilyich server and discover Cast devices on your local network.</string>
+    <string>Connect to your server and discover Cast devices on your local network.</string>
     <key>NSBonjourServices</key>
     <array><string>_googlecast._tcp</string><string>_CC1AD845._googlecast._tcp</string></array>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>Choose device albums to view and back up to your Ilyich server.</string>
+    <string>Show the photos and videos on this iPhone, back them up to your server, and favorite or remove them when you ask.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>Save photos and videos from Ilyich to your photo library.</string>
     <key>NSFaceIDUsageDescription</key>

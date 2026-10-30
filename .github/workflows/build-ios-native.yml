@@ -154,6 +154,7 @@ jobs:
           test ! -e "$app/PlugIns/WidgetExtension.appex"
           for bundle in "$app" "$app/PlugIns/ShareExtension.appex"; do
             test -f "$bundle/Info.plist"
+            test -f "$bundle/PrivacyInfo.xcprivacy"
             executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")
             xcrun lipo "$bundle/$executable" -verify_arch arm64
           done
