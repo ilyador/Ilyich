@@ -12,7 +12,6 @@ enum ViewerSheet: Identifiable {
     case stack
     /// The comments and likes on the photo in the album it was opened from.
     case activity
-    case cast
     case similar
     case profilePhoto
     /// What can be done to the photo's copy on this phone.
@@ -28,7 +27,6 @@ enum ViewerSheet: Identifiable {
         case .sharedLink: "sharedLink"
         case .stack: "stack"
         case .activity: "activity"
-        case .cast: "cast"
         case .similar: "similar"
         case .profilePhoto: "profilePhoto"
         case .phoneCopy: "phoneCopy"

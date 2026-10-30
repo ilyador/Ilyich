@@ -31,12 +31,6 @@ final class AssetCapabilityPolicyTests: XCTestCase {
         AssetCapabilityPolicy.evaluate(asset, context: context ?? self.context())
     }
 
-    func testCastIsHiddenForLockedPhotos() {
-        XCTAssertEqual(evaluate(photo())[.cast], .offered)
-        XCTAssertEqual(evaluate(photo(visibility: .locked))[.cast], .hidden, "A locked photo never reaches a TV.")
-        XCTAssertEqual(evaluate(photo(visibility: .archive))[.cast], .offered)
-    }
-
     /// The server's editor refuses panoramas, by projection or as an Insta360 file. The server
     /// writes the projection upper-cased.
     func testEditIsHiddenForPanoramasAndInspFiles() {
@@ -78,11 +72,11 @@ final class AssetCapabilityPolicyTests: XCTestCase {
 
     func testLockedPhotosHideAlbumLinkProfileBrowserSimilarCoverCommentsArchiveAndStack() {
         let locked = evaluate(photo(visibility: .locked), context(album: "album"))
-        for action: AssetAction in [.addToAlbum, .sharedLink, .profilePhoto, .openInBrowser, .findSimilar, .albumCover, .comments, .archive, .stack, .cast] {
+        for action: AssetAction in [.addToAlbum, .sharedLink, .profilePhoto, .openInBrowser, .findSimilar, .albumCover, .comments, .archive, .stack] {
             XCTAssertEqual(locked[action], .hidden, "\(action) is hidden for a locked photo.")
         }
         let open = evaluate(photo(), context(album: "album"))
-        for action: AssetAction in [.addToAlbum, .sharedLink, .profilePhoto, .openInBrowser, .findSimilar, .albumCover, .comments, .archive, .stack, .cast] {
+        for action: AssetAction in [.addToAlbum, .sharedLink, .profilePhoto, .openInBrowser, .findSimilar, .albumCover, .comments, .archive, .stack] {
             XCTAssertEqual(open[action], .offered, "\(action) is offered outside the Locked Folder.")
         }
     }
@@ -101,7 +95,7 @@ final class AssetCapabilityPolicyTests: XCTestCase {
         for action: AssetAction in [.favorite, .archive, .lock, .trash, .deletePermanently, .restore, .edit, .editInfo, .stack] {
             XCTAssertEqual(partners[action], .hidden, "\(action) needs the owner.")
         }
-        for action: AssetAction in [.share, .download, .saveToPhotos, .addToAlbum, .sharedLink, .cast, .findSimilar] {
+        for action: AssetAction in [.share, .download, .saveToPhotos, .addToAlbum, .sharedLink, .findSimilar] {
             XCTAssertEqual(partners[action], .offered, "\(action) works on a partner's photo.")
         }
         XCTAssertEqual(evaluate(photo(owner: nil))[.favorite], .hidden, "A photo with no known owner is nobody's to change.")
@@ -117,7 +111,7 @@ final class AssetCapabilityPolicyTests: XCTestCase {
                                     .edit, .editInfo, .saveToPhotos] {
             XCTAssertEqual(readOnly[action], reason, "\(action) waits for read-only mode to end.")
         }
-        for action: AssetAction in [.share, .download, .cast, .findSimilar, .openInBrowser, .comments, .selectText] {
+        for action: AssetAction in [.share, .download, .findSimilar, .openInBrowser, .comments, .selectText] {
             XCTAssertEqual(readOnly[action], .offered, "\(action) only reads.")
         }
         var trashed = photo(); trashed.isTrashed = true

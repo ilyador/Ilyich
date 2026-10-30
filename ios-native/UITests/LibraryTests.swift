@@ -1663,12 +1663,12 @@ final class LibraryTests: XCTestCase {
         tapPhoto(grid.cells.element(boundBy: 1))
         XCTAssertTrue(app.buttons["Photo actions"].waitForExistence(timeout: 10))
     }
-    /// A locked photo's menu offers only what the Locked Folder allows: no album, shared link, Cast,
+    /// A locked photo's menu offers only what the Locked Folder allows: no album, shared link,
     /// similar photos, browser, profile photo or archive, while sharing, downloading, saving and
     /// moving it out of the folder stay. A library photo's menu shows them all first, so their
     /// absence means something.
     @MainActor func testLockedFolderViewerMenuOffersOnlyPermittedActions() throws {
-        let hiddenWhenLocked = ["Add to album", "Create shared link", "Cast", "Find similar photos", "Open in browser", "Set profile photo", "Archive"]
+        let hiddenWhenLocked = ["Add to album", "Create shared link", "Find similar photos", "Open in browser", "Set profile photo", "Archive"]
         let app = launch()
         let grid = app.collectionViews["library.grid"]
         XCTAssertTrue(grid.cells.element(boundBy: 1).waitForExistence(timeout: 15))

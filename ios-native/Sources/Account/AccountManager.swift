@@ -60,8 +60,6 @@ protocol AccountDevice: Sendable {
     /// at launch and after every sign-in, so the backup screens show the account signed in
     /// without a relaunch (TransferHost).
     func activateBackup(_ runtime: AccountRuntime) async
-    /// Stops casting and revokes the grants the receiver was given.
-    func endCasting() async
     func clearNotifications() async
     /// Forgets the Locked Folder PIN kept for biometric unlock.
     func removeLockedPIN(scope: String) async
@@ -93,7 +91,7 @@ struct AccountDependencies: Sendable {
     var unlockEvents: @Sendable () async -> AsyncStream<Void>
     /// How long after an expired answer the session is checked again.
     var expiryRecheckDelay: Duration = .seconds(2)
-    /// How long sign-out waits for the server to revoke the cast session and end the session.
+    /// How long sign-out waits for the server to end the session.
     var serverSignOutBudget: Duration = .seconds(3)
 }
 
@@ -325,14 +323,9 @@ actor AccountManager {
         //    the transfer engine winds down first, then everything the runtime runs.
         await runtime.prepareForSignOut(keepingAutomaticBackup: policy.keepsAutomaticBackup)
         await runtime.cancelAndJoin()
-        // 3. While the token and the network settings still work: casting stops and its grants
-        //    are revoked, which needs the token, then the session itself. Past the budget,
-        //    sign-out goes on without them.
-        await Self.within(dependencies.serverSignOutBudget) {
-            await device.endCasting()
-            await runtime.castGrants.close()
-            try? await runtime.api.logout()
-        }
+        // 3. While the token and the network settings still work, the session itself ends. Past
+        //    the budget, sign-out goes on without it.
+        await Self.within(dependencies.serverSignOutBudget) { try? await runtime.api.logout() }
         // 4. The extensions and upload delegates stop seeing the session: the tombstone first, then
         //    the Keychain item.
         var problem: String?

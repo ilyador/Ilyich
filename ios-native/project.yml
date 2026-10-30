@@ -17,8 +17,6 @@ settings:
     SUPPORTS_MACCATALYST: NO
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
 packages:
-  GoogleCast:
-    path: Packages/GoogleCast
   IlyichKit:
     path: Packages/IlyichKit
 targets:
@@ -31,8 +29,6 @@ targets:
       - path: Config/PrivacyInfo.xcprivacy
         buildPhase: resources
     dependencies:
-      - package: GoogleCast
-        product: GoogleCastDynamic
       - package: IlyichKit
         product: IlyichPlatform
       - package: IlyichKit

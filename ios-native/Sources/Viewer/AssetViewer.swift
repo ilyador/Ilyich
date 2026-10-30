@@ -13,7 +13,6 @@ struct AssetViewer: View {
     /// Closes the viewer when it was presented outside SwiftUI.
     let onClose: (() -> Void)?
     @State private var model: ViewerModel
-    @ObservedObject private var cast = CastSessionService.shared
     @State private var controls = true
     @State private var playingLive = false
     /// Where the bars leave room for the LIVE badge and the video pill, kept while the bars are hidden.
@@ -88,12 +87,7 @@ struct AssetViewer: View {
             transition?.currentID = model.selectedID
             transition?.aspectRatio = CGFloat(current.aspectRatio)
         }
-        // Scrubbing the strip passes many photos; only the one it stops on is refreshed and cast.
-        // A photo that can't be cast, such as a locked one, never reaches the TV.
-        .task(id: model.settledID) {
-            guard model.settledID != nil, capabilities.offers(.cast) else { return }
-            CastSessionService.shared.select(api: api, asset: current)
-        }
+        // Scrubbing the strip passes many photos; only the one it stops on is refreshed.
         .task(id: model.refreshKey) { await model.refreshCurrentAsset() }
         .task(id: model.settledID) { if model.settledID != nil { await prefetchNeighbors() } }
     }
@@ -145,10 +139,10 @@ struct AssetViewer: View {
         let selectedID = model.selectedID
         if abs(index - model.index) <= 1 {
             if asset.isVideo {
-                videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !model.stripScrubbing && !(cast.connected && cast.currentAssetID == asset.id),
+                videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !model.stripScrubbing,
                                              sourceAsset: asset, matchedLocalPhoto: model.localCopy(of: asset), playback: playback))
             } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
-                videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: !(cast.connected && cast.currentAssetID == asset.id), onEnded: { playingLive = false },
+                videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: true, onEnded: { playingLive = false },
                                              sourceAsset: asset, matchedLocalPhoto: model.localCopy(of: asset), isLivePhotoMotion: true))
             } else {
                 ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { if transition == nil { close() } },
@@ -218,7 +212,6 @@ struct AssetViewer: View {
             if let stack = current.stack { NavigationStack { ViewerStackView(api: api, pipeline: pipeline, stackID: stack.id) } }
         case .activity:
             if let albumID = model.route.albumContext { NavigationStack { AlbumActivityView(api: api, albumID: albumID, assetID: current.id) } }
-        case .cast: CastView(api: api, asset: current)
         case .similar: SimilarPhotosView(api: api, pipeline: pipeline, reference: current)
         case .profilePhoto: NavigationStack { ProfilePhotoCropView(api: api, pipeline: pipeline, asset: current) }
         case .phoneCopy:
@@ -299,7 +292,6 @@ struct AssetViewer: View {
             }
             Section {
                 Button("Slideshow", systemImage: "play.rectangle") { model.cover = .slideshow }
-                menuItem(.cast, can, "Cast", systemImage: "tv") { model.sheet = .cast }
                 menuItem(.selectText, can, "Select text", systemImage: "text.viewfinder") { model.cover = .selectText }
                 menuItem(.findSimilar, can, "Find similar photos", systemImage: "photo.on.rectangle.angled") { model.sheet = .similar }
                 // Opening the stack only reads it; the stack's own screen disables what read-only
