@@ -1539,7 +1539,7 @@ Status as of C8 (2026-10-29), after each item: resolved, with where; in progress
 - Plan line 9, "Preserve ... the functionality tracked in PARITY.md". PARITY completion gate 3 (PARITY.md:362) requires device checks that no milestone's acceptance includes:
 - Photos permission transitions between limited, full and denied (absent from P1 and P3); **open:** a check by the owner on the phone, which no test run can make;
 - shared-album role restrictions (absent from N4); **open:** needs a second account that shares an album with the owner's;
-- outgoing share handoff (absent from W1's MediaExportService). **Open:** a check by the owner on the phone's share sheet.
+- outgoing share handoff (absent from W1's MediaExportService). **Resolved** by the owner on the phone (3040093, 2026-10-29), asked to send a photo, a video and a Live Photo from the viewer's Share button to other apps: "so far sharing worked well".
 
 ### Unsafe or unshippable as written
 
