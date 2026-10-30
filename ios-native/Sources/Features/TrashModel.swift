@@ -99,7 +99,8 @@ import Observation
     func restoreSelected() async {
         let ids = Array(selection)
         if let result = await change(.restore(ids), on: assets.filter { selection.contains($0.id) }) {
-            resultMessage = "Restored \((result.affected ?? result.succeeded.count).formatted()) items."
+            let restored = result.affected ?? result.succeeded.count
+            resultMessage = "Restored \(restored.formatted()) item\(restored == 1 ? "" : "s")."
         }
     }
 
@@ -115,8 +116,9 @@ import Observation
         // Photos not loaded here are named by the sync, which forgets an emptied Trash's as their
         // deletions arrive.
         guard let result = await change(permanently ? .emptyTrash : .restoreAllTrash, on: assets) else { return }
-        let count = (result.affected ?? result.succeeded.count).formatted()
-        resultMessage = permanently ? "Permanently removed \(count) items." : "Restored \(count) items."
+        let count = result.affected ?? result.succeeded.count
+        let items = "\(count.formatted()) item\(count == 1 ? "" : "s")"
+        resultMessage = permanently ? "Permanently removed \(items)." : "Restored \(items)."
     }
 
     /// Has the account's mutations make the change, and says what it did. The photos leave the
@@ -126,7 +128,7 @@ import Observation
         loading = true; defer { endLoading() }
         do {
             let result = try await mutations.start(request, on: records).result
-            if !result.failed.isEmpty { failure = .init(APIError.invalidResponse("\(result.failed.count.formatted()) items couldn’t be changed. Refresh and try again.")) }
+            if !result.failed.isEmpty { failure = .init(APIError.invalidResponse("\(result.failed.count.formatted()) item\(result.failed.count == 1 ? "" : "s") couldn’t be changed. Refresh and try again.")) }
             return result
         } catch { failure = .init(error); return nil }
     }

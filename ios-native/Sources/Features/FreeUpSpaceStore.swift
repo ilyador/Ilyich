@@ -213,7 +213,7 @@ extension EnvironmentValues {
         switch await service.remove(requested) {
         case .removed(let ids):
             drop(Set(ids)); selection = []
-            message = "Removed \(ids.count) items from Apple Photos. Your server copies are kept."
+            message = "Removed \(ids.count) item\(ids.count == 1 ? "" : "s") from Apple Photos. Your server copies are kept."
         case .declined:
             // Declining iOS's prompt is the person's answer, not an error. Nothing was removed.
             break

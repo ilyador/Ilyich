@@ -97,7 +97,7 @@ struct LocalLibraryView: View {
                     .onAppear { if library.isNearEnd(photo.id) { Task { await library.loadMore() } } }
                 }
             }
-            Text("\(library.total.formatted()) items").font(.caption).foregroundStyle(.secondary).padding()
+            Text("\(library.total.formatted()) item\(library.total == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary).padding()
         }.refreshable { await library.refresh() }
     }
     private func upload() async {

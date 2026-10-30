@@ -979,7 +979,7 @@ enum GlobeArt {
     /// its revision, so a new one needs no asset round trip (T6).
     func configure(place: PlaceCollection, api: APIClient, pipeline: MediaPipeline) {
         self.place = place; nameLabel.text = place.title; countLabel.text = place.assetIDs.count.formatted()
-        accessibilityLabel = "\(place.title), \(place.assetIDs.count) items"
+        accessibilityLabel = "\(place.title), \(place.assetIDs.count) item\(place.assetIDs.count == 1 ? "" : "s")"
         guard let id = place.assetIDs.first, id != imageID else { return }
         imageTask?.cancel(); imageID = id
         thumbnail.image = pipeline.latestImage(assetID: id, size: .thumbnail)?.uiImage

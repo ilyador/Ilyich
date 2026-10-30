@@ -242,7 +242,7 @@ struct LibraryView: View {
             .alert("Couldn’t complete action", isPresented: alertShown { if case .error = $0 { true } else { false } }) {
                 Button("OK", role: .cancel) { }
             } message: { Text(errorMessage) }
-            .confirmationDialog(deletesSelectionPermanently ? "Permanently delete \(store.selected.count) items?" : "Move \(store.selected.count) items to Trash?", isPresented: alertShown { $0 == .confirm(.deleteSelection) }, titleVisibility: .visible) {
+            .confirmationDialog(deletesSelectionPermanently ? "Permanently delete \(store.selected.count) item\(store.selected.count == 1 ? "" : "s")?" : "Move \(store.selected.count) item\(store.selected.count == 1 ? "" : "s") to Trash?", isPresented: alertShown { $0 == .confirm(.deleteSelection) }, titleVisibility: .visible) {
                 Button(deletesSelectionPermanently ? "Delete permanently" : "Move to Trash", role: .destructive) {
                     let permanently = deletesSelectionPermanently
                     changeSelection { permanently ? .deletePermanently($0) : .trash($0) }

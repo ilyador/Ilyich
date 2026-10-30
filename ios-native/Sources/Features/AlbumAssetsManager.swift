@@ -69,7 +69,7 @@ struct AlbumAssetsManager: View {
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button(action) { if mode == .remove { confirmRemove = true } else { Task { await save() } } }.disabled(selection.isEmpty || busy || loading).requiresWriteAccess() } }
         .disabled(busy)
         .task(id: source) { await reload() }
-        .confirmationDialog("Remove \(selection.count) items from this album?", isPresented: $confirmRemove, titleVisibility: .visible) {
+        .confirmationDialog("Remove \(selection.count) item\(selection.count == 1 ? "" : "s") from this album?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove from album", role: .destructive) { Task { await save() } }.requiresWriteAccess()
         } message: { Text("The photos and videos will stay in your library.") }
         .alert("Couldn’t update album", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {

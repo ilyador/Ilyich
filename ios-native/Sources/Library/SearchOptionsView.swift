@@ -31,8 +31,8 @@ struct SearchOptionsView: View {
             Section("People and tags") {
                 NavigationLink("People", value: "people")
                 NavigationLink("Tags", value: "tags")
-                if let count = filter.personIds?.all?.count { Text("\(count) people required").font(.footnote).foregroundStyle(.secondary) }
-                if let count = filter.tagIds?.all?.count { Text("\(count) tags required").font(.footnote).foregroundStyle(.secondary) }
+                if let count = filter.personIds?.all?.count { Text(count == 1 ? "1 person required" : "\(count) people required").font(.footnote).foregroundStyle(.secondary) }
+                if let count = filter.tagIds?.all?.count { Text(count == 1 ? "1 tag required" : "\(count) tags required").font(.footnote).foregroundStyle(.secondary) }
             }
             Section("Place") {
                 SearchMetadataField(title: "Country", api: api, request: .init(kind: .country), value: text(\.country))
