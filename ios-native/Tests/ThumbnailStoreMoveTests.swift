@@ -148,8 +148,8 @@ final class ThumbnailStoreMoveTests: XCTestCase {
         XCTAssertTrue(isExcludedFromBackup(tree), "So does the store, once cleared.")
     }
 
-    /// Sign-out and Clear browsing cache empty the account's folder in Application Support, and
-    /// remove anything of it a move left in Caches.
+    /// Sign-out empties the account's folder in Application Support, and removes anything of it a
+    /// move left in Caches. Clear browsing cache keeps it (G2).
     func testClearingEmptiesTheFolderInBothPlaces() async throws {
         let store = ThumbnailDiskStore(directory: directory(in: support), indexDelay: nil, earlierRoot: caches)
         await store.store(photo(0).bytes, assetID: photo(0).id, revision: photo(0).revision)

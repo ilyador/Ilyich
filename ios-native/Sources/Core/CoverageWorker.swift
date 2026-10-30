@@ -548,8 +548,9 @@ final class CoverageWorker: Sendable {
                 kept.mark = verified ? kept.passMark : nil
                 kept.passMark = nil
                 kept.stored = min(kept.stored, kept.total)
-                // A store cleared meanwhile (Clear browsing cache) refuses the save: this pass
-                // ends and the next starts from the newest photo with fresh counts.
+                // A store cleared meanwhile refuses the save: this pass ends and the next starts
+                // from the newest photo with fresh counts. Clear browsing cache leaves the store
+                // and the pass alone (G2).
                 guard await store.saveCoverageState(kept, token: token) else { return failed }
                 state.withLock { $0.statistics.completedPasses += 1 }
                 publish { $0.total = kept.total; $0.stored = kept.stored }

@@ -242,9 +242,11 @@ import XCTest
         }
     }
 
-    /// Clear browsing cache (Settings, Diagnostics) empties the account's thumbnail folder in
-    /// Application Support, which the cache usage Diagnostics shows counted, and keeps the account.
-    func testClearingTheBrowsingCacheEmptiesTheThumbnailFolder() async throws {
+    /// Clear browsing cache (Settings, Diagnostics) keeps the account's thumbnails in Application
+    /// Support, with coverage's position and counts, so coverage downloads nothing again (G2).
+    /// Diagnostics shows them against their cap. The account stays signed in, and signing out
+    /// still removes them.
+    func testClearingTheBrowsingCacheKeepsTheThumbnails() async throws {
         let server = makeStubServer()
         server.route("POST", "auth/validateToken", .json(#"{"authStatus":true}"#))
         server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
@@ -255,20 +257,27 @@ import XCTest
         await thumbnails.store(Data("thumbnail".utf8), assetID: "asset", revision: "1")
         let thumbnail = thumbnails.url(assetID: "asset", revision: "1")
         XCTAssertTrue(thumbnail.path.contains("/Library/Application Support/IlyichThumbnails/"), thumbnail.path)
+        let position = CoverageState(mark: 7, policyHash: "policy", total: 1, stored: 1)
+        let saved = await thumbnails.saveCoverageState(position, token: thumbnails.fence.token())
+        XCTAssertTrue(saved)
         let stored = await thumbnails.currentUsage()
         XCTAssertGreaterThan(stored, 0)
-        let shown = await runtime.pipeline.cacheUsage().diskBytes
-        XCTAssertGreaterThanOrEqual(shown, stored, "Diagnostics counts the thumbnails.")
+        let shown = await runtime.pipeline.cacheUsage()
+        XCTAssertEqual(shown.thumbnailBytes, stored, "Diagnostics shows the thumbnails.")
+        XCTAssertEqual(shown.thumbnailLimit, ThumbnailDiskStore.defaultLimit, "Against their cap.")
 
         await harness.manager.clearBrowsingCache()
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: thumbnail.path))
-        XCTAssertFalse(thumbnails.contains(assetID: "asset", revision: "1"))
-        let cleared = await thumbnails.currentUsage()
-        XCTAssertEqual(cleared, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: thumbnail.path), "The thumbnail stays on disk.")
+        XCTAssertTrue(thumbnails.contains(assetID: "asset", revision: "1"))
+        let kept = await thumbnails.currentUsage()
+        XCTAssertEqual(kept, stored)
+        let coverage = await thumbnails.coverageState()
+        XCTAssertEqual(coverage, position, "Coverage's position and counts stay.")
         let phase = await harness.manager.phase
         XCTAssertEqual(phase, .active, "The account stays signed in.")
         await signOutAfterwards(harness)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: thumbnails.directory.path), "Signing out removes them.")
     }
 
     /// A server the logout can't reach within the budget doesn't hold sign-out up. Here the

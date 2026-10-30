@@ -21,7 +21,7 @@ import XCTest
         server.route("GET", "timeline/buckets", Self.buckets([("2026-03-01", 2), ("2026-02-01", 1)]))
         server.route("GET", "timeline/bucket", Self.trashed("2026-03-01", ["t1", "t2"]), Self.trashed("2026-02-01", ["t3"]))
         let bus = LibraryBus()
-        let trash = TrashModel(api: try makeAPI(server))
+        let trash = TrashModel(api: try makeAPI(server), refreshDelay: .zero)
         trash.follow(mutations: nil, bus: bus)
         await trash.reload()
         XCTAssertEqual(trash.assets.map(\.id), ["t1", "t2"])
@@ -62,7 +62,7 @@ import XCTest
         server.route("GET", "timeline/buckets", Self.buckets([("2026-03-01", 2)]))
         server.route("GET", "timeline/bucket", Self.trashed("2026-03-01", ["t1", "t2"]))
         let bus = LibraryBus()
-        let trash = TrashModel(api: try makeAPI(server))
+        let trash = TrashModel(api: try makeAPI(server), refreshDelay: .zero)
         trash.follow(mutations: nil, bus: bus)
         await trash.reload()
         XCTAssertEqual(trash.assets.map(\.id), ["t1", "t2"])
@@ -83,6 +83,44 @@ import XCTest
         try await until("The read overtaken was not read again.") { server.requests("GET", "timeline/buckets").count == summaries + 2 }
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(trash.assets.map(\.id), ["t1"], "The read that began before the restore never shows the photo again.")
+    }
+
+    /// G2: the changes a sync reports one after another are read once. A photo they take out
+    /// leaves at once; the months shown are read a moment after the first change, with every change
+    /// that came in meanwhile; and a change that comes in while that read runs has them read once
+    /// more, after the same wait.
+    func testTheTrashReadsTheChangesASyncReportsTogetherOnce() async throws {
+        let server = makeStubServer()
+        server.route("GET", "server/features", Self.features)
+        server.route("GET", "timeline/buckets", Self.buckets([("2026-03-01", 3)]))
+        server.route("GET", "timeline/bucket", Self.trashed("2026-03-01", ["t1", "t2", "t3"]))
+        let bus = LibraryBus()
+        let trash = TrashModel(api: try makeAPI(server), refreshDelay: .milliseconds(500))
+        trash.follow(mutations: nil, bus: bus)
+        await trash.reload()
+        XCTAssertEqual(trash.assets.map(\.id), ["t1", "t2", "t3"])
+        func reads() -> Int { server.requests("GET", "timeline/buckets").count }
+        let before = reads()
+
+        // On the web t1 and t2 are deleted for good and t4 put in Trash; the sync reports them in
+        // two changes.
+        let gate = StubServer.Gate()
+        server.route("GET", "timeline/buckets", Self.buckets([("2026-03-01", 2)]).waiting(for: gate), Self.buckets([("2026-03-01", 2)]))
+        server.route("GET", "timeline/bucket", Self.trashed("2026-03-01", ["t3", "t4"]))
+        bus.post(.changed(Self.change(upserted: ["t4"], removed: ["t1"]), accessChanged: false))
+        try await until("The photo deleted elsewhere did not leave at once.") { trash.assets.map(\.id) == ["t2", "t3"] }
+        bus.post(.changed(Self.change(upserted: ["elsewhere"], removed: ["t2"]), accessChanged: false))
+        try await until("The second photo deleted elsewhere did not leave at once.") { trash.assets.map(\.id) == ["t3"] }
+        XCTAssertEqual(reads(), before, "Nothing is read while the changes come in.")
+        try await until("The changes were not read.") { reads() == before + 1 }
+
+        // Another change comes in while that read runs.
+        bus.post(.changed(Self.change(upserted: ["later"]), accessChanged: false))
+        gate.open()
+        try await until("The photo put in Trash elsewhere did not join.") { trash.assets.map(\.id) == ["t3", "t4"] }
+        try await until("The change that came in during the read was not read.") { reads() == before + 2 }
+        try await Task.sleep(for: .milliseconds(700))
+        XCTAssertEqual(reads(), before + 2, "Three changes, two reads.")
     }
 
     /// Restoring here goes through the account's mutations: the photos leave the Trash in place
