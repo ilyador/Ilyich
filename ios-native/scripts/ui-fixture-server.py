@@ -424,7 +424,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             found=[m for m in memories() if m['id']==path.split('/')[2]]
             return self.send(found[0]) if found else self.send_immich_error(400,'Not found or no memory.read access')
         if path=='/map/markers':return self.send(MARKERS)
-        if path=='/server/features':return self.send({k:True for k in ['passwordLogin','smartSearch','ocr','facialRecognition','map','trash','sidecar','realtimeTranscoding']}|{'oauth':False})
+        # The owner's fork: only its features name searchVerification.
+        if path=='/server/features':return self.send({k:True for k in ['passwordLogin','smartSearch','searchVerification','ocr','facialRecognition','map','trash','sidecar','realtimeTranscoding']}|{'oauth':False})
         if path=='/server/version':return self.send({'major':3,'minor':3,'patch':3})
         if path=='/assets/statistics':return self.send({'images':24000,'videos':0,'total':24000})
         return self.send([])

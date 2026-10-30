@@ -94,7 +94,7 @@ import XCTest
     }
 
     func testMoreListsItsCollectionsThenBrowsingAndSharedFiles() {
-        var catalog = ShelfCatalog()
+        var catalog = ShelfCatalog(features: features(faces: true, map: true, trash: true, fork: true))
         let more = catalog.rows(.more)
         XCTAssertEqual(more.map(\.id), ["recent-taken", "recent-added", "videos", "motion", "lightroom", "favorites", "archive", "trash", "browse-more"])
         XCTAssertEqual(more.map(\.title), ["Recently taken", "Recently added", "Videos", "Motion", "Lightroom", "Favorites", "Archive", "Trash", "Browse more"])
@@ -133,7 +133,8 @@ import XCTest
         for collection in LibraryCollection.more {
             store.clearFilters()
             store.show(collection)
-            let marked = ShelfCatalog(selection: store.shelfSelection).rows(.more).filter(\.isSelected).map(\.id)
+            let marked = ShelfCatalog(features: features(faces: true, map: true, trash: true, fork: true), selection: store.shelfSelection)
+                .rows(.more).filter(\.isSelected).map(\.id)
             XCTAssertEqual(marked, [collection.rowID], "\(collection.title) shown marks only its row.")
             XCTAssertEqual(store.filterTitle, collection.title)
         }
@@ -157,9 +158,10 @@ import XCTest
         XCTAssertEqual(store.shelfSelection, ShelfSelection(), "The library marks nothing.")
     }
 
-    private func features(faces: Bool, map: Bool, trash: Bool) -> ServerFeatures {
-        ServerFeatures(passwordLogin: true, oauth: false, smartSearch: true, searchVerification: nil, ocr: false, facialRecognition: faces,
-                       map: map, trash: trash, sidecar: true, realtimeTranscoding: false)
+    /// `fork` names searchVerification, as only the owner's fork does.
+    private func features(faces: Bool, map: Bool, trash: Bool, fork: Bool = false) -> ServerFeatures {
+        ServerFeatures(passwordLogin: true, oauth: false, smartSearch: true, searchVerification: fork ? true : nil, ocr: false,
+                       facialRecognition: faces, map: map, trash: trash, sidecar: true, realtimeTranscoding: false)
     }
 }
 

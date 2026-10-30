@@ -105,11 +105,13 @@ struct ShelfSelection: Hashable, Sendable {
 /// cover, whether the feed shows it, and a typed action. The top level offers Clear while filters
 /// apply (N6), People (where the server recognizes faces), Places (where it has the map), Albums,
 /// More and Settings; People and Albums list the owner's order of them, then Manage people, or New
-/// album and Manage albums; More lists its collections (Trash where the server keeps one), Browse
-/// more, and Shared files while any wait; Settings lists each settings screen, then Sign out. Under
-/// a stack of filters People and Albums list only those in its photos, an album counting them.
+/// album and Manage albums; More lists its collections (Trash where the server keeps one, Lightroom
+/// on the owner's fork), Browse more, and Shared files while any wait; Settings lists each
+/// settings screen, then Sign out. Under a stack of filters People and Albums list only those in
+/// its photos, an album counting them.
 struct ShelfCatalog: Sendable {
-    /// What the server offers; nil while it is unknown, when every row shows.
+    /// What the server offers; nil while it is unknown, when every row shows but Lightroom, which
+    /// only the owner's fork can tell (a stock server develops nothing).
     var features: ServerFeatures?
     /// The people and albums in the owner's order.
     var people: [Person] = []
@@ -166,7 +168,13 @@ struct ShelfCatalog: Sendable {
                 + [.init(id: "new-album", title: "New album", symbol: "plus", action: .present(.newAlbum)),
                    .init(id: "all-albums", title: "Manage albums", symbol: "square.grid.2x2", action: .present(.albums))]
         case .more:
-            var rows = LibraryCollection.more.filter { $0 != .trash || features?.trash != false }.map { row($0) }
+            var rows = LibraryCollection.more.filter { collection in
+                switch collection {
+                case .trash: features?.trash != false
+                case .lightroom: features?.isFork == true
+                default: true
+                }
+            }.map { row($0) }
             rows.append(.init(id: "browse-more", title: "Browse more", symbol: "square.grid.2x2", action: .present(.more)))
             if sharedFiles {
                 rows.append(.init(id: "shared-files", title: "Shared files", symbol: "square.and.arrow.down", action: .present(.sharedFiles)))
