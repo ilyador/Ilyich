@@ -160,14 +160,33 @@ final class ImmichAPI: @unchecked Sendable {
   func fetchAlbums() async throws -> [Album] {
     try JSONDecoder().decode([Album].self, from: await request("albums"))
   }
-  func fetchImage(asset: Asset) async throws -> UIImage {
+  /// The photo's preview, at most 512 px on its long side; for a widget `targetSize` pixels large,
+  /// just large enough to fill it and cropped to its shape (upstream #32215). A panorama's long
+  /// side is capped at twice the widget's, which keeps its decode inside the widget's memory.
+  func fetchImage(asset: Asset, targetSize: CGSize? = nil) async throws -> UIImage {
     let data = try await request("assets/\(asset.id)/thumbnail", query: [.init(name: "size", value: "preview"), .init(name: "edited", value: "true")])
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-          let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw FetchError.invalidImage }
+    let target = targetSize.flatMap { $0.width > 0 && $0.height > 0 ? $0 : nil }
+    var maxPixelSize = 512
+    if let target,
+       let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+       let width = properties[kCGImagePropertyPixelWidth] as? Int, width > 0,
+       let height = properties[kCGImagePropertyPixelHeight] as? Int, height > 0 {
+      let scale = max(target.width / CGFloat(width), target.height / CGFloat(height))
+      maxPixelSize = min(Int(ceil(CGFloat(max(width, height)) * scale)), Int(max(target.width, target.height)) * 2)
+    }
+    guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 512,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
             kCGImageSourceCreateThumbnailWithTransform: true,
           ] as CFDictionary) else { throw FetchError.invalidImage }
+    if let target {
+      let ratio = target.width / target.height
+      let width = min(CGFloat(thumbnail.width), CGFloat(thumbnail.height) * ratio)
+      let height = min(CGFloat(thumbnail.height), CGFloat(thumbnail.width) / ratio)
+      let crop = CGRect(x: (CGFloat(thumbnail.width) - width) / 2, y: (CGFloat(thumbnail.height) - height) / 2, width: width, height: height)
+      if let cropped = thumbnail.cropping(to: crop) { return UIImage(cgImage: cropped) }
+    }
     return UIImage(cgImage: thumbnail)
   }
 }
