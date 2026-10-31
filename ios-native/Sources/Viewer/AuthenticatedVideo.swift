@@ -189,6 +189,8 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
         var contentLength: Int64?
     }
     private var transfers: [Int: Transfer] = [:]
+    /// Set by close(); the invalidated session raises on a new task.
+    private var closed = false
 
     init(request: URLRequest, server: URL) throws {
         guard let originalURL = request.url,
@@ -214,6 +216,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     }
 
     func close() {
+        closed = true
         observation = nil
         onFailure = nil
         player.pause(); player.replaceCurrentItem(with: nil)
@@ -222,6 +225,8 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     }
 
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        // A request AVFoundation queued before close() still arrives after it.
+        guard !closed else { return false }
         var rangeRequest = request
         if let data = loadingRequest.dataRequest {
             let start = max(data.requestedOffset, data.currentOffset)
