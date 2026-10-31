@@ -27,7 +27,9 @@ final class ThumbnailDiskStore: Sendable {
     nonisolated let directory: URL
     /// The same folder where a build before T8 kept it, in Caches.
     nonisolated let earlierDirectory: URL?
-    nonisolated let limit: Int
+    /// How much the store may hold, which the owner picks under Diagnostics (ThumbnailLimitSetting).
+    nonisolated var limit: Int { limitBytes.load(ordering: .relaxed) }
+    private let limitBytes: Atomic<Int>
     /// Downloads that began before their photo was forgotten, or before the store was cleared, are not written.
     nonisolated let fence: MediaFence
     /// Directory listings made, for tests that check a write needs none.
@@ -138,7 +140,7 @@ final class ThumbnailDiskStore: Sendable {
         earlierDirectory = earlierRoot.map {
             $0.appendingPathComponent(Self.folderName, isDirectory: true).appendingPathComponent(directory.lastPathComponent, isDirectory: true)
         }
-        self.limit = limit
+        limitBytes = Atomic(limit)
         self.fence = fence
         self.idleDelay = idleDelay
         self.touchInterval = touchInterval
@@ -409,6 +411,13 @@ final class ThumbnailDiskStore: Sendable {
 
     nonisolated func maintainInBackground() {
         queue.async { [self] in maintainNow() }
+    }
+
+    /// A new cap. Below what the store holds, it trims now instead of once the store is idle,
+    /// least recently viewed first.
+    nonisolated func setLimit(_ bytes: Int) {
+        limitBytes.store(bytes, ordering: .relaxed)
+        maintainInBackground()
     }
 
     private func scheduleMaintenance() {
@@ -690,5 +699,22 @@ final class ThumbnailDiskStore: Sendable {
         flush()
         setMeta("complete", "1")
         setMeta("cursor", nil)
+    }
+}
+
+/// The offline thumbnails' cap, picked under Diagnostics. Every account's store opens with it.
+enum ThumbnailLimitSetting {
+    static let defaultsKey = "thumbnails.limit.v1"
+    /// The sizes offered, from 512 MB to 10 GB, in the binary units the cap is set in.
+    static let choices = [512, 1_024, 1_536, 2_048, 3_072, 5_120, 10_240].map { $0 * 1_024 * 1_024 }
+
+    /// The size picked, or 1.5 GB until one is.
+    static func load(from defaults: UserDefaults = .standard) -> Int {
+        let picked = defaults.integer(forKey: defaultsKey)
+        return choices.contains(picked) ? picked : ThumbnailDiskStore.defaultLimit
+    }
+
+    static func save(_ bytes: Int, to defaults: UserDefaults = .standard) {
+        defaults.set(bytes, forKey: defaultsKey)
     }
 }

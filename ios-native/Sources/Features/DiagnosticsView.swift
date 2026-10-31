@@ -5,6 +5,7 @@ struct DiagnosticsView: View {
     let pipeline: MediaPipeline?
     var session: AccountSession? = nil
     @AppStorage(DiagnosticsStore.levelKey) private var level = DiagnosticLevel.errors.rawValue
+    @AppStorage(ThumbnailLimitSetting.defaultsKey) private var thumbnailLimit = ThumbnailDiskStore.defaultLimit
     @State private var events: [DiagnosticEvent] = []
     @State private var media: MediaCacheUsage?
     @State private var syncStatistics: EntityStoreStatistics?
@@ -64,6 +65,9 @@ struct DiagnosticsView: View {
                 if let media {
                     // In binary units, which the cap is set in, so it reads as it was set.
                     LabeledContent("Offline thumbnails", value: "\(bytes(media.thumbnailBytes, .binary)) of \(bytes(media.thumbnailLimit, .binary))")
+                    Picker("Offline thumbnail limit", selection: $thumbnailLimit) {
+                        ForEach(ThumbnailLimitSetting.choices, id: \.self) { Text(bytes($0, .binary)).tag($0) }
+                    }
                     LabeledContent("Photo download cache", value: bytes(media.diskBytes))
                     LabeledContent("Downloads held in memory", value: bytes(media.memoryBytes))
                     LabeledContent("Decoded image memory limit", value: bytes(media.decodedMemoryLimit))
@@ -72,7 +76,7 @@ struct DiagnosticsView: View {
                 if let resetMessage { Text(resetMessage).font(.footnote).foregroundStyle(.secondary) }
                 if session != nil { Button("Clear browsing cache", role: .destructive) { confirmReset = true }.disabled(clearing) }
             } header: { Text("Browsing cache") } footer: {
-                Text("Clears this account’s downloaded previews and the images held in memory; previews download again when you view them. Offline thumbnails stay. Originals, backup receipts, your upload queue and photos on the server stay intact.")
+                Text("Offline thumbnails let you browse without a connection, up to the limit; a lower limit removes those viewed least recently. Clear browsing cache removes this account’s downloaded previews and the images held in memory; previews download again when you view them. Offline thumbnails stay. Originals, backup receipts, your upload queue and photos on the server stay intact.")
             }
             Section {
                 Picker("Record", selection: $level) { ForEach(DiagnosticLevel.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) } }
@@ -99,6 +103,12 @@ struct DiagnosticsView: View {
         .onChange(of: session?.lastSyncDate) { _, _ in Task { await refresh() } }
         .onChange(of: session?.isSyncing) { _, syncing in if syncing == false { Task { await refresh() } } }
         .refreshable { await refresh() }
+        // A lower cap trims at once; a higher one lets coverage fill the room now.
+        .onChange(of: thumbnailLimit) { _, bytes in
+            pipeline?.thumbnails.setLimit(bytes)
+            session?.coverage?.roomChanged()
+            Task { await refresh() }
+        }
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }.disabled(clearing) } }
         .confirmationDialog("Clear this account’s browsing cache?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Clear browsing cache", role: .destructive) { Task { await clearCache() } }

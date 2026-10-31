@@ -400,6 +400,10 @@ final class CoverageWorker: Sendable {
         publish { $0.isRunning = false; $0.hold = nil }
     }
 
+    /// The store's cap changed: a worker waiting at the budget looks again now instead of within
+    /// the minute.
+    func roomChanged() { wake.signal() }
+
     /// A pass or a recheck has work.
     var isRunning: Bool { state.withLock { $0.progress.isRunning } }
     var progress: Progress { state.withLock { $0.progress } }

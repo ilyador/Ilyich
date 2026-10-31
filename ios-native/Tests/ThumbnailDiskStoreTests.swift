@@ -145,6 +145,40 @@ final class ThumbnailDiskStoreTests: XCTestCase {
         XCTAssertEqual(usage, measuredUsage())
     }
 
+    /// A lower cap, picked under Diagnostics, trims at once instead of waiting until the store is
+    /// idle, least recently viewed first.
+    func testALowerLimitTrimsAtOnce() async throws {
+        let store = ThumbnailDiskStore(directory: directory(), limit: 5 * 4_096, indexDelay: nil, idleDelay: 60, touchInterval: 0)
+        for index in 0..<4 {
+            await store.store(Data(repeating: UInt8(index), count: 3_000), assetID: "asset-\(index)", revision: "1")
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        store.setLimit(2 * 4_096)
+
+        let usage = await store.currentUsage()
+        XCTAssertEqual(store.limit, 2 * 4_096)
+        XCTAssertLessThanOrEqual(usage, 2 * 4_096 / 10 * 9)
+        XCTAssertNil(store.data(assetID: "asset-0", revision: "1"), "The least recently viewed goes.")
+        XCTAssertNotNil(store.data(assetID: "asset-3", revision: "1"), "The newest stays.")
+        XCTAssertEqual(usage, measuredUsage())
+    }
+
+    /// The cap is one of the sizes Diagnostics offers, 1.5 GB until one is picked.
+    func testTheLimitSettingKeepsAChoiceAndOtherwiseReads1Point5GB() throws {
+        let name = "ThumbnailLimitSetting-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        XCTAssertTrue(ThumbnailLimitSetting.choices.contains(ThumbnailDiskStore.defaultLimit))
+        XCTAssertEqual(ThumbnailLimitSetting.load(from: defaults), ThumbnailDiskStore.defaultLimit)
+
+        ThumbnailLimitSetting.save(5_120 * 1_024 * 1_024, to: defaults)
+        XCTAssertEqual(ThumbnailLimitSetting.load(from: defaults), 5_120 * 1_024 * 1_024)
+
+        defaults.set(12_345, forKey: ThumbnailLimitSetting.defaultsKey)
+        XCTAssertEqual(ThumbnailLimitSetting.load(from: defaults), ThumbnailDiskStore.defaultLimit, "A size that isn't offered reads as the default.")
+    }
+
     /// Files a build without the index wrote are listed by the index, kept in place and read
     /// without a download. Until the index is complete, the store asks the disk.
     func testV1FilesAreAdoptedWithoutDownloading() async throws {

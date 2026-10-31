@@ -198,6 +198,7 @@ actor AccountManager {
     /// for the fixture account.
     private func resetInterfaceState() {
         UserDefaults.standard.removeObject(forKey: "gridColumns")
+        UserDefaults.standard.removeObject(forKey: ThumbnailLimitSetting.defaultsKey)
         for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("shelfOrder.") || key.hasPrefix("searchChoices.") {
             UserDefaults.standard.removeObject(forKey: key)
         }

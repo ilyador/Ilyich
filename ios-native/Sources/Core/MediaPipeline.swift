@@ -278,7 +278,7 @@ actor MediaPipeline {
         ephemeral.requestCachePolicy = .reloadIgnoringLocalCacheData
         if let protocolClasses { ephemeral.protocolClasses = protocolClasses }
         privateSession = URLSession(configuration: ephemeral, delegate: SameOriginRedirectDelegate(origin: client.baseURL), delegateQueue: nil)
-        let thumbnails = ThumbnailDiskStore.shared(scope: client.cacheScope)
+        let thumbnails = ThumbnailDiskStore.shared(scope: client.cacheScope, limit: ThumbnailLimitSetting.load())
         self.thumbnails = thumbnails
         let memory = MediaMemory(fence: thumbnails.fence)
         self.memory = memory
