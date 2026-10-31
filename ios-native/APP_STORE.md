@@ -66,7 +66,7 @@ The demo account holds sample photos. Backups and edits made while reviewing go 
 
 ## Left before submitting
 
-1. A demo account on a server App Review can reach from the internet: a non-admin account with a few sample photos and a storage quota is enough. Fill its details into the review notes.
+1. Fill the review notes from the demo server's credentials file (`/mnt/data/ilyich-demo/credentials.json` on the home server): its address, the reviewer's email and password, and the Locked Folder PIN. The server holds about 300 Pexels photos and videos in 14 shoots with albums, places, named people, a partner and a shared album. Keep the address out of this public repo.
 2. The App Store Connect record, with the bundle ID above. Team H4K2MSF2SG is already in the paid Apple Developer Program.
 3. Screenshots for the 6.9-inch iPhone (1320 × 2868), at least three. iPhone 15 Pro screenshots are too small.
 4. Archive and upload: Xcode's Organizer, or `xcodebuild archive` and `-exportArchive` on the Mac with an App Store Connect API key.
