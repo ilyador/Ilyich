@@ -26,9 +26,9 @@ final class AppGroupLayoutTests: XCTestCase {
     }
 
     func testTheAppGroupComesFromTheBundleAndAnUnexpandedSettingIsUnavailable() throws {
-        XCTAssertEqual(try AppGroup.identifier, "group.app.alextran.immich")
-        XCTAssertEqual(try AppGroup.identifier(from: "group.app.alextran.immich.H4K2MSF2SG"), "group.app.alextran.immich.H4K2MSF2SG")
-        for value in ["$(CUSTOM_GROUP_ID)", "app.alextran.immich", nil, 7] as [Any?] {
+        XCTAssertEqual(try AppGroup.identifier, "group.io.ilyador.ilyich")
+        XCTAssertEqual(try AppGroup.identifier(from: "group.io.ilyador.ilyich.H4K2MSF2SG"), "group.io.ilyador.ilyich.H4K2MSF2SG")
+        for value in ["$(CUSTOM_GROUP_ID)", "io.ilyador.ilyich", nil, 7] as [Any?] {
             XCTAssertThrowsError(try AppGroup.identifier(from: value)) { error in
                 XCTAssertEqual(error as? AppGroupError, .unavailable)
             }
