@@ -316,6 +316,22 @@ import XCTest
         await worker.stop()
     }
 
+    /// A higher cap picked while coverage waits at the budget lets it go on at once, not after
+    /// its minute's wait.
+    func testARaisedCapResumesCoverageAtOnce() async throws {
+        let h = try await makeHarness(photos: Array(Self.six.prefix(2)), storeLimit: 4_096)
+        await h.store.store(Self.png, assetID: "elsewhere", revision: "r1")
+        let worker = makeWorker(h)
+        worker.start()
+        try await until("The budget hold was not shown.") { worker.progress.hold == .diskBudget }
+
+        h.store.setLimit(1_024 * 1_024)
+        worker.roomChanged()
+
+        try await until("Coverage did not resume.") { h.server.requested.count == 2 }
+        await worker.stop()
+    }
+
     /// A failing server gets a pause after three failures in a row instead of a stream of
     /// requests, and a change of conditions meanwhile does not cut the pause short.
     func testAFailingServerGetsAPause() async throws {

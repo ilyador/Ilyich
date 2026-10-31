@@ -332,7 +332,8 @@ final class LibraryTests: XCTestCase {
                        "A trailing inward and vertical drag should scrub to a different timeline month.")
     }
     /// G2: Diagnostics shows the thumbnails kept offline against their 1.5 GB cap, beside the
-    /// photo download cache that Clear browsing cache clears.
+    /// photo download cache that Clear browsing cache clears. The cap is picked there (owner), and
+    /// every UI-test launch starts from 1.5 GB again.
     @MainActor func testDiagnosticsShowsTheOfflineThumbnailsAgainstTheirCap() {
         let app = launch()
         openShelves(app)
@@ -355,6 +356,16 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue((value.contains(" of 1.5") && value.hasSuffix("GB")) || text.exists, "Against their 1.5 GB cap.")
         XCTAssertTrue(labeled(NSPredicate(format: "label BEGINSWITH %@", "Photo download cache")).exists)
         capture(app, "Diagnostics — offline thumbnails against their cap")
+
+        let limit = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Offline thumbnail limit")).firstMatch
+        XCTAssertTrue(limit.waitForExistence(timeout: 5), "The cap is picked beside them.")
+        requireHittable(limit, in: app); limit.tap()
+        let larger = app.buttons["3 GB"]
+        XCTAssertTrue(larger.waitForExistence(timeout: 5), "The sizes are offered.")
+        larger.tap()
+        let raised = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", " of 3"), object: row)
+        let raisedText = labeled(NSPredicate(format: "label CONTAINS %@ AND label ENDSWITH %@", " of 3", "GB"))
+        XCTAssertTrue(XCTWaiter.wait(for: [raised], timeout: 5) == .completed || raisedText.exists, "Against the 3 GB cap picked.")
     }
     @MainActor func testEverySettingIsReachableFromTheSettingsShelf() {
         let app = launch()
