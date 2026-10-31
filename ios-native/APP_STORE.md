@@ -10,7 +10,7 @@ What to enter in App Store Connect, and what is left before the first submission
 - **Devices:** iPhone only; iPads run it as an iPhone app, so no iPad screenshots are needed.
 - **Keywords:** `photos,backup,self-hosted,gallery,video,albums,memories,private,library,server,offline,home,nas`. Leave out other apps' names; App Review rejects trademarks in keywords.
 - **Support URL:** https://github.com/ilyador/Ilyich/issues
-- **Privacy policy URL:** https://github.com/ilyador/Ilyich/blob/dev/ios-native/PRIVACY.md (it works once `dev` includes this branch)
+- **Privacy policy URL:** https://github.com/ilyador/Ilyich/blob/dev/ios-native/PRIVACY.md
 - **Copyright:** 2026 Ilya Dorman
 - **What's New:** First release.
 
