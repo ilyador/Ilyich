@@ -62,11 +62,11 @@ The demo account holds sample photos. Backups and edits made while reviewing go 
 - **Privacy manifests:** `Config/PrivacyInfo.xcprivacy` and `Extensions/Share/PrivacyInfo.xcprivacy` declare the required-reason APIs.
 - **Content rights:** answer No. The app shows the user's own photos; the map data is Natural Earth's public domain data, credited under About.
 - **Licenses:** the app ships your code and ThumbHash (MIT, credited under About > Licenses). Nothing outside `ios-native` is compiled in.
-- **Bundle ID:** `app.alextran.immich.H4K2MSF2SG`, kept so the store build replaces the installed app and keeps its data. Users never see it.
+- **Bundle ID:** `io.ilyador.ilyich`, App Group `group.io.ilyador.ilyich`. Users never see it, and it can't change after the first upload.
 
 ## Left before submitting
 
 1. A demo account on a server App Review can reach from the internet: a non-admin account with a few sample photos and a storage quota is enough. Fill its details into the review notes.
-2. The App Store Connect record (paid Apple Developer Program on team H4K2MSF2SG), with the bundle ID above.
+2. The App Store Connect record, with the bundle ID above. Team H4K2MSF2SG is already in the paid Apple Developer Program.
 3. Screenshots for the 6.9-inch iPhone (1320 × 2868), at least three. iPhone 15 Pro screenshots are too small.
 4. Archive and upload: Xcode's Organizer, or `xcodebuild archive` and `-exportArchive` on the Mac with an App Store Connect API key.

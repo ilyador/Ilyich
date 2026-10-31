@@ -2,7 +2,6 @@
 MARKETING_VERSION = 3.3.3
 CURRENT_PROJECT_VERSION = 3040000
 IPHONEOS_DEPLOYMENT_TARGET = 27.0
-// Device builds signed with the owner's team pass APP_BUNDLE_ID=app.alextran.immich.<TEAM> and
-// CUSTOM_GROUP_ID=group.app.alextran.immich.<TEAM>, the identifiers iloader gave the installed app.
-APP_BUNDLE_ID = app.alextran.immich
-CUSTOM_GROUP_ID = group.app.alextran.immich
+// The App Store identifiers, which every build uses.
+APP_BUNDLE_ID = io.ilyador.ilyich
+CUSTOM_GROUP_ID = group.io.ilyador.ilyich

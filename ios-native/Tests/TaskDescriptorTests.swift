@@ -60,11 +60,11 @@ final class TaskDescriptorTests: XCTestCase {
 
     func testSessionIdentifiersFollowTheBundleIdentifier() {
         // The identifiers every build used, so iOS hands over the sessions earlier builds left.
-        let bundle = Bundle.main.bundleIdentifier ?? "app.alextran.immich"
+        let bundle = Bundle.main.bundleIdentifier ?? "io.ilyador.ilyich"
         XCTAssertEqual(TransferSessionID.backup.identifier, bundle + ".backup")
         XCTAssertEqual(TransferSessionID.shareUpload.identifier, bundle + ".share-upload")
-        XCTAssertEqual(TransferSessionID.backup.identifier(bundleIdentifier: "app.alextran.immich.H4K2MSF2SG"), "app.alextran.immich.H4K2MSF2SG.backup")
-        XCTAssertEqual(TransferSessionID.shareUpload.identifier(bundleIdentifier: "app.alextran.immich.H4K2MSF2SG"), "app.alextran.immich.H4K2MSF2SG.share-upload")
-        XCTAssertEqual(TransferSessionID.backup.identifier(bundleIdentifier: nil), "app.alextran.immich.backup")
+        XCTAssertEqual(TransferSessionID.backup.identifier(bundleIdentifier: "io.ilyador.ilyich.H4K2MSF2SG"), "io.ilyador.ilyich.H4K2MSF2SG.backup")
+        XCTAssertEqual(TransferSessionID.shareUpload.identifier(bundleIdentifier: "io.ilyador.ilyich.H4K2MSF2SG"), "io.ilyador.ilyich.H4K2MSF2SG.share-upload")
+        XCTAssertEqual(TransferSessionID.backup.identifier(bundleIdentifier: nil), "io.ilyador.ilyich.backup")
     }
 }

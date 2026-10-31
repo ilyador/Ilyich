@@ -45,14 +45,14 @@ struct AttemptID: Hashable, Sendable, CustomStringConvertible {
     var description: String { rawValue }
 }
 
-/// The two background URLSessions. Their identifiers derive from the bundle identifier, which the
-/// sideloading tool rewrites (on the phone, app.alextran.immich.H4K2MSF2SG), and never change.
+/// The two background URLSessions. Their identifiers derive from the bundle identifier
+/// (io.ilyador.ilyich) and never change.
 enum TransferSessionID: String, CaseIterable, Hashable, Sendable {
     case backup
     case shareUpload = "share-upload"
 
     var identifier: String { identifier(bundleIdentifier: Bundle.main.bundleIdentifier) }
-    func identifier(bundleIdentifier: String?) -> String { (bundleIdentifier ?? "app.alextran.immich") + "." + rawValue }
+    func identifier(bundleIdentifier: String?) -> String { (bundleIdentifier ?? "io.ilyador.ilyich") + "." + rawValue }
 }
 
 /// What a background upload task's taskDescription says about it.

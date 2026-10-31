@@ -85,7 +85,7 @@ targets:
       - target: Ilyich
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: app.alextran.immich.tests
+        PRODUCT_BUNDLE_IDENTIFIER: io.ilyador.ilyich.tests
         GENERATE_INFOPLIST_FILE: YES
   IlyichUITests:
     type: bundle.ui-testing
@@ -96,7 +96,7 @@ targets:
       - target: Ilyich
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: app.alextran.immich.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: io.ilyador.ilyich.uitests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   Ilyich:

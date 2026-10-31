@@ -72,9 +72,9 @@ final class TransportRegistryTests: XCTestCase {
     func testIdentifiersMapOnlyToThisBundlesSessions() {
         XCTAssertEqual(TransferSessionID(identifier: TransferSessionID.backup.identifier), .backup)
         XCTAssertEqual(TransferSessionID(identifier: TransferSessionID.shareUpload.identifier), .shareUpload)
-        let sideloaded = "app.alextran.immich.H4K2MSF2SG"
-        XCTAssertEqual(TransferSessionID(identifier: "app.alextran.immich.H4K2MSF2SG.share-upload", bundleIdentifier: sideloaded), .shareUpload)
-        XCTAssertNil(TransferSessionID(identifier: "app.alextran.immich.backup", bundleIdentifier: sideloaded), "A re-signed bundle's sessions are its own.")
+        let sideloaded = "io.ilyador.ilyich.H4K2MSF2SG"
+        XCTAssertEqual(TransferSessionID(identifier: "io.ilyador.ilyich.H4K2MSF2SG.share-upload", bundleIdentifier: sideloaded), .shareUpload)
+        XCTAssertNil(TransferSessionID(identifier: "io.ilyador.ilyich.backup", bundleIdentifier: sideloaded), "A re-signed bundle's sessions are its own.")
         XCTAssertNil(TransferSessionID(identifier: "com.example.downloads"))
 
         let registry = TransportRegistry { session, emit in
