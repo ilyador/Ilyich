@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
+  import Logo from '$lib/components/shared-components/BrandLogo.svelte';
   import { goto } from '$app/navigation';
   import type { Action } from '$lib/components/asset-viewer/actions/action';
   import DownloadAction from '$lib/components/timeline/actions/DownloadAction.svelte';

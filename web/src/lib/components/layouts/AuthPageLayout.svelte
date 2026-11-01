@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
+  import Logo from '$lib/components/shared-components/BrandLogo.svelte';
   import { Card, CardBody, CardHeader, Heading, VStack } from '@immich/ui';
   import type { Snippet } from 'svelte';
   interface Props {

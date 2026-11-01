@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
+  import Logo from '$lib/components/shared-components/BrandLogo.svelte';
   import { goto } from '$app/navigation';
   import { OpenQueryParam } from '$lib/constants';
   import Portal from '$lib/elements/Portal.svelte';

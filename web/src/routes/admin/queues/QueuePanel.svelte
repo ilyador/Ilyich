@@ -68,7 +68,7 @@
     [QueueName.VideoFaceDetection]: {
       allText: $t('all'),
       missingText: $t('missing'),
-      disabled: !machineLearning.facialRecognition.enabled,
+      disabled: !featureFlags.facialRecognition,
     },
     [QueueName.FacialRecognition]: {
       allText: $t('reset'),
