@@ -1,6 +1,6 @@
-import { transformManager } from '#lib/managers/edit/transform-manager.svelte.ts';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assetFactory } from '#test-data/factories/asset-factory';
+import { transformManager } from '$lib/managers/edit/transform-manager.svelte';
+import { assetFactory } from '@test-data/factories/asset-factory';
 
 describe('published editor base', () => {
   afterEach(() => transformManager.onDeactivate());
