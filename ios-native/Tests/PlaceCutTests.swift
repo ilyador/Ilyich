@@ -79,6 +79,24 @@ final class PlaceCutTests: XCTestCase {
         }
     }
 
+    func testAPinKeepsItsSideWhileItFitsAndPinsPlacedBeforeGoFirst() {
+        let bounds = CGRect(x: 0, y: 0, width: 400, height: 800)
+        let label = CGSize(width: 120, height: 28)
+        // Another pin's place has moved under the first pin's label: the label stays put.
+        let kept = PinPlacement.place([
+            .init(id: "a", point: CGPoint(x: 200, y: 400), label: label),
+            .init(id: "b", point: CGPoint(x: 300, y: 400), label: label),
+        ], in: bounds, sides: ["a": .right], limit: 8)
+        XCTAssertEqual(kept.map(\.id), ["a"])
+        XCTAssertEqual(kept[0].side, .right)
+        // A smaller pin placed last time is placed before a bigger one that just came into view.
+        let sticky = PinPlacement.place([
+            .init(id: "big", point: CGPoint(x: 230, y: 400), label: label),
+            .init(id: "small", point: CGPoint(x: 200, y: 400), label: label),
+        ], in: bounds, sides: ["small": .left], before: ["small"], limit: 8)
+        XCTAssertEqual(sticky.map(\.id), ["small"])
+    }
+
     func testALabelKeepsItsSideAndAPinNearTheEdgeDropsItsLabel() {
         let bounds = CGRect(x: 0, y: 0, width: 400, height: 800)
         let label = CGSize(width: 120, height: 28)

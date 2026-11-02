@@ -213,11 +213,12 @@ actor PlaceDirectory {
         for watcher in entry.watchers.values { watcher.yield(entry.snapshot) }
     }
 
-    /// Builds the hierarchies again once localities have come in for a moment, not on each one.
+    /// Builds the hierarchies again as localities come in, every few of them rather than on each
+    /// one, so the Earth isn't made again every other second while they are looked up.
     private func scheduleRebuild() {
         guard rebuilding == nil else { return }
         rebuilding = Task { [weak self, settle] in
-            try? await Task.sleep(for: settle)
+            try? await Task.sleep(for: settle * 8)
             await self?.rebuildAll()
         }
     }
