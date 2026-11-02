@@ -981,10 +981,9 @@ final class LibraryTests: XCTestCase {
         openShelves(app); app.buttons["Places"].tap()
         let earth = app.otherElements["Interactive Earth"]
         XCTAssertTrue(earth.waitForExistence(timeout: 15))
-        // From afar the Earth shows countries (L1); the fixture's Netherlands holds Amsterdam.
-        let netherlands = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Netherlands,")).firstMatch
-        XCTAssertTrue(netherlands.waitForExistence(timeout: 10))
-        requireHittable(netherlands, in: app); netherlands.tap()
+        let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch
+        XCTAssertTrue(amsterdam.waitForExistence(timeout: 10))
+        requireHittable(amsterdam, in: app); amsterdam.tap()
         XCTAssertTrue(app.buttons["library.pill.place.remove"].waitForExistence(timeout: 10), "The place joins Favorites.")
         XCTAssertTrue(app.buttons["library.pill.favorites.remove"].exists)
         openShelves(app)
@@ -1782,7 +1781,7 @@ final class LibraryTests: XCTestCase {
         openShelves(app); app.buttons["Places"].tap()
         let earth = app.otherElements["Interactive Earth"]
         XCTAssertTrue(earth.waitForExistence(timeout: 15))
-        let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Netherlands,")).firstMatch
+        let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch
         XCTAssertTrue(amsterdam.waitForExistence(timeout: 10), "Photo pins must be accessible controls.")
         requireHittable(amsterdam, in: app)
         amsterdam.tap()
@@ -1802,23 +1801,18 @@ final class LibraryTests: XCTestCase {
         }
         capture(app, "Places — photo pin selection and actual rotation")
     }
-    /// L1: from afar a country is one pin; closer it opens into its city, and at city zoom the
-    /// streets come in under the pins, the pin's thumbnail on the place itself.
-    @MainActor func testTheEarthOpensACountryIntoItsCityAndStreetsAsItComesCloser() {
+    /// L1: a city is one pin from afar, and at city zoom the streets come in under the pins,
+    /// the pin's thumbnail on the place itself.
+    @MainActor func testTheEarthKeepsACityPinnedDownToItsStreets() {
         let app = launch(appearance: "dark")
         openShelves(app); app.buttons["Places"].tap()
         let earth = app.otherElements["Interactive Earth"]
         XCTAssertTrue(earth.waitForExistence(timeout: 15))
-        let netherlands = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Netherlands,")).firstMatch
-        XCTAssertTrue(netherlands.waitForExistence(timeout: 10), "From afar, the country.")
-        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch.exists)
-        capture(app, "Places — countries from afar")
         let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch
-        for _ in 0..<6 where !amsterdam.exists { earth.pinch(withScale: 3, velocity: 1.5) }
-        XCTAssertTrue(amsterdam.waitForExistence(timeout: 10), "Closer, the country opens into its city.")
-        XCTAssertFalse(netherlands.exists)
-        capture(app, "Places — the city, closer")
-        for _ in 0..<4 { earth.pinch(withScale: 3, velocity: 1.5) }
+        XCTAssertTrue(amsterdam.waitForExistence(timeout: 10), "From afar, the city.")
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Netherlands,")).firstMatch.exists, "Countries are for the list and search")
+        capture(app, "Places — cities from afar")
+        for _ in 0..<8 { earth.pinch(withScale: 3, velocity: 1.5) }
         RunLoop.current.run(until: Date().addingTimeInterval(4))
         XCTAssertTrue(amsterdam.exists, "The city's pin stays at city zoom.")
         capture(app, "Places — streets at city zoom")

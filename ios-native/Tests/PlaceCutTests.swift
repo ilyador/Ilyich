@@ -17,29 +17,27 @@ final class PlaceCutTests: XCTestCase {
         PlaceHierarchy.build(markers, localities: PlacesTests.localities(markers, cities: ["Bairro Alto": "Lisbon", "Graça": "Lisbon", "Porto": "Porto"]))
     }
 
-    func testFromAfarACountryIsOnePlaceAndCloserItOpensIntoItsCities() {
+    func testCitiesShowFromAfarAndOpenIntoNeighborhoodsCloseUp() {
         let hierarchy = Self.hierarchy
-        let country = hierarchy[hierarchy.roots[0]].flatMap { hierarchy.children(of: $0).first }!
-        XCTAssertEqual(country.level, .country)
-        // Lisbon and Porto are 0.042 radians apart: 4 points on screen from orbit, 420 close up.
         let far = PlaceCut.shown(hierarchy, radiansPerPoint: 0.01, open: [])
-        XCTAssertEqual(far.nodes.map(\.title), ["Europe"], "From orbit, the continent")
+        XCTAssertEqual(Set(far.nodes.map(\.title)), ["Lisbon", "Porto"], "Cities, never countries or continents")
         let near = PlaceCut.shown(hierarchy, radiansPerPoint: 0.0001, open: [])
-        XCTAssertEqual(Set(near.nodes.map(\.title)), ["Lisbon", "Porto"], "Cities 420 points apart show as themselves; Lisbon's neighborhoods are still too close")
-        XCTAssertTrue(near.open.contains(country.id))
+        XCTAssertEqual(Set(near.nodes.map(\.title)), ["Lisbon", "Porto"], "Lisbon's neighborhoods are still too close to tell apart")
         let closest = PlaceCut.shown(hierarchy, radiansPerPoint: 0.000001, open: [])
         XCTAssertEqual(Set(closest.nodes.map(\.title)), ["Bairro Alto", "Graça", "Porto"])
+        XCTAssertTrue(closest.open.contains(hierarchy.places(named: "Lisbon").first { $0.level == .city }!.id))
     }
 
     func testAnOpenPlaceClosesALittleLaterThanItOpened() {
         let hierarchy = Self.hierarchy
-        let country = hierarchy[hierarchy.roots[0]].flatMap { hierarchy.children(of: $0).first }!
-        let opensAt = country.split / (PlaceCut.pinPoints * PlaceCut.opensAt)
-        XCTAssertEqual(PlaceCut.shown(hierarchy, radiansPerPoint: opensAt * 1.01, open: []).nodes.count, 1)
-        let opened = PlaceCut.shown(hierarchy, radiansPerPoint: opensAt * 0.99, open: [])
-        XCTAssertEqual(opened.nodes.count, 2)
-        XCTAssertEqual(PlaceCut.shown(hierarchy, radiansPerPoint: opensAt * 1.1, open: opened.open).nodes.count, 2, "Zooming out a little keeps it open")
-        XCTAssertEqual(PlaceCut.shown(hierarchy, radiansPerPoint: opensAt * 1.5, open: opened.open).nodes.count, 1)
+        let lisbon = hierarchy.places(named: "Lisbon").first { $0.level == .city }!
+        let opensAt = lisbon.split / (PlaceCut.pinPoints * PlaceCut.opensAt)
+        // A tall view, so only the neighborhoods' distance apart decides.
+        XCTAssertEqual(PlaceCut.shown(hierarchy, radiansPerPoint: opensAt * 1.01, viewPoints: 4000, open: []).nodes.count, 2)
+        let opened = PlaceCut.shown(hierarchy, radiansPerPoint: opensAt * 0.99, viewPoints: 4000, open: [])
+        XCTAssertEqual(opened.nodes.count, 3)
+        XCTAssertEqual(PlaceCut.shown(hierarchy, radiansPerPoint: opensAt * 1.1, viewPoints: 4000, open: opened.open).nodes.count, 3, "Zooming out a little keeps it open")
+        XCTAssertEqual(PlaceCut.shown(hierarchy, radiansPerPoint: opensAt * 1.5, viewPoints: 4000, open: opened.open).nodes.count, 2)
     }
 
     func testAPhotosOwnPlaceIsShownWhateverTheZoom() {
@@ -55,18 +53,12 @@ final class PlaceCutTests: XCTestCase {
         XCTAssertTrue(cut.nodes.isEmpty)
     }
 
-    func testACountryOfOneCityOpensIntoItAtCityZoom() {
-        let markers = [
-            MapMarker(id: "a1", lat: 52.3676, lon: 4.9041, city: "Amsterdam", state: nil, country: "Netherlands"),
-            MapMarker(id: "a2", lat: 52.3702, lon: 4.8952, city: "Amsterdam", state: nil, country: "Netherlands"),
-        ]
-        let hierarchy = PlaceHierarchy.build(markers, localities: PlaceLocalities(language: "en"))
-        // Both photos lie within a kilometer, so they never stand a pin apart; the view spanning
-        // less than a country opens it all the same.
-        let wide = PlaceCut.shown(hierarchy, radiansPerPoint: PlaceCut.span(.country) / 800 * 1.3, open: [])
-        XCTAssertEqual(wide.nodes.map(\.title), ["Netherlands"])
-        let city = PlaceCut.shown(hierarchy, radiansPerPoint: PlaceCut.span(.country) / 800 * 0.8, open: [])
-        XCTAssertEqual(city.nodes.map(\.title), ["Amsterdam"])
+    func testACityOpensIntoItsNeighborhoodsOnceTheViewSpansLessThanACity() {
+        let hierarchy = Self.hierarchy
+        let wide = PlaceCut.shown(hierarchy, radiansPerPoint: PlaceCut.span(.city) / 800 * 1.3, open: [])
+        XCTAssertEqual(Set(wide.nodes.map(\.title)), ["Lisbon", "Porto"])
+        let city = PlaceCut.shown(hierarchy, radiansPerPoint: PlaceCut.span(.city) / 800 * 0.8, open: [])
+        XCTAssertEqual(Set(city.nodes.map(\.title)), ["Bairro Alto", "Graça", "Porto"], "Porto has no parts and stays itself")
     }
 
     func testPinsSitOnTheirPlaceAndLabelsFindRoom() {

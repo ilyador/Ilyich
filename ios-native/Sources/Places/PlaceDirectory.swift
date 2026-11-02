@@ -42,6 +42,8 @@ actor PlaceDirectory {
         }
     }
 
+    /// The city each server name lies in, for the screens that name one photo's place.
+    nonisolated let naming: PlaceNaming?
     private let markers: @Sendable (MapMarkerQuery) async throws -> [MapMarker]
     private let geocoder: (any PlaceGeocoder)?
     private let file: URL?
@@ -63,9 +65,9 @@ actor PlaceDirectory {
     /// `markers` finds the photos' locations; without a geocoder no locality is looked up, and
     /// without a file none is kept past the directory.
     init(markers: @escaping @Sendable (MapMarkerQuery) async throws -> [MapMarker], geocoder: (any PlaceGeocoder)?, file: URL?,
-         language: String = PlaceDirectory.language, pacing: Duration = .milliseconds(1300), backoff: Duration = .seconds(60),
-         settle: Duration = .seconds(2)) {
-        self.markers = markers; self.geocoder = geocoder; self.file = file
+         naming: PlaceNaming? = nil, language: String = PlaceDirectory.language, pacing: Duration = .milliseconds(1300),
+         backoff: Duration = .seconds(60), settle: Duration = .seconds(2)) {
+        self.markers = markers; self.geocoder = geocoder; self.file = file; self.naming = naming
         self.pacing = pacing; self.backoff = backoff; self.settle = settle
         localities = PlaceLocalities(language: language)
     }
@@ -199,6 +201,10 @@ actor PlaceDirectory {
         guard entries[query] != nil, !ended else { return }
         entries[query]!.hierarchy = hierarchy
         publish(query)
+        if query == Self.library, let naming {
+            let cities = hierarchy.citiesByServerName
+            await MainActor.run { naming.cities = cities }
+        }
         want(hierarchy.units)
     }
 

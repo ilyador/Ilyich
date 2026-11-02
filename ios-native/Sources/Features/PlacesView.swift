@@ -178,7 +178,7 @@ struct PlacesView: View {
     }
 
     private var globeFocus: PlaceFocus? {
-        selected.map { $0.focus } ?? focus ?? hierarchy.roots.first.flatMap { hierarchy[$0] }.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
+        selected.map { $0.focus } ?? focus ?? hierarchy.cities.first.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
     }
 
     /// The photos the places are found in: the library's, with the filters chosen here.
