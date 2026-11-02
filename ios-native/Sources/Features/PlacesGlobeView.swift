@@ -149,6 +149,10 @@ private struct GlobeSurface: UIViewRepresentable {
         private var labelMetricsContext = ""
         private var pinSides: [String: PinPlacement.Side] = [:]
         private var pinsPlaced: Set<String> = []
+        /// What the places shown were cut for: the zoom, the view's height and the focused place.
+        /// Turning the Earth changes none of them, so a pan keeps the cut.
+        private var cutFor: (gain: Float, height: CGFloat, focus: String?)?
+        private var ordered: [(Entity, PlaceHierarchy.Node)] = []
         var lastIdentity = ""
         var lastFocus: PlaceFocus?
         var focusedPlaceID: String?
@@ -258,7 +262,7 @@ private struct GlobeSurface: UIViewRepresentable {
                 // pins are made again where they are, and the Earth stays where it was turned.
                 self.hierarchy = hierarchy; lastIdentity = hierarchy.identity
                 markerRoot.children.removeAll(); pinEntities.removeAll(); markers.removeAll(); labelSizes.removeAll()
-                open.removeAll(); focusedPhoto = nil
+                open.removeAll(); focusedPhoto = nil; cutFor = nil
                 if let focus, let placeID = focus.placeID, hierarchy[placeID] != nil { focusedPlaceID = placeID }
             }
             if let focus, !Self.sameTarget(focus, lastFocus), focus.latitude.isFinite, focus.longitude.isFinite {
@@ -495,15 +499,18 @@ private struct GlobeSurface: UIViewRepresentable {
             let metricsContext = "\(view.traitCollection.preferredContentSizeCategory.rawValue)|\(Int(view.bounds.width))"
             if metricsContext != labelMetricsContext { labelSizes.removeAll(); labelMetricsContext = metricsContext }
             let gain = GlobeGeometry.dragRadiansPerPoint(cameraDistance: cameraDistance, viewportHeight: Float(view.bounds.height), compact: compact)
-            let cut = PlaceCut.shown(hierarchy, radiansPerPoint: Double(gain), viewPoints: Double(view.bounds.height), open: open, forced: focusedPlaceID.map { [$0] } ?? [])
-            open = cut.open
-            markers = cut.nodes.map { (pin($0), $0) }
+            if cutFor == nil || cutFor! != (gain, view.bounds.height, focusedPlaceID) {
+                let cut = PlaceCut.shown(hierarchy, radiansPerPoint: Double(gain), viewPoints: Double(view.bounds.height), open: open, forced: focusedPlaceID.map { [$0] } ?? [])
+                open = cut.open
+                markers = cut.nodes.map { (pin($0), $0) }
+                ordered = markers.sorted { left, right in
+                    if (left.1.id == focusedPlaceID) != (right.1.id == focusedPlaceID) { return left.1.id == focusedPlaceID }
+                    return left.1.count != right.1.count ? left.1.count > right.1.count : left.1.title < right.1.title
+                }
+                cutFor = (gain, view.bounds.height, focusedPlaceID)
+            }
             var candidates: [PinPlacement.Candidate] = []
             var shown: [String: (title: String, count: Int, cover: String, label: CGSize)] = [:]
-            let ordered = markers.sorted { left, right in
-                if (left.1.id == focusedPlaceID) != (right.1.id == focusedPlaceID) { return left.1.id == focusedPlaceID }
-                return left.1.count != right.1.count ? left.1.count > right.1.count : left.1.title < right.1.title
-            }
             for (entity, node) in ordered {
                 let world = entity.position(relativeTo: nil)
                 guard isFacingCamera(world, margin: 0.05), let point = view.project(world) else { continue }

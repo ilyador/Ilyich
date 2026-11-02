@@ -141,10 +141,13 @@ actor PlaceDirectory {
         }
     }
 
+    /// Fetches `query`'s photos. `stale` means changed since the last fetch began, so a change
+    /// that lands while one is in flight is fetched next.
     private func load(_ query: MapMarkerQuery) {
         guard !ended, entries[query]?.loading == nil else { return }
         let markers = self.markers
-        entries[query, default: Entry()].loading = Task { [weak self] in
+        entries[query, default: Entry()].stale = false
+        entries[query]!.loading = Task { [weak self] in
             do {
                 let found = try await markers(query)
                 await self?.loaded(found, for: query)
@@ -158,8 +161,9 @@ actor PlaceDirectory {
 
     private func loaded(_ markers: [MapMarker], for query: MapMarkerQuery) async {
         guard entries[query] != nil else { return }
-        entries[query]!.markers = markers; entries[query]!.stale = false; entries[query]!.loading = nil
+        entries[query]!.markers = markers; entries[query]!.loading = nil
         entries[query]!.failure = nil
+        if entries[query]!.stale { load(query) }
         await readLocalities()
         await rebuild(query)
     }
@@ -168,7 +172,7 @@ actor PlaceDirectory {
 
     private func failed(_ error: any Error, for query: MapMarkerQuery) {
         guard entries[query] != nil else { return }
-        entries[query]!.loading = nil
+        entries[query]!.loading = nil; entries[query]!.stale = true
         // Places already shown stay; only a first load that failed says so.
         guard entries[query]!.hierarchy == nil else { return }
         entries[query]!.failure = error.localizedDescription
