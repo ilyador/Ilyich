@@ -113,7 +113,8 @@ import XCTest
         // The places on the map carry their membership, with the marker query that found them.
         let markers = [MapMarker(id: "a", lat: 38.7, lon: -9.1, city: "Lisbon", state: nil, country: "Portugal"),
                        MapMarker(id: "b", lat: 38.7, lon: -9.1, city: "Lisbon", state: nil, country: "Portugal")]
-        let place = try XCTUnwrap(PlaceCollection.group(markers, markerQuery: "withPartners=false").first)
+        let hierarchy = PlaceHierarchy.build(markers, localities: PlaceLocalities(language: "en"), markerQuery: "withPartners=false")
+        let place = PlaceCollection(try XCTUnwrap(hierarchy.places(named: "Lisbon").first), in: hierarchy)
         XCTAssertEqual(place.membership, PlaceMembership(placeID: place.id, assetIDs: ["b", "a"], markerQuery: "withPartners=false"))
         XCTAssertNotEqual(place.membership, PlaceMembership(placeID: place.id, assetIDs: ["a", "b"], markerQuery: "withPartners=true"))
     }

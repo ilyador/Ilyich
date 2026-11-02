@@ -134,16 +134,18 @@ final class StackedFiltersIndexTests: XCTestCase {
         // The Earth keeps of its places only the stack's photos: Maya's, with no partner among them.
         let mayas = try await index.feedIDs(FilterStack([.collection(.person(maya))]).query)
         XCTAssertEqual(mayas, ["a1", "a2", "v1", "m1", "c1"])
-        let places = PlacesView.arrange([
+        let whole = PlaceHierarchy.build([
             MapMarker(id: "a1", lat: 38.72, lon: -9.14, city: "Lisbon", state: nil, country: "Portugal"),
             MapMarker(id: "b1", lat: 38.72, lon: -9.14, city: "Lisbon", state: nil, country: "Portugal"),
             MapMarker(id: "a6", lat: 41.15, lon: -8.61, city: "Porto", state: nil, country: "Portugal"),
-        ], markerQuery: "", narrowing: PlaceNarrowing(key: "maya", ids: mayas))
-        XCTAssertEqual(places.all.map(\.title), ["Lisbon", "Porto"], "Every place is kept whole for choosing.")
-        XCTAssertEqual(places.shown.map(\.title), ["Lisbon"], "A place without Maya's photos leaves the Earth.")
-        XCTAssertEqual(places.shown.first?.assetIDs, ["a1"], "Lisbon counts only Maya's photo.")
-        XCTAssertEqual(places.all.first?.assetIDs, ["a1", "b1"])
-        XCTAssertEqual(places.lights.total, 1)
+        ], localities: PlaceLocalities(language: "en"))
+        let narrowing = PlaceNarrowing(key: "maya", ids: mayas)
+        let shown = whole.narrowed(to: narrowing.ids)
+        XCTAssertEqual(whole.cities.map(\.title), ["Lisbon", "Porto"], "Every place is kept whole for choosing.")
+        XCTAssertEqual(shown.cities.map(\.title), ["Lisbon"], "A place without Maya's photos leaves the Earth.")
+        XCTAssertEqual(shown.cities.first?.assetIDs, ["a1"], "Lisbon counts only Maya's photo.")
+        XCTAssertEqual(whole.cities.first?.assetIDs, ["a1", "b1"])
+        XCTAssertEqual(GlobePhotoLights(photos: shown.photos).total, 1)
     }
 
     /// A stack with a kind on a 60,000-photo library, as on the owner's phone: its months and its

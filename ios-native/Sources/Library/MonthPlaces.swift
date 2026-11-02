@@ -34,8 +34,14 @@ struct FeedPlaces: Sendable, Equatable {
         years = MonthPlaces.years(months)
     }
 
-    init(counts: [MonthPlaceCount]) {
-        self.init(months: MonthPlaces.byMonth(counts), trips: MonthPlaces.trips(counts))
+    /// `naming` renames the server's places by "country|name" to the city each lies in
+    /// (REBUILD_ROADMAP.md L1), so a month in three neighborhoods of Porto is a month in Porto.
+    init(counts: [MonthPlaceCount], naming: [String: String] = [:]) {
+        let named = naming.isEmpty ? counts : counts.map { count in
+            guard let city = count.city, let name = naming["\(count.country ?? "")|\(city)"] else { return count }
+            return MonthPlaceCount(bucket: count.bucket, city: name, country: count.country, count: count.count)
+        }
+        self.init(months: MonthPlaces.byMonth(named), trips: MonthPlaces.trips(named))
     }
 }
 

@@ -734,7 +734,7 @@ final class LibraryTests: XCTestCase {
         // The AI check starts off; this search is the verified one.
         let check = app.switches["search.aiCheck"]
         requireHittable(check, in: app); check.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
-        search.typeText("me wearing a red hat in Amsterdam\n")
+        search.typeText("me wearing a red hat\n")
         XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.staticTexts["Visually checked"].waitForExistence(timeout: 5))
         let firstMatch = app.collectionViews["library.grid"].cells.element(boundBy: 0)
@@ -981,9 +981,10 @@ final class LibraryTests: XCTestCase {
         openShelves(app); app.buttons["Places"].tap()
         let earth = app.otherElements["Interactive Earth"]
         XCTAssertTrue(earth.waitForExistence(timeout: 15))
-        let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch
-        XCTAssertTrue(amsterdam.waitForExistence(timeout: 10))
-        requireHittable(amsterdam, in: app); amsterdam.tap()
+        // From afar the Earth shows countries (L1); the fixture's Netherlands holds Amsterdam.
+        let netherlands = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Netherlands,")).firstMatch
+        XCTAssertTrue(netherlands.waitForExistence(timeout: 10))
+        requireHittable(netherlands, in: app); netherlands.tap()
         XCTAssertTrue(app.buttons["library.pill.place.remove"].waitForExistence(timeout: 10), "The place joins Favorites.")
         XCTAssertTrue(app.buttons["library.pill.favorites.remove"].exists)
         openShelves(app)
@@ -1781,7 +1782,7 @@ final class LibraryTests: XCTestCase {
         openShelves(app); app.buttons["Places"].tap()
         let earth = app.otherElements["Interactive Earth"]
         XCTAssertTrue(earth.waitForExistence(timeout: 15))
-        let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch
+        let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Netherlands,")).firstMatch
         XCTAssertTrue(amsterdam.waitForExistence(timeout: 10), "Photo pins must be accessible controls.")
         requireHittable(amsterdam, in: app)
         amsterdam.tap()
@@ -1801,6 +1802,47 @@ final class LibraryTests: XCTestCase {
         }
         capture(app, "Places — photo pin selection and actual rotation")
     }
+    /// L1: from afar a country is one pin; closer it opens into its city, and at city zoom the
+    /// streets come in under the pins, the pin's thumbnail on the place itself.
+    @MainActor func testTheEarthOpensACountryIntoItsCityAndStreetsAsItComesCloser() {
+        let app = launch(appearance: "dark")
+        openShelves(app); app.buttons["Places"].tap()
+        let earth = app.otherElements["Interactive Earth"]
+        XCTAssertTrue(earth.waitForExistence(timeout: 15))
+        let netherlands = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Netherlands,")).firstMatch
+        XCTAssertTrue(netherlands.waitForExistence(timeout: 10), "From afar, the country.")
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch.exists)
+        capture(app, "Places — countries from afar")
+        let amsterdam = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Amsterdam,")).firstMatch
+        for _ in 0..<6 where !amsterdam.exists { earth.pinch(withScale: 3, velocity: 1.5) }
+        XCTAssertTrue(amsterdam.waitForExistence(timeout: 10), "Closer, the country opens into its city.")
+        XCTAssertFalse(netherlands.exists)
+        capture(app, "Places — the city, closer")
+        for _ in 0..<4 { earth.pinch(withScale: 3, velocity: 1.5) }
+        RunLoop.current.run(until: Date().addingTimeInterval(4))
+        XCTAssertTrue(amsterdam.exists, "The city's pin stays at city zoom.")
+        capture(app, "Places — streets at city zoom")
+        amsterdam.tap()
+        XCTAssertTrue(app.buttons["library.pill.place.remove"].waitForExistence(timeout: 10))
+    }
+
+    /// L1: a search naming a place keeps to the whole place, and the rest of the text is searched
+    /// inside it.
+    @MainActor func testASearchNamingAPlaceKeepsToThePlace() {
+        let app = launch()
+        let search = app.textFields["library.search"]
+        search.tap()
+        search.typeText("red hat in Amsterdam\n")
+        let place = app.buttons["library.pill.place.remove"]
+        XCTAssertTrue(place.waitForExistence(timeout: 20), "The place named becomes the place filter.")
+        XCTAssertTrue(app.buttons["library.pill.search.remove"].exists, "The rest of the text is a search inside it.")
+        XCTAssertTrue(waitForCells(app.collectionViews["library.grid"], count: 2), "Only Amsterdam's photos are searched.")
+        capture(app, "Search — a place named in the text")
+        place.tap()
+        XCTAssertFalse(place.exists)
+        XCTAssertTrue(app.staticTexts["9 matches"].waitForExistence(timeout: 20), "Without the place, the search runs over the library.")
+    }
+
     @MainActor func testAccessibilityTextKeepsDayHeadersAndLibraryControlsTappable() {
         let app = launch(extraArguments: ["-timelineGrouping", "day", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXL"])
         requireHittable(app.buttons["library.shelves"], in: app)

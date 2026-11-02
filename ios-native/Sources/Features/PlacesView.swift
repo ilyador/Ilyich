@@ -4,45 +4,39 @@ import MapKit
 struct PlaceFocus: Hashable, Sendable {
     let latitude: Double
     let longitude: Double
+    /// A photo's own location, which the Earth comes in closer to and shows the place of.
     var assetID: String? = nil
+    /// A place chosen, which the Earth turns to and shows at its zoom.
+    var placeID: String? = nil
 }
 
+/// A place chosen on the Earth or in its list: the whole place, with its photos as the place
+/// filter knows them (REBUILD_ROADMAP.md L1).
 struct PlaceCollection: Identifiable, Hashable, Sendable {
     let id: String
     let title: String
-    let city: String?
     let country: String?
     let latitude: Double
     let longitude: Double
-    let assetIDs: [String]
-    /// What the place's feed is known by: its photos and the marker query that found them.
     let membership: PlaceMembership
-    var focus: PlaceFocus { .init(latitude: latitude, longitude: longitude, assetID: assetIDs.first) }
+    var assetIDs: [String] { membership.assetIDs }
+    var focus: PlaceFocus { .init(latitude: latitude, longitude: longitude, placeID: id) }
 
-    init(id: String, title: String, city: String?, country: String?, latitude: Double, longitude: Double,
-         assetIDs: [String], markerQuery: String = "") {
-        self.id = id; self.title = title; self.city = city; self.country = country
-        self.latitude = latitude; self.longitude = longitude; self.assetIDs = assetIDs
-        membership = PlaceMembership(placeID: id, assetIDs: assetIDs, markerQuery: markerQuery)
+    init(_ node: PlaceHierarchy.Node, in hierarchy: PlaceHierarchy) {
+        id = node.id; title = node.title; country = node.level == .country ? nil : node.countryName
+        latitude = node.latitude; longitude = node.longitude
+        membership = hierarchy.membership(of: node)
     }
+}
 
-    static func group(_ markers: [MapMarker], markerQuery: String = "") -> [PlaceCollection] {
-        let valid = markers.filter { $0.lat.isFinite && $0.lon.isFinite && (-90...90).contains($0.lat) && (-180...180).contains($0.lon) }
-        let grouped = Dictionary(grouping: valid) { marker in
-            if let city = marker.city, !city.isEmpty { return [marker.country ?? "", marker.state ?? "", city].joined(separator: "|") }
-            return "\(Int((marker.lat * 10).rounded()))|\(Int((marker.lon * 10).rounded()))"
-        }
-        return grouped.map { key, markers in
-            let first = markers[0]
-            let title = first.city?.isEmpty == false ? first.city! : first.country?.isEmpty == false ? first.country! : String(format: "%.2f°, %.2f°", first.lat, first.lon)
-            // Circular mean avoids a center at Greenwich for a group straddling the date line.
-            let radians = markers.map { $0.lon * .pi / 180 }
-            let longitude = atan2(radians.reduce(0) { $0 + sin($1) }, radians.reduce(0) { $0 + cos($1) }) * 180 / .pi
-            return PlaceCollection(id: key, title: title, city: first.city, country: first.country,
-                latitude: markers.reduce(0) { $0 + $1.lat } / Double(markers.count), longitude: longitude, assetIDs: Array(Set(markers.map(\.id))).sorted(),
-                markerQuery: markerQuery)
-        }.sorted { $0.assetIDs.count == $1.assetIDs.count ? $0.title < $1.title : $0.assetIDs.count > $1.assetIDs.count }
-    }
+extension EnvironmentValues {
+    /// The signed-in account's places (REBUILD_ROADMAP.md L1). Nil while nobody is signed in.
+    @Entry var placeDirectory: PlaceDirectory? = nil
+}
+
+/// A place in the list of locations, by its ID.
+struct PlaceRoute: Hashable {
+    let id: String
 }
 
 struct PlacesView: View {
@@ -59,27 +53,23 @@ struct PlacesView: View {
     /// Under a stack of filters the Earth keeps only these photos of its places (REBUILD_ROADMAP.md
     /// N6); nil keeps every one.
     var narrowing: PlaceNarrowing? = nil
+    @Environment(\.placeDirectory) private var directory
     /// Every place, whole: a place chosen is always the whole place.
-    @State private var places: [PlaceCollection] = []
+    @State private var hierarchy = PlaceHierarchy.empty
     /// The places shown and their lights: every one, or under a stack of filters only those holding
     /// its photos, each counting only those.
-    @State private var shown: [PlaceCollection] = []
+    @State private var shown = PlaceHierarchy.empty
     @State private var lights: GlobePhotoLights?
-    @State private var markers: [MapMarker] = []
-    @State private var markerQuery = ""
-    /// Moves each time markers load, so what is shown is arranged again for the latest narrowing.
-    @State private var markersRevision = 0
-    /// The narrowing `shown` was arranged for, by its identity: the stack and its count.
+    /// What `shown` was arranged for: the narrowing's identity and the hierarchy's.
     @State private var arrangedFor: String?
-    @State private var selected: PlaceCollection?
+    @State private var selected: PlaceHierarchy.Node?
     @State private var loading = true
-    @State private var failure: FeatureFailure?
-    @State private var mapPlace: PlaceCollection?
+    @State private var failure: String?
+    @State private var mapPlace: PlaceHierarchy.Node?
     @State private var favoritesOnly = false
     @State private var includeArchived = false
     @State private var includePartners = true
     @State private var mapEnabled: Bool?
-    @State private var generation = UUID()
     @State private var dateFilter = false
     @State private var startDate = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
     @State private var endDate = Date()
@@ -87,51 +77,43 @@ struct PlacesView: View {
     @State private var showingLocations = false
     /// A sheet is up or still on its way out; it has gone once its onDismiss runs.
     @State private var sheetUp = false
+
     var body: some View {
         GeometryReader { geometry in
             if mapEnabled == false {
                 FeatureEmpty(title: "Maps are turned off", symbol: "globe", description: "Enable maps on your server to browse photo locations.")
             } else if compact {
-                PlacesGlobeView(places: shown, lights: lights, focus: globeFocus, compact: true, api: api, pipeline: pipeline,
+                PlacesGlobeView(hierarchy: shown, lights: lights, focus: globeFocus, compact: true, api: api, pipeline: pipeline,
                                 onSelect: { selected = $0; onSelect(whole($0)) })
                     .overlay(alignment: .bottomTrailing) {
                         Button("All locations", systemImage: "list.bullet") { showingLocations = true }
                             .font(.subheadline).buttonStyle(.glass).foregroundStyle(.primary)
-                            .padding(16).padding(.bottom, bottomInset).disabled(loading || shown.isEmpty)
+                            .padding(16).padding(.bottom, bottomInset).disabled(loading || shown.roots.isEmpty)
                     }
                     .overlay { if loading { ProgressView() } }
             } else {
-            ScrollView {
-                PlacesGlobeView(places: places, lights: lights, focus: selected?.focus ?? focus, api: api, pipeline: pipeline, onSelect: { selected = $0 })
-                    .frame(height: min(geometry.size.height * 0.55, 460)).clipped()
-                if let selected {
-                    HStack(spacing: 14) {
-                        FeatureThumbnail(api: api, pipeline: pipeline, assetID: selected.assetIDs.first).frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 9))
-                        VStack(alignment: .leading) { Text(selected.title).font(.headline); Text("\(selected.assetIDs.count.formatted()) item\(selected.assetIDs.count == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary) }
-                        Spacer()
-                        Button("Open photos") { onSelect(selected) }.buttonStyle(.borderedProminent)
-                    }.padding(.horizontal, 20).padding(.bottom, 12)
-                }
-                if loading { ProgressView().padding() }
-                else if places.isEmpty { FeatureEmpty(title: "No locations yet", symbol: "globe.europe.africa", description: "Photos with location data will appear on your globe.") }
-                LazyVStack(spacing: 0) {
-                    ForEach(places) { place in
+                ScrollView {
+                    PlacesGlobeView(hierarchy: hierarchy, lights: lights, focus: selected.map { $0.focus } ?? focus, api: api, pipeline: pipeline, onSelect: { selected = $0 })
+                        .frame(height: min(geometry.size.height * 0.55, 460)).clipped()
+                    if let selected {
                         HStack(spacing: 14) {
-                            Button { selected = place } label: {
-                                HStack(spacing: 14) {
-                                    FeatureThumbnail(api: api, pipeline: pipeline, assetID: place.assetIDs.first).frame(width: 52, height: 52).clipShape(.rect(cornerRadius: 9))
-                                    VStack(alignment: .leading, spacing: 3) { Text(place.title).font(.headline); Text([place.country, "\(place.assetIDs.count.formatted()) item\(place.assetIDs.count == 1 ? "" : "s")"].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }
-                                    Spacer()
-                                }.contentShape(Rectangle())
-                            }.buttonStyle(.plain)
-                            Menu {
-                                Button("Open photos", systemImage: "photo.on.rectangle") { onSelect(place) }
-                                Button("Map details", systemImage: "map") { mapPlace = place }
-                            } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("Actions for \(place.title)")
-                        }.padding(.vertical, 10)
+                            FeatureThumbnail(api: api, pipeline: pipeline, assetID: selected.coverID).frame(width: 56, height: 56).clipShape(.rect(cornerRadius: 9))
+                            VStack(alignment: .leading) { Text(selected.title).font(.headline); Text(Self.items(selected.count)).font(.caption).foregroundStyle(.secondary) }
+                            Spacer()
+                            Button("Open photos") { onSelect(whole(selected)) }.buttonStyle(.borderedProminent)
+                        }.padding(.horizontal, 20).padding(.bottom, 12)
                     }
-                }.padding(.horizontal, 20)
-            }
+                    if loading { ProgressView().padding() }
+                    else if hierarchy.roots.isEmpty { FeatureEmpty(title: "No locations yet", symbol: "globe.europe.africa", description: "Photos with location data will appear on your globe.") }
+                    PlaceRows(hierarchy: hierarchy, parent: nil, api: api, pipeline: pipeline, inline: true,
+                              onSelect: { onSelect(whole($0)) }, onFocus: { selected = $0 }, onMap: { mapPlace = $0 })
+                        .padding(.horizontal, 20)
+                }
+                .navigationDestination(for: PlaceRoute.self) { route in
+                    PlaceRows(hierarchy: hierarchy, parent: hierarchy[route.id], api: api, pipeline: pipeline, inline: false,
+                              onSelect: { onSelect(whole($0)) }, onFocus: { selected = $0 }, onMap: { mapPlace = $0 })
+                        .navigationTitle(hierarchy[route.id]?.title ?? "")
+                }
             }
         }.navigationTitle(compact ? "" : "Places")
         .toolbar {
@@ -146,11 +128,11 @@ struct PlacesView: View {
             }
             }
         }
-        .task(id: "\(favoritesOnly)|\(includeArchived)|\(includePartners)|\(dateFilter)|\(startDate)|\(endDate)") { await load() }
-        // The filters stacked changed or were counted again, or markers loaded under an older
+        .task(id: query) { await follow() }
+        // The filters stacked changed or were counted again, or the places loaded under an older
         // narrowing: shown again.
-        .task(id: "\(narrowing?.identity ?? "")|\(markersRevision)") { await arrange() }
-        .refreshable { await load() }
+        .task(id: "\(narrowing?.identity ?? "")|\(hierarchy.identity)") { await arrange() }
+        .refreshable { await directory?.reload(query) }
         .sheet(isPresented: $showingDates, onDismiss: sheetDismissed) {
             NavigationStack {
                 Form {
@@ -161,10 +143,10 @@ struct PlacesView: View {
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingDates = false } } }
             }.presentationDetents([.medium])
         }
-        .sheet(item: $mapPlace, onDismiss: sheetDismissed) { place in NavigationStack { PlaceMapDetail(place: place, onSelect: onSelect) } }
+        .sheet(item: $mapPlace, onDismiss: sheetDismissed) { place in NavigationStack { PlaceMapDetail(place: place, onSelect: { onSelect(whole($0)) }) } }
         .sheet(isPresented: $showingLocations, onDismiss: sheetDismissed) {
             NavigationStack {
-                PlacesListView(places: shown, api: api, pipeline: pipeline) { place in
+                PlacesListView(hierarchy: shown, api: api, pipeline: pipeline) { place in
                     selected = place; showingLocations = false; onSelect(whole(place))
                 }
             }
@@ -173,8 +155,8 @@ struct PlacesView: View {
             .presentationDragIndicator(.visible)
         }
         .alert("Couldn’t load places", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
-        } message: { Text(failure?.message ?? "") }
+            Button("Retry") { Task { await directory?.reload(query) } }; Button("Cancel", role: .cancel) { }
+        } message: { Text(failure ?? "") }
         .onChange(of: presenting) { _, up in
             if up { sheetUp = sheetUp || showingDates || showingLocations || mapPlace != nil; onPresentation(true) }
             else if !sheetUp { onPresentation(false) }
@@ -186,115 +168,206 @@ struct PlacesView: View {
         .onDisappear { onPresentation(false) }
     }
 
+    static func items(_ count: Int) -> String { "\(count.formatted()) item\(count == 1 ? "" : "s")" }
+
     private var presenting: Bool { showingDates || showingLocations || mapPlace != nil || failure != nil }
 
     private func sheetDismissed() {
         sheetUp = false
         if !presenting { onPresentation(false) }
     }
+
     private var globeFocus: PlaceFocus? {
-        selected?.focus ?? focus ?? places.first.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
+        selected.map { $0.focus } ?? focus ?? hierarchy.roots.first.flatMap { hierarchy[$0] }.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
     }
 
-    private func load() async {
-        let requestGeneration = UUID(); generation = requestGeneration
-        loading = true; failure = nil
-        defer { if requestGeneration == generation { loading = false } }
-        do {
-            let features = try await api.serverFeatures()
-            try Task.checkCancellation()
-            guard generation == requestGeneration else { return }
-            mapEnabled = features.map
-            guard features.map else { places = []; shown = []; lights = nil; markers = []; selected = nil; return }
-            var fileCreatedAfter: Date?
-            var fileCreatedBefore: Date?
-            if dateFilter {
-                let calendar = Calendar.current
-                let first = calendar.startOfDay(for: startDate)
-                let last = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: endDate)) ?? endDate
-                fileCreatedAfter = first
-                fileCreatedBefore = last
-            }
-            let query = MapMarkerQuery(withPartners: includePartners, withSharedAlbums: true,
-                                       isArchived: includeArchived, isFavorite: favoritesOnly ? true : nil,
-                                       fileCreatedAfter: fileCreatedAfter, fileCreatedBefore: fileCreatedBefore)
-            let markers = try await api.mapMarkers(query)
-            let markerQuery = query.queryItems.map { $0.name + "=" + ($0.value ?? "") }.joined(separator: "&")
-            try Task.checkCancellation()
-            guard generation == requestGeneration else { return }
-            let narrowing = self.narrowing
-            let arranged = await Task.detached(priority: .userInitiated) {
-                Self.arrange(markers, markerQuery: markerQuery, narrowing: narrowing)
-            }.value
-            try Task.checkCancellation(); guard generation == requestGeneration else { return }
-            places = arranged.all; shown = arranged.shown; lights = arranged.lights
-            self.markers = markers; self.markerQuery = markerQuery; arrangedFor = narrowing?.identity; markersRevision += 1
-            if let previous = selected { selected = places.first { $0.id == previous.id } }
-            else if compact, let assetID = focus?.assetID, let place = places.first(where: { $0.assetIDs.contains(assetID) }) {
-                selected = place; onSelect(place)
-            }
-        } catch is CancellationError { } catch {
-            if generation == requestGeneration { places = []; shown = []; lights = nil; markers = []; selected = nil; failure = .init(error) }
+    /// The photos the places are found in: the library's, with the filters chosen here.
+    private var query: MapMarkerQuery {
+        var fileCreatedAfter: Date?
+        var fileCreatedBefore: Date?
+        if dateFilter {
+            let calendar = Calendar.current
+            fileCreatedAfter = calendar.startOfDay(for: startDate)
+            fileCreatedBefore = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: endDate)) ?? endDate
         }
-    }
-
-    /// Shows the places again for the latest narrowing, from the markers loaded, when they were
-    /// arranged for another.
-    private func arrange() async {
-        let narrowing = self.narrowing, markers = self.markers, markerQuery = self.markerQuery
-        guard !markers.isEmpty, narrowing?.identity != arrangedFor else { return }
-        let arranged = await Task.detached(priority: .userInitiated) {
-            Self.arrange(markers, markerQuery: markerQuery, narrowing: narrowing)
-        }.value
-        guard !Task.isCancelled else { return }
-        shown = arranged.shown; lights = arranged.lights; arrangedFor = narrowing?.identity
+        return MapMarkerQuery(withPartners: includePartners, withSharedAlbums: true, isArchived: includeArchived,
+                              isFavorite: favoritesOnly ? true : nil, fileCreatedAfter: fileCreatedAfter, fileCreatedBefore: fileCreatedBefore)
     }
 
     /// The whole place of one shown, which may count only the photos of a stack of filters.
-    private func whole(_ place: PlaceCollection) -> PlaceCollection {
-        places.first { $0.id == place.id } ?? place
+    private func whole(_ place: PlaceHierarchy.Node) -> PlaceCollection {
+        PlaceCollection(hierarchy[place.id] ?? place, in: hierarchy)
     }
 
-    /// Every place, and those shown with their lights: under a narrowing only its photos, so a
-    /// place without any is left out and the others count only theirs. Pure; off the main actor.
-    nonisolated static func arrange(_ markers: [MapMarker], markerQuery: String, narrowing: PlaceNarrowing?)
-        -> (all: [PlaceCollection], shown: [PlaceCollection], lights: GlobePhotoLights) {
-        let all = PlaceCollection.group(markers, markerQuery: markerQuery)
-        guard let narrowing else { return (all, all, GlobePhotoLights(markers: markers)) }
-        let kept = markers.filter { narrowing.ids.contains($0.id) }
-        return (all, PlaceCollection.group(kept, markerQuery: markerQuery), GlobePhotoLights(markers: kept))
+    /// Follows the account's places for the query: what is known at once, then each change.
+    private func follow() async {
+        guard let directory else { loading = false; failure = "Places need a signed-in account."; return }
+        if let features = try? await api.serverFeatures() {
+            mapEnabled = features.map
+            guard features.map else { hierarchy = .empty; shown = .empty; lights = nil; selected = nil; loading = false; return }
+        }
+        for await snapshot in await directory.places(query) {
+            guard !Task.isCancelled else { return }
+            switch snapshot {
+            case .loading: loading = hierarchy.roots.isEmpty
+            case .failed(let message): loading = false; failure = message
+            case .loaded(let loaded):
+                hierarchy = loaded; loading = false; failure = nil
+                if let previous = selected { selected = loaded[previous.id] }
+                else if compact, let assetID = focus?.assetID, let place = loaded.leaf(of: assetID) {
+                    selected = place; onSelect(PlaceCollection(place, in: loaded))
+                }
+            }
+        }
+    }
+
+    /// Shows the places again for the latest narrowing, from the hierarchy loaded, when they were
+    /// arranged for another.
+    private func arrange() async {
+        let narrowing = self.narrowing, hierarchy = self.hierarchy
+        let identity = "\(narrowing?.identity ?? "")|\(hierarchy.identity)"
+        guard !hierarchy.roots.isEmpty, identity != arrangedFor else { return }
+        let arranged = await Task.detached(priority: .userInitiated) {
+            let shown = narrowing.map { hierarchy.narrowed(to: $0.ids) } ?? hierarchy
+            return (shown, GlobePhotoLights(photos: shown.photos))
+        }.value
+        guard !Task.isCancelled else { return }
+        shown = arranged.0; lights = arranged.1; arrangedFor = identity
     }
 }
 
-private struct PlacesListView: View {
-    let places: [PlaceCollection]
+extension PlaceHierarchy.Node {
+    var focus: PlaceFocus { .init(latitude: latitude, longitude: longitude, placeID: id) }
+}
+
+/// The places under one, or at the top every city under its country: a place with parts opens
+/// into them, and any place's photos open from its row or its country's heading.
+private struct PlaceRows: View {
+    let hierarchy: PlaceHierarchy
+    let parent: PlaceHierarchy.Node?
     let api: APIClient
     let pipeline: MediaPipeline
-    let onSelect: (PlaceCollection) -> Void
+    /// Inline rows sit in a scroll view; otherwise they are a list of their own.
+    let inline: Bool
+    let onSelect: (PlaceHierarchy.Node) -> Void
+    let onFocus: (PlaceHierarchy.Node) -> Void
+    let onMap: (PlaceHierarchy.Node) -> Void
+
+    var body: some View {
+        if inline {
+            LazyVStack(spacing: 0) { rows }
+        } else {
+            List { rows }.listStyle(.plain)
+        }
+    }
+
+    @ViewBuilder private var rows: some View {
+        if let parent {
+            PlaceRow(place: parent, title: "All of \(parent.title)", api: api, pipeline: pipeline, opens: false, onSelect: onSelect, onFocus: onFocus, onMap: onMap)
+            ForEach(hierarchy.children(of: parent)) { child in
+                PlaceRow(place: child, title: child.title, api: api, pipeline: pipeline, opens: !child.childIDs.isEmpty, onSelect: onSelect, onFocus: onFocus, onMap: onMap)
+            }
+        } else {
+            ForEach(hierarchy.countries) { country in
+                if country.level == .country {
+                    Section {
+                        ForEach(hierarchy.descendants(of: country, at: .city)) { city in
+                            PlaceRow(place: city, title: city.title, api: api, pipeline: pipeline, opens: !city.childIDs.isEmpty, onSelect: onSelect, onFocus: onFocus, onMap: onMap)
+                        }
+                    } header: {
+                        Button { onSelect(country) } label: {
+                            HStack {
+                                Text(country.title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                                Spacer()
+                                Text(PlacesView.items(country.count)).font(.caption).foregroundStyle(.tertiary)
+                            }.contentShape(Rectangle())
+                        }.buttonStyle(.plain).padding(.top, 14).padding(.bottom, 4)
+                        .accessibilityLabel("All of \(country.title), \(PlacesView.items(country.count))")
+                    }
+                } else {
+                    PlaceRow(place: country, title: country.title, api: api, pipeline: pipeline, opens: !country.childIDs.isEmpty, onSelect: onSelect, onFocus: onFocus, onMap: onMap)
+                }
+            }
+        }
+    }
+}
+
+private struct PlaceRow: View {
+    let place: PlaceHierarchy.Node
+    let title: String
+    let api: APIClient
+    let pipeline: MediaPipeline
+    /// The row opens the place's parts; otherwise it opens its photos.
+    let opens: Bool
+    let onSelect: (PlaceHierarchy.Node) -> Void
+    let onFocus: (PlaceHierarchy.Node) -> Void
+    let onMap: (PlaceHierarchy.Node) -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            if opens {
+                NavigationLink(value: PlaceRoute(id: place.id)) { label }.buttonStyle(.plain)
+            } else {
+                Button { onSelect(place) } label: { label }.buttonStyle(.plain)
+            }
+            Menu {
+                Button("Open photos", systemImage: "photo.on.rectangle") { onSelect(place) }
+                Button("Show on the Earth", systemImage: "globe") { onFocus(place) }
+                Button("Map details", systemImage: "map") { onMap(place) }
+            } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("Actions for \(place.title)")
+        }.padding(.vertical, 10)
+    }
+
+    private var label: some View {
+        HStack(spacing: 14) {
+            FeatureThumbnail(api: api, pipeline: pipeline, assetID: place.coverID).frame(width: 52, height: 52).clipShape(.rect(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.headline)
+                Text([place.level == .country ? nil : place.countryName, PlacesView.items(place.count)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if opens { Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary) }
+        }.contentShape(Rectangle())
+    }
+}
+
+/// The sheet of locations over the library's Earth: the places by continent and country, each
+/// opening into its parts, and a search over every place by name.
+private struct PlacesListView: View {
+    let hierarchy: PlaceHierarchy
+    let api: APIClient
+    let pipeline: MediaPipeline
+    let onSelect: (PlaceHierarchy.Node) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     var body: some View {
-        List {
-            ForEach(places.filter { query.isEmpty || $0.title.localizedStandardContains(query) || ($0.country?.localizedStandardContains(query) == true) }) { place in
-                Button { onSelect(place) } label: {
-                    HStack(spacing: 14) {
-                        FeatureThumbnail(api: api, pipeline: pipeline, assetID: place.assetIDs.first).frame(width: 48, height: 48).clipShape(.rect(cornerRadius: 10))
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(place.title).font(.headline).foregroundStyle(.primary)
-                            Text([place.country, "\(place.assetIDs.count.formatted()) item\(place.assetIDs.count == 1 ? "" : "s")"].compactMap { $0 }.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
-                        }
-                    }.padding(.vertical, 4)
-                }.accessibilityElement(children: .combine)
+        Group {
+            if query.isEmpty {
+                PlaceRows(hierarchy: hierarchy, parent: nil, api: api, pipeline: pipeline, inline: false, onSelect: onSelect, onFocus: onSelect, onMap: onSelect)
+            } else {
+                List(matches) { place in
+                    PlaceRow(place: place, title: place.title, api: api, pipeline: pipeline, opens: false, onSelect: onSelect, onFocus: onSelect, onMap: onSelect)
+                }.listStyle(.plain)
             }
-        }.accessibilityIdentifier("places.list")
+        }
+        .accessibilityIdentifier("places.list")
         .navigationTitle("Locations").searchable(text: $query, prompt: "Find a location")
+        .navigationDestination(for: PlaceRoute.self) { route in
+            PlaceRows(hierarchy: hierarchy, parent: hierarchy[route.id], api: api, pipeline: pipeline, inline: false, onSelect: onSelect, onFocus: onSelect, onMap: onSelect)
+                .navigationTitle(hierarchy[route.id]?.title ?? "")
+        }
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+    }
+
+    private var matches: [PlaceHierarchy.Node] {
+        hierarchy.nodes.values.filter { $0.title.localizedStandardContains(query) || ($0.countryName?.localizedStandardContains(query) == true) }
+            .sorted(by: PlaceHierarchy.biggestFirst)
     }
 }
 
 private struct PlaceMapDetail: View {
-    let place: PlaceCollection
-    let onSelect: (PlaceCollection) -> Void
+    let place: PlaceHierarchy.Node
+    let onSelect: (PlaceHierarchy.Node) -> Void
     @Environment(\.dismiss) private var dismiss
     @AppStorage("mapDetailStyle") private var style = "satellite"
     var body: some View {

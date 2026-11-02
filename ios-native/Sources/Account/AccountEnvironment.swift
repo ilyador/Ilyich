@@ -33,6 +33,8 @@ struct AccountEnvironment: Sendable {
     /// Where the transfers databases are kept: nil for Application Support/IlyichTransfers, a
     /// folder for tests.
     var transfersDirectory: URL?
+    /// Apple Maps names the cities around the library's places (REBUILD_ROADMAP.md L1).
+    var resolvesPlaces = true
     /// URL protocols put in front of the media sessions (thumbnails, previews, originals): nil on
     /// the phone; a UI test can take the media offline with them.
     var mediaProtocolClasses: [AnyClass]?
@@ -82,6 +84,7 @@ struct AccountEnvironment: Sendable {
         environment.syncsLibrary = false
         environment.usesDevicePhotos = false
         environment.keepsTransfers = false
+        environment.resolvesPlaces = false
         environment.resetsInterfaceState = true
         environment.keepsShelvesOpen = arguments.contains("--ui-testing-shelves-stay-open")
         // The fixture server is shared by every test run, so a launch that wants its media
