@@ -832,10 +832,32 @@ extension FrozenFeed: DisplayedFeed {
 
     // MARK: - Search
 
+    /// Reads the places a search names, from the account's places (REBUILD_ROADMAP.md L1). Nil
+    /// without them: the text goes to the server as typed.
+    @ObservationIgnored var readPlaces: (@Sendable (String) async -> PlaceSearch.Reading?)?
+    @ObservationIgnored private var reading: Task<Void, Never>?
+
+    /// A search typed. A place it names becomes the place filter, the whole place, and the rest of
+    /// the text is searched inside it; the feed shown stays until the places have been read.
     func search(_ text: String) {
+        reading?.cancel()
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let readPlaces else { return run(search: text) }
+        reading = Task { [weak self] in
+            let reading = await readPlaces(text)
+            guard !Task.isCancelled, let self else { return }
+            guard let reading, let membership = reading.membership else { return run(search: text) }
+            var next = stack
+            next.add(.place(membership, title: reading.title))
+            query = reading.remainder
+            open(next, keepingSearch: true)
+        }
+    }
+
+    private func run(search text: String) {
         rememberOriginal()
         beginScopeChange()
-        query = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        query = text
         guard !query.isEmpty else {
             if filterTitle == nil { clearFilters() }
             else { showingResults = usesMetadata; scheduleReload() }

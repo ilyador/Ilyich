@@ -24,6 +24,9 @@ public struct AccountStoragePaths: Sendable {
     /// at suspension gets the app killed.
     public var transfersDatabase: String { "IlyichTransfers/\(account.digest).sqlite" }
 
+    /// The cities found around the library's places, in Application Support.
+    public var places: String { "IlyichPlaces/\(account.digest).json" }
+
     /// The read-only flag, in the App Group's preferences.
     public var readOnlyKey: String { "readOnly.\(account.digest)" }
 

@@ -32,6 +32,7 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
     var bus: LibraryBus? = nil
     var collections: CollectionsService? = nil
     var settings: AccountSettingsService? = nil
+    var places: PlaceDirectory? = nil
     let onDismiss: () -> Void
     let content: (ViewerRoute, ViewerTransitionState, @escaping () -> Void) -> AnyView
     /// Outside the app's scene the viewer would always read as in the background, which keeps
@@ -164,7 +165,7 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
             guard let parent, let state else { return AnyView(EmptyView()) }
             return AnyView(ViewerRoot(content: parent.content(route, state, { [weak self] in self?.close() }), authorization: parent.authorization,
                                       mutations: parent.mutations, bus: parent.bus, collections: parent.collections,
-                                      settings: parent.settings, scenePhase: parent.scenePhase)
+                                      settings: parent.settings, places: parent.places, scenePhase: parent.scenePhase)
                 .id(route.asset.id))
         }
     }
@@ -232,12 +233,13 @@ private struct ViewerRoot: View {
     let bus: LibraryBus?
     let collections: CollectionsService?
     let settings: AccountSettingsService?
+    let places: PlaceDirectory?
     let scenePhase: ScenePhase
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     var body: some View {
         content.tint((AppearanceAccent(rawValue: accentName) ?? .design).tint).environment(\.authorization, authorization)
             .environment(\.mutations, mutations).environment(\.libraryBus, bus).environment(\.collectionsService, collections)
-            .environment(\.accountSettings, settings).environment(\.scenePhase, scenePhase)
+            .environment(\.accountSettings, settings).environment(\.placeDirectory, places).environment(\.scenePhase, scenePhase)
     }
 }
 

@@ -534,7 +534,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path=='/auth/logout':return self.send({'successful':True,'redirectUri':'/auth/login?autoLaunch=0'})
         if path.startswith('/search/'):
             if 'unavailable' in body.get('query',''):return self.send({'error':'Fixture unavailable'},503)
-            listed=listed_photos(body) if path=='/search/metadata' else None
+            # A search naming its photos keeps to them with text too, as the server's does (L1).
+            listed=listed_photos(body) if path in ('/search/metadata','/search/smart') else None
             if listed is not None:return self.send(listed)
             cursor=body.get('cursor');items=[] if cursor is None else [asset(i) for i in range(9)]
             return self.send({'assets':{'items':items,'count':len(items),'nextCursor':'verified-page-2' if cursor is None else None},'verification':{'status':'complete','checked':10,'rejected':10-len(items)}})

@@ -19,6 +19,11 @@ protocol MonthPlacesStore: Sendable {
 @MainActor @Observable final class MonthPlacesService {
     /// The feeds kept in memory.
     private(set) var kept: [LibraryQuery: FeedPlaces] = [:]
+    /// Each kept feed's counts as the server names them, to name again when the cities are known.
+    @ObservationIgnored private var counts: [LibraryQuery: [MonthPlaceCount]] = [:]
+    /// The city each server name lies in, from the account's places (REBUILD_ROADMAP.md L1).
+    @ObservationIgnored private var naming: [String: String] = [:]
+    @ObservationIgnored private var followingPlaces: Task<Void, Never>?
     @ObservationIgnored private let source: any TimelineSource
     @ObservationIgnored private let store: (any MonthPlacesStore)?
     @ObservationIgnored private let authorization: AuthorizationState?
@@ -39,6 +44,29 @@ protocol MonthPlacesStore: Sendable {
 
     /// The places of `query`, if they are in memory.
     func places(of query: LibraryQuery) -> FeedPlaces? { kept[query] }
+
+    /// Follows the account's places: as cities are found, the months are named by them.
+    func follow(_ directory: PlaceDirectory?) {
+        followingPlaces?.cancel()
+        guard let directory else { return }
+        followingPlaces = Task { [weak self] in
+            for await snapshot in await directory.places() {
+                guard case .loaded(let hierarchy) = snapshot else { continue }
+                await self?.name(by: hierarchy.citiesByServerName)
+            }
+        }
+    }
+
+    /// Names every kept feed's months again.
+    private func name(by naming: [String: String]) async {
+        guard naming != self.naming else { return }
+        self.naming = naming
+        for (query, counts) in counts {
+            let places = await Task.detached(priority: .utility) { FeedPlaces(counts: counts, naming: naming) }.value
+            guard !Task.isCancelled, self.naming == naming else { return }
+            if self.counts[query] != nil { kept[query] = places }
+        }
+    }
 
     /// Shows `query`'s places: what memory holds, then the index's copy, then a fresh count after
     /// the delay. Showing the feed being counted asks for one recount after it; showing another
@@ -66,22 +94,24 @@ protocol MonthPlacesStore: Sendable {
     private func run(_ query: LibraryQuery, plan: QueryPlan, id: UUID) async {
         defer { finish(id) }
         if kept[query] == nil, let store, let rows = try? await store.monthPlaces(forKey: query.stableKey), !Task.isCancelled {
-            let saved = await Task.detached(priority: .utility) { FeedPlaces(counts: rows) }.value
+            let naming = naming
+            let saved = await Task.detached(priority: .utility) { FeedPlaces(counts: rows, naming: naming) }.value
             guard !Task.isCancelled else { return }
-            if kept[query] == nil { keep(saved, for: query) }
+            if kept[query] == nil { keep(saved, counts: rows, for: query) }
         }
         try? await Task.sleep(for: delay)
         guard !Task.isCancelled else { return }
         let current = fence()
         guard let counts = try? await source.monthPlaces(query, plan: plan), !Task.isCancelled else { return }
-        let places = await Task.detached(priority: .utility) { FeedPlaces(counts: counts) }.value
+        let naming = naming
+        let places = await Task.detached(priority: .utility) { FeedPlaces(counts: counts, naming: naming) }.value
         guard !Task.isCancelled else { return }
         if !current() {
             // Counted under access the account no longer has: dropped, and counted again.
             recount = true
             return
         }
-        keep(places, for: query)
+        keep(places, counts: counts, for: query)
         try? await store?.keepMonthPlaces(counts, forKey: query.stableKey, ifCurrent: current)
     }
 
@@ -101,11 +131,13 @@ protocol MonthPlacesStore: Sendable {
         if load.query == displayed { show(load.query, plan: load.plan) }
     }
 
-    private func keep(_ places: FeedPlaces, for query: LibraryQuery) {
+    private func keep(_ places: FeedPlaces, counts: [MonthPlaceCount], for query: LibraryQuery) {
         // The library and a handful of people or albums are plenty to keep.
         if kept[query] == nil, kept.count >= Self.keptLimit {
             kept = kept.filter { $0.key == .library || $0.key == displayed }
+            self.counts = self.counts.filter { kept[$0.key] != nil }
         }
         kept[query] = places
+        self.counts[query] = counts
     }
 }
