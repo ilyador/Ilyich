@@ -55,9 +55,10 @@ enum PlaceCut {
 }
 
 /// Where each pin's label goes, beside its round thumbnail, which sits on the place itself. Pins
-/// are placed biggest first; a label tries the side it had, then right, left, below and above,
-/// taking first a side that covers no other pin's place, and a pin whose label fits nowhere keeps
-/// its thumbnail alone. Pure.
+/// placed last time go first, then the rest biggest first, so a pin at the edge of the room
+/// doesn't trade places with another every frame; a label keeps the side it had while it fits,
+/// else takes the first side that covers no other pin's place, else any side that fits, and a pin
+/// whose label fits nowhere keeps its thumbnail alone. Pure.
 enum PinPlacement {
     enum Side: CaseIterable, Sendable {
         case right, left, below, above
@@ -77,7 +78,7 @@ enum PinPlacement {
     }
 
     /// The round thumbnail's edge, in points.
-    static let thumbnail = 52.0
+    static let thumbnail = 36.0
     /// How far the label's capsule tucks under the thumbnail.
     static let overlap = 4.0
     static let margin = 6.0
@@ -125,8 +126,9 @@ enum PinPlacement {
         }
     }
 
-    /// Places `candidates`, in order, inside `bounds`. `sides` are the sides pins had last time.
-    static func place(_ candidates: [Candidate], in bounds: CGRect, sides: [String: Side], limit: Int) -> [Placed] {
+    /// Places `candidates`, in order, inside `bounds`. `sides` are the sides pins had last time
+    /// and `before` the pins placed last time.
+    static func place(_ candidates: [Candidate], in bounds: CGRect, sides: [String: Side], before: Set<String> = [], limit: Int) -> [Placed] {
         var taken: [CGRect] = []
         var placed: [Placed] = []
         let inside = bounds.insetBy(dx: margin, dy: margin)
@@ -134,12 +136,18 @@ enum PinPlacement {
             inside.contains(frame) && !taken.contains { $0.insetBy(dx: -8, dy: -10).intersects(frame) }
         }
         let points = candidates.map { ($0.id, $0.point) }
-        for candidate in candidates where placed.count < limit {
-            var order = Side.allCases
-            if let last = sides[candidate.id] { order.removeAll { $0 == last }; order.insert(last, at: 0) }
-            let frames = order.map { ($0, frame(at: candidate.point, label: candidate.label, side: $0)) }.filter { fits($0.1) }
-            var chosen = frames.first { frame in !points.contains { $0.0 != candidate.id && frame.1.contains($0.1) } }.map { ($0.1, Optional($0.0)) }
-            if chosen == nil, let first = frames.first { chosen = (first.1, first.0) }
+        let ordered = candidates.filter { before.contains($0.id) } + candidates.filter { !before.contains($0.id) }
+        for candidate in ordered where placed.count < limit {
+            var chosen: (CGRect, Side?)?
+            if let last = sides[candidate.id] {
+                let kept = frame(at: candidate.point, label: candidate.label, side: last)
+                if fits(kept) { chosen = (kept, last) }
+            }
+            if chosen == nil {
+                let frames = Side.allCases.map { ($0, frame(at: candidate.point, label: candidate.label, side: $0)) }.filter { fits($0.1) }
+                chosen = frames.first { frame in !points.contains { $0.0 != candidate.id && frame.1.contains($0.1) } }.map { ($0.1, Optional($0.0)) }
+                if chosen == nil, let first = frames.first { chosen = (first.1, first.0) }
+            }
             if chosen == nil {
                 let alone = frame(at: candidate.point, label: candidate.label, side: nil)
                 if fits(alone) { chosen = (alone, nil) }

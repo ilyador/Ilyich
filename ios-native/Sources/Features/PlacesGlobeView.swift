@@ -148,6 +148,7 @@ private struct GlobeSurface: UIViewRepresentable {
         private var labelSizes: [String: CGSize] = [:]
         private var labelMetricsContext = ""
         private var pinSides: [String: PinPlacement.Side] = [:]
+        private var pinsPlaced: Set<String> = []
         var lastIdentity = ""
         var lastFocus: PlaceFocus?
         var focusedPlaceID: String?
@@ -253,11 +254,14 @@ private struct GlobeSurface: UIViewRepresentable {
                 updatePhotoLights()
             }
             if hierarchy.identity != lastIdentity {
+                // The places were built again (localities came in, or the library changed): the
+                // pins are made again where they are, and the Earth stays where it was turned.
                 self.hierarchy = hierarchy; lastIdentity = hierarchy.identity
                 markerRoot.children.removeAll(); pinEntities.removeAll(); markers.removeAll(); labelSizes.removeAll()
-                open.removeAll(); focusedPhoto = nil; lastFocus = nil
+                open.removeAll(); focusedPhoto = nil
+                if let focus, let placeID = focus.placeID, hierarchy[placeID] != nil { focusedPlaceID = placeID }
             }
-            if let focus, focus != lastFocus, focus.latitude.isFinite, focus.longitude.isFinite {
+            if let focus, !Self.sameTarget(focus, lastFocus), focus.latitude.isFinite, focus.longitude.isFinite {
                 lastFocus = focus
                 stop()
                 let targetPitch = GlobeGeometry.focusPitch(latitude: focus.latitude, compact: compact)
@@ -292,6 +296,15 @@ private struct GlobeSurface: UIViewRepresentable {
                 }
             }
             updatePhotoMarkers()
+        }
+
+        /// Whether two focuses ask for the same thing: the same place or photo, whatever its point
+        /// after the places were built again, or the same point.
+        private static func sameTarget(_ a: PlaceFocus, _ b: PlaceFocus?) -> Bool {
+            guard let b else { return false }
+            if let place = a.placeID { return place == b.placeID }
+            if let asset = a.assetID { return asset == b.assetID }
+            return b.placeID == nil && b.assetID == nil && a.latitude == b.latitude && a.longitude == b.longitude
         }
 
         private func applyLand(_ meshes: GlobeLand.Meshes) {
@@ -508,8 +521,9 @@ private struct GlobeSurface: UIViewRepresentable {
                     shown[id] = ("Photo location", 1, focusedPhoto.id, size)
                 }
             }
-            let placed = PinPlacement.place(candidates, in: view.bounds, sides: pinSides, limit: photoMarkers.count)
+            let placed = PinPlacement.place(candidates, in: view.bounds, sides: pinSides, before: pinsPlaced, limit: photoMarkers.count)
             for pin in placed where pin.side != nil { pinSides[pin.id] = pin.side }
+            pinsPlaced = Set(placed.map(\.id))
             for (index, marker) in photoMarkers.enumerated() {
                 guard index < placed.count, let place = shown[placed[index].id] else { marker.isHidden = true; marker.cancelImage(); continue }
                 let pin = placed[index]

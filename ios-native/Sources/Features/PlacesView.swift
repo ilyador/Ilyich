@@ -62,6 +62,9 @@ struct PlacesView: View {
     @State private var lights: GlobePhotoLights?
     /// What `shown` was arranged for: the narrowing's identity and the hierarchy's.
     @State private var arrangedFor: String?
+    /// Where the Earth first turns with nothing chosen: its biggest city, decided once, so the
+    /// places built again never turn it back.
+    @State private var firstFocus: PlaceFocus?
     @State private var selected: PlaceHierarchy.Node?
     @State private var loading = true
     @State private var failure: String?
@@ -178,7 +181,7 @@ struct PlacesView: View {
     }
 
     private var globeFocus: PlaceFocus? {
-        selected.map { $0.focus } ?? focus ?? hierarchy.cities.first.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
+        selected.map { $0.focus } ?? focus ?? firstFocus
     }
 
     /// The photos the places are found in: the library's, with the filters chosen here.
@@ -213,6 +216,7 @@ struct PlacesView: View {
             case .failed(let message): loading = false; failure = message
             case .loaded(let loaded):
                 hierarchy = loaded; loading = false; failure = nil
+                if firstFocus == nil, let city = loaded.cities.first { firstFocus = .init(latitude: city.latitude, longitude: city.longitude) }
                 if let previous = selected { selected = loaded[previous.id] }
                 else if compact, let assetID = focus?.assetID, let place = loaded.leaf(of: assetID) {
                     selected = place; onSelect(PlaceCollection(place, in: loaded))
