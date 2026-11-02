@@ -17,7 +17,6 @@ import UIKit
     private let veil = UIView()
     private let lightLayer = UIView()
     private var lightViews: [UIImageView] = []
-    private var shownLights: [Light] = []
     /// MapKit's camera distance for the Earth's height over the ground. Measured from the map's
     /// own scale each time the camera is set, so a kilometer is as many points on both.
     private var distanceFactor = 1.5
@@ -72,21 +71,27 @@ import UIKit
                 map.camera = MKMapCamera(lookingAtCenter: center, fromDistance: altitude * distanceFactor, pitch: pitch, heading: 0)
             }
         }
-        while lightViews.count < lights.count {
-            let view = UIImageView()
-            view.isUserInteractionEnabled = false
-            lightLayer.addSubview(view); lightViews.append(view)
-        }
-        let changed = lights != shownLights
-        shownLights = lights
-        for (index, view) in lightViews.enumerated() {
-            guard index < lights.count else { view.isHidden = true; continue }
-            let light = lights[index]
-            if changed { view.image = Self.glow(count: light.count); view.sizeToFit() }
+        // The lights in view reach far past the screen (the Earth's own glow keeps a wide set),
+        // so only those within the ground the camera can see are projected, and only they get a
+        // view, from a pool: a few dozen, not thousands, each frame.
+        let reach = 3 * altitude / PlaceGeometry.earthRadius * 180 / .pi
+        let stretch = 1 / max(0.1, cos(center.latitude * .pi / 180))
+        var used = 0
+        for light in lights where abs(light.latitude - center.latitude) <= reach && abs(light.longitude - center.longitude) <= reach * stretch {
             let point = map.convert(CLLocationCoordinate2D(latitude: light.latitude, longitude: light.longitude), toPointTo: map)
+            guard bounds.insetBy(dx: -40, dy: -40).contains(point) else { continue }
+            if used == lightViews.count {
+                let view = UIImageView()
+                view.isUserInteractionEnabled = false
+                lightLayer.addSubview(view); lightViews.append(view)
+            }
+            let view = lightViews[used]; used += 1
+            let glow = Self.glow(count: light.count)
+            if view.image !== glow { view.image = glow; view.sizeToFit() }
             view.center = point
-            view.isHidden = !bounds.insetBy(dx: -40, dy: -40).contains(point)
+            view.isHidden = false
         }
+        for view in lightViews[used...] where !view.isHidden { view.isHidden = true }
     }
 
     /// The Earth's glow for a light, as a flat image: eight steps of brightness by count.

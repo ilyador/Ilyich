@@ -217,7 +217,13 @@ struct PlacesView: View {
             case .loaded(let loaded):
                 hierarchy = loaded; loading = false; failure = nil
                 if firstFocus == nil, let city = loaded.cities.first { firstFocus = .init(latitude: city.latitude, longitude: city.longitude) }
-                if let previous = selected { selected = loaded[previous.id] }
+                // A place's ID moves as its locality comes in (its country gains its code, its
+                // city its name), so a place chosen is found again by its cover photo.
+                if let previous = selected {
+                    selected = loaded[previous.id] ?? loaded.leaf(of: previous.coverID).flatMap { leaf in
+                        loaded.lineage(of: leaf.id).first { $0.level <= previous.level }
+                    }
+                }
                 else if compact, let assetID = focus?.assetID, let place = loaded.leaf(of: assetID) {
                     selected = place; onSelect(PlaceCollection(place, in: loaded))
                 }
