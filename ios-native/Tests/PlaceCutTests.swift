@@ -55,9 +55,9 @@ final class PlaceCutTests: XCTestCase {
 
     func testACityOpensIntoItsNeighborhoodsOnceTheViewSpansLessThanACity() {
         let hierarchy = Self.hierarchy
-        let wide = PlaceCut.shown(hierarchy, radiansPerPoint: PlaceCut.span(.city) / 800 * 1.3, open: [])
+        let wide = PlaceCut.shown(hierarchy, radiansPerPoint: PlaceCut.citySpan / 800 * 1.3, open: [])
         XCTAssertEqual(Set(wide.nodes.map(\.title)), ["Lisbon", "Porto"])
-        let city = PlaceCut.shown(hierarchy, radiansPerPoint: PlaceCut.span(.city) / 800 * 0.8, open: [])
+        let city = PlaceCut.shown(hierarchy, radiansPerPoint: PlaceCut.citySpan / 800 * 0.8, open: [])
         XCTAssertEqual(Set(city.nodes.map(\.title)), ["Bairro Alto", "Graça", "Porto"], "Porto has no parts and stays itself")
     }
 

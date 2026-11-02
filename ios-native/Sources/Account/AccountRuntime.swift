@@ -47,6 +47,9 @@ final class AccountRuntime: Sendable {
     /// The account's places, nested from continents down to neighborhoods, for the Earth, search
     /// and the names months and photos carry (REBUILD_ROADMAP.md L1). Shut down with the collections.
     let places: PlaceDirectory
+    /// The city each server name lies in, for the screens that name one photo's place; it follows
+    /// the places.
+    let placeNaming: PlaceNaming
     /// Where the screens hear of everything that happens to the account's library: its sync's
     /// changes, its mutations' results, its collections' changes and a cleared cache, in one
     /// order (REBUILD_ROADMAP.md N4). Closed first at teardown.
@@ -85,7 +88,7 @@ final class AccountRuntime: Sendable {
     private init(id: UUID, credential: StoredCredential, authorization: AuthorizationState, api: APIClient, pipeline: MediaPipeline,
                  library: LibraryServices?, libraryError: String?, transfers: TransferServices?, check: SessionCheck, work: OwnedWork,
                  cleanup: CleanupService, deviceIndex: DeviceIndexService?, mutations: LibraryMutationService, collections: CollectionsService,
-                 settings: AccountSettingsService, places: PlaceDirectory, bus: LibraryBus, presence: AppPresence,
+                 settings: AccountSettingsService, places: PlaceDirectory, placeNaming: PlaceNaming, bus: LibraryBus, presence: AppPresence,
                  cutover: TransferCutoverState, usesDevicePhotos: Bool) {
         self.id = id
         self.credential = credential
@@ -103,6 +106,7 @@ final class AccountRuntime: Sendable {
         self.collections = collections
         self.settings = settings
         self.places = places
+        self.placeNaming = placeNaming
         self.bus = bus
         self.presence = presence
         self.cutover = cutover
@@ -178,15 +182,15 @@ final class AccountRuntime: Sendable {
         let mutations = LibraryMutationService(client: api, pipeline: pipeline, authorization: authorization, refresh: followUp, bus: bus)
         let collections = CollectionsService(client: api, authorization: authorization, bus: bus)
         let settings = AccountSettingsService(client: api, authorization: authorization)
-        let naming = await MainActor.run { PlaceNaming() }
         let places = PlaceDirectory(markers: { query in try await api.mapMarkers(query) },
                                     geocoder: environment.resolvesPlaces ? AppleMapsGeocoder() : nil,
-                                    file: environment.usesDeviceStorage ? PlaceDirectory.url(for: credential.account) : nil, naming: naming)
+                                    file: environment.usesDeviceStorage ? PlaceDirectory.url(for: credential.account) : nil)
         await places.follow(bus)
+        let placeNaming = await MainActor.run { let naming = PlaceNaming(); naming.follow(places); return naming }
         return AccountRuntime(id: id, credential: credential, authorization: authorization, api: api, pipeline: pipeline,
                               library: library, libraryError: libraryError, transfers: transfers, check: check, work: work,
                               cleanup: cleanup, deviceIndex: deviceIndex, mutations: mutations, collections: collections,
-                              settings: settings, places: places, bus: bus, presence: presence, cutover: cutover,
+                              settings: settings, places: places, placeNaming: placeNaming, bus: bus, presence: presence, cutover: cutover,
                               usesDevicePhotos: environment.usesDevicePhotos)
     }
 

@@ -46,6 +46,15 @@ enum GlobeGeometry {
         photo && !compact ? 2.35 : current
     }
 
+    /// The latitude and longitude of a point on the unit sphere: the inverse of position.
+    static func coordinate(_ point: SIMD3<Float>) -> CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: Double(asin(min(1, max(-1, point.y)))) * 180 / .pi, longitude: Double(atan2(point.x, point.z)) * 180 / .pi)
+    }
+
+    /// How far the compact camera looks down from the vertical at the ground under the middle of
+    /// the view, in degrees: about 30.
+    static let compactTiltDegrees = Double(acos(min(1, groundZ(compact: true) / markerRadius))) * 180 / .pi
+
     static func textureCoordinate(latitude: Float, longitude: Float) -> SIMD2<Float> {
         // Mesh UVs have a lower-left origin; the north-up image starts at its top.
         [longitude / (2 * .pi) + 0.5, latitude / .pi + 0.5]
@@ -142,7 +151,15 @@ private struct GlobeSurface: UIViewRepresentable {
         /// One invisible anchor on the Earth for each place shown, made as it is first shown.
         private var pinEntities: [String: Entity] = [:]
         /// The places shown at this zoom, with their anchors, for taps.
-        var markers: [(Entity, PlaceHierarchy.Node)] = []
+        var markers: [(entity: Entity, node: PlaceHierarchy.Node)] = []
+        /// A pin to draw: a place, or a photo's own location, and the label it needs.
+        private struct Pin {
+            let id: String
+            let title: String
+            let count: Int
+            let coverID: String
+            let label: CGSize
+        }
         /// The places open at this zoom, held open a little past the point they opened at.
         private var open: Set<String> = []
         private var labelSizes: [String: CGSize] = [:]
@@ -152,7 +169,7 @@ private struct GlobeSurface: UIViewRepresentable {
         /// What the places shown were cut for: the zoom, the view's height and the focused place.
         /// Turning the Earth changes none of them, so a pan keeps the cut.
         private var cutFor: (gain: Float, height: CGFloat, focus: String?)?
-        private var ordered: [(Entity, PlaceHierarchy.Node)] = []
+        private var ordered: [(entity: Entity, node: PlaceHierarchy.Node)] = []
         var lastIdentity = ""
         var lastFocus: PlaceFocus?
         var focusedPlaceID: String?
@@ -265,7 +282,7 @@ private struct GlobeSurface: UIViewRepresentable {
                 open.removeAll(); focusedPhoto = nil; cutFor = nil
                 if let focus, let placeID = focus.placeID, hierarchy[placeID] != nil { focusedPlaceID = placeID }
             }
-            if let focus, !Self.sameTarget(focus, lastFocus), focus.latitude.isFinite, focus.longitude.isFinite {
+            if let focus, !focus.sameTarget(as: lastFocus), focus.latitude.isFinite, focus.longitude.isFinite {
                 lastFocus = focus
                 stop()
                 let targetPitch = GlobeGeometry.focusPitch(latitude: focus.latitude, compact: compact)
@@ -273,21 +290,20 @@ private struct GlobeSurface: UIViewRepresentable {
                 let yawDelta = atan2(sin(requestedYaw - yaw), cos(requestedYaw - yaw))
                 let target = SIMD3(yaw + yawDelta, targetPitch,
                                    GlobeGeometry.focusDistance(current: cameraDistance, photo: focus.assetID != nil, compact: compact))
-                if let placeID = focus.placeID, hierarchy[placeID] != nil {
-                    focusedPlaceID = placeID
-                    focusedPhoto?.entity.removeFromParent(); focusedPhoto = nil
-                } else if let assetID = focus.assetID {
-                    focusedPlaceID = hierarchy.leaf(of: assetID)?.id
+                focusedPhoto?.entity.removeFromParent(); focusedPhoto = nil
+                switch focus {
+                case .place(let id, _, _):
+                    focusedPlaceID = hierarchy[id] != nil ? id : nil
+                case .photo(let id, _, _):
+                    focusedPlaceID = hierarchy.leaf(of: id)?.id
+                    // A photo in no place of the hierarchy (one not in the markers) gets a pin of its own.
                     if focusedPlaceID == nil {
-                        focusedPhoto?.entity.removeFromParent()
                         let entity = Entity()
                         entity.position = GlobeGeometry.position(latitude: focus.latitude, longitude: focus.longitude) * GlobeGeometry.markerRadius
                         markerRoot.addChild(entity)
-                        focusedPhoto = (assetID, entity)
-                    } else {
-                        focusedPhoto?.entity.removeFromParent(); focusedPhoto = nil
+                        focusedPhoto = (id, entity)
                     }
-                } else {
+                case .point:
                     focusedPlaceID = nil
                 }
                 let current = SIMD3(yaw, pitch, cameraDistance)
@@ -300,15 +316,6 @@ private struct GlobeSurface: UIViewRepresentable {
                 }
             }
             updatePhotoMarkers()
-        }
-
-        /// Whether two focuses ask for the same thing: the same place or photo, whatever its point
-        /// after the places were built again, or the same point.
-        private static func sameTarget(_ a: PlaceFocus, _ b: PlaceFocus?) -> Bool {
-            guard let b else { return false }
-            if let place = a.placeID { return place == b.placeID }
-            if let asset = a.assetID { return asset == b.assetID }
-            return b.placeID == nil && b.assetID == nil && a.latitude == b.latitude && a.longitude == b.longitude
         }
 
         private func applyLand(_ meshes: GlobeLand.Meshes) {
@@ -350,12 +357,9 @@ private struct GlobeSurface: UIViewRepresentable {
             let opacity = GlobeStreetMapView.opacity(altitude: altitude)
             guard opacity > 0 || streetMapShown else { return }
             streetMapShown = opacity > 0
-            let center = viewCenter
             let gain = GlobeGeometry.dragRadiansPerPoint(cameraDistance: cameraDistance, viewportHeight: Float(view.bounds.height), compact: compact)
-            host.streetMap.show(center: CLLocationCoordinate2D(latitude: Double(asin(min(1, max(-1, center.y)))) * 180 / .pi,
-                                                               longitude: Double(atan2(center.x, center.z)) * 180 / .pi),
-                                altitude: altitude * PlaceGeometry.earthRadius,
-                                pitch: compact ? Double(acos(min(1, GlobeGeometry.groundZ(compact: true) / GlobeGeometry.markerRadius))) * 180 / .pi : 0,
+            host.streetMap.show(center: GlobeGeometry.coordinate(viewCenter), altitude: altitude * PlaceGeometry.earthRadius,
+                                pitch: compact ? GlobeGeometry.compactTiltDegrees : 0,
                                 opacity: opacity, pointsPerMeter: 1 / (Double(gain) * PlaceGeometry.earthRadius), lights: streetLights)
         }
 
@@ -398,8 +402,8 @@ private struct GlobeSurface: UIViewRepresentable {
             let reach = cos(horizon)
             let visible = lightData?.clusters(level: level).filter { simd_dot($0.center, center) > reach } ?? []
             streetLights = visible.map { cluster in
-                GlobeStreetMapView.Light(latitude: Double(asin(min(1, max(-1, cluster.center.y)))) * 180 / .pi,
-                                         longitude: Double(atan2(cluster.center.x, cluster.center.z)) * 180 / .pi, count: cluster.count)
+                let coordinate = GlobeGeometry.coordinate(cluster.center)
+                return GlobeStreetMapView.Light(latitude: coordinate.latitude, longitude: coordinate.longitude, count: cluster.count)
             }
             let roadLines = roadData?.visible(around: center, within: horizon) ?? []
             let cell = GlobePhotoLights.cell(level: level)
@@ -504,39 +508,40 @@ private struct GlobeSurface: UIViewRepresentable {
                 open = cut.open
                 markers = cut.nodes.map { (pin($0), $0) }
                 ordered = markers.sorted { left, right in
-                    if (left.1.id == focusedPlaceID) != (right.1.id == focusedPlaceID) { return left.1.id == focusedPlaceID }
-                    return left.1.count != right.1.count ? left.1.count > right.1.count : left.1.title < right.1.title
+                    if (left.node.id == focusedPlaceID) != (right.node.id == focusedPlaceID) { return left.node.id == focusedPlaceID }
+                    return left.node.count != right.node.count ? left.node.count > right.node.count : left.node.title < right.node.title
                 }
                 cutFor = (gain, view.bounds.height, focusedPlaceID)
             }
             var candidates: [PinPlacement.Candidate] = []
-            var shown: [String: (title: String, count: Int, cover: String, label: CGSize)] = [:]
+            var pins: [String: Pin] = [:]
+            let labelWidth = view.bounds.width - PinPlacement.thumbnail - 12
             for (entity, node) in ordered {
                 let world = entity.position(relativeTo: nil)
                 guard isFacingCamera(world, margin: 0.05), let point = view.project(world) else { continue }
-                let size = labelSizes[node.id] ?? GlobePhotoMarker.labelSize(title: node.title, count: node.count, traits: view.traitCollection, availableWidth: view.bounds.width - PinPlacement.thumbnail - 12)
+                let size = labelSizes[node.id] ?? GlobePhotoMarker.labelSize(title: node.title, count: node.count, traits: view.traitCollection, availableWidth: labelWidth)
                 labelSizes[node.id] = size
                 candidates.append(.init(id: node.id, point: point, label: size))
-                shown[node.id] = (node.title, node.count, node.coverID, size)
+                pins[node.id] = Pin(id: node.id, title: node.title, count: node.count, coverID: node.coverID, label: size)
             }
             if let focusedPhoto {
                 let world = focusedPhoto.entity.position(relativeTo: nil)
                 if isFacingCamera(world, margin: 0.05), let point = view.project(world) {
                     let id = "photo:" + focusedPhoto.id
-                    let size = GlobePhotoMarker.labelSize(title: "Photo location", count: 1, traits: view.traitCollection, availableWidth: view.bounds.width - PinPlacement.thumbnail - 12)
+                    let size = GlobePhotoMarker.labelSize(title: "Photo location", count: 1, traits: view.traitCollection, availableWidth: labelWidth)
                     candidates.insert(.init(id: id, point: point, label: size), at: 0)
-                    shown[id] = ("Photo location", 1, focusedPhoto.id, size)
+                    pins[id] = Pin(id: id, title: "Photo location", count: 1, coverID: focusedPhoto.id, label: size)
                 }
             }
             let placed = PinPlacement.place(candidates, in: view.bounds, sides: pinSides, before: pinsPlaced, limit: photoMarkers.count)
-            for pin in placed where pin.side != nil { pinSides[pin.id] = pin.side }
+            for placement in placed where placement.side != nil { pinSides[placement.id] = placement.side }
             pinsPlaced = Set(placed.map(\.id))
             for (index, marker) in photoMarkers.enumerated() {
-                guard index < placed.count, let place = shown[placed[index].id] else { marker.isHidden = true; marker.cancelImage(); continue }
-                let pin = placed[index]
-                marker.frame = pin.frame; marker.isHidden = false
+                guard index < placed.count, let pin = pins[placed[index].id] else { marker.isHidden = true; marker.cancelImage(); continue }
+                let placement = placed[index]
+                marker.frame = placement.frame; marker.isHidden = false
                 marker.isSelected = pin.id == focusedPlaceID || pin.id.hasPrefix("photo:")
-                marker.configure(id: pin.id, title: place.title, count: place.count, coverID: place.cover, label: place.label, side: pin.side, api: api, pipeline: pipeline)
+                marker.configure(id: pin.id, title: pin.title, count: pin.count, coverID: pin.coverID, label: pin.label, side: placement.side, api: api, pipeline: pipeline)
             }
             host?.accessibilityElements = photoMarkers.filter { !$0.isHidden }
         }
@@ -820,14 +825,7 @@ final class GlobePhotoLights: Sendable {
     }
 
     convenience init(photos: [PlacePhoto]) {
-        self.init(locations: photos.map { GlobeGeometry.position(latitude: $0.latitude, longitude: $0.longitude) })
-    }
-
-    convenience init(markers: [MapMarker]) {
-        self.init(locations: markers.compactMap { marker in
-            guard marker.lat.isFinite, marker.lon.isFinite, (-90...90).contains(marker.lat), (-180...180).contains(marker.lon) else { return nil }
-            return GlobeGeometry.position(latitude: marker.lat, longitude: marker.lon)
-        })
+        self.init(locations: photos.map { SIMD3<Float>($0.position) })
     }
 
     func clusters(level: Int) -> [Cluster] {
@@ -1014,7 +1012,15 @@ enum GlobeArt {
     private var imageID: String?
     private var side: PinPlacement.Side?
     private var label = CGSize.zero
+    private var shownCount = -1
     private(set) var placeID: String?
+    /// The capsule's padding: before the name (past the thumbnail it tucks under on the right),
+    /// after the count, and between the two; and slack beyond the measured text, so rounding
+    /// never truncates a name.
+    static let labelLeading = PinPlacement.overlap + 8
+    static let labelTrailing = 12.0
+    static let countGap = 6.0
+    static let labelSlack = 10.0
     override var isSelected: Bool {
         didSet { thumbnail.layer.borderColor = (isSelected ? UIColor.systemCyan : UIColor.white.withAlphaComponent(0.9)).cgColor }
     }
@@ -1048,10 +1054,10 @@ enum GlobeArt {
         guard let frame = PinPlacement.labelFrame(in: local, label: label, side: side) else { backdrop.isHidden = true; return }
         backdrop.isHidden = false
         backdrop.frame = frame; backdrop.layer.cornerRadius = frame.height / 2
-        let leading = side == .right ? PinPlacement.overlap + 8 : 12.0, trailing = side == .left ? PinPlacement.overlap + 8 : 12.0
+        let leading = side == .right ? Self.labelLeading : Self.labelTrailing, trailing = side == .left ? Self.labelLeading : Self.labelTrailing
         let countWidth = min(frame.width * 0.3, ceil(countLabel.sizeThatFits(frame.size).width))
         countLabel.frame = CGRect(x: frame.width - trailing - countWidth, y: 0, width: countWidth, height: frame.height)
-        nameLabel.frame = CGRect(x: leading, y: 0, width: max(0, countLabel.frame.minX - leading - 6), height: frame.height)
+        nameLabel.frame = CGRect(x: leading, y: 0, width: max(0, countLabel.frame.minX - leading - Self.countGap), height: frame.height)
     }
 
     /// The capsule a label needs for `title` and its count.
@@ -1062,8 +1068,7 @@ enum GlobeArt {
         let height = max(28, ceil(name.lineHeight * lines + 10))
         let textWidth = (title as NSString).size(withAttributes: [.font: name]).width
         let countWidth = (itemCount.formatted() as NSString).size(withAttributes: [.font: count]).width
-        // A little slack beyond the measured text, so rounding never truncates a name.
-        let width = min(max(60, availableWidth), min(lines == 2 ? 300 : 220, max(72, ceil(textWidth + countWidth) + PinPlacement.overlap + 8 + 12 + 6 + 10)))
+        let width = min(max(60, availableWidth), min(lines == 2 ? 300 : 220, max(72, ceil(textWidth + countWidth) + labelLeading + labelTrailing + countGap + labelSlack)))
         return .init(width: width, height: height)
     }
 
@@ -1071,9 +1076,13 @@ enum GlobeArt {
     /// the grid's: a photo seen before draws in this frame, and the library names the photo and
     /// its revision, so a new one needs no asset round trip (T6).
     func configure(id: String, title: String, count: Int, coverID: String, label: CGSize, side: PinPlacement.Side?, api: APIClient, pipeline: MediaPipeline) {
-        placeID = id; nameLabel.text = title; countLabel.text = count.formatted()
         if self.side != side || self.label != label { self.side = side; self.label = label; setNeedsLayout() }
-        accessibilityLabel = "\(title), \(count) item\(count == 1 ? "" : "s")"
+        // Only the frame changes from one frame to the next; the words are set when they change.
+        if placeID != id || shownCount != count || nameLabel.text != title {
+            placeID = id; shownCount = count
+            nameLabel.text = title; countLabel.text = count.formatted()
+            accessibilityLabel = "\(title), \(count) item\(count == 1 ? "" : "s")"
+        }
         guard coverID != imageID else { return }
         imageTask?.cancel(); imageID = coverID
         thumbnail.image = pipeline.latestImage(assetID: coverID, size: .thumbnail)?.uiImage

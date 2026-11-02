@@ -12,18 +12,9 @@ enum PlaceCut {
     static let opensAt = 1.15
     static let closesAt = 0.85
 
-    /// A place also opens once the view spans less than a place of its level: a country when the
-    /// view is under 500 km tall, a region under 100 km, a city under 16 km. Its parts may then be
-    /// too close to each pin a label; the biggest keeps its own.
-    static func span(_ level: PlaceHierarchy.Level) -> Double {
-        switch level {
-        case .continent: 3_000_000 / PlaceGeometry.earthRadius
-        case .country: 500_000 / PlaceGeometry.earthRadius
-        case .region: 100_000 / PlaceGeometry.earthRadius
-        case .city: 16_000 / PlaceGeometry.earthRadius
-        case .neighborhood: 0
-        }
-    }
+    /// A city also opens once the view is shorter than one, about 16 km, whatever its parts'
+    /// distance apart. Its parts may then be too close to each pin a label; the biggest keeps its own.
+    static let citySpan = 16_000 / PlaceGeometry.earthRadius
 
     /// The places shown, and which places are open, for the next cut to hold them open a little
     /// longer. `viewPoints` is the view's height. `forced` places and those above them are open
@@ -41,7 +32,7 @@ enum PlaceCut {
             else {
                 let hysteresis = open.contains(node.id) ? closesAt : opensAt
                 let apart = node.split / max(radiansPerPoint, 1e-12)
-                opens = apart > pinPoints * hysteresis || radiansPerPoint * viewPoints < span(node.level) / hysteresis
+                opens = apart > pinPoints * hysteresis || (node.level == .city && radiansPerPoint * viewPoints < citySpan / hysteresis)
             }
             if opens {
                 opened.insert(node.id)
@@ -82,6 +73,8 @@ enum PinPlacement {
     /// How far the label's capsule tucks under the thumbnail.
     static let overlap = 4.0
     static let margin = 6.0
+    /// The room kept between pins.
+    static let spacing = CGSize(width: 8, height: 10)
 
     /// A pin's frame for a label on `side` of a thumbnail at `point`.
     static func frame(at point: CGPoint, label: CGSize, side: Side?) -> CGRect {
@@ -133,7 +126,7 @@ enum PinPlacement {
         var placed: [Placed] = []
         let inside = bounds.insetBy(dx: margin, dy: margin)
         func fits(_ frame: CGRect) -> Bool {
-            inside.contains(frame) && !taken.contains { $0.insetBy(dx: -8, dy: -10).intersects(frame) }
+            inside.contains(frame) && !taken.contains { $0.insetBy(dx: -spacing.width, dy: -spacing.height).intersects(frame) }
         }
         let points = candidates.map { ($0.id, $0.point) }
         let ordered = candidates.filter { before.contains($0.id) } + candidates.filter { !before.contains($0.id) }

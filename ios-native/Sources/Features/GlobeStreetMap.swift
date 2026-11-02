@@ -12,7 +12,9 @@ import UIKit
         let count: Int
     }
 
-    private let map = MKMapView()
+    /// Made the first time the camera comes down to a city, and let go under memory pressure
+    /// while the Earth is higher, since most visits to the Earth never come that close.
+    private var map: MKMapView?
     /// Night over the whole map: a dark veil over Apple's streets and labels, under the lights.
     private let veil = UIView()
     private let lightLayer = UIView()
@@ -36,6 +38,20 @@ import UIKit
         isUserInteractionEnabled = false
         isAccessibilityElement = false
         accessibilityElementsHidden = true
+        veil.backgroundColor = UIColor(red: 0.03, green: 0.03, blue: 0.1, alpha: 0.5)
+        for view in [veil, lightLayer] { view.isUserInteractionEnabled = false; addSubview(view) }
+        alpha = 0; isHidden = true
+        NotificationCenter.default.addObserver(self, selector: #selector(memoryWarning), name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        map?.frame = bounds; veil.frame = bounds; lightLayer.frame = bounds
+    }
+
+    private func makeMap() -> MKMapView {
+        let map = MKMapView(frame: bounds)
         map.isUserInteractionEnabled = false
         map.overrideUserInterfaceStyle = .dark
         map.pointOfInterestFilter = .excludingAll
@@ -44,15 +60,15 @@ import UIKit
         configuration.pointOfInterestFilter = .excludingAll
         configuration.showsTraffic = false
         map.preferredConfiguration = configuration
-        veil.backgroundColor = UIColor(red: 0.03, green: 0.03, blue: 0.1, alpha: 0.5)
-        for view in [map, veil, lightLayer] { view.isUserInteractionEnabled = false; addSubview(view) }
-        alpha = 0; isHidden = true
+        insertSubview(map, at: 0)
+        self.map = map
+        return map
     }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        map.frame = bounds; veil.frame = bounds; lightLayer.frame = bounds
+    @objc private func memoryWarning() {
+        guard isHidden, let map else { return }
+        map.removeFromSuperview(); self.map = nil
+        distanceFactor = 1.5
     }
 
     /// Shows the map as the Earth's camera sees the ground: `altitude` meters over `center`,
@@ -61,6 +77,7 @@ import UIKit
         alpha = opacity
         isHidden = opacity <= 0
         guard opacity > 0, bounds.width > 0 else { return }
+        let map = self.map ?? makeMap()
         map.camera = MKMapCamera(lookingAtCenter: center, fromDistance: altitude * distanceFactor, pitch: pitch, heading: 0)
         if pointsPerMeter > 0 {
             let north = CLLocationCoordinate2D(latitude: center.latitude + 1000 / 111_320, longitude: center.longitude)

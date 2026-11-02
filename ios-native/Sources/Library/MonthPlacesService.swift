@@ -23,7 +23,7 @@ protocol MonthPlacesStore: Sendable {
     @ObservationIgnored private var counts: [LibraryQuery: [MonthPlaceCount]] = [:]
     /// The city each server name lies in, from the account's places (REBUILD_ROADMAP.md L1).
     @ObservationIgnored private var naming: [String: String] = [:]
-    @ObservationIgnored private var followingPlaces: Task<Void, Never>?
+    @ObservationIgnored private var followedNaming: PlaceNaming?
     @ObservationIgnored private let source: any TimelineSource
     @ObservationIgnored private let store: (any MonthPlacesStore)?
     @ObservationIgnored private let authorization: AuthorizationState?
@@ -45,15 +45,19 @@ protocol MonthPlacesStore: Sendable {
     /// The places of `query`, if they are in memory.
     func places(of query: LibraryQuery) -> FeedPlaces? { kept[query] }
 
-    /// Follows the account's places: as cities are found, the months are named by them.
-    func follow(_ directory: PlaceDirectory?) {
-        followingPlaces?.cancel()
-        guard let directory else { return }
-        followingPlaces = Task { [weak self] in
-            for await snapshot in await directory.places() {
-                guard case .loaded(let hierarchy) = snapshot else { continue }
-                await self?.name(by: hierarchy.citiesByServerName)
-            }
+    /// Follows the account's place naming: as cities are found, the months are named by them.
+    func follow(_ naming: PlaceNaming?) {
+        followedNaming = naming
+        guard naming != nil else { return }
+        observeNaming()
+    }
+
+    private func observeNaming() {
+        guard let naming = followedNaming else { return }
+        withObservationTracking {
+            Task { [weak self] in await self?.name(by: naming.cities) }
+        } onChange: {
+            Task { @MainActor [weak self] in self?.observeNaming() }
         }
     }
 

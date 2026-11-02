@@ -1,30 +1,47 @@
 import SwiftUI
 import MapKit
 
-struct PlaceFocus: Hashable, Sendable {
-    let latitude: Double
-    let longitude: Double
-    /// A photo's own location, which the Earth comes in closer to and shows the place of.
-    var assetID: String? = nil
-    /// A place chosen, which the Earth turns to and shows at its zoom.
-    var placeID: String? = nil
+/// What the Earth turns to: a point, a photo's own location (the Earth comes in closer and shows
+/// the photo's place), or a place chosen (shown at the zoom it has).
+enum PlaceFocus: Hashable, Sendable {
+    case point(latitude: Double, longitude: Double)
+    case photo(id: String, latitude: Double, longitude: Double)
+    case place(id: String, latitude: Double, longitude: Double)
+
+    init(latitude: Double, longitude: Double, assetID: String? = nil) {
+        self = assetID.map { .photo(id: $0, latitude: latitude, longitude: longitude) } ?? .point(latitude: latitude, longitude: longitude)
+    }
+
+    var latitude: Double {
+        switch self { case .point(let latitude, _), .photo(_, let latitude, _), .place(_, let latitude, _): latitude }
+    }
+    var longitude: Double {
+        switch self { case .point(_, let longitude), .photo(_, _, let longitude), .place(_, _, let longitude): longitude }
+    }
+    var assetID: String? { if case .photo(let id, _, _) = self { id } else { nil } }
+    var placeID: String? { if case .place(let id, _, _) = self { id } else { nil } }
+
+    /// Whether two focuses ask for the same thing: the same place or photo, whatever its point
+    /// after the places were built again, or the same point.
+    func sameTarget(as other: PlaceFocus?) -> Bool {
+        switch (self, other) {
+        case (.place(let a, _, _), .place(let b, _, _)?): a == b
+        case (.photo(let a, _, _), .photo(let b, _, _)?): a == b
+        case (.point, .point?): self == other
+        default: false
+        }
+    }
 }
 
 /// A place chosen on the Earth or in its list: the whole place, with its photos as the place
 /// filter knows them (REBUILD_ROADMAP.md L1).
-struct PlaceCollection: Identifiable, Hashable, Sendable {
-    let id: String
+struct PlaceCollection: Hashable, Sendable {
     let title: String
-    let country: String?
-    let latitude: Double
-    let longitude: Double
     let membership: PlaceMembership
     var assetIDs: [String] { membership.assetIDs }
-    var focus: PlaceFocus { .init(latitude: latitude, longitude: longitude, placeID: id) }
 
     init(_ node: PlaceHierarchy.Node, in hierarchy: PlaceHierarchy) {
-        id = node.id; title = node.title; country = node.level == .country ? nil : node.countryName
-        latitude = node.latitude; longitude = node.longitude
+        title = node.title
         membership = hierarchy.membership(of: node)
     }
 }
@@ -216,7 +233,7 @@ struct PlacesView: View {
             case .failed(let message): loading = false; failure = message
             case .loaded(let loaded):
                 hierarchy = loaded; loading = false; failure = nil
-                if firstFocus == nil, let city = loaded.cities.first { firstFocus = .init(latitude: city.latitude, longitude: city.longitude) }
+                if firstFocus == nil, let city = loaded.cities.first { firstFocus = .point(latitude: city.latitude, longitude: city.longitude) }
                 // A place's ID moves as its locality comes in (its country gains its code, its
                 // city its name), so a place chosen is found again by its cover photo.
                 if let previous = selected {
@@ -247,7 +264,7 @@ struct PlacesView: View {
 }
 
 extension PlaceHierarchy.Node {
-    var focus: PlaceFocus { .init(latitude: latitude, longitude: longitude, placeID: id) }
+    var focus: PlaceFocus { .place(id: id, latitude: latitude, longitude: longitude) }
 }
 
 /// The places under one, or at the top every city under its country: a place with parts opens

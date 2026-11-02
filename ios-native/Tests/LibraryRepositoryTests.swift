@@ -115,8 +115,8 @@ import XCTest
                        MapMarker(id: "b", lat: 38.7, lon: -9.1, city: "Lisbon", state: nil, country: "Portugal")]
         let hierarchy = PlaceHierarchy.build(markers, localities: PlaceLocalities(language: "en"), markerQuery: "withPartners=false")
         let place = PlaceCollection(try XCTUnwrap(hierarchy.places(named: "Lisbon").first), in: hierarchy)
-        XCTAssertEqual(place.membership, PlaceMembership(placeID: place.id, assetIDs: ["b", "a"], markerQuery: "withPartners=false"))
-        XCTAssertNotEqual(place.membership, PlaceMembership(placeID: place.id, assetIDs: ["a", "b"], markerQuery: "withPartners=true"))
+        XCTAssertEqual(place.membership, PlaceMembership(placeID: place.membership.placeID, assetIDs: ["b", "a"], markerQuery: "withPartners=false"))
+        XCTAssertNotEqual(place.membership, PlaceMembership(placeID: place.membership.placeID, assetIDs: ["a", "b"], markerQuery: "withPartners=true"))
     }
 
     /// An offline answer stands in only when the server gave none at all, and only from an index

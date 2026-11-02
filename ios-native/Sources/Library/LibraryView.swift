@@ -77,13 +77,14 @@ struct LibraryView: View {
     @Environment(\.collectionsService) private var collectionsService
     @Environment(\.accountSettings) private var accountSettings
     @Environment(\.placeDirectory) private var placeDirectory
+    @Environment(\.placeNaming) private var placeNaming
 
     init(api: APIClient, pipeline: MediaPipeline, session: AccountSession) {
         self.api = api; self.pipeline = pipeline; self.session = session
         let repository = session.libraryRepository ?? LibraryRepository(client: api, index: nil, sync: nil)
         // The feeds' month places are kept in the index and fenced by the account's access epoch (F5).
         let places = MonthPlacesService(source: repository, store: session.entities, authorization: session.runtime?.authorization)
-        places.follow(session.places)
+        places.follow(session.placeNaming)
         let store = LibraryFeedStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos,
                                      choices: SearchChoicesStorage(scope: api.cacheScope), places: places)
         if let places = session.places { store.readPlaces = { text in await places.read(text) } }
@@ -237,7 +238,7 @@ struct LibraryView: View {
             // The viewer zooms out of its grid cell and back into the cell of the photo it closes on.
             .background {
                 ViewerZoomPresenter(item: viewerItem, sourceView: { viewport.scroller.zoomSourceView(for: $0, in: store) }, authorization: authorization,
-                                    mutations: mutations, bus: bus, collections: collectionsService, settings: accountSettings, places: placeDirectory,
+                                    mutations: mutations, bus: bus, collections: collectionsService, settings: accountSettings, places: placeDirectory, naming: placeNaming,
                                     onDismiss: { navigator.layerDidDismiss(level: 0) }) { route, transition, close in
                     AnyView(assetViewer(route, transition: transition, close: close))
                 }

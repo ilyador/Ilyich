@@ -72,6 +72,7 @@ import IlyichPlatform
     var settings: AccountSettingsService? { runtime?.settings }
     /// The account's places, nested from continents down to neighborhoods (REBUILD_ROADMAP.md L1).
     var places: PlaceDirectory? { runtime?.places }
+    var placeNaming: PlaceNaming? { runtime?.placeNaming }
     var isSyncing: Bool { runtime?.library?.status.status.isSyncing ?? false }
     var syncError: String? { runtime?.library?.status.status.error ?? runtime?.libraryError }
     var lastSyncDate: Date? { runtime?.library?.status.status.lastSyncDate }

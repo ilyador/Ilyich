@@ -31,30 +31,28 @@ struct PlaceSearch: Sendable {
         guard !tokens.isEmpty else { return nil }
         var used = Set<Int>()
         var found: [PlaceHierarchy.Node] = []
-        let titles = hierarchy.foldedTitles.sorted(by: { $0.count != $1.count ? $0.count > $1.count : $0 < $1 })
         // A name alone counts once everything else is read, so "Lisbon or Porto" is read again
         // for Lisbon after "or Porto" was.
         var more = true
         while more {
             more = false
-            for title in titles {
-                let parts = title.split(separator: " ").map(String.init)
-                guard !parts.isEmpty else { continue }
-                var index = 0
-                while index + parts.count <= tokens.count {
-                    defer { index += 1 }
-                    guard !(index..<index + parts.count).contains(where: used.contains),
-                          (0..<parts.count).allSatisfy({ tokens[index + $0].folded == parts[$0] }) else { continue }
+            for index in tokens.indices where !used.contains(index) {
+                for words in hierarchy.searchTitles[tokens[index].folded] ?? [] {
+                    let range = index..<index + words.count
+                    guard range.upperBound <= tokens.count, !range.contains(where: used.contains),
+                          (1..<words.count).allSatisfy({ tokens[index + $0].folded == words[$0] }) else { continue }
                     let previous = index > 0 ? tokens[index - 1].folded : nil
                     // Only a place asked for, after "in" or alone, is one; "outside" and "not in"
                     // stay for the server, which can leave a place out.
                     guard previous != "outside", !(index > 1 && tokens[index - 2].folded == "not") else { continue }
                     let askedFor = previous.map(Self.leading.contains) == true
-                        || tokens.indices.allSatisfy { used.contains($0) || ($0 >= index && $0 < index + parts.count) || Self.filler.contains(tokens[$0].folded) }
-                    guard askedFor, let place = Self.choose(hierarchy.places(named: title)), !found.contains(where: { $0.id == place.id }) else { continue }
+                        || tokens.indices.allSatisfy { used.contains($0) || range.contains($0) || Self.filler.contains(tokens[$0].folded) }
+                    guard askedFor, let place = choose(hierarchy.places(named: words.joined(separator: " "))),
+                          !found.contains(where: { $0.id == place.id }) else { continue }
                     found.append(place); more = true
-                    for offset in 0..<parts.count { used.insert(index + offset) }
+                    used.formUnion(range)
                     if let previous, Self.leading.contains(previous) { used.insert(index - 1) }
+                    break
                 }
             }
         }
@@ -64,7 +62,7 @@ struct PlaceSearch: Sendable {
         while let first = kept.first, Self.filler.contains(tokens[first].folded) { kept.removeFirst() }
         while let last = kept.last, Self.filler.contains(tokens[last].folded) { kept.removeLast() }
         let remainder = kept.map { String(tokens[$0].original) }.joined(separator: " ")
-        let ids = Set(found.flatMap(\.assetIDs)).sorted()
+        let ids = found.count == 1 ? hierarchy.assetIDs(of: found[0]) : Set(found.flatMap { hierarchy.assetIDs(of: $0) }).sorted()
         let membership = ids.isEmpty ? nil : PlaceMembership(placeID: found.map(\.id).joined(separator: "+"), assetIDs: ids, markerQuery: hierarchy.markerQuery)
         return Reading(places: found, remainder: remainder, membership: membership, title: found.map(\.title).joined(separator: " · "))
     }
@@ -72,19 +70,12 @@ struct PlaceSearch: Sendable {
     /// Of the places of one name: the most specific when they lie in one another (the city of
     /// Porto, not its region, and not the neighborhood the server calls Porto, which is the city's
     /// own part), the biggest otherwise.
-    static func choose(_ places: [PlaceHierarchy.Node]) -> PlaceHierarchy.Node? {
+    func choose(_ places: [PlaceHierarchy.Node]) -> PlaceHierarchy.Node? {
         guard let biggest = places.first else { return nil }
         let candidates = places.filter { $0.level <= .city }
         let deepest = (candidates.isEmpty ? places : candidates).max { a, b in a.level != b.level ? a.level < b.level : a.count < b.count }!
-        return places.allSatisfy({ related($0, deepest) }) ? deepest : biggest
+        return places.allSatisfy({ hierarchy.related($0.id, deepest.id) }) ? deepest : biggest
     }
-
-    /// Whether one place holds the other: a place's key starts with its parent's.
-    private static func related(_ a: PlaceHierarchy.Node, _ b: PlaceHierarchy.Node) -> Bool {
-        key(a).hasPrefix(key(b)) || key(b).hasPrefix(key(a))
-    }
-
-    private static func key(_ node: PlaceHierarchy.Node) -> String { String(node.id.drop { $0 != ":" }.dropFirst()) + "|" }
 
     /// The words of `text`: letters and digits, with apostrophes and hyphens inside a word.
     static func tokens(of text: String) -> [Token] {

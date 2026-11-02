@@ -143,8 +143,8 @@ final class StackedFiltersIndexTests: XCTestCase {
         let shown = whole.narrowed(to: narrowing.ids)
         XCTAssertEqual(whole.cities.map(\.title), ["Lisbon", "Porto"], "Every place is kept whole for choosing.")
         XCTAssertEqual(shown.cities.map(\.title), ["Lisbon"], "A place without Maya's photos leaves the Earth.")
-        XCTAssertEqual(shown.cities.first?.assetIDs, ["a1"], "Lisbon counts only Maya's photo.")
-        XCTAssertEqual(whole.cities.first?.assetIDs, ["a1", "b1"])
+        XCTAssertEqual(shown.assetIDs(of: shown.cities[0]), ["a1"], "Lisbon counts only Maya's photo.")
+        XCTAssertEqual(whole.assetIDs(of: whole.cities[0]), ["a1", "b1"])
         XCTAssertEqual(GlobePhotoLights(photos: shown.photos).total, 1)
     }
 
