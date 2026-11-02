@@ -47,6 +47,8 @@ struct PlaceUnit: Sendable {
             }
         }
         units.sort { $0.key < $1.key }
+        // In ID order, so every place's members, collected in this order, are sorted already.
+        photos.sort { $0.id < $1.id }
         return (units, photos)
     }
 

@@ -12,7 +12,7 @@ import simd
 /// A narrowed hierarchy keeps the paths and puts the nodes together again from fewer photos, so
 /// every node keeps its ID under a stack of filters.
 struct PlaceHierarchy: Sendable {
-    enum Level: Int, Comparable, CaseIterable, Sendable {
+    enum Level: Int, Comparable, Sendable {
         case continent, country, region, city, neighborhood
         static func < (a: Level, b: Level) -> Bool { a.rawValue < b.rawValue }
     }
@@ -23,8 +23,8 @@ struct PlaceHierarchy: Sendable {
         let title: String
         let parentID: String?
         fileprivate(set) var childIDs: [String] = []
-        /// Every photo under the node, sorted.
-        fileprivate(set) var assetIDs: [String] = []
+        /// Every photo under the node, as indices into the hierarchy's photos, in ID order.
+        fileprivate(set) var members: [Int] = []
         /// Where the node stands, at one of its photos: where its biggest part stands, and for a
         /// place with no parts, at its biggest unit.
         fileprivate(set) var latitude = 0.0
@@ -40,7 +40,7 @@ struct PlaceHierarchy: Sendable {
         let countryName: String?
         let regionName: String?
 
-        var count: Int { assetIDs.count }
+        var count: Int { members.count }
         var position: SIMD3<Double> { PlaceGeometry.position(latitude: latitude, longitude: longitude) }
     }
 
@@ -68,6 +68,8 @@ struct PlaceHierarchy: Sendable {
     private var leaves: [String: String] = [:]
     /// Node IDs by their folded title, for search.
     private var titled: [String: [String]] = [:]
+    /// Every title's words by its first word, longest titles first, for finding them in text.
+    private(set) var searchTitles: [String: [[String]]] = [:]
     /// Tells one hierarchy from another: its places and their counts.
     private(set) var identity = ""
 
@@ -135,12 +137,12 @@ struct PlaceHierarchy: Sendable {
         (titled[PlaceGeometry.folded(name)] ?? []).compactMap { nodes[$0] }.sorted(by: Self.biggestFirst)
     }
 
-    /// Every folded place name, for finding them in text.
-    var foldedTitles: some Collection<String> { titled.keys }
+    /// The node's photos, sorted by ID.
+    func assetIDs(of node: Node) -> [String] { node.members.map { photos[$0].id } }
 
     /// The node's photos as the place filter knows them.
     func membership(of node: Node) -> PlaceMembership {
-        PlaceMembership(placeID: node.id, assetIDs: node.assetIDs, markerQuery: markerQuery)
+        PlaceMembership(placeID: node.id, assetIDs: assetIDs(of: node), markerQuery: markerQuery)
     }
 
     static func biggestFirst(_ a: Node, _ b: Node) -> Bool {
@@ -173,11 +175,12 @@ struct PlaceHierarchy: Sendable {
         }
         // Deepest first: a node stands where its biggest part stands, all the way down to the
         // biggest unit of a place with no parts, so a pin that opens stays where it was and its
-        // parts come out around it.
+        // parts come out around it. The photos are in ID order, so each node's members are too.
+        func biggerFirst(_ a: String, _ b: String) -> Bool { made[a]!.count != made[b]!.count ? made[a]!.count > made[b]!.count : a < b }
         for id in made.keys.sorted(by: { made[$0]!.level > made[$1]!.level }) {
             guard var node = made[id], let indices = members[id] else { continue }
-            node.assetIDs = indices.map { photos[$0].id }.sorted()
-            node.childIDs.sort { made[$0]!.assetIDs.count != made[$1]!.assetIDs.count ? made[$0]!.assetIDs.count > made[$1]!.assetIDs.count : $0 < $1 }
+            node.members = indices
+            node.childIDs.sort(by: biggerFirst)
             let standing: PlacePhoto
             if let biggest = node.childIDs.first.flatMap({ made[$0] }) {
                 standing = PlacePhoto(id: biggest.coverID, latitude: biggest.latitude, longitude: biggest.longitude, unit: "")
@@ -194,8 +197,13 @@ struct PlaceHierarchy: Sendable {
         for id in made.keys.sorted() { hasher.combine(id); hasher.combine(made[id]!.count); hasher.combine(made[id]!.coverID) }
         hasher.combine(markerQuery)
         identity = String(hasher.finalize())
-        roots.sort { made[$0]!.assetIDs.count != made[$1]!.assetIDs.count ? made[$0]!.assetIDs.count > made[$1]!.assetIDs.count : $0 < $1 }
+        roots.sort(by: biggerFirst)
         for node in made.values { titled[PlaceGeometry.folded(node.title), default: []].append(node.id) }
+        for title in titled.keys {
+            let words = title.split(separator: " ").map(String.init)
+            if let first = words.first { searchTitles[first, default: []].append(words) }
+        }
+        searchTitles = searchTitles.mapValues { $0.sorted { $0.count != $1.count ? $0.count > $1.count : $0.joined(separator: " ") < $1.joined(separator: " ") } }
     }
 
     /// Where a place with no parts stands: at its biggest unit's own photo, or, when that photo is
@@ -203,7 +211,7 @@ struct PlaceHierarchy: Sendable {
     private static func standing(_ photos: [PlacePhoto], units: [String: PlaceUnit]) -> PlacePhoto {
         var counts: [String: Int] = [:]
         for photo in photos { counts[photo.unit, default: 0] += 1 }
-        let biggest = counts.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }!.key
+        let biggest = counts.biggest!
         let inUnit = photos.filter { $0.unit == biggest }
         guard let unit = units[biggest] else { return PlaceGeometry.nearestToMiddle(inUnit) }
         if let own = inUnit.first(where: { $0.id == unit.photoID }) { return own }
@@ -227,18 +235,25 @@ struct PlaceHierarchy: Sendable {
     }
 }
 
-/// One located photo.
+/// One located photo, with its point on the sphere worked out once.
 struct PlacePhoto: Sendable {
     let id: String
     let latitude: Double
     let longitude: Double
     /// The unit it falls in.
     let unit: String
-    var position: SIMD3<Double> { PlaceGeometry.position(latitude: latitude, longitude: longitude) }
+    let position: SIMD3<Double>
 
     init(id: String, latitude: Double, longitude: Double, unit: String) {
         self.id = id; self.latitude = latitude; self.longitude = longitude; self.unit = unit
+        position = PlaceGeometry.position(latitude: latitude, longitude: longitude)
     }
+}
+
+extension Dictionary where Key == String, Value == Int {
+    /// The key with the biggest count; of equal counts the first by name, so the choice is the
+    /// same on every build.
+    var biggest: String? { self.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key }
 }
 
 /// Each unit's path, decided from the units of the whole library.
@@ -255,7 +270,7 @@ private struct PlaceStructure {
         for unit in units {
             if let country = unit.country, let code = localities[unit.key]?.countryCode { codes[country, default: [:]][code, default: 0] += unit.count }
         }
-        let learned = codes.compactMapValues { $0.max { $0.value < $1.value }?.key }
+        let learned = codes.compactMapValues(\.biggest)
 
         struct Placed {
             let unit: PlaceUnit
@@ -289,7 +304,7 @@ private struct PlaceStructure {
                     if let state = unit.state { states[state, default: 0] += unit.count }
                     names[unit.name ?? first.city, default: 0] += unit.count
                 }
-                let region = states.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key
+                let region = states.biggest
                 var head: [PlaceHierarchy.Step] = []
                 if let continent = first.continent { head.append(.init(level: .continent, key: continent.rawValue, title: continent.name)) }
                 if let key = first.countryKey, let title = first.countryTitle { head.append(.init(level: .country, key: key, title: title)) }
@@ -305,6 +320,6 @@ private struct PlaceStructure {
                 }
             }
         }
-        citiesByServerName = serverNames.compactMapValues { $0.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key }
+        citiesByServerName = serverNames.compactMapValues(\.biggest)
     }
 }

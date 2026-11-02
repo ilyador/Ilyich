@@ -30,7 +30,7 @@ final class PlacesTests: XCTestCase {
         let hierarchy = PlaceHierarchy.build(Self.porto, localities: Self.localities(Self.porto, cities: Self.portoCities))
         let porto = hierarchy.places(named: "Porto").first { $0.level == .city }
         XCTAssertEqual(porto?.count, 6)
-        XCTAssertEqual(porto?.assetIDs, ["g1", "m1", "m2", "p1", "p2", "p3"])
+        XCTAssertEqual(hierarchy.assetIDs(of: porto!), ["g1", "m1", "m2", "p1", "p2", "p3"])
         XCTAssertEqual(hierarchy.children(of: porto!).map(\.title), ["Porto", "Massarelos", "Godim"])
         XCTAssertEqual(hierarchy.children(of: porto!).map(\.level), [.neighborhood, .neighborhood, .neighborhood])
         let gaia = hierarchy.places(named: "Vila Nova de Gaia").first
@@ -97,7 +97,7 @@ final class PlacesTests: XCTestCase {
         let narrowed = hierarchy.narrowed(to: ["m1", "g1"])
         let porto = hierarchy.places(named: "Porto").first { $0.level == .city }!
         XCTAssertEqual(narrowed[porto.id]?.count, 2)
-        XCTAssertEqual(narrowed[porto.id]?.assetIDs, ["g1", "m1"])
+        XCTAssertEqual(narrowed.assetIDs(of: narrowed[porto.id]!), ["g1", "m1"])
         XCTAssertNil(narrowed.places(named: "Vila Nova de Gaia").first)
         XCTAssertEqual(narrowed.children(of: narrowed[porto.id]!).map(\.title), ["Godim", "Massarelos"], "Equal counts, then by name")
         XCTAssertNotEqual(narrowed.identity, hierarchy.identity)
@@ -128,7 +128,7 @@ final class PlacesTests: XCTestCase {
         let hierarchy = PlaceHierarchy.build(markers, localities: PlaceLocalities(language: "en"))
         let island = hierarchy.places(named: "Island")
         XCTAssertEqual(island.count, 1)
-        XCTAssertEqual(island[0].assetIDs, ["a", "b"])
+        XCTAssertEqual(hierarchy.assetIDs(of: island[0]), ["a", "b"])
         XCTAssertEqual(abs(island[0].longitude), 179.995, accuracy: 0.001, "It stands at one of its photos, not at Greenwich")
         XCTAssertEqual(hierarchy.photos.count, 2)
         let apart = PlaceHierarchy.build([markers[0], MapMarker(id: "c", lat: 22, lon: -179.5, city: "Island", state: nil, country: "Ocean")],

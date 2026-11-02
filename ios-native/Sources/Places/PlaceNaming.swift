@@ -4,7 +4,19 @@ import SwiftUI
 /// place (REBUILD_ROADMAP.md L1): "Massarelos, Porto". The account's places keep it current.
 @MainActor @Observable final class PlaceNaming {
     /// By "country|name", as PlaceHierarchy.citiesByServerName keys them.
-    var cities: [String: String] = [:]
+    private(set) var cities: [String: String] = [:]
+    @ObservationIgnored private var following: Task<Void, Never>?
+
+    /// Follows the account's places: each build of the library's hierarchy names the cities again.
+    func follow(_ directory: PlaceDirectory) {
+        following?.cancel()
+        following = Task { [weak self] in
+            for await snapshot in await directory.places() {
+                guard case .loaded(let hierarchy) = snapshot else { continue }
+                self?.cities = hierarchy.citiesByServerName
+            }
+        }
+    }
 
     /// The city `name` lies in when that is another place; nil for a name that is its own city,
     /// or one not looked up yet.

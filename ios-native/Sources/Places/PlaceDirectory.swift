@@ -42,8 +42,6 @@ actor PlaceDirectory {
         }
     }
 
-    /// The city each server name lies in, for the screens that name one photo's place.
-    nonisolated let naming: PlaceNaming?
     private let markers: @Sendable (MapMarkerQuery) async throws -> [MapMarker]
     private let geocoder: (any PlaceGeocoder)?
     private let file: URL?
@@ -56,6 +54,8 @@ actor PlaceDirectory {
     private var unsaved = 0
     /// Units not looked up yet, by key.
     private var wanted: [String: PlaceUnit] = [:]
+    /// The countries Apple Maps has given a code to, through any of their units.
+    private var codedCountries: Set<String> = []
     private var resolving: Task<Void, Never>?
     private var rebuilding: Task<Void, Never>?
     private var reloading: Task<Void, Never>?
@@ -65,9 +65,9 @@ actor PlaceDirectory {
     /// `markers` finds the photos' locations; without a geocoder no locality is looked up, and
     /// without a file none is kept past the directory.
     init(markers: @escaping @Sendable (MapMarkerQuery) async throws -> [MapMarker], geocoder: (any PlaceGeocoder)?, file: URL?,
-         naming: PlaceNaming? = nil, language: String = PlaceDirectory.language, pacing: Duration = .milliseconds(1300),
-         backoff: Duration = .seconds(60), settle: Duration = .seconds(2)) {
-        self.markers = markers; self.geocoder = geocoder; self.file = file; self.naming = naming
+         language: String = PlaceDirectory.language, pacing: Duration = .milliseconds(1300), backoff: Duration = .seconds(60),
+         settle: Duration = .seconds(2)) {
+        self.markers = markers; self.geocoder = geocoder; self.file = file
         self.pacing = pacing; self.backoff = backoff; self.settle = settle
         localities = PlaceLocalities(language: language)
     }
@@ -205,10 +205,6 @@ actor PlaceDirectory {
         guard entries[query] != nil, !ended else { return }
         entries[query]!.hierarchy = hierarchy
         publish(query)
-        if query == Self.library, let naming {
-            let cities = hierarchy.citiesByServerName
-            await MainActor.run { naming.cities = cities }
-        }
         want(hierarchy.units)
     }
 
@@ -237,7 +233,10 @@ actor PlaceDirectory {
 
     private func want(_ units: [PlaceUnit]) {
         guard geocoder != nil else { return }
-        for unit in units where localities[unit.key] == nil { wanted[unit.key] = unit }
+        for unit in units {
+            if localities[unit.key] == nil { wanted[unit.key] = unit }
+            else if localities[unit.key]?.countryCode != nil, let country = unit.country { codedCountries.insert(country) }
+        }
         guard !wanted.isEmpty, resolving == nil, !ended else { return }
         resolving = Task { [weak self] in await self?.resolve() }
     }
@@ -268,14 +267,13 @@ actor PlaceDirectory {
 
     private func nextUnit() -> PlaceUnit? {
         wanted = wanted.filter { localities[$0.key] == nil }
-        var known = Set<String>()
-        for (key, locality) in localities.units where locality.countryCode != nil { known.insert(key.split(separator: "|", omittingEmptySubsequences: false).first.map(String.init) ?? "") }
-        let unnamedCountry = wanted.values.filter { !known.contains($0.country ?? "") }.max { $0.count < $1.count }
-        return unnamedCountry ?? wanted.values.max { $0.count != $1.count ? $0.count < $1.count : $0.key > $1.key }
+        let uncoded = wanted.filter { !codedCountries.contains($0.value.country ?? "") }
+        return (uncoded.isEmpty ? wanted : uncoded).mapValues(\.count).biggest.flatMap { wanted[$0] }
     }
 
     private func record(_ locality: PlaceLocality, for key: String) {
         localities.units[key] = locality
+        if locality.countryCode != nil, let country = wanted[key]?.country { codedCountries.insert(country) }
         wanted[key] = nil
         unsaved += 1
         if unsaved >= 20 { save() }
