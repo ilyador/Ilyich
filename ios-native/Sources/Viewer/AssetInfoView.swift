@@ -9,6 +9,7 @@ struct AssetInfoView: View {
     /// place. The photo's own changes reach the viewer and the feed through the account's mutations.
     let viewer: ViewerModel
     @State private var asset: Asset
+    @Environment(\.placeNaming) private var naming
     @State private var caption: String
     @State private var albums: [Album] = []
     @State private var text: [RecognizedText] = []
@@ -170,7 +171,8 @@ struct AssetInfoView: View {
                 Marker("Photo location", coordinate: .init(latitude: latitude, longitude: longitude))
             }.frame(height: 140).clipShape(.rect(cornerRadius: 12))
                 .allowsHitTesting(false).accessibilityHidden(true)
-            Label([exif.city, exif.state, exif.country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "), systemImage: "globe.europe.africa")
+            Label([exif.city, naming?.city(of: exif.city, country: exif.country), exif.state, exif.country].compactMap { $0 }.filter { !$0.isEmpty }
+                .reduce(into: [String]()) { if $0.last != $1 { $0.append($1) } }.joined(separator: ", "), systemImage: "globe.europe.africa")
             Text(String(format: "%.5f°, %.5f°", latitude, longitude)).font(.caption).foregroundStyle(.secondary)
         }.padding(.vertical, 4)
     }

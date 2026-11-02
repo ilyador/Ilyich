@@ -1,11 +1,11 @@
 import CoreGraphics
 import Foundation
 
-/// Which places the Earth shows at a zoom (REBUILD_ROADMAP.md L1): from afar whole countries, and
-/// the closer the camera comes, the parts they open into, down to neighborhoods, as the phone's
-/// own Photos opens its places. What is shown depends only on the zoom, so turning the Earth never
-/// changes it, and a place opens a little later than it closes, so pinching across the point
-/// doesn't make it flicker. Pure.
+/// Which places the Earth shows at a zoom (REBUILD_ROADMAP.md L1): cities, and the closer the
+/// camera comes, the neighborhoods they open into, as the phone's own Photos opens its places.
+/// Countries and continents are for the list and for search (the owner's choice). What is shown
+/// depends only on the zoom, so turning the Earth never changes it, and a place opens a little
+/// later than it closes, so pinching across the point doesn't make it flicker. Pure.
 enum PlaceCut {
     /// A place opens into its parts once they stand this far apart on screen: a pin's width.
     static let pinPoints = 64.0
@@ -33,7 +33,7 @@ enum PlaceCut {
         for id in forced { for node in hierarchy.lineage(of: id).dropFirst() { held.insert(node.id) } }
         var shown: [PlaceHierarchy.Node] = []
         var opened = Set<String>()
-        var pending = hierarchy.roots.compactMap { hierarchy[$0] }
+        var pending = hierarchy.cities
         while let node = pending.popLast() {
             let opens: Bool
             if node.childIDs.isEmpty { opens = false }

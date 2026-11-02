@@ -13,6 +13,7 @@ struct AssetViewer: View {
     /// Closes the viewer when it was presented outside SwiftUI.
     let onClose: (() -> Void)?
     @State private var model: ViewerModel
+    @Environment(\.placeNaming) private var naming
     @State private var controls = true
     @State private var playingLive = false
     /// Where the bars leave room for the LIVE badge and the video pill, kept while the bars are hidden.
@@ -355,7 +356,9 @@ struct AssetViewer: View {
     /// The place over the date and time, or, without a place, the date over the time.
     private var titleLines: (title: String, subtitle: String?)? {
         let utc = TimeZone(secondsFromGMT: 0)!
-        let place = [current.exifInfo?.city, current.exifInfo?.country].compactMap { $0 }.first { !$0.isEmpty }
+        // A neighborhood with its city (L1): "Massarelos, Porto".
+        let place = naming?.place(name: current.exifInfo?.city, country: current.exifInfo?.country)
+            ?? [current.exifInfo?.city, current.exifInfo?.country].compactMap { $0 }.first { !$0.isEmpty }
         guard let date = current.localDateTime ?? current.fileCreatedAt else { return place.map { ($0, nil) } }
         if let place { return (place, date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, timeZone: utc))) }
         return (date.formatted(Date.FormatStyle(date: .long, time: .omitted, timeZone: utc)),

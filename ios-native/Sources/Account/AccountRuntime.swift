@@ -178,9 +178,10 @@ final class AccountRuntime: Sendable {
         let mutations = LibraryMutationService(client: api, pipeline: pipeline, authorization: authorization, refresh: followUp, bus: bus)
         let collections = CollectionsService(client: api, authorization: authorization, bus: bus)
         let settings = AccountSettingsService(client: api, authorization: authorization)
+        let naming = await MainActor.run { PlaceNaming() }
         let places = PlaceDirectory(markers: { query in try await api.mapMarkers(query) },
                                     geocoder: environment.resolvesPlaces ? AppleMapsGeocoder() : nil,
-                                    file: environment.usesDeviceStorage ? PlaceDirectory.url(for: credential.account) : nil)
+                                    file: environment.usesDeviceStorage ? PlaceDirectory.url(for: credential.account) : nil, naming: naming)
         await places.follow(bus)
         return AccountRuntime(id: id, credential: credential, authorization: authorization, api: api, pipeline: pipeline,
                               library: library, libraryError: libraryError, transfers: transfers, check: check, work: work,

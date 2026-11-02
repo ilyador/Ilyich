@@ -52,7 +52,7 @@ import SwiftUI
             .environment(\.mutations, session.mutations)
             .environment(\.libraryBus, session.bus)
             .environment(\.collectionsService, session.collections)
-            .environment(\.placeDirectory, session.places)
+            .environment(\.placeDirectory, session.places).environment(\.placeNaming, session.places?.naming)
             .environment(\.accountSettings, session.settings)
             .environment(\.freeUpSpace, session.freeUpSpace)
             .environment(\.lockedFolder, session.lockedFolder)

@@ -239,7 +239,8 @@ private struct ViewerRoot: View {
     var body: some View {
         content.tint((AppearanceAccent(rawValue: accentName) ?? .design).tint).environment(\.authorization, authorization)
             .environment(\.mutations, mutations).environment(\.libraryBus, bus).environment(\.collectionsService, collections)
-            .environment(\.accountSettings, settings).environment(\.placeDirectory, places).environment(\.scenePhase, scenePhase)
+            .environment(\.accountSettings, settings).environment(\.placeDirectory, places).environment(\.placeNaming, places?.naming)
+            .environment(\.scenePhase, scenePhase)
     }
 }
 
