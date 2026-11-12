@@ -27,6 +27,10 @@ final class AuthorizationState: Sendable {
     /// observers at once, so this is not the snapshot's lock: an observer may read the snapshot.
     private let changes = Mutex(())
     private let mirror: AuthorizationMirror?
+    private let purchaseAccess: PurchaseAccess?
+    /// A restored grant cannot revive work created under an earlier entitlement.
+    /// This stays in this process; the share extension never trusts a purchase bool.
+    private let purchaseGeneration: UInt64?
 
     private struct State {
         var snapshot: AuthorizationSnapshot
@@ -41,7 +45,8 @@ final class AuthorizationState: Sendable {
     /// them, so neither repeats on this phone: the same account keeps both, as a relaunch changes
     /// nothing, and any other account starts after every generation given out before. The
     /// private epoch fences only what is held in memory, so it starts there too.
-    init(account: AccountID, token: String, readOnly: Bool, requiresPasswordChange: Bool, mirror: AuthorizationMirror?) {
+    init(account: AccountID, token: String, readOnly: Bool, requiresPasswordChange: Bool, mirror: AuthorizationMirror?,
+         purchaseAccess: PurchaseAccess? = nil) {
         let published = mirror?.read(), kept = mirror?.accessEpoch()
         let write: UInt64, access: UInt64
         if let published, published.digest == account.digest {
@@ -59,6 +64,8 @@ final class AuthorizationState: Sendable {
                                              lockedFolderUnlocked: false)
         self.account = account
         self.mirror = mirror
+        self.purchaseAccess = purchaseAccess
+        purchaseGeneration = purchaseAccess?.snapshot.generation
         state = Mutex(State(snapshot: snapshot, counter: counter))
         // The access epoch first: until the digest names this account, a relaunch starts afresh.
         mirror?.keepAccessEpoch(access)
@@ -69,6 +76,21 @@ final class AuthorizationState: Sendable {
 
     /// Whether the session ended: signed out, or replaced by another.
     var hasEnded: Bool { state.withLock { $0.ended } }
+
+    /// Signed access is checked synchronously, including its expiration, at every
+    /// network/transfer boundary. Nil is the explicit dependency-injected test seam.
+    var permitsServiceUse: Bool {
+        guard !hasEnded else { return false }
+        guard let purchaseAccess, let purchaseGeneration else { return true }
+        return purchaseAccess.permits(generation: purchaseGeneration)
+    }
+
+    private func requireServiceUse(method: String, path: String) throws {
+        // Signing out remains possible after access ends and after authorization.end().
+        if method.uppercased() == "POST", path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == "auth/logout" { return }
+        guard !hasEnded else { throw CancellationError() }
+        guard permitsServiceUse else { throw PurchaseAccessRequired() }
+    }
 
     /// Whether a result made under `epoch` may still be kept.
     func isCurrent(_ epoch: AuthorizationEpoch) -> Bool {
@@ -179,6 +201,7 @@ final class AuthorizationState: Sendable {
 /// mode is by then. Reads and the requests read-only mode allows always go.
 extension AuthorizationState: RequestAuthority {
     func admit(method: String, path: String) throws -> UInt64? {
+        try requireServiceUse(method: method, path: path)
         guard !ReadOnlyPolicy.permits(method: method, path: path) else { return nil }
         let snapshot = snapshot
         guard !snapshot.readOnly else { throw ReadOnlyPolicy.ReadOnlyError() }
@@ -186,10 +209,43 @@ extension AuthorizationState: RequestAuthority {
     }
 
     func confirm(method: String, path: String, admittedUnder generation: UInt64?) throws {
+        try requireServiceUse(method: method, path: path)
         guard let generation else { return }
         let snapshot = snapshot
         guard !snapshot.readOnly else { throw ReadOnlyPolicy.ReadOnlyError() }
         guard snapshot.writeGeneration == generation else { throw WriteFenced() }
+    }
+}
+
+struct PurchaseAccessRequired: LocalizedError, Equatable, Sendable {
+    var errorDescription: String? { "Unlock Ilyich to continue. Your account and saved files are kept." }
+}
+
+/// Sign-in has no account authorization yet. Its requests and eventual login acceptance still
+/// belong to the verified grant that began the flow, including time spent in an OAuth web sheet.
+struct PurchaseRequestFence: RequestAuthority {
+    let access: PurchaseAccess
+    let generation: UInt64
+
+    init(_ access: PurchaseAccess) throws {
+        let snapshot = access.snapshot
+        guard snapshot.hasAccess else { throw PurchaseAccessRequired() }
+        self.access = access
+        generation = snapshot.generation
+    }
+
+    func requireAccess() throws {
+        guard access.permits(generation: generation) else { throw PurchaseAccessRequired() }
+    }
+
+    func admit(method: String, path: String) throws -> UInt64? {
+        try requireAccess()
+        return generation
+    }
+
+    func confirm(method: String, path: String, admittedUnder generation: UInt64?) throws {
+        try requireAccess()
+        guard generation == self.generation else { throw PurchaseAccessRequired() }
     }
 }
 

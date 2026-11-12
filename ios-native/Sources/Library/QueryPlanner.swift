@@ -92,11 +92,11 @@ enum QueryPlanner {
 
     /// Whether a feed on the library keeps to the account's own photos, as the index lays it out
     /// (IndexReader's owner rule) and the server timeline serves it: every feed but one with an
-    /// album, whose photos are whoever's, and a place alone, the map's photos there. Partners are
-    /// not in the library yet (QUERY-1), while search reaches those shown in the timeline too, so
-    /// a stacked feed only search serves keeps to the account's photos on the phone (N6).
+    /// album, whose photos are whoever's, a place alone, the map's photos there, and a shared
+    /// timeline feed. Search already limits its partner universe to those shown in the timeline.
     static func keepsToOwnPhotos(_ query: LibraryQuery) -> Bool {
         query.scope == .library && query.predicates.albums.isEmpty && !IndexFeedRequest.isPlaceAlone(query)
+            && !query.includesTimelinePartners
     }
 }
 
@@ -154,7 +154,7 @@ struct ServerTimelineRequest: Hashable, Sendable {
 
     /// `includesPartners` asks for the partners shown in the timeline; it is sent only where
     /// the server accepts it.
-    init(_ query: LibraryQuery, userID: String?, includesPartners: Bool = false) throws(Unsupported) {
+    init(_ query: LibraryQuery, userID: String?, includesPartners: Bool = true) throws(Unsupported) {
         if query.predicates.place != nil { throw .placeNeedsIndex }
         guard QueryPlanner.serverTimelineServes(query) else { throw .predicate("search") }
         guard case .chronological(let field, let ascending) = query.ranking else { throw .predicate("relevance") }
@@ -199,8 +199,7 @@ struct ServerTimelineRequest: Hashable, Sendable {
     /// The server answers 400 when withPartners comes with the archive, favorites or the trash, and
     /// it means nothing but for the whole library: no owner, album, person or place.
     static func allowsPartners(_ query: LibraryQuery) -> Bool {
-        query.scope == .library && query.predicates.albums.isEmpty && query.predicates.people.isEmpty && query.predicates.place == nil
-            && query.visibility == .timeline && query.predicates.favorite == nil && query.trash == .active
+        query.includesTimelinePartners
     }
 
     /// A month in the library's order, which the index reads in too: by the time taken (or added,
@@ -251,7 +250,7 @@ struct IndexFeedRequest: Sendable {
     var personID: String? { personIDs.first }
 
     /// `userID` is the account's, which the mine scope names.
-    init(_ query: LibraryQuery, userID: String, includesPartners: Bool = false) throws(Unsupported) {
+    init(_ query: LibraryQuery, userID: String, includesPartners: Bool = true) throws(Unsupported) {
         guard case .chronological(let field, let ascending) = query.ranking else { throw .predicate("relevance") }
         if query.visibility == .timeline { visibility = "timeline" }
         else if query.visibility == .archive { visibility = "archive" }
@@ -306,9 +305,8 @@ struct ServerSearchRequest: Sendable {
     /// The owner the phone keeps, for the account's own photos or a partner's.
     let owner: String?
     let limitations: Set<Limitation>
-    /// Whether a Photo content search's results are checked by the server's AI. When true the
-    /// request leaves verify unsaid, so the server checks whenever it is configured to; when false
-    /// it sends verify: false, Immich's plain smart search.
+    /// Whether a Photo content search's results are checked by the server's AI. Servers with the
+    /// cursor API receive this choice explicitly; stock servers omit the unsupported field.
     let checksContent: Bool
     /// A Photo content search the server is asked to check, the only one whose verification means anything.
     var asksForCheck: Bool {
@@ -401,7 +399,7 @@ struct ServerSearchRequest: Sendable {
         case .relevance(.text(let text, let language)):
             body.query = text
             if let language { body.language = language }
-            if pages && !checksContent { body.verify = false }
+            if pages { body.verify = checksContent }
         case .relevance(.similar(let id)): body.queryAssetId = id
         case .chronological: break
         }

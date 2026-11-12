@@ -9,6 +9,166 @@ import XCTest
 /// Keychain, the App Group or the device-wide services: they are fakes that record what they
 /// are asked.
 @MainActor final class AccountManagerTests: XCTestCase {
+    // MARK: - Purchase boundary
+
+    func testMissingPurchaseKeepsSavedAccountWithoutOpeningServices() async throws {
+        let server = makeStubServer()
+        let saved = credential("alice", on: server)
+        let access = PurchaseAccess(state: .locked)
+        var environment = self.environment()
+        environment.usesDevicePhotos = true
+        let harness = makeHarness(saved, server: server, environment: environment, purchaseAccess: access)
+
+        await harness.manager.restore()
+
+        let phase = await harness.manager.phase
+        let runtime = await harness.manager.runtime
+        XCTAssertEqual(phase, .purchaseRequired)
+        XCTAssertNil(runtime)
+        XCTAssertEqual(harness.credentials.credential, saved)
+        XCTAssertEqual(harness.recorder.states.last?.savedAccount, SavedAccountSummary(name: "Alice", server: saved.server))
+        XCTAssertTrue(harness.log.all.isEmpty)
+        XCTAssertTrue(server.requests("POST", "auth/validateToken").isEmpty)
+        do {
+            try await harness.manager.signIn(server: server.baseURL.absoluteString, email: "alice@example.test", password: "unused")
+            XCTFail("Locked purchase started sign-in.")
+        } catch is PurchaseAccessRequired {}
+        XCTAssertTrue(server.requests("GET", "server/version").isEmpty)
+    }
+
+    func testPurchaseLossSuspendsAndReacquisitionOpensANewRuntimeWithoutSigningOut() async throws {
+        let server = makeStubServer()
+        let saved = credential("alice", on: server)
+        let access = lifetimeAccess()
+        let environment = keepingTransfers(self.environment(validatesSession: false))
+        let harness = makeHarness(saved, server: server, environment: environment, purchaseAccess: access)
+        await harness.manager.restore()
+        let first = try await XCTUnwrapAsync(await harness.manager.runtime)
+        let store = try XCTUnwrap(first.transfers).store
+        let cutover = await first.prepareTransfers()
+        XCTAssertEqual(cutover, .engine)
+        var preferences = TransferPreferences()
+        preferences.automatic = true
+        try await store.savePreferences(preferences)
+        try await store.saveEngineState(intent: .automatic, blocker: nil, lastMessage: nil)
+
+        access.update(.unavailable("Store could not be checked."))
+        await harness.manager.purchaseAccessChanged()
+        let suspendedPhase = await harness.manager.phase
+        let suspendedRuntime = await harness.manager.runtime
+        XCTAssertEqual(suspendedPhase, .purchaseRequired)
+        XCTAssertNil(suspendedRuntime)
+        XCTAssertTrue(first.authorization.hasEnded)
+        XCTAssertEqual(harness.credentials.credential, saved)
+        XCTAssertFalse(harness.log.all.contains("removeCredential"))
+        XCTAssertTrue(server.requests("POST", "auth/logout").isEmpty)
+
+        access.update(lifetimeAccess().snapshot.state)
+        await harness.manager.purchaseAccessChanged()
+        let next = try await XCTUnwrapAsync(await harness.manager.runtime)
+        XCTAssertNotEqual(first.id, next.id)
+        XCTAssertFalse(first.authorization.permitsServiceUse, "The restored purchase cannot revive old work.")
+        XCTAssertTrue(next.authorization.permitsServiceUse)
+        let kept = try await next.transfers?.store.preferences()
+        XCTAssertEqual(kept?.automatic, true, "Purchase loss preserves the user's automatic-backup choice.")
+        XCTAssertEqual(harness.credentials.credential, saved)
+        await signOutAfterwards(harness)
+    }
+
+    func testLosingPurchaseWhileRuntimeIsPresentedNeverStartsBackup() async throws {
+        let server = makeStubServer()
+        let access = lifetimeAccess()
+        var environment = self.environment(validatesSession: false)
+        environment.usesDevicePhotos = true
+        let harness = makeHarness(credential("alice", on: server), server: server, environment: environment, purchaseAccess: access)
+        harness.recorder.observe = { state in
+            if state.runtime != nil { access.update(.locked) }
+        }
+
+        await harness.manager.restore()
+        await harness.manager.purchaseAccessChanged()
+
+        let phase = await harness.manager.phase
+        let runtime = await harness.manager.runtime
+        XCTAssertEqual(phase, .purchaseRequired)
+        XCTAssertNil(runtime)
+        XCTAssertFalse(harness.log.all.contains("activateBackup(alice)"))
+        XCTAssertNotNil(harness.credentials.credential)
+        XCTAssertTrue(server.requests("POST", "auth/validateToken").isEmpty)
+    }
+
+    func testLockedAccountCanSignOutWithoutOpeningRuntime() async throws {
+        let server = makeStubServer()
+        server.route("POST", "auth/logout", .json(#"{"successful":true}"#))
+        let harness = makeHarness(credential("alice", on: server), server: server, purchaseAccess: PurchaseAccess(state: .locked))
+        await harness.manager.restore()
+        await harness.manager.signOut(.user)
+
+        XCTAssertNil(harness.credentials.credential)
+        let runtime = await harness.manager.runtime
+        XCTAssertNil(runtime)
+        XCTAssertFalse(harness.log.all.contains("activateBackup(alice)"))
+        XCTAssertTrue(harness.log.all.contains("removeCredential"))
+        XCTAssertTrue(harness.log.all.contains("removeLockedPIN"))
+        XCTAssertEqual(server.requests("POST", "auth/logout").count, 1)
+    }
+
+    private func lifetimeAccess() -> PurchaseAccess {
+        PurchaseAccess(state: .unlocked(PurchaseEntitlement(productID: AccessProductID.lifetime.rawValue, transactionID: 1,
+            originalTransactionID: 1, purchaseDate: Date(), expirationDate: nil, isLifetime: true)))
+    }
+
+    func testOAuthClientCannotStartACallbackAfterItsPurchaseGrantWasReplaced() async throws {
+        let server = makeStubServer()
+        server.route("GET", "server/version", .json(#"{"major":3,"minor":3,"patch":5,"prerelease":null}"#))
+        server.route("POST", "oauth/callback", .json(Self.loginJSON("alice")))
+        let access = lifetimeAccess()
+        let harness = makeHarness(nil, server: server, purchaseAccess: access)
+        await harness.manager.restore()
+        let client = try await harness.manager.signInClient(for: server.baseURL)
+        addTeardownBlock { await client.shutdown() }
+        XCTAssertNotNil(client.purchaseFence)
+
+        access.update(.locked)
+        access.update(lifetimeAccess().snapshot.state)
+
+        do {
+            let _: LoginResponse = try await client.request(.post, path: "oauth/callback", body: ["url": "app.immich:///oauth-callback"])
+            XCTFail("An OAuth client survived loss and reacquisition of its original grant.")
+        } catch { XCTAssertTrue(error is PurchaseAccessRequired, "\(error)") }
+        XCTAssertTrue(server.requests("POST", "oauth/callback").isEmpty)
+        XCTAssertNil(harness.credentials.credential)
+    }
+
+    func testOAuthResponseAlreadyInFlightCannotBeAcceptedUnderAReplacementGrant() async throws {
+        let server = makeStubServer()
+        let callback = StubServer.Gate()
+        server.route("GET", "server/version", .json(#"{"major":3,"minor":3,"patch":5,"prerelease":null}"#))
+        server.route("POST", "oauth/callback", .json(Self.loginJSON("alice")).waiting(for: callback))
+        let access = lifetimeAccess()
+        let harness = makeHarness(nil, server: server, purchaseAccess: access)
+        await harness.manager.restore()
+        let client = try await harness.manager.signInClient(for: server.baseURL)
+        let response = Task { () throws -> LoginResponse in
+            try await client.request(.post, path: "oauth/callback", body: ["url": "app.immich:///oauth-callback"])
+        }
+        try await until("OAuth callback did not reach the server.") { callback.waiting == 1 }
+        access.update(.locked)
+        access.update(lifetimeAccess().snapshot.state)
+        callback.open()
+        let login = try await response.value
+
+        do {
+            try await harness.manager.completeSSO(login, server: client.baseURL, purchaseFence: client.purchaseFence)
+            XCTFail("A response from an earlier grant opened an account under the new grant.")
+        } catch { XCTAssertTrue(error is PurchaseAccessRequired, "\(error)") }
+        XCTAssertNil(harness.credentials.credential)
+        let runtime = await harness.manager.runtime
+        XCTAssertNil(runtime)
+        XCTAssertFalse(harness.log.all.contains("save(alice)"))
+        await client.shutdown()
+    }
+
     // MARK: - Restore
 
     /// Earlier native builds saved the server's password-change flag without the administrator
@@ -804,7 +964,7 @@ import XCTest
         let clients = AccountClients { address, credential, purpose in
             let authorization: AuthorizationState? = if case .session(let state) = purpose { state } else { nil }
             return try APIClient(baseURL: address, accessToken: credential?.token, userID: credential?.userID, sessionConfiguration: server.configuration(),
-                                 networkConfiguration: network, wifiName: NoWiFi(), authorization: authorization)
+                                 networkConfiguration: network, wifiName: NoWiFi(), authorization: authorization, purchaseFence: purpose.purchaseFence)
         }
         return AccountDependencies(credentials: store, mirror: mirror, device: FakeAccountDevice(log: log),
                                    clients: clients, unlockEvents: { unlockEvents }, expiryRecheckDelay: .milliseconds(20),
@@ -813,7 +973,8 @@ import XCTest
 
     private func makeHarness(_ credential: StoredCredential?, server: StubServer, environment: AccountEnvironment? = nil,
                              locked: Bool = false, foreground: Bool = false, mirror: AuthorizationMirror? = nil,
-                             network: NetworkConfiguration = NetworkConfiguration(), serverSignOutBudget: Duration = .seconds(3)) -> AccountHarness {
+                             network: NetworkConfiguration = NetworkConfiguration(), serverSignOutBudget: Duration = .seconds(3),
+                             purchaseAccess: PurchaseAccess? = nil) -> AccountHarness {
         let log = AccountEventLog()
         let (events, unlock) = AsyncStream.makeStream(of: Void.self)
         let dependencies = dependencies(credential, server: server, log: log, locked: locked, mirror: mirror, unlockEvents: events,
@@ -822,7 +983,7 @@ import XCTest
         harness.presence.isForeground = foreground
         let recorder = harness.recorder
         harness.manager = AccountManager(environment: environment ?? self.environment(), dependencies: dependencies,
-                                         presence: harness.presence) { recorder.record($0) }
+                                         presence: harness.presence, purchaseAccess: purchaseAccess) { recorder.record($0) }
         return harness
     }
 

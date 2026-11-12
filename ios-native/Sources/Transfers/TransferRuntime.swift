@@ -36,6 +36,7 @@ final class TransferRuntime: Sendable {
     private let receiptChanges: ChangeBroadcast
     private let tasks = Mutex<[Task<Void, Never>]>([])
     private let stopped = Mutex(false)
+    private let authorization: any TransferAuthorizing
     fileprivate static let logger = Logger(subsystem: "app.ilyich.native", category: "Transfers")
 
     /// What the runtime is made from. The registry, scheduler and time are the device's; the rest
@@ -67,17 +68,23 @@ final class TransferRuntime: Sendable {
         account = parts.account
         store = parts.store
         registry = parts.registry
+        authorization = parts.authorization
         let (events, continuation) = AsyncStream.makeStream(of: TransportEvent.self)
         transportEvents = continuation
         let outcomes = TransportOutcomes(events: events)
         self.outcomes = outcomes
         let backup = parts.registry.transport(.backup)
         let share = parts.registry.transport(.shareUpload)
+        let authorization = parts.authorization
+        let permits: @Sendable () -> Bool = {
+            guard let snapshot = authorization.current() else { return false }
+            return !snapshot.readOnly && !snapshot.requiresPasswordChange
+        }
         let library = LibraryJobExecutor(store: parts.store, staging: parts.staging, server: parts.server,
-                                         uploader: TransportPartUploader(transport: backup, outcomes: outcomes), layout: parts.layout,
+                                         uploader: TransportPartUploader(transport: backup, outcomes: outcomes, allowsSubmission: permits), layout: parts.layout,
                                          account: parts.account, conditionsPermit: parts.conditionsPermit)
         let shares = ShareJobExecutor(store: parts.store, inbox: parts.inbox, server: parts.server,
-                                      uploader: TransportPartUploader(transport: share, outcomes: outcomes), layout: parts.layout, account: parts.account)
+                                      uploader: TransportPartUploader(transport: share, outcomes: outcomes, allowsSubmission: permits), layout: parts.layout, account: parts.account)
         self.shares = shares
         let worker = PostUploadWorker(store: parts.store, server: parts.server, photos: parts.staging, authorization: parts.authorization,
                                       conditionsPermit: parts.conditionsPermit)
@@ -88,7 +95,8 @@ final class TransferRuntime: Sendable {
         self.engine = engine
         let recovery = Recovery(store: parts.store, account: parts.account, layout: parts.layout, backup: backup, share: share)
         self.recovery = recovery
-        let discovery = LibraryDiscovery(store: parts.store, staging: parts.staging, notifying: true)
+        let servicePermits: @Sendable () -> Bool = { authorization.current() != nil }
+        let discovery = LibraryDiscovery(store: parts.store, staging: parts.staging, notifying: true, allowsDiscovery: servicePermits)
         self.discovery = discovery
         notifier = TransferNotifier(store: parts.store, poster: parts.poster ?? SystemTransferNotificationPoster(), authorization: parts.authorization)
         let receiptChanges = ChangeBroadcast()
@@ -109,7 +117,7 @@ final class TransferRuntime: Sendable {
         self.reconciler = reconciler
         let preferences: @Sendable () async -> TransferPreferences? = { try? await engine.preferences() }
         let work = EngineWindowWork(engine: engine, discovery: discovery, reconciling: { await reconciler.request(drain: nil).value },
-                                    preSync: parts.preSync, preferences: preferences)
+                                    preSync: parts.preSync, preferences: preferences, allowsWork: servicePermits)
         lifecycle = TransferLifecycle(work: work, time: parts.time, clock: parts.clock, appActive: parts.appActive)
         let (lifecycleStream, lifecycleEvents) = AsyncStream.makeStream(of: LifecycleEvent.self)
         self.lifecycleStream = lifecycleStream
@@ -126,11 +134,15 @@ final class TransferRuntime: Sendable {
     /// Reconciles, settles shares a crash left, then starts the engine, the worker's first pass,
     /// the notifier and the lifecycle. Returns once the engine runs.
     func start() async throws {
+        guard authorization.current() != nil else { throw PurchaseAccessRequired() }
         // Leases of the process that ended are free, so recovery sees every job it left.
         try await store.releaseAllLeases()
         await reconciler.request(drain: nil).value
+        guard authorization.current() != nil else { throw PurchaseAccessRequired() }
         await shares.replayConsumed()
+        guard authorization.current() != nil else { throw PurchaseAccessRequired() }
         try await engine.start()
+        guard authorization.current() != nil else { throw PurchaseAccessRequired() }
         let commits = await engine.snapshots()
         let receiptChanges = self.receiptChanges
         let watch = Task {
@@ -191,6 +203,14 @@ final class TransferRuntime: Sendable {
             try? await engine.setPreferences(preferences)
         }
         if !keepingAutomaticBackup { try? await engine.setIntent(.paused, requeueingFailures: false) }
+        for session in TransferSessionID.allCases {
+            _ = await registry.transport(session).cancel(scope: account.digest)
+        }
+    }
+
+    /// Purchase suspension preserves intent, automatic backup, every stage and receipt.
+    /// Tasks already completed by the daemon keep their durable outcome journals.
+    func suspendForPurchase() async {
         for session in TransferSessionID.allCases {
             _ = await registry.transport(session).cancel(scope: account.digest)
         }
@@ -285,23 +305,30 @@ struct EngineWindowWork: BackgroundWindowWork {
     let reconciling: @Sendable () async -> Void
     let preSync: (@Sendable () async -> Void)?
     let preferences: @Sendable () async -> TransferPreferences?
+    var allowsWork: @Sendable () -> Bool = { true }
 
     func reconcile() async throws { await reconciling() }
     func applyOutcomes() async throws { await reconciling() }
     func submitStaged() async throws { await engine.refresh() }
     func daemonOwnsWork() async -> Bool { await engine.daemonOwnsWork() }
     func runUntilHandedOff() async -> WindowHandoff { await engine.handoff() }
-    func preSyncMetadata() async throws { await preSync?() }
+    func preSyncMetadata() async throws {
+        guard allowsWork() else { throw PurchaseAccessRequired() }
+        await preSync?()
+    }
 
     /// Automatic backup looks for new photos; with it off, a window only carries on what is queued.
     func discover() async throws {
+        guard allowsWork() else { throw PurchaseAccessRequired() }
         guard await preferences()?.automatic == true else { return }
+        guard allowsWork() else { throw PurchaseAccessRequired() }
         _ = try await engine.discover(discovery)
     }
 
     func conditionsChanged() async { await engine.conditionsChanged() }
 
     func automaticTriggerDelay() async -> Duration? {
+        guard allowsWork() else { return nil }
         guard let preferences = await preferences(), preferences.automatic else { return nil }
         return .seconds(max(0, preferences.triggerDelay))
     }

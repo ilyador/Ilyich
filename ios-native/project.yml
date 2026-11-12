@@ -92,6 +92,8 @@ targets:
     platform: iOS
     sources:
       - UITests
+      - path: Config/Ilyich.storekit
+        buildPhase: resources
     dependencies:
       - target: Ilyich
     settings:
@@ -118,3 +120,32 @@ schemes:
       deleteScreenshotsWhenEachTestSucceeds: false
     archive:
       config: Release
+  # Explicit local StoreKit development/test entry point. The shipping Ilyich scheme above
+  # keeps its real App Store run/archive behavior; no synthetic entitlement enters its app.
+  IlyichCommerce:
+    build:
+      targets:
+        Ilyich: all
+        IlyichTests: [test]
+        IlyichUITests: [test]
+    run:
+      config: Debug
+      storeKitConfiguration: Config/Ilyich.storekit
+    test:
+      config: Debug
+      language: en
+      region: US
+      targets:
+        - name: IlyichTests
+          parallelizable: false
+          randomExecutionOrder: false
+          selectedTests:
+            - PurchaseAccessTests
+            - PurchaseStoreTests
+        - name: IlyichUITests
+          parallelizable: false
+          randomExecutionOrder: false
+          selectedTests:
+            - PurchaseAccessUITests
+      captureScreenshotsAutomatically: true
+      deleteScreenshotsWhenEachTestSucceeds: false

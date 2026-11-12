@@ -173,7 +173,10 @@ import XCTest
         server.route("GET", "people", page(["maya"]))
         server.route("GET", "albums", albums(["coast"]))
         store.reloadIfFailed()
-        try await until("The failed load was not tried again.") { !store.lastLoadFailed }
+        try await until("The failed load did not publish its refreshed collections and features.") {
+            !store.lastLoadFailed && store.people.map(\.id) == ["maya"]
+                && store.albums.map(\.id) == ["coast"] && store.features?.map == true
+        }
         XCTAssertEqual(store.people.map(\.id), ["maya"])
         XCTAssertEqual(store.albums.map(\.id), ["coast"])
         XCTAssertEqual(store.features?.map, true)
@@ -214,6 +217,23 @@ import XCTest
     }
 
     // MARK: - Collection changes (N4)
+
+    /// A slow feature probe must not hold the collection responses behind it: the shelves can
+    /// show the albums and people already returned while the server's features are still loading.
+    func testCollectionListsAppearWhileTheFeatureProbeIsStillWaiting() async throws {
+        let gate = StubServer.Gate()
+        server.route("GET", "server/features", features(map: true).waiting(for: gate))
+        server.route("GET", "people", page(["maya"]))
+        server.route("GET", "albums", albums(["coast"]))
+        let store = makeStore()
+        let loading = Task { await store.load() }
+        try await until("The feature probe did not start.") { gate.waiting == 1 }
+        try await until("The independent collection answers were held behind the feature probe.") {
+            store.people.map(\.id) == ["maya"] && store.albums.map(\.id) == ["coast"]
+        }
+        gate.open(); await loading.value
+        XCTAssertFalse(store.lastLoadFailed)
+    }
 
     /// A change to the account's collections applies in place at once: an album renamed keeps its
     /// place, a person renamed theirs, an album deleted or left goes. A load on its way when the

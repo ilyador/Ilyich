@@ -603,17 +603,31 @@ struct LibraryView: View {
     }
 
     private func verificationView(_ verification: Verification) -> some View {
-        HStack(alignment: .center, spacing: 10) {
-            Image(systemName: verification.status == .complete ? "checkmark.viewfinder" : "exclamationmark.magnifyingglass")
-                .foregroundStyle(.cyan).font(.title3)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(verificationTitle(verification)).font(.subheadline.weight(.semibold))
-                Text("\(verification.checked) checked · \(verification.rejected) excluded in this batch")
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: verification.status == .complete ? "checkmark.viewfinder" : "exclamationmark.magnifyingglass")
+                    .foregroundStyle(.cyan).font(.title3)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verificationTitle(verification)).font(.subheadline.weight(.semibold))
+                    Text("\(verification.checked) checked · \(verification.rejected) excluded in this batch")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if verification.status == .unavailable {
+                Text("Unchecked matches are hidden. Retry, or turn off AI check to see all matches.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Spacer(minLength: 4)
-            if verification.canRetry { Button("Retry", action: store.retrySearch).buttonStyle(.glass).disabled(store.isSearching) }
-            else if store.hasMore { Button("Check more", action: store.loadMore).buttonStyle(.glass).disabled(store.isSearching) }
+            if verification.canRetry {
+                HStack {
+                    Button("Retry", action: store.retrySearch).buttonStyle(.glass).disabled(store.isSearching)
+                    if verification.status == .unavailable {
+                        Button("Turn off AI check") { store.setChecksContent(false) }
+                            .buttonStyle(.glass).disabled(store.isSearching)
+                    }
+                }
+            } else if store.hasMore {
+                Button("Check more", action: store.loadMore).buttonStyle(.glass).disabled(store.isSearching)
+            }
         }.padding(14).glassEffect(in: .rect(cornerRadius: 20))
     }
 

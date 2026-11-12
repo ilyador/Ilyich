@@ -9,7 +9,8 @@ import Foundation
 /// - A verified page can be empty and still continue: the first pages, more and a retry follow
 ///   up to 3 pages until one has results, or up to 40 (20,000 photos) when the phone filters.
 /// - A partial or unavailable verification stops there with a RetryPoint at that page's cursor,
-///   keeping the results before it.
+///   keeping the results before it. Partial pages contain confirmed matches; unavailable pages
+///   from older servers may contain unchecked candidates, which a checked search never shows.
 /// - A continuation that is only a legacy page number is refused; a cursor the server repeats ends
 ///   the results.
 /// - A refresh reads again as many pages as were loaded, and says whether the rows changed.
@@ -139,8 +140,12 @@ actor SearchFeed {
                 }
                 try Task.checkCancellation()
                 fetched += 1
-                accumulated += response.assets.items
                 latest = response.verification
+                // Older servers return their raw candidates when verification fails. Asking for
+                // an AI check must not turn into an unchecked search without the owner's choice.
+                if !request.search.asksForCheck || latest?.status != .unavailable {
+                    accumulated += response.assets.items
+                }
                 // Structured filters select this server's cursor API. A legacy page number must
                 // never be sent back as an opaque cursor.
                 if response.assets.nextCursor == nil, response.assets.nextPage != nil {

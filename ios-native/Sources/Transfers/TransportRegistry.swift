@@ -16,6 +16,14 @@ final class TransportRegistry: Sendable {
     private let continuation: AsyncStream<TransportEvent>.Continuation
     private let factory: Factory
     private let transports = Mutex<[TransferSessionID: BackgroundTransport]>([:])
+    private let purchaseAccess = Mutex<PurchaseAccess?>(nil)
+
+    func setPurchaseAccess(_ access: PurchaseAccess) {
+        purchaseAccess.withLock { $0 = access }
+        transports.withLock { transports in
+            for transport in transports.values { transport.setPurchaseAccess(access) }
+        }
+    }
 
     init(factory: @escaping Factory) {
         (events, continuation) = AsyncStream.makeStream(of: TransportEvent.self)
@@ -32,6 +40,7 @@ final class TransportRegistry: Sendable {
             if let existing = transports[session] { return existing }
             let stream = self.continuation
             let created = factory(session) { _ = stream.yield($0) }
+            if let access = purchaseAccess.withLock({ $0 }) { created.setPurchaseAccess(access) }
             transports[session] = created
             return created
         }

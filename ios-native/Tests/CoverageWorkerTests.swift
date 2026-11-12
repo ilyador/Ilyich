@@ -61,6 +61,8 @@ import XCTest
 
     override func setUp() {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("CoverageWorkerTests-\(UUID().uuidString)", isDirectory: true)
+        // Render the fixture before any background download or timed worker assertion starts.
+        _ = Self.png
     }
 
     override func tearDown() { try? FileManager.default.removeItem(at: root) }
@@ -542,11 +544,19 @@ import XCTest
         if complete { events.append(SyncEvents.complete()) }
         _ = try await index.apply(events, epoch: index.epoch())
         let store = ThumbnailDiskStore(directory: root.appendingPathComponent("thumbnails", isDirectory: true), limit: storeLimit, indexDelay: nil)
+        // The app gives initialization a head start; these workers deliberately have no start delay.
+        await store.waitUntilIndexed()
         let scheduler = ThumbnailScheduler(store: store, memory: DecodedThumbnailCache(),
                                            fetcher: ThumbnailFetcher(load: { id, _, _ in try await server.load(id) }, baseDelay: 0.05))
         let account = AccountID(server: try XCTUnwrap(URL(string: "https://coverage.example/api")), userID: "alice")
         let authorization = AuthorizationState(account: account, token: "coverage-session", readOnly: false, requiresPasswordChange: false, mirror: nil)
-        addTeardownBlock { server.block([]) }
+        addTeardownBlock {
+            // Worker teardowns run first. Fence any detached download before the fixture is removed.
+            store.fence.forgetAll()
+            server.block([])
+            scheduler.reset()
+            await store.waitUntilIndexed()
+        }
         return Harness(index: index, store: store, scheduler: scheduler, server: server, conditions: CoverageConditions(),
                        authorization: authorization, account: account, feed: ChangeFeed(), root: root)
     }
@@ -554,9 +564,12 @@ import XCTest
     private func makeWorker(_ h: Harness, policy: CoveragePolicy = .today, pageSize: Int = 2,
                             failurePause: Duration = .milliseconds(300)) -> CoverageWorker {
         let feed = h.feed
-        return CoverageWorker(index: h.index, store: h.store, scheduler: h.scheduler, conditions: h.conditions, board: CoverageBoard(),
-                              changes: { feed.stream() }, authorization: h.authorization, policy: policy, pageSize: pageSize,
-                              startDelay: .zero, failurePause: failurePause)
+        let worker = CoverageWorker(index: h.index, store: h.store, scheduler: h.scheduler, conditions: h.conditions, board: CoverageBoard(),
+                                    changes: { feed.stream() }, authorization: h.authorization, policy: policy, pageSize: pageSize,
+                                    startDelay: .zero, failurePause: failurePause)
+        // Also stop on a thrown test failure, before tearDown removes the fixture directory.
+        addTeardownBlock { [weak worker] in await worker?.stop() }
+        return worker
     }
 
     private func makeChange(_ h: Harness) async -> LibraryChange {

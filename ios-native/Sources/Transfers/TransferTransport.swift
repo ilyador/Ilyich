@@ -7,6 +7,8 @@ protocol TransferTransport: Sendable {
     /// Uploads the attempt's body and returns the task's ID. A task iOS still holds for the attempt,
     /// sent before a relaunch, is adopted instead of sending a second one.
     func submit(_ request: URLRequest, key: AttemptKey) async throws(TransportSubmitError) -> Int
+    /// Rechecks the owning runtime after transport awaits and before resuming a task.
+    func submit(_ request: URLRequest, key: AttemptKey, allowing: @escaping @Sendable () -> Bool) async throws(TransportSubmitError) -> Int
     /// The attempt's outcome file, or nil when there is none.
     func outcome(for key: AttemptKey) throws -> OutcomeRecord?
     /// Deletes the attempt's outcome file once what it says is committed, and the body with it
@@ -19,6 +21,13 @@ protocol TransferTransport: Sendable {
     /// Cancels tasks by ID, as recovery does for tasks no attempt waits for. A task that is gone
     /// is ignored.
     func cancel(tasks: [Int]) async
+}
+
+extension TransferTransport {
+    func submit(_ request: URLRequest, key: AttemptKey, allowing: @escaping @Sendable () -> Bool) async throws(TransportSubmitError) -> Int {
+        guard allowing() else { throw .unavailable }
+        return try await submit(request, key: key)
+    }
 }
 
 extension TransferSessionID {

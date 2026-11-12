@@ -5,6 +5,71 @@ import XCTest
 @MainActor final class SearchFeedTests: XCTestCase {
     // MARK: - Continuation and verification, ported from the feed store's tests
 
+    func testUnavailableVerificationNeverShowsRawCandidatesFromAnOlderServer() async throws {
+        let source = ScriptedSearch([
+            .page(["unchecked"], next: "past-unchecked", status: .unavailable),
+            .page(["confirmed"], next: "next"),
+        ])
+        let feed = SearchFeed(.init(try Self.smart()), source: source)
+        let unavailable = try await feed.first()
+        XCTAssertTrue(unavailable.results.isEmpty, "AI checking must not silently fall back to raw candidates.")
+        XCTAssertEqual(unavailable.verification?.status, .unavailable)
+        XCTAssertEqual(unavailable.retryPoint, .init(cursor: nil, prefix: []))
+        XCTAssertFalse(unavailable.hasMore)
+        let retried = try await feed.retry()
+        XCTAssertEqual(retried.results.map(\.id), ["confirmed"])
+        let cursors = await source.cursors
+        XCTAssertEqual(cursors, [nil, nil], "Retry must check the failed page, not skip its unchecked candidates.")
+    }
+
+    func testUnavailableThenPartialRetriesKeepConfirmedMatchesWithoutSkippingTheTail() async throws {
+        let source = ScriptedSearch([
+            .page(["first"], next: "second"),
+            .page(["unchecked"], next: "third", status: .unavailable),
+            .page(["accepted"], next: "third", status: .partial),
+            .page(["accepted", "tail"], next: "third"),
+            .page(["last"]),
+        ])
+        let feed = SearchFeed(.init(try Self.smart()), source: source)
+        _ = try await feed.first()
+        let unavailable = try await feed.more()
+        XCTAssertEqual(unavailable.results.map(\.id), ["first"])
+        XCTAssertFalse(unavailable.rowsChanged)
+        let partial = try await feed.retry()
+        XCTAssertEqual(partial.results.map(\.id), ["first", "accepted"], "Partial pages contain confirmed matches only.")
+        XCTAssertEqual(partial.retryPoint, .init(cursor: "second", prefix: [Asset(id: "first")]))
+        XCTAssertFalse(partial.hasMore)
+        let completed = try await feed.retry()
+        XCTAssertEqual(completed.results.map(\.id), ["first", "accepted", "tail"])
+        XCTAssertTrue(completed.hasMore)
+        XCTAssertNil(completed.retryPoint)
+        let final = try await feed.more()
+        XCTAssertEqual(final.results.map(\.id), ["first", "accepted", "tail", "last"])
+        let cursors = await source.cursors
+        XCTAssertEqual(cursors, [nil, "second", "second", "second", "third"])
+    }
+
+    func testUnavailableRefreshRetainsTheConfirmedResults() async throws {
+        let source = ScriptedSearch([
+            .page(["first"], next: "second"), .page(["second"]),
+            .page(["unchecked"], status: .unavailable),
+        ])
+        let feed = SearchFeed(.init(try Self.smart()), source: source)
+        _ = try await feed.first(); _ = try await feed.more()
+        let refreshed = try await feed.refresh()
+        XCTAssertEqual(refreshed.results.map(\.id), ["first", "second"])
+        XCTAssertFalse(refreshed.rowsChanged)
+        XCTAssertEqual(refreshed.retryPoint, .init(cursor: nil, prefix: []))
+        XCTAssertEqual(refreshed.verification?.status, .unavailable)
+    }
+
+    func testExplicitlyUncheckedSearchKeepsItsRawCandidates() async throws {
+        let source = ScriptedSearch([.page(["raw"], status: .unavailable)])
+        let feed = SearchFeed(.init(try Self.smart(checksContent: false)), source: source)
+        let state = try await feed.first()
+        XCTAssertEqual(state.results.map(\.id), ["raw"], "Turning AI check off preserves the ordinary smart-search path.")
+    }
+
     func testPartialPageStopsAndRetriesItsOwnCursorWithoutLosingEarlierMatches() async throws {
         let source = ScriptedSearch([
             .page(["first"], next: "second"),
@@ -141,6 +206,29 @@ import XCTest
 
     // MARK: - LibraryFeedStore applies the feed's State
 
+    func testUnavailableAIResultsStayHiddenUntilTheOwnerTurnsTheCheckOff() async throws {
+        let api = SearchStoreFixture(smart: [
+            .page(["unchecked"], status: .unavailable),
+            .page(["unchecked"]),
+        ])
+        let store = LibraryFeedStore(source: api)
+        defer { store.stop() }
+        store.setChecksContent(true)
+        store.search("red hat")
+        try await until("The unavailable check did not settle.") { await api.smartCalls == 1 && !store.isSearching }
+        XCTAssertTrue(store.results.isEmpty)
+        XCTAssertEqual(store.verification?.status, .unavailable)
+        XCTAssertTrue(store.verification?.canRetry == true)
+        XCTAssertFalse(store.hasMore)
+
+        store.setChecksContent(false)
+        try await until("Turning the check off did not read plain smart search.") { await api.smartCalls == 2 && !store.isSearching }
+        XCTAssertEqual(store.results.map(\.id), ["unchecked"])
+        XCTAssertNil(store.verification, "Plain results must not claim to be checked.")
+        let requests = await api.smartVerification
+        XCTAssertEqual(requests, [true, false])
+    }
+
     func testRefreshKeepsRowsWhenIDsUnchanged() async throws {
         let api = SearchStoreFixture([
             .page(["a"], next: "c1"), .page(["b"], next: "c2"),
@@ -245,8 +333,8 @@ import XCTest
         XCTFail(message)
     }
 
-    private static func smart() throws -> ServerSearchRequest {
-        try ServerSearchRequest(LibraryFeedStore.librarySearch.refined(text: "red hat", mode: .context), userID: nil)
+    private static func smart(checksContent: Bool = true) throws -> ServerSearchRequest {
+        try ServerSearchRequest(LibraryFeedStore.librarySearch.refined(text: "red hat", mode: .context), userID: nil, checksContent: checksContent)
     }
 
     private static func metadata(developed: Bool = false) throws -> ServerSearchRequest {
@@ -283,6 +371,7 @@ private actor SearchStoreFixture: FakeFeedSource {
     private var smartPages: [SearchResponse]
     var metadataCursors: [String?] = []
     private(set) var smartCalls = 0
+    private(set) var smartVerification: [Bool?] = []
     /// The offline library's records, and the photos each lookup asked for.
     private var stored: [String: Asset] = [:]
     private(set) var recordsAsked: [Set<String>] = []
@@ -296,6 +385,7 @@ private actor SearchStoreFixture: FakeFeedSource {
     func month(_ bucket: String, of query: LibraryQuery) async throws -> [Asset] { [Asset(id: "timeline-photo")] }
     func search(_ body: SearchQuery) async throws -> SearchResponse {
         smartCalls += 1
+        smartVerification.append(body.verify)
         guard !smartPages.isEmpty else { throw ServerFailure.http(500, nil) }
         return smartPages.removeFirst()
     }

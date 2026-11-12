@@ -223,10 +223,14 @@ actor PhotoKitAdapter {
     /// end even if the caller is cancelled or its screen is gone, as the person may already be
     /// answering iOS's prompt; the journal says how it ended either way.
     nonisolated func perform(_ mutation: DeviceMutation) async -> DeviceMutationResult {
-        await Task { await self.apply(mutation) }.value
+        await perform(mutation, validation: .unrestricted)
     }
 
-    private func apply(_ mutation: DeviceMutation) async -> DeviceMutationResult {
+    nonisolated func perform(_ mutation: DeviceMutation, validation: PhotoChangeValidation) async -> DeviceMutationResult {
+        await Task { await self.apply(mutation, validation: validation) }.value
+    }
+
+    private func apply(_ mutation: DeviceMutation, validation: PhotoChangeValidation) async -> DeviceMutationResult {
         let id = UUID()
         func ended(_ outcome: DeviceMutationResult.Outcome) -> DeviceMutationResult {
             publish(DeviceMutationResult(id: id, mutation: mutation, outcome: outcome))
@@ -251,9 +255,22 @@ actor PhotoKitAdapter {
         begun.insert(id)
         do { try await journal.begin(DeviceJournalEntry(id: id, mutation: mutation, createdAt: Date())) }
         catch { return ended(.failed(Self.journalUnavailable)) }
+        guard await validation.beforeChanges(), validation.atCommit() else {
+            try? await journal.finish(id, outcome: .notPermitted, at: Date())
+            return ended(.notPermitted)
+        }
         let report = ChangeReport()
         var failure: (any Error)?
-        do { try await library.performChanges(PhotoChanges.block(for: mutation, library: library, assets: assets, report: report)) }
+        let library = library
+        let allowed: @Sendable () -> Bool = {
+            guard validation.atCommit() else { return false }
+            switch mutation {
+            case .delete, .setFavorite: return Self.canRead(library.authorizationStatus())
+            case .create: return true
+            }
+        }
+        do { try await library.performChanges(PhotoChanges.block(for: mutation, library: library, assets: assets, report: report,
+                                                                allowed: allowed)) }
         catch { failure = error }
         let outcome = Self.outcome(of: mutation, report: report.value, error: failure)
         // An entry left unfinished, as when this write fails, is reconciled at the next launch.

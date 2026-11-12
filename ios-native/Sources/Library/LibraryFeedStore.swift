@@ -964,7 +964,7 @@ extension FrozenFeed: DisplayedFeed {
             scope = scope.refined(text: text, mode: searchChoices.mode)
         }
         // The stacked feed itself, when only search serves it, keeps to the photos the index and
-        // the server timeline show of it (N6): partners are not in the library yet.
+        // the server timeline show of it (N6), including enabled timeline partners.
         let stackedFeed = !stack.isEmpty && text.isEmpty && choiceBrowse == nil && similarAssetID == nil
         return try ServerSearchRequest(scope, userID: source.userID, checksContent: similarAssetID == nil && searchChoices.verifiesText,
                                        keepsToOwnPhotos: stackedFeed && QueryPlanner.keepsToOwnPhotos(feedQuery))
@@ -1183,6 +1183,7 @@ extension FrozenFeed: DisplayedFeed {
     /// they show that the change names takes its record from the offline library, so one put in
     /// Trash elsewhere leaves them too.
     func apply(_ change: LibraryChange) async {
+        if change.partnersChanged { places.invalidateMembership() }
         prune(change)
         let gone = change.removed.union(change.accessLost)
         // Those it took out stay out of any month read before it.
@@ -1201,7 +1202,11 @@ extension FrozenFeed: DisplayedFeed {
             if everything { savedStaleMonths = nil }
             else { savedStaleMonths?.formUnion(Self.months(touchedBy: change, in: originalTimeline?.rows ?? [:])) }
         }
-        guard query.isEmpty else { return await recheckResults(named: Set(change.upserted.keys)) }
+        guard query.isEmpty else {
+            if change.partnersChanged { await reload(preservingPosition: true) }
+            else { await recheckResults(named: Set(change.upserted.keys)) }
+            return
+        }
         if showingResults {
             // Results are read again, as before, unless the change touched no photo, album or person.
             if !named.isEmpty || everything || !change.albums.isEmpty || !change.people.isEmpty { await reload(preservingPosition: true) }
@@ -1259,8 +1264,11 @@ extension FrozenFeed: DisplayedFeed {
             stack = next; filterTitle = next.title
             return false
         case .partnersChanged:
+            places.invalidateMembership()
             if originalTimeline != nil { savedStaleMonths = nil }
-            if query.isEmpty { Task { await reload(preservingPosition: true) } }
+            // The server just changed; the readable index still has its previous partner row.
+            // Refresh through the repository before re-reading it, as for other mutations.
+            Task { await refreshAfterMutation() }
             return false
         case .albumCreated, .memorySaved:
             return false

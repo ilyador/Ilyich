@@ -13,6 +13,9 @@ import Foundation
     private(set) var isLoading = false
     /// Why the last page failed; nil once a page loads or a new query starts.
     private(set) var failure: String?
+    /// A saved or successful server answer has supplied this query's people, including an empty list.
+    private(set) var hasSnapshot = false
+    private(set) var isOffline = false
     private(set) var query = ""
     /// The page the next load asks for, from one; a failed page is asked for again.
     private(set) var nextPage = 1
@@ -31,11 +34,18 @@ import Foundation
     /// replaces them, or stay when it fails.
     func start(query: String, debounce: Duration = .zero, keepingPeople: Bool = false) async {
         let token = UUID()
-        if !keepingPeople { begin(token, query: query); people = []; hasMore = true }
+        if !keepingPeople { begin(token, query: query); people = []; hasMore = true; hasSnapshot = false }
         if debounce > .zero {
             do { try await Task.sleep(for: debounce) } catch { if generation == token { isLoading = false }; return }
         }
         if keepingPeople { begin(token, query: query) }
+        // Saved people render while the server is being contacted, including on a cold launch.
+        if people.isEmpty, let saved = try? await source.cachedPeople() {
+            guard token == generation else { return }
+            guard !Task.isCancelled else { isLoading = false; return }
+            people = matching(saved)
+            hasSnapshot = true
+        }
         await load(token)
     }
 
@@ -47,6 +57,11 @@ import Foundation
 
     /// Drops whatever is on its way, as when the screen goes.
     func cancel() { generation = UUID(); isLoading = false }
+
+    /// A reset or revoked access drops the previous answer before another load can begin.
+    func invalidateSavedContent() {
+        cancel(); people = []; hasSnapshot = false; hasMore = true; nextPage = 1; isOffline = false
+    }
 
     func dismissFailure() { failure = nil }
 
@@ -60,7 +75,7 @@ import Foundation
     private func begin(_ token: UUID, query: String) {
         generation = token
         self.query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        nextPage = 1; failure = nil; isLoading = true
+        nextPage = 1; failure = nil; isLoading = true; isOffline = false
     }
 
     private func load(_ token: UUID) async {
@@ -76,9 +91,9 @@ import Foundation
                 try Task.checkCancellation()
                 guard token == generation else { return }
                 // The offline library answers the whole query as one page.
-                people = offline.filter { person in
-                    person.isHidden != true && (name.map { person.name.localizedStandardContains($0) } ?? true)
-                }
+                // A stale, empty offline index must not replace a newer list already shown.
+                if people.isEmpty { people = matching(offline) }
+                hasSnapshot = true; isOffline = true
                 hasMore = false; nextPage = page + 1
                 return
             }
@@ -88,9 +103,21 @@ import Foundation
             if page == 1 { people = [] }
             let known = Set(people.map(\.id))
             people += response.people.filter { !known.contains($0.id) }
+            hasSnapshot = true; isOffline = false
             hasMore = response.hasNextPage ?? (response.people.count == pageSize)
             nextPage = page + 1
         } catch is CancellationError {
-        } catch { if token == generation { failure = error.localizedDescription } }
+        } catch {
+            guard token == generation else { return }
+            isOffline = CollectionFailure.isOffline(error)
+            if CollectionFailure.clearsSavedContent(error) {
+                people = []; hasSnapshot = false; hasMore = false; nextPage = 1
+            }
+            failure = error.localizedDescription
+        }
+    }
+
+    private func matching(_ people: [Person]) -> [Person] {
+        people.filter { $0.isHidden != true && (query.isEmpty || $0.name.localizedStandardContains(query)) }
     }
 }

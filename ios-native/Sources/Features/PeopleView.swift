@@ -15,14 +15,30 @@ struct PeopleView: View {
     }
 
     private var people: [Person] { pager.people }
+    private var visiblePeople: [Person] { people.filter { query.isEmpty || $0.name.localizedStandardContains(query) } }
     private var loading: Bool { pager.isLoading }
     var body: some View {
         ScrollView {
-            if people.isEmpty && !loading {
-                FeatureEmpty(title: "People in your photos", symbol: "person.2", description: "Faces appear here after your server finishes recognizing them.")
+            if pager.isOffline || pager.failure != nil {
+                CollectionConnectionNotice(isOffline: pager.isOffline, hasSnapshot: pager.hasSnapshot, failure: pager.failure) {
+                    Task {
+                        if pager.failure != nil && pager.nextPage > 1 { await pager.loadMore() }
+                        else { await pager.start(query: query, keepingPeople: true) }
+                    }
+                }
+            }
+            if !pager.hasSnapshot && pager.failure == nil { ProgressView().padding(60) }
+            else if visiblePeople.isEmpty && pager.failure != nil {
+                FeatureEmpty(title: pager.isOffline ? (pager.hasSnapshot ? "No saved people" : "People aren’t saved on this phone") : "People couldn’t load", symbol: "person.2",
+                             description: pager.isOffline ? "Connect to your server to load the people in your photos." : "Try again when your server is available.")
+            }
+            else if loading && visiblePeople.isEmpty { ProgressView("Refreshing people").padding(60) }
+            else if visiblePeople.isEmpty && !loading {
+                FeatureEmpty(title: pager.isOffline ? "No saved people" : (query.isEmpty ? "People in your photos" : "No matching people"), symbol: "person.2",
+                             description: pager.isOffline ? "Connect to your server to refresh the people in your photos." : (query.isEmpty ? "Faces appear here after your server finishes recognizing them." : "Try another name."))
             }
             LazyVGrid(columns: [.init(.adaptive(minimum: 100), spacing: 20)], spacing: 28) {
-                ForEach(people.filter { query.isEmpty || $0.name.localizedStandardContains(query) }) { person in
+                ForEach(visiblePeople) { person in
                     Button { onSelect(person) } label: {
                         VStack(spacing: 10) {
                             PersonThumbnail(pipeline: pipeline, person: person).aspectRatio(1, contentMode: .fit)
@@ -35,7 +51,7 @@ struct PeopleView: View {
                     .contextMenu { Button("Edit person", systemImage: "pencil") { editing = person }.requiresWriteAccess() }
                 }
             }.padding(20)
-            if pager.hasMore {
+            if pager.hasMore && pager.hasSnapshot {
                 Button { Task { await pager.loadMore() } } label: {
                     if loading { ProgressView() } else { Text("Load more people") }
                 }.disabled(loading).padding()
@@ -46,13 +62,15 @@ struct PeopleView: View {
         // when it fails.
         .task(id: query) { await pager.start(query: query, debounce: query.isEmpty ? .zero : .milliseconds(250), keepingPeople: true) }
         .refreshable { await pager.start(query: query, keepingPeople: true) }
+        .onCollectionChange { change in if case .personUpdated(let person) = change { pager.replace(person) } }
+        .onLibraryChange { change in
+            if change.reset || !change.accessLost.isEmpty { pager.invalidateSavedContent() }
+            if change.reloadsCollections || !change.accessLost.isEmpty { Task { await pager.start(query: query, keepingPeople: true) } }
+        }
         .sheet(item: $editing) { person in
             // The shelves and the feed hear of the change from the account's collections.
             NavigationStack { PersonEditor(person: person) { updated in pager.replace(updated) } }
         }
-        .alert("Couldn’t load people", isPresented: Binding(get: { pager.failure != nil }, set: { if !$0 { pager.dismissFailure() } })) {
-            Button("Retry") { Task { await pager.loadMore() } }; Button("Cancel", role: .cancel) { }
-        } message: { Text(pager.failure ?? "") }
     }
 }
 

@@ -129,6 +129,13 @@ final class LibraryIndex: Sendable {
     func isQueryable() async throws -> Bool { try await mapped { try await writer.isQueryable() } }
     func persistCachedServerFeatures(_ features: ServerFeatures) async throws { try await mapped { try await writer.persistCachedServerFeatures(features) } }
     func cachedServerFeatures() async throws -> ServerFeatures? { try await mapped { try await writer.cachedServerFeatures() } }
+    func collectionCacheAccess(_ kind: CollectionKind) async throws -> (refused: Bool, generation: String?) {
+        try await mapped { try await writer.collectionCacheAccess(kind) }
+    }
+    func refuseCollectionCache(_ kind: CollectionKind) async throws { try await mapped { try await writer.refuseCollectionCache(kind) } }
+    func permitCollectionCache(_ kind: CollectionKind, after generation: String?) async throws -> Bool {
+        try await mapped { try await writer.permitCollectionCache(kind, after: generation) }
+    }
     func takeAccessInvalidation() async throws -> Bool { try await mapped { try await writer.takeAccessInvalidation() } }
     func accessInvalidationPending() async throws -> Bool { try await mapped { try await writer.accessInvalidationPending() } }
     func thumbnailRevisions() async throws -> [String: String] { try await mapped { try await writer.thumbnailRevisions() } }
@@ -166,22 +173,22 @@ final class LibraryIndex: Sendable {
     func asset(id: String) async throws -> Asset? { try await mapped { try await viewport.asset(id: id) } }
     /// A feed's photos across months, newest first by the time taken unless it asks otherwise.
     /// `includesPartners` adds the partners shown in the timeline where the library allows them.
-    func timelineAssets(_ query: LibraryQuery = .library, includesPartners: Bool = false, offset: Int = 0, limit: Int = 200) async throws -> [Asset] {
+    func timelineAssets(_ query: LibraryQuery = .library, includesPartners: Bool = true, offset: Int = 0, limit: Int = 200) async throws -> [Asset] {
         let feed = try feed(query, includesPartners)
         return try await mapped { try await viewport.timelineAssets(feed, offset: offset, limit: limit) }
     }
     /// A feed's months, newest first unless it asks otherwise, with their counts.
-    func timeBuckets(_ query: LibraryQuery = .library, includesPartners: Bool = false) async throws -> [TimeBucket] {
+    func timeBuckets(_ query: LibraryQuery = .library, includesPartners: Bool = true) async throws -> [TimeBucket] {
         let feed = try feed(query, includesPartners)
         return try await mapped { try await viewport.timeBuckets(feed) }
     }
     /// One month of a feed, by the time taken (or added), then ID.
-    func timeBucket(_ bucket: String, of query: LibraryQuery = .library, includesPartners: Bool = false) async throws -> [Asset] {
+    func timeBucket(_ bucket: String, of query: LibraryQuery = .library, includesPartners: Bool = true) async throws -> [Asset] {
         let feed = try feed(query, includesPartners)
         return try await mapped { try await viewport.timeBucket(bucket, of: feed) }
     }
     /// What SQLite plans for a month's query, for tests and diagnostics.
-    func timeBucketPlan(_ bucket: String, of query: LibraryQuery = .library, includesPartners: Bool = false) async throws -> [String] {
+    func timeBucketPlan(_ bucket: String, of query: LibraryQuery = .library, includesPartners: Bool = true) async throws -> [String] {
         let feed = try feed(query, includesPartners)
         return try await mapped { try await viewport.timeBucketPlan(bucket, of: feed) }
     }
@@ -201,7 +208,7 @@ final class LibraryIndex: Sendable {
     }
     func memories(onCivilDate day: String) async throws -> [Memory] { try await mapped { try await aggregate.memories(onCivilDate: day) } }
     /// Located photos per month and place, for naming months and marking trips on the time rail.
-    func monthPlaces(_ query: LibraryQuery = .library, includesPartners: Bool = false) async throws -> [MonthPlaceCount] {
+    func monthPlaces(_ query: LibraryQuery = .library, includesPartners: Bool = true) async throws -> [MonthPlaceCount] {
         let feed = try feed(query, includesPartners)
         return try await mapped { try await aggregate.monthPlaces(feed) }
     }
@@ -219,14 +226,14 @@ final class LibraryIndex: Sendable {
         try await mapped { try await aggregate.identities(after: cursor, limit: limit) }
     }
     /// How many of a stacked feed's photos each person and each album holds, for the shelves (N6).
-    /// The library never takes partners in here, as the feed doesn't.
+    /// The counts use the feed's same shared-timeline membership.
     func facets(_ query: LibraryQuery) async throws -> ShelfFacets {
-        let feed = try feed(query, false)
+        let feed = try feed(query, true)
         return try await mapped { try await aggregate.facets(feed) }
     }
     /// A stacked feed's photos by ID, which the Earth keeps of its places (N6).
     func feedIDs(_ query: LibraryQuery) async throws -> Set<String> {
-        let feed = try feed(query, false)
+        let feed = try feed(query, true)
         return try await mapped { try await aggregate.feedIDs(feed) }
     }
     func albums() async throws -> [Album] { try await mapped { try await aggregate.albums() } }

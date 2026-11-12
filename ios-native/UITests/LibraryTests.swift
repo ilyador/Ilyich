@@ -801,6 +801,76 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(check.waitForExistence(timeout: 5), "Photo content brings the AI check back.")
         XCTAssertEqual(check.value as? String, "1", "Still on, as it was left.")
     }
+    /// These cases test the directory's offline state after the library and its shelves are ready.
+    @MainActor private func openOfflineCollection(_ title: String, in app: XCUIApplication) -> Bool {
+        let grid = app.collectionViews["library.grid"]
+        guard grid.cells.firstMatch.waitForExistence(timeout: 15), waitForPhotoPixels(in: grid, timeout: 10) else {
+            capture(app, "Offline \(title) — library not ready")
+            XCTFail("The fixture library must render before opening its shelves.")
+            return false
+        }
+        let shelf = app.buttons[title]
+        var opened = false
+        // As in SignInTests, retry once if the first gesture lands during launch layout.
+        for _ in 0..<2 {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.5))
+                .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.5)))
+            if shelf.waitForExistence(timeout: 3), waitUntilSettled(shelf) { opened = true; break }
+        }
+        guard opened else {
+            capture(app, "Offline \(title) — shelves did not open")
+            XCTFail("The \(title) shelf must open before entering its directory.")
+            return false
+        }
+        shelf.tap()
+        let manage = app.buttons["Manage " + title.lowercased()]
+        guard manage.waitForExistence(timeout: 5), waitUntilSettled(manage) else {
+            capture(app, "Offline \(title) — Manage row not ready")
+            XCTFail("The Manage row must settle before it is tapped.")
+            return false
+        }
+        manage.tap()
+        guard app.navigationBars[title].waitForExistence(timeout: 5) else {
+            capture(app, "Offline \(title) — directory did not open")
+            XCTFail("The \(title) directory must open from its Manage row.")
+            return false
+        }
+        capture(app, "Offline \(title) — directory opened")
+        return true
+    }
+
+    /// Hittability alone can precede the end of a shelf transition. Require a stable tap frame.
+    @MainActor private func waitUntilSettled(_ element: XCUIElement) -> Bool {
+        let deadline = Date().addingTimeInterval(5)
+        var previous: CGRect?
+        var stableReads = 0
+        repeat {
+            if element.exists, element.isHittable, !element.frame.isEmpty {
+                let frame = element.frame
+                stableReads = frame == previous ? stableReads + 1 : 0
+                if stableReads >= 2 { return true }
+                previous = frame
+            } else {
+                previous = nil; stableReads = 0
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        return false
+    }
+
+    @MainActor func testOfflineAlbumsWithoutASavedCopyExplainsHowToRecover() {
+        let app = launch(extraArguments: ["--ui-testing-offline-collections"])
+        guard openOfflineCollection("Albums", in: app) else { return }
+        XCTAssertTrue(app.staticTexts["Albums aren’t saved on this phone"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Server unavailable"].exists)
+        XCTAssertFalse(app.staticTexts["Your albums"].exists, "A failed request must not claim this library has no albums.")
+        XCTAssertFalse(app.staticTexts["Create an album to keep a story together."].exists)
+        let retry = app.buttons["Retry"]
+        requireHittable(retry, in: app); retry.tap()
+        XCTAssertTrue(app.staticTexts["Albums aren’t saved on this phone"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.alerts.count, 0, "A connection failure is an inline state, so browsing remains available.")
+    }
+
     /// F5, G1: people come a numbered page at a time. Search options' People shows the server's
     /// first page; Load more people asks for the next page and adds it after, and the last page
     /// ends the list. The fixture's session serves 75 people thirty at a time, whatever the size

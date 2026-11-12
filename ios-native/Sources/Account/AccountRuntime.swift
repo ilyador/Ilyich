@@ -119,14 +119,15 @@ final class AccountRuntime: Sendable {
     /// that the account's work met ends the session; `refused` hears that the server the session
     /// checks with runs a release older than the app needs.
     static func open(_ credential: StoredCredential, environment: AccountEnvironment, dependencies: AccountDependencies,
-                     presence: AppPresence, refused: @escaping @Sendable (UUID, UnsupportedServer) async -> Void = { _, _ in },
+                     presence: AppPresence, purchaseAccess: PurchaseAccess? = nil,
+                     refused: @escaping @Sendable (UUID, UnsupportedServer) async -> Void = { _, _ in },
                      expired: @escaping @Sendable (UUID, any Error) async -> Bool) async throws -> AccountRuntime {
         let id = UUID()
         // The App Group mirror is written here for the saved credential, which stays untouched.
         let authorization = AuthorizationState(account: credential.account, token: credential.token,
                                                readOnly: ReadOnlyPolicy.isEnabled(server: credential.server, userID: credential.userID),
                                                requiresPasswordChange: credential.requiresPasswordChange == true,
-                                               mirror: dependencies.mirror)
+                                               mirror: dependencies.mirror, purchaseAccess: purchaseAccess)
         let api: APIClient
         do { api = try dependencies.clients.make(credential.server, credential, .session(authorization)) }
         catch { authorization.end(); throw error }
@@ -198,10 +199,12 @@ final class AccountRuntime: Sendable {
     /// library to be complete, sync while the app is in front, and the session check. Backup
     /// starts when the account becomes active (TransferHost.activate).
     @MainActor func start() async {
+        guard authorization.permitsServiceUse else { return }
         if let library {
             let entities = library.entities
             library.coverage.start()
             await library.sync.start()
+            guard authorization.permitsServiceUse else { return }
             // Fills the index's derived tables for a library synced before they existed, off the
             // main thread and a batch at a time; the feeds read the server until it is done.
             entities.startBackfill()

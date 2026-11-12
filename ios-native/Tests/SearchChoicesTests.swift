@@ -8,8 +8,7 @@ import XCTest
         try XCTUnwrap(JSONSerialization.jsonObject(with: APIJSON.encoder().encode(value)) as? [String: Any])
     }
 
-    /// Photo content is smart search, with verify: false unless the AI check is on; on leaves
-    /// verification to the server, as before. The other modes are metadata searches on their field.
+    /// Photo content states the AI choice explicitly. The other modes are metadata searches on their field.
     func testEachModeBuildsTheRightRequest() throws {
         let library = LibraryFeedStore.librarySearch
         let plain = try ServerSearchRequest(library.refined(text: "red hat", mode: .context), userID: "alice", checksContent: false)
@@ -21,7 +20,7 @@ import XCTest
         let checked = try ServerSearchRequest(library.refined(text: "red hat", mode: .context), userID: "alice", checksContent: true)
         body = try json(checked.smartBody(cursor: nil))
         XCTAssertEqual(body["query"] as? String, "red hat")
-        XCTAssertNil(body["verify"], "With it on, the server verifies as it always did when configured.")
+        XCTAssertEqual(body["verify"] as? Bool, true, "With it on, the server must not substitute its default verification setting.")
 
         let similar = try ServerSearchRequest(library.similar(to: "reference"), userID: "alice", checksContent: false)
         XCTAssertNil(try json(similar.smartBody(cursor: nil))["verify"], "Similar photos have no text to check.")
@@ -118,7 +117,7 @@ import XCTest
         try await until("The search did not run again.") { await api.smart.count == 3 && !store.isSearching }
         XCTAssertNil(store.verification)
         let verify = await api.smart.map(\.verify)
-        XCTAssertEqual(verify, [false, nil, false])
+        XCTAssertEqual(verify, [false, true, false])
         XCTAssertEqual(store.results.map(\.id), ["shown"])
 
         // Neither a field search nor More's filtered view is checked, with the switch on.

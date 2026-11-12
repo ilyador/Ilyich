@@ -5,6 +5,61 @@ import XCTest
 
 /// The transfer engine against changes of authorization while it works (B2).
 final class TransferEngineFenceTests: XCTestCase {
+    func testPurchaseRefusalPreservesExhaustedRetryJobForTheNextGrant() async throws {
+        for transportRefusal in [false, true] {
+            let h = try await TransferEngineHarness()
+            let access = PurchaseAccess(state: .unlocked(PurchaseEntitlement(productID: AccessProductID.lifetime.rawValue, transactionID: 1,
+                originalTransactionID: 1, purchaseDate: Date(), expirationDate: nil, isLifetime: true)))
+            let authorization = AuthorizationState(account: FakeTransferAuthorization.account, token: "token", readOnly: false,
+                requiresPasswordChange: false, mirror: nil, purchaseAccess: access)
+            let engine = TransferEngineHarness.engine(store: h.store, clock: h.clock, authorization: authorization, executor: h.executor)
+            var preferences = TransferPreferences()
+            preferences.automatic = true
+            try await h.store.savePreferences(preferences)
+            _ = try await engine.enqueue([h.photo("a")])
+            // Five previous real failures put this job at the classifier's permanent-failure
+            // threshold. A purchase refusal must not count as the next item failure.
+            for _ in 0..<TransferFailureClassifier.unknownAttempts {
+                let token = UUID()
+                let job = try await h.store.reserve(lane: .library, now: TransferEngineHarness.base, token: token, epoch: 1)
+                let id = try XCTUnwrap(job).id
+                _ = try await h.store.scheduleRetry(job: id, token: token, notBefore: TransferEngineHarness.base.addingTimeInterval(-1),
+                    message: "Earlier genuine failure", at: TransferEngineHarness.base)
+            }
+            h.executor.script("a", .fail {
+                // The synchronous purchase fence wins before AccountManager or the engine's
+                // authorization-stream consumer can tear down the runtime.
+                access.update(.locked)
+                if transportRefusal { return TransportSubmitError.unavailable }
+                return PurchaseAccessRequired()
+            }, .succeed)
+            try await engine.setIntent(.automatic)
+            try await engine.start()
+            await untilTransfers("Purchase loss did not block the engine.") { await engine.currentSnapshot.phase == .blocked(.signedOut) }
+            let job = try await h.requireJob("a")
+            XCTAssertEqual(job.retryCount, TransferFailureClassifier.unknownAttempts)
+            XCTAssertNotEqual(job.state, .failed)
+            XCTAssertNotEqual(job.errorClass, "item")
+            XCTAssertEqual(job.phase, "staged")
+            let running = await engine.runningLease
+            XCTAssertNil(running)
+            let kept = try await h.store.preferences()
+            XCTAssertEqual(kept?.automatic, true)
+            await engine.stop()
+
+            access.update(.unlocked(PurchaseEntitlement(productID: AccessProductID.lifetime.rawValue, transactionID: 2,
+                originalTransactionID: 2, purchaseDate: Date(), expirationDate: nil, isLifetime: true)))
+            let restored = AuthorizationState(account: FakeTransferAuthorization.account, token: "token", readOnly: false,
+                requiresPasswordChange: false, mirror: nil, purchaseAccess: access)
+            let next = TransferEngineHarness.engine(store: h.store, clock: h.clock, authorization: restored, executor: h.executor)
+            try await next.start()
+            try await untilTransfers("Restored access did not continue the preserved job.") { try await h.confirmed("a") }
+            XCTAssertEqual(h.executor.calls.map(\.retryCount), [TransferFailureClassifier.unknownAttempts, TransferFailureClassifier.unknownAttempts])
+            await next.stop()
+            await h.tearDown()
+        }
+    }
+
     func testATokenChangeGivesAnExplicitBlock() async throws {
         let h = try await TransferEngineHarness()
         let gate = TransferGate()

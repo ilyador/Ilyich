@@ -4,8 +4,8 @@ import Foundation
 /// They apply to every search typed in the bar, and to the filtered view More opens when no text
 /// is typed. They persist, per server and account, until changed.
 struct SearchChoices: Hashable, Sendable {
-    /// The AI check on a Photo content search. Off is Immich's smart search, sent with
-    /// verify: false; on leaves verification to the server, which checks when it is configured.
+    /// The AI check on a Photo content search. The cursor API receives verify: true or false;
+    /// stock Immich keeps its ordinary smart search without the unsupported field.
     var checksContent = false
     var mode = SearchMode.context
     /// Only the filters More sets: people, tags, place, camera, date, media type and display options.

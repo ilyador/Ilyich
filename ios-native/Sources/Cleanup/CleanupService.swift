@@ -1,6 +1,7 @@
 import Foundation
 import IlyichPlatform
 import os
+import Synchronization
 
 /// A phone photo a check found safe to remove: backed up, verified on the server, unchanged.
 struct CleanupCandidate: Hashable, Sendable {
@@ -50,7 +51,7 @@ enum CleanupEvent: Hashable, Sendable {
 
 /// Why a removal didn't start.
 enum CleanupBlock: Hashable, Sendable {
-    /// Removal is shut until the owner's device test (CleanupRemovalGate).
+    /// Removal is disabled for this service.
     case unavailable
     case readOnly
     /// The account, its session or its access changed since the check.
@@ -109,7 +110,7 @@ actor CleanupService {
     private let settings: CleanupSettingsStore
     private let credentialIsCurrent: @Sendable () -> Bool
     private let serverChanges: (@Sendable () async -> AsyncStream<LibraryChange>)?
-    /// CleanupRemovalGate on the phone; tests open it.
+    /// Release availability, independent of the per-removal safety checks.
     nonisolated let removalAllowed: Bool
     private let verificationLimit: Int
     private let batchSize: Int
@@ -117,13 +118,13 @@ actor CleanupService {
     private lazy var device: any CleanupDevice = makeDevice()
 
     /// The fence a removal must still be inside (DS6).
-    private struct Fence: Equatable {
+    private struct Fence: Equatable, Sendable {
         let account: String
         let tokenDigest: String
         let epoch: AuthorizationEpoch
     }
 
-    private struct Scan {
+    private struct Scan: Sendable {
         let id: UUID
         let fence: Fence
         let access: UInt64
@@ -138,6 +139,16 @@ actor CleanupService {
     private var dirty: Set<String> = []
     private var dirtyWhole = false
     private var removing = false
+    /// A removal can wait in the Photos adapter or its journal. Invalidation revokes this
+    /// synchronously, so the eventual change block cannot rely on an old actor-side check.
+    private final class RemovalPermit: Sendable {
+        let selection: Set<String>
+        private let valid = Mutex(true)
+        init(_ selection: Set<String>) { self.selection = selection }
+        var isValid: Bool { valid.withLock { $0 } }
+        func revoke() { valid.withLock { $0 = false } }
+    }
+    private var removalPermit: RemovalPermit?
     private var watchers: [Task<Void, Never>] = []
     private var observers: [UUID: AsyncStream<CleanupEvent>.Continuation] = [:]
     private var closed = false
@@ -205,6 +216,7 @@ actor CleanupService {
     func invalidate() { invalidate(.settings) }
 
     private func invalidate(_ reason: CleanupInvalidation?) {
+        removalPermit?.revoke()
         // A check under way read the settings when it began, and a removal compares them again.
         if scanning != nil, let reason, reason != .settings { dirtyWhole = true }
         guard current != nil else { return }
@@ -352,10 +364,11 @@ actor CleanupService {
         guard removalAllowed else { return .blocked(.unavailable) }
         guard !closed, !removing else { return .blocked(.checkAgain) }
         removing = true
-        defer { removing = false }
+        defer { removalPermit?.revoke(); removalPermit = nil; removing = false }
         // DS1: only what the current check offers.
         guard let scan = current, !selection.isEmpty, selection.isSubset(of: scan.candidates.keys) else { return .blocked(.checkAgain) }
         if let block = blockedByAccount(scan) { return .blocked(block) }
+        let writeGeneration = authorization.snapshot.writeGeneration
         // DS7 and DS11: the settings and Photos access the check was made with.
         guard settings.load() == scan.settings else { invalidate(.settings); return .blocked(.checkAgain) }
         guard await device.access().generation == scan.access else { invalidate(.access); return .blocked(.checkAgain) }
@@ -395,12 +408,48 @@ actor CleanupService {
         if let block = blockedByAccount(scan) { return .blocked(block) }
         let lost = selection.subtracting(latest.candidates.keys)
         guard lost.isEmpty else { return .changed(lost) }
+        // A receipt or keep rule may have changed while the network checks were suspended,
+        // before its change stream reached this actor. Read them directly again.
+        guard settings.load() == scan.settings else { invalidate(.settings); return .blocked(.checkAgain) }
+        let finalReceipts = await receipts.receipts(account: account) ?? [:]
+        let replaced = Set(reviewed.filter { finalReceipts[$0.localID] != $0.receipt }.map(\.localID))
+        guard replaced.isEmpty else { return drop(replaced) }
+        let finalKept: Set<String>
+        let finalAssets: [DeviceAsset]
+        do {
+            finalKept = try await device.members(of: scan.settings.keptAlbumIDs ?? [])
+            finalAssets = try await device.assets(reviewed.map(\.asset.id))
+        } catch { return .blocked(.checkAgain) }
+        let finalFound = Dictionary(finalAssets.map { ($0.id.rawValue, $0) }, uniquingKeysWith: { first, _ in first })
+        let protected = Set(reviewed.filter { candidate in
+            guard let asset = finalFound[candidate.localID] else { return true }
+            return Self.localExclusion(asset, receipt: candidate.receipt, settings: scan.settings, cutoff: scan.cutoff, kept: finalKept) != nil
+        }.map(\.localID))
+        guard protected.isEmpty else { return drop(protected) }
         let ids = reviewed.map(\.asset.id)
         let expected = Dictionary(uniqueKeysWithValues: reviewed.map { ($0.asset.id, $0.receipt.revision) })
         let removal = DeviceMutation.delete(ids, expected: expected, origin: .cleanup(scan: scan.id, account: account))
         // DS6 again, immediately before Photos is asked: nothing awaits between this and perform.
         guard !Task.isCancelled, current?.id == scan.id, blockedByAccount(scan) == nil else { return .blocked(.checkAgain) }
-        let outcome = await device.perform(removal).outcome
+        let permit = RemovalPermit(selection)
+        removalPermit = permit
+        let authorization = authorization, settings = settings, credentialIsCurrent = credentialIsCurrent
+        let account = account
+        let validation = PhotoChangeValidation(beforeChanges: { [weak self] in
+            guard let self else { return false }
+            return await self.confirmRemoval(scan: scan, reviewed: reviewed, permit: permit)
+        }, atCommit: {
+            let snapshot = authorization.snapshot
+            return permit.isValid && !authorization.hasEnded && authorization.account.digest == account &&
+                snapshot.epoch == scan.fence.epoch && snapshot.tokenDigest == scan.fence.tokenDigest &&
+                snapshot.writeGeneration == writeGeneration && !snapshot.readOnly && !snapshot.requiresPasswordChange &&
+                credentialIsCurrent() && settings.load() == scan.settings
+        })
+        let check = CleanupDeletionCheck(receipts: reviewed.map(\.receipt), settings: scan.settings, cutoff: scan.cutoff)
+        let device = device
+        let outcome = await withTaskCancellationHandler {
+            await device.perform(removal, check: check, validation: validation).outcome
+        } onCancel: { permit.revoke() }
 
         switch outcome {
         case .committed:
@@ -421,6 +470,19 @@ actor CleanupService {
         }
     }
 
+    /// The adapter calls this after its journal write, before Photos is asked. Receipt reads are
+    /// asynchronous, so every suspension is followed by the current scan/account/permit checks.
+    private func confirmRemoval(scan: Scan, reviewed: [CleanupCandidate], permit: RemovalPermit) async -> Bool {
+        guard !closed, permit.isValid, current?.id == scan.id, blockedByAccount(scan) == nil,
+              settings.load() == scan.settings else { return false }
+        guard await device.access().generation == scan.access else { permit.revoke(); return false }
+        let now = await receipts.receipts(account: account) ?? [:]
+        guard reviewed.allSatisfy({ now[$0.localID] == $0.receipt }) else { permit.revoke(); return false }
+        guard !closed, permit.isValid, let latest = current, latest.id == scan.id, blockedByAccount(scan) == nil,
+              settings.load() == scan.settings, permit.selection.isSubset(of: latest.candidates.keys) else { return false }
+        return true
+    }
+
     /// Drops candidates that changed, and says so.
     private func drop(_ ids: Set<String>) -> CleanupRemovalResult {
         removeCandidates(ids)
@@ -428,6 +490,7 @@ actor CleanupService {
     }
 
     private func removeCandidates(_ ids: Set<String>) {
+        if let removalPermit, !removalPermit.selection.isDisjoint(with: ids) { removalPermit.revoke() }
         if scanning != nil { dirty.formUnion(ids) }
         guard current != nil else { return }
         let gone = ids.filter { current?.candidates[$0] != nil }
@@ -486,8 +549,10 @@ actor CleanupService {
 
     func deviceChanged(_ change: DeviceLibraryChange) {
         let access = current?.access
-        if change.requiresFullReload || (access != nil && change.access.generation != access) {
-            invalidate(change.requiresFullReload ? .library : .access)
+        // Album-membership changes can name no assets and need not move their modification
+        // dates. A kept album may have acquired any candidate.
+        if change.requiresFullReload || change.albumsChanged || (access != nil && change.access.generation != access) {
+            invalidate(change.requiresFullReload || change.albumsChanged ? .library : .access)
             return
         }
         let named = Set(change.inserted.union(change.removed).union(change.changed).map(\.rawValue))
@@ -529,6 +594,7 @@ actor CleanupService {
     /// Ends the check under way and the following of changes, and waits for them.
     func shutdown() async {
         closed = true
+        removalPermit?.revoke()
         current = nil
         let running = scanning?.task
         scanning = nil

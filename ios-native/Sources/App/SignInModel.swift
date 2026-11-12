@@ -78,7 +78,7 @@ import Foundation
             catch { self.error = error.localizedDescription; return }
             do {
                 let login = try await oauth.signIn(api: api)
-                try await session.completeSSO(login, server: api.baseURL)
+                try await session.completeSSO(login, server: api.baseURL, purchaseFence: api.purchaseFence)
             }
             catch let failure as ASWebAuthenticationSessionError where failure.code == .canceledLogin { }
             catch { self.error = error.localizedDescription }

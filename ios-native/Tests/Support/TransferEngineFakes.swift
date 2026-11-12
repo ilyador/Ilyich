@@ -202,7 +202,7 @@ struct TransferEngineHarness {
         engine = Self.engine(store: store, clock: clock, authorization: authorization, executor: executor, scheduler: scheduler)
     }
 
-    static func engine(store: TransferStore, clock: TestClock, authorization: FakeTransferAuthorization,
+    static func engine(store: TransferStore, clock: TestClock, authorization: any TransferAuthorizing,
                        executor: FakeJobExecutor, scheduler: (any WindowScheduling)? = nil) -> TransferEngine<TestClock> {
         TransferEngine(store: store, executor: executor, authorization: authorization, clock: clock, scheduler: scheduler,
                        now: { base.addingTimeInterval(TimeInterval(clock.now.offset.components.seconds) + TimeInterval(clock.now.offset.components.attoseconds) / 1e18) },

@@ -24,6 +24,62 @@ final class BackgroundTransportTests: XCTestCase {
 
     // MARK: Submitting
 
+    func testPurchaseLossWhileListingTasksRefusesSubmissionAndPreservesBody() async throws {
+        let gate = StubServer.Gate()
+        let fake = FakeTransportSession(listGate: gate)
+        let transport = makeTransport(fake)
+        let access = lifetimeAccess()
+        transport.setPurchaseAccess(access)
+        let key = key()
+        try group.write("body", to: key.bodyPath)
+        let pending = Task { () -> TransportSubmitError? in
+            do { _ = try await transport.submit(Self.request, key: key); return nil }
+            catch { return error as? TransportSubmitError }
+        }
+        try await poll("Submit never reached its inventory await.") { gate.waiting == 1 }
+        access.update(.locked)
+        // A new grant must not revive the submit already waiting under the revoked grant.
+        access.update(lifetimeAccess().snapshot.state)
+        gate.open()
+
+        let error = await pending.value
+        XCTAssertEqual(error, .unavailable)
+        XCTAssertTrue(fake.uploads.isEmpty)
+        XCTAssertTrue(fake.resumed.isEmpty)
+        XCTAssertTrue(group.exists(key.bodyPath))
+        XCTAssertFalse(group.exists(key.outcomePath))
+    }
+
+    func testPurchaseLossInsideSessionResumeRefusesAdoption() async throws {
+        let gate = StubServer.Gate()
+        let key = key()
+        let fake = FakeTransportSession(tasks: [SessionTask(id: 7, description: key.descriptor.taskDescription, state: .suspended,
+            sent: 0, expected: 4)], resumeGate: gate)
+        let transport = makeTransport(fake)
+        let access = lifetimeAccess()
+        transport.setPurchaseAccess(access)
+        try group.write("body", to: key.bodyPath)
+        let pending = Task { () -> TransportSubmitError? in
+            do { _ = try await transport.submit(Self.request, key: key); return nil }
+            catch { return error as? TransportSubmitError }
+        }
+        try await poll("Submit never reached the session's resume await.") { gate.waiting == 1 }
+        access.update(.locked)
+        gate.open()
+
+        let error = await pending.value
+        XCTAssertEqual(error, .unavailable)
+        XCTAssertTrue(fake.resumed.isEmpty)
+        XCTAssertTrue(fake.uploads.isEmpty)
+        XCTAssertTrue(group.exists(key.bodyPath))
+        await assertSubmit(transport, key, throws: .unavailable)
+    }
+
+    private func lifetimeAccess() -> PurchaseAccess {
+        PurchaseAccess(state: .unlocked(PurchaseEntitlement(productID: AccessProductID.lifetime.rawValue, transactionID: 1,
+            originalTransactionID: 1, purchaseDate: Date(), expirationDate: nil, isLifetime: true)))
+    }
+
     func testSubmitDescribesANewTaskWithVersion2AndAdoptsItAfterwards() async throws {
         let fake = FakeTransportSession()
         let transport = makeTransport(fake)

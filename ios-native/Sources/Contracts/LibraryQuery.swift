@@ -88,6 +88,13 @@ struct LibraryQuery: Hashable, Sendable {
     var ranking: Ranking = .chronological(.takenAt, ascending: false)
     var stacks: Stacks = .primaryOnly
     var predicates = Predicates()
+
+    /// Shared timeline feeds follow incoming partners' server-side `inTimeline` setting.
+    /// Own-only collections and explicit album, person and place membership keep their scopes.
+    var includesTimelinePartners: Bool {
+        scope == .library && trash == .active && visibility == .timeline && predicates.favorite == nil
+            && predicates.albums.isEmpty && predicates.people.isEmpty && predicates.place == nil
+    }
 }
 
 // MARK: Presets
@@ -150,8 +157,9 @@ extension LibraryQuery {
 
 extension LibraryQuery {
     /// Names the feed for what the phone keeps per feed. For the library, favorites, archive,
-    /// trash, Lightroom, partner, album, person and place feeds it is byte-equal to the key these feeds
-    /// were cached under before Q5, which never said withPartners. A query on the account's own
+    /// trash, partner, album, person and place feeds it is byte-equal to the key these feeds
+    /// were cached under before Q5. Shared timeline feeds name their changed membership with
+    /// withPartners=true, so an old own-only count cannot stand in for them. A query on the account's own
     /// photos says userId=me rather than the user's ID, and a place is named by its membership
     /// revision rather than its photo count.
     var stableKey: String {
@@ -177,6 +185,7 @@ extension LibraryQuery {
         // Today's own-photo feeds ask for active photos explicitly; the others leave it to the server.
         if trash == .trashed { items.append(("isTrashed", "true")) } else if scope == .mine { items.append(("isTrashed", "false")) }
         if let developed = predicates.developed { items.append(("isDeveloped", String(developed))) }
+        if includesTimelinePartners { items.append(("withPartners", "true")) }
         // Filters timeline feeds could not express.
         if let kind = predicates.kind { items.append(("type", kind.rawValue)) }
         if let motion = predicates.motion { items.append(("isMotion", String(motion))) }

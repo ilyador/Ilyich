@@ -74,6 +74,29 @@ actor IndexWriter {
         guard let value = try metadata(Self.cachedServerFeaturesKey) else { return nil }
         return try APIJSON.decoder().decode(ServerFeatures.self, from: Data(value.utf8))
     }
+    func collectionCacheAccess(_ kind: CollectionKind) throws -> (refused: Bool, generation: String?) {
+        let key = "cache.collection.\(kind.rawValue)"
+        return (try metadata(key + ".refused") == "1", try metadata(key + ".refusalGeneration"))
+    }
+    /// A refusal survives a process restart and a sync completion. Only that endpoint succeeding
+    /// again may reopen its cache. Its generation fences a 200 that started before the refusal.
+    func refuseCollectionCache(_ kind: CollectionKind) throws {
+        let key = "cache.collection.\(kind.rawValue)"
+        try write {
+            try setMetadata(key + ".refused", "1")
+            try setMetadata(key + ".refusalGeneration", UUID().uuidString)
+        }
+    }
+    func permitCollectionCache(_ kind: CollectionKind, after generation: String?) throws -> Bool {
+        var permitted = false
+        try write {
+            let current = try collectionCacheAccess(kind)
+            guard current.generation == generation else { return }
+            if current.refused { try setMetadata("cache.collection.\(kind.rawValue).refused", "0") }
+            permitted = true
+        }
+        return permitted
+    }
     /// Keeps one feed's month places (REBUILD_ROADMAP.md F5): its rows are replaced, unless
     /// `ifCurrent` says no once the write holds the connection, so a count begun under an access
     /// epoch that moved meanwhile is never kept. The feeds kept are bounded to the twelve written
@@ -194,6 +217,8 @@ actor IndexWriter {
                 try database.execute("INSERT INTO acknowledgements(type,ack) VALUES(?,?) ON CONFLICT(type) DO UPDATE SET ack=excluded.ack", [.text(event.ackType), .text(event.ack)])
             }
             if change.serverReset { try setMetadata("accessInvalidated", "1") }
+            // A partner's visibility changes membership without changing an asset revision.
+            if change.partnersChanged { try database.execute("DELETE FROM month_places") }
             try purgeInaccessibleAssets(change: &change)
             maintainDerived()
         }

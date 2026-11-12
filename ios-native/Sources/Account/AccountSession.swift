@@ -21,24 +21,26 @@ import IlyichPlatform
     /// The open account's Locked Folder, which the app puts in the environment and which hears
     /// every scene change here first (REBUILD_ROADMAP.md N5).
     private(set) var lockedFolder: LockedFolderSession?
+    private(set) var savedAccount: SavedAccountSummary?
     @ObservationIgnored let manager: AccountManager
     @ObservationIgnored private let presence: AppPresence
     @ObservationIgnored private var following: Task<Void, Never>?
 
-    init(environment: AccountEnvironment, dependencies: AccountDependencies, presence: AppPresence) {
+    init(environment: AccountEnvironment, dependencies: AccountDependencies, presence: AppPresence, purchaseAccess: PurchaseAccess? = nil) {
         let relay = Relay()
         self.environment = environment
         self.presence = presence
-        manager = AccountManager(environment: environment, dependencies: dependencies, presence: presence) { state in
+        manager = AccountManager(environment: environment, dependencies: dependencies, presence: presence, purchaseAccess: purchaseAccess) { state in
             relay.session?.apply(state)
         }
         relay.session = self
     }
 
     /// The app's session, on the phone or in a UI test.
-    convenience init(environment: AccountEnvironment) {
+    convenience init(environment: AccountEnvironment, purchaseAccess: PurchaseAccess) {
         self.init(environment: environment, dependencies: .live(environment),
-                  presence: AppPresence(isForeground: UIApplication.shared.applicationState == .active))
+                  presence: AppPresence(isForeground: UIApplication.shared.applicationState == .active), purchaseAccess: purchaseAccess)
+        TransferHost.shared.setPurchaseAccess(purchaseAccess)
     }
 
     /// Hands the manager's changes to the session it was made for.
@@ -81,12 +83,16 @@ import IlyichPlatform
 
     func restore() async { await manager.restore() }
 
+    func purchaseAccessChanged() async { await manager.purchaseAccessChanged() }
+
+    func forgetSavedAccount() async { await manager.signOut(.user) }
+
     func signIn(server: String, email: String, password: String) async throws {
         try await manager.signIn(server: server, email: email, password: password)
     }
 
-    func completeSSO(_ login: LoginResponse, server: URL) async throws {
-        try await manager.completeSSO(login, server: server)
+    func completeSSO(_ login: LoginResponse, server: URL, purchaseFence: PurchaseRequestFence? = nil) async throws {
+        try await manager.completeSSO(login, server: server, purchaseFence: purchaseFence)
     }
 
     /// A client for signing in to `server`, made off the main actor. The caller shuts it down.
@@ -161,6 +167,7 @@ import IlyichPlatform
         if state.phase == .signingOut { pendingLink = nil }
         phase = state.phase
         error = state.message
+        savedAccount = state.savedAccount
     }
 
     /// Keeps the snapshot views read current, whatever moves it: an access change after a sync,

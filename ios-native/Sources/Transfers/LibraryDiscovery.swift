@@ -16,16 +16,22 @@ struct LibraryDiscovery: Sendable {
     let staging: any PhotoLibraryStaging
     /// The photos queued count in a backup notification batch, as the app's discovery does.
     var notifying = false
+    /// Process-local access, rechecked after Photos/database awaits. No entitlement is persisted.
+    var allowsDiscovery: @Sendable () -> Bool = { true }
 
     func run() async throws -> DiscoveryMerge {
+        guard allowsDiscovery() else { throw PurchaseAccessRequired() }
         guard let preferences = try await store.preferences(), !preferences.includedAlbums.isEmpty else { return DiscoveryMerge() }
+        guard allowsDiscovery() else { throw PurchaseAccessRequired() }
         let access = staging.authorization
         guard access == .authorized || access == .limited else { throw PHPhotosError(.accessUserDenied) }
         var found: [DeviceCandidate] = []
         for try await batch in staging.candidates(included: preferences.includedAlbums, excluded: preferences.excludedAlbums) {
+            guard allowsDiscovery() else { throw PurchaseAccessRequired() }
             found += batch
         }
         try Task.checkCancellation()
+        guard allowsDiscovery() else { throw PurchaseAccessRequired() }
         var gone: [String] = []
         if access == .authorized {
             let unseen = Set(try await store.libraryJobKeys()).subtracting(found.map(\.id))
@@ -35,6 +41,7 @@ struct LibraryDiscovery: Sendable {
             }
         }
         try Task.checkCancellation()
+        guard allowsDiscovery() else { throw PurchaseAccessRequired() }
         return try await store.mergeDiscovery(found, gone: gone, notifying: notifying)
     }
 }

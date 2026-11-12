@@ -38,6 +38,8 @@ struct AccountEnvironment: Sendable {
     /// URL protocols put in front of the media sessions (thumbnails, previews, originals): nil on
     /// the phone; a UI test can take the media offline with them.
     var mediaProtocolClasses: [AnyClass]?
+    /// URL protocols for a UI test's API session; nil for the live app.
+    var apiProtocolClasses: [AnyClass]?
 
     /// The app on the phone.
     static let live = AccountEnvironment()
@@ -45,6 +47,10 @@ struct AccountEnvironment: Sendable {
     /// This process's environment.
     static let current: AccountEnvironment = {
         #if DEBUG
+        // The owner-attended cleanup test uses real Photos, but must never restore the saved
+        // account or start its backup engine while creating disposable test images.
+        if ProcessInfo.processInfo.environment["ILYICH_CLEANUP_DEVICE_ACCEPTANCE"] == "1",
+           let fixture = uiTest(arguments: ["--ui-testing"]) { return fixture }
         let arguments = ProcessInfo.processInfo.arguments
         if let test = uiTest(arguments: arguments) { return test }
         // A live UI test against a real server (StockServerLiveTests) taps the shelves' rows.
@@ -90,6 +96,7 @@ struct AccountEnvironment: Sendable {
         // The fixture server is shared by every test run, so a launch that wants its media
         // offline fails the requests in the app instead; the library itself still loads.
         if arguments.contains("--ui-testing-offline-media") { environment.mediaProtocolClasses = [OfflineMediaProtocol.self] }
+        if arguments.contains("--ui-testing-offline-collections") { environment.apiProtocolClasses = [OfflineCollectionsProtocol.self] }
         let server = fixtureServer(in: arguments)
         environment.fixtureAccount = AccountID(server: server, userID: fixtureUserID)
         if arguments.contains("--ui-testing-library") {
@@ -117,6 +124,18 @@ struct AccountEnvironment: Sendable {
 /// grid shows from what it has stored (REBUILD_ROADMAP.md T3).
 final class OfflineMediaProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)) }
+    override func stopLoading() {}
+}
+
+/// Keeps the fixture's timeline online while People and Albums have no connection, so UI tests
+/// exercise the same no-saved-copy state as a first launch before the offline index is ready.
+final class OfflineCollectionsProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard request.httpMethod == "GET", let path = request.url?.path else { return false }
+        return path.hasSuffix("/albums") || path.hasSuffix("/people")
+    }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)) }
     override func stopLoading() {}
