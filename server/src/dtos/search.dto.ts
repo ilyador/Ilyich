@@ -475,7 +475,7 @@ const SearchResponseSchema = z
       })
       .optional()
       .describe(
-        'Visual verification status; partial preserves confirmed matches from an incomplete batch; unavailable means regular search results were returned. Retry the search to revisit unchecked candidates.',
+        'Checked searches return only confirmed matches. Complete may be empty with a continuation; partial preserves confirmed matches from an incomplete check; unavailable returns no candidates. Retry an incomplete check from the returned continuation without skipping unchecked candidates. Set verify to false for regular search results.',
       ),
   })
   .meta({ id: 'SearchResponseDto' });
