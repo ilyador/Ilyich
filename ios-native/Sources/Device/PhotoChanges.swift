@@ -20,6 +20,16 @@ enum PhotoChangeVerdict: Hashable, Sendable {
     case notPermitted
 }
 
+/// A caller's permission to make a journaled change. The asynchronous check runs after the
+/// journal write; the synchronous check also runs on Photos' queue, immediately before requests.
+/// Nothing after a request has been submitted tries to withdraw iOS's confirmation prompt.
+struct PhotoChangeValidation: Sendable {
+    let beforeChanges: @Sendable () async -> Bool
+    let atCommit: @Sendable () -> Bool
+
+    static let unrestricted = PhotoChangeValidation(beforeChanges: { true }, atCommit: { true })
+}
+
 /// The checks a change passes before Photos is asked, and again inside its change block. All or
 /// nothing: one asset failing stops the whole change.
 enum PhotoChangeChecks {
@@ -97,14 +107,18 @@ final class ChangeReport: Sendable {
 /// nothing unless every check holds.
 enum PhotoChanges {
     nonisolated static func block(for mutation: DeviceMutation, library: any PhotoLibraryPerforming, assets: any AssetFetching,
-                                  report: ChangeReport) -> @Sendable () -> Void {
-        switch mutation {
+                                  report: ChangeReport, allowed: @escaping @Sendable () -> Bool = { true }) -> @Sendable () -> Void {
+        let change: @Sendable () -> Void = switch mutation {
         case .delete(let ids, let expected, _):
             delete(ids, expected: expected, library: library, assets: assets, report: report)
         case .setFavorite(let ids, let value, let expected):
             favorite(ids, value, expected: expected, library: library, assets: assets, report: report)
         case .create(let still, let video, let pairedVideo, _):
             create(still: still, video: video, pairedVideo: pairedVideo, library: library, report: report)
+        }
+        return {
+            guard allowed() else { report.found(.notPermitted); return }
+            change()
         }
     }
 

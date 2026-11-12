@@ -18,6 +18,9 @@ import UIKit
 /// (TransportRegistry), the completion queue (BackgroundEventAcks) and the lifecycle source, and
 /// from then on hands each to the account's TransferRuntime: a session's completion is registered
 /// before its session is touched and answered only after the runtime committed what it delivered.
+/// Purchase access gates new scheduling, not delivery of tasks already handed to iOS while
+/// access was valid. A locked wake connects the sessions to retain their outcomes on disk and
+/// answer their drains; account recovery and all follow-up network work wait for verified access.
 @MainActor final class TransferHost {
     static let shared = TransferHost(scheduler: SystemBackgroundTaskScheduler(), makeRegistry: { TransportRegistry.live() })
 
@@ -38,6 +41,10 @@ import UIKit
     /// Background session events that came before the engine started.
     private var held: [(identifier: String, completion: OnceCompletion)] = []
     private var restore: (@MainActor () async -> Void)?
+    private var purchaseAccess: PurchaseAccess?
+    private var purchaseWatch: Task<Void, Never>?
+    /// A failed journal must still wait for iOS's completion deadline.
+    private var unrecordedSessions: Set<TransferSessionID> = []
     private var usesDevicePhotos = false
     /// Why the signed-in account's backup can't start, for Diagnostics.
     private var unavailableReason: String?
@@ -55,6 +62,26 @@ import UIKit
     /// Opens the saved account when a background launch needs it. The app sets it as it starts.
     func setRestore(_ restore: @escaping @MainActor () async -> Void) { self.restore = restore }
 
+    func setPurchaseAccess(_ access: PurchaseAccess) {
+        purchaseAccess = access
+        tasks.setPurchaseAccess(access)
+        registry?.setPurchaseAccess(access)
+        purchaseWatch?.cancel()
+        purchaseWatch = Task { [weak self] in
+            for await snapshot in access.changes() {
+                guard !Task.isCancelled, let self else { return }
+                if !snapshot.hasAccess, !access.hasAccess {
+                    self.tasks.suspend()
+                    for lease in self.windows { lease.finish(success: true) }
+                    self.windows = []
+                    self.backend.deactivate()
+                }
+            }
+        }
+    }
+
+    private var mayStartWork: Bool { purchaseAccess?.hasAccess ?? true }
+
     /// In didFinishLaunching, synchronously: registers both background task identifiers, holding
     /// any task until the engine starts.
     func launch(usesDevicePhotos: Bool) {
@@ -69,7 +96,11 @@ import UIKit
 
     /// iOS relaunched the app, or woke it, for a background session's events.
     func handleEvents(identifier: String, completion: @escaping @MainActor () -> Void) {
-        guard registry == nil else { return deliver(identifier: identifier, completion: completion) }
+        if registry != nil {
+            deliver(identifier: identifier, completion: completion)
+            if current == nil { restoreForBackgroundWork() }
+            return
+        }
         guard TransferSessionID(identifier: identifier) != nil else { return completion() }
         let once = OnceCompletion(completion)
         held.append((identifier, once))
@@ -81,11 +112,14 @@ import UIKit
             self.held.removeAll { $0.completion === once }
             once.call()
         }
+        // Connecting only drains the daemon's existing tasks into durable outcome files. It
+        // never grants purchase access, opens an account or schedules another upload.
+        startEngine()
         restoreForBackgroundWork()
     }
 
     private func restoreForBackgroundWork() {
-        guard registry == nil, let restore else { return }
+        guard let restore else { return }
         Task { await restore() }
     }
 
@@ -105,19 +139,19 @@ import UIKit
         startTransport()
         for event in held { deliver(identifier: event.identifier) { event.completion.call() } }
         held = []
+        registry?.connect()
     }
 
     /// Creates the sessions, the completion queue and the lifecycle source, and routes their
     /// events to the account's runtime.
     private func startTransport() {
         let registry = makeRegistry()
+        if let purchaseAccess { registry.setPurchaseAccess(purchaseAccess) }
         self.registry = registry
         acks = BackgroundEventAcks(clock: ContinuousClock()) { registry.drains(identifier: $0) }
         consumers.append(Task { [weak self] in
             for await event in registry.events { self?.route(event) }
         })
-        // iOS delivers what it queued for each session once the session exists.
-        registry.connect()
         guard usesDevicePhotos else { return }
         let source = LifecycleEventSource(initial: SystemLifecycleInputs.current(), scheduler: tasks)
         self.source = source
@@ -138,11 +172,26 @@ import UIKit
     }
 
     private func route(_ event: TransportEvent) {
-        if case .drained(let session, let drain) = event, current == nil { drains.append((session, drain)) }
+        if case .finished(let session, let completion) = event,
+           case .unrecorded = completion.journal { unrecordedSessions.insert(session) }
+        if case .drained(let session, let drain) = event, current == nil {
+            drains.removeAll { $0.0 == session }
+            drains.append((session, drain))
+            // No account needs to run to retain a completed upload. The serial delegate wrote
+            // each outcome before this drain; database reconciliation waits for paid access.
+            if !unrecordedSessions.contains(session) { acks?.committed(identifier: session.identifier, through: drain) }
+        }
         current?.receive(event)
     }
 
     private func route(_ event: LifecycleEvent) {
+        guard mayStartWork else {
+            if case .window(let lease) = event {
+                lease.finish(success: true)
+                restoreForBackgroundWork()
+            }
+            return
+        }
         if let current { return current.receive(event) }
         guard case .window(let lease) = event else { return }
         // Held for the runtime about to start; one that never comes leaves the task to expire.
@@ -160,11 +209,12 @@ import UIKit
     /// the engine (AccountRuntime.prepareTransfers), then the account's TransferRuntime starts. The
     /// screens' commands wait meanwhile and reach the engine once it runs.
     func activate(_ runtime: AccountRuntime) async {
+        guard mayStartWork, runtime.authorization.permitsServiceUse else { return }
         unavailableReason = nil
         backend.prepare()
         let decision = await runtime.prepareTransfers()
         // The account ended while its database was readied: nothing starts for it.
-        guard !runtime.authorization.hasEnded else {
+        guard mayStartWork, runtime.authorization.permitsServiceUse else {
             runtime.cutover.decide(.unavailable)
             backend.deactivate()
             return
@@ -179,7 +229,7 @@ import UIKit
             attach(made)
             do {
                 try await made.start()
-                if current === made { backend.use(made.backend) }
+                if current === made, mayStartWork, runtime.authorization.permitsServiceUse { backend.use(made.backend) }
             } catch {
                 Self.logger.error("The transfer engine didn't start: \(String(describing: error), privacy: .public)")
                 if current === made { unavailable(runtime, reason: "\(Self.engineCouldNotStart) \(error.localizedDescription)") }
@@ -237,6 +287,16 @@ import UIKit
         backend.deactivate()
     }
 
+    /// Explicit locked-account sign-out cancels tasks without opening its runtime or database.
+    /// Purchase suspension uses the same transport cancellation but keeps backup preferences.
+    func cancelTransfers(of account: AccountID) async {
+        startEngine()
+        guard let registry else { return }
+        for session in TransferSessionID.allCases {
+            _ = await registry.transport(session).cancel(scope: account.digest)
+        }
+    }
+
     /// Photos access changed in the backup screen: automatic backup looks again.
     func accessChanged() { source?.preferencesChanged() }
 
@@ -261,8 +321,11 @@ import UIKit
     private var held: [any BackgroundTaskHandle] = []
     private var registered = false
     private var waiting: (@MainActor () -> Void)?
+    private var purchaseAccess: PurchaseAccess?
 
     init(system: any BackgroundTaskScheduling) { self.system = system }
+
+    func setPurchaseAccess(_ access: PurchaseAccess) { purchaseAccess = access }
 
     /// Registers both identifiers with iOS, as didFinishLaunching must. `waiting` runs when a
     /// task comes before anything handles it.
@@ -301,9 +364,22 @@ import UIKit
         return registered
     }
 
-    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void) { system.submit(request, answered: answered) }
+    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void) {
+        guard purchaseAccess?.hasAccess != false else { return answered(PurchaseAccessRequired().localizedDescription) }
+        system.submit(request, answered: answered)
+    }
     func cancel(identifier: String) { system.cancel(identifier: identifier) }
     func pending() async -> [WindowRequest] { await system.pending() }
+
+    func suspend() {
+        for kind in BackgroundWindowKind.allCases { system.cancel(identifier: kind.identifier) }
+        let waiting = held
+        held = []
+        for task in waiting {
+            task.expirationHandler = nil
+            task.setTaskCompleted(success: true)
+        }
+    }
 }
 
 /// A completion handler that runs once, whichever path answers it first.

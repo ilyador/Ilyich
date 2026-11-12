@@ -403,11 +403,8 @@ import XCTest
         }
     }
 
-    /// QUERY-1. The library leaves out the partners whose photos are shown in the timeline:
-    /// LibraryRepository.includesPartners is off, so the "Show in your timeline" switch has no
-    /// effect on the native library, offline or from the server. Q5 built the switch through the
-    /// index and the server timeline, but adopting it changes what the library shows, which waits
-    /// for the owner's answer (and T5's coverage scope); the wrapper goes when it is turned on.
+    /// QUERY-1 regression: incoming partners shown in the timeline are included online and
+    /// offline. Coverage still keeps only the account's own photos.
     func testLibraryIncludesPartnersShownInTimeline() async throws {
         let server = makeStubServer()
         let api = try stubClient(server, token: "ledger-session", userID: "alice")
@@ -435,10 +432,8 @@ import XCTest
         await online.reload()
         let query = try XCTUnwrap(remote.requests("GET", "timeline/buckets").first?.query)
 
-        XCTExpectFailure("QUERY-1: partners shown in the timeline are missing from the library until the owner turns LibraryRepository.includesPartners on.", strict: true) {
-            XCTAssertTrue(shown.contains("bob-photo"), "A partner shown in the timeline is part of the offline library.")
-            XCTAssertTrue(query.contains(URLQueryItem(name: "withPartners", value: "true")), "The server is asked for those partners too.")
-        }
+        XCTAssertTrue(shown.contains("bob-photo"), "A partner shown in the timeline is part of the offline library.")
+        XCTAssertTrue(query.contains(URLQueryItem(name: "withPartners", value: "true")), "The server is asked for those partners too.")
         XCTAssertFalse(shown.contains("carol-photo"), "A partner kept out of the timeline stays out.")
     }
 

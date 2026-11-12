@@ -1,13 +1,10 @@
 import Foundation
 
-/// The one switch that lets Free up space remove photos from the phone. It stays closed until the
-/// owner has run P4's device acceptance gate with 30 disposable photos (REBUILD_ROADMAP.md P4):
-/// a photo removed here may have its only other copy on the server. While it is closed, checking
-/// still lists the real candidates and why every other backed-up photo stays, Remove stays
-/// unavailable, and CleanupService refuses to ask Photos for anything. Opening it is a one-line
-/// change here, plus deleting testFreeUpSpaceRemoveStaysClosedUntilTheDeviceGate.
+/// Release switch for Free up space. The owner-attended 30-photo PhotoKit acceptance passed
+/// on iPhone 13 Pro Max on 2026-11-11; see REVIEW_FIXES_2026-11-11.md for evidence and scope.
+/// Every removal still needs fresh backup verification, current permissions and Photos consent.
 enum CleanupRemovalGate {
-    static let isOpen = false
+    static let isOpen = true
 }
 
 struct CleanupPolicy: Equatable, Sendable {

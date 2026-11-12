@@ -53,7 +53,7 @@ protocol TransferAuthorizing: Sendable {
 extension AuthorizationState: TransferAuthorizing {
     func current() -> AuthorizationSnapshot? {
         let snapshot = snapshot
-        return hasEnded ? nil : snapshot
+        return permitsServiceUse ? snapshot : nil
     }
 }
 
@@ -674,9 +674,12 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                 _ = try? await store.release(job: job.lease.job, token: job.lease.token)
             }
         case .failure(let error):
-            // A write fenced by a read-only toggle runs again under the new generation; it is
-            // not the photo's failure.
-            if error is LeaseLost || error is WriteFenced || Task.isCancelled {
+            // Authorization can expire synchronously inside the API/transport before the
+            // account's asynchronous teardown runs. That refusal is never the file's failure,
+            // even when earlier genuine failures already exhausted its unknown-error retries.
+            // Successful OS outcomes above are still committed and durably acknowledged.
+            if error is LeaseLost || error is WriteFenced || error is PurchaseAccessRequired ||
+                authorization.current() == nil || Task.isCancelled {
                 _ = try? await store.release(job: job.lease.job, token: job.lease.token)
             } else {
                 await fail(job, error)

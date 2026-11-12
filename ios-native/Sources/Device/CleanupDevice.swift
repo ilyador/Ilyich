@@ -19,9 +19,16 @@ protocol CleanupDevice: Sendable {
     /// The photos and videos in any of the albums, read now.
     func members(of albumIDs: Set<String>) async throws -> Set<String>
     /// Applies a change through the adapter, which journals it and checks it again inside its block.
-    func perform(_ mutation: DeviceMutation) async -> DeviceMutationResult
+    func perform(_ mutation: DeviceMutation, check: CleanupDeletionCheck, validation: PhotoChangeValidation) async -> DeviceMutationResult
     /// The library's changes from now on.
     func changes() -> AsyncStream<DeviceLibraryChange>
+}
+
+/// Immutable local protection rules for just the selection, checked again inside Photos' block.
+struct CleanupDeletionCheck: Sendable {
+    let receipts: [CleanupReceipt]
+    let settings: CleanupSettings
+    let cutoff: Date
 }
 
 /// CleanupDevice over the app's one Photos adapter.
@@ -49,7 +56,22 @@ struct PhotoKitCleanupDevice: CleanupDevice {
         }.value
     }
 
-    func perform(_ mutation: DeviceMutation) async -> DeviceMutationResult { await adapter.perform(mutation) }
+    func perform(_ mutation: DeviceMutation, check: CleanupDeletionCheck, validation: PhotoChangeValidation) async -> DeviceMutationResult {
+        let reader = reader
+        let guarded = PhotoChangeValidation(beforeChanges: validation.beforeChanges, atCommit: {
+            guard validation.atCommit(), let albumIDs = check.settings.keptAlbumIDs else { return false }
+            let kept = reader.members(of: albumIDs)
+            let assets = Dictionary(reader.cleanupAssets(check.receipts.map { DeviceAssetID(rawValue: $0.localID) })
+                .map { ($0.id.rawValue, $0) }, uniquingKeysWith: { first, _ in first })
+            guard check.receipts.allSatisfy({ receipt in
+                guard let asset = assets[receipt.localID] else { return false }
+                return CleanupService.localExclusion(asset, receipt: receipt, settings: check.settings, cutoff: check.cutoff, kept: kept) == nil
+            }) else { return false }
+            // Account/settings/cancellation may have changed while the synchronous Photos reads ran.
+            return validation.atCommit()
+        })
+        return await adapter.perform(mutation, validation: guarded)
+    }
 
     func changes() -> AsyncStream<DeviceLibraryChange> { adapter.changes() }
 }

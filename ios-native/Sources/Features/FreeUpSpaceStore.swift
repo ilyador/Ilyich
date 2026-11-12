@@ -38,7 +38,7 @@ extension EnvironmentValues {
     private(set) var message: String?
     var failure: String?
 
-    /// Removal stays unavailable until the owner's device test (CleanupRemovalGate).
+    /// Release availability; a selection still needs a current check and write access.
     var removeAvailable: Bool { service.removalAllowed }
 
     @ObservationIgnored let service: CleanupService

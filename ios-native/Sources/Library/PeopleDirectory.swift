@@ -9,6 +9,8 @@ protocol PeopleSource: Sendable {
     /// Every person the offline library holds, hidden ones included, when it may answer for
     /// `error`: a definite transport failure, and a complete first sync. Nil otherwise.
     func offlinePeople(after error: any Error) async throws -> [Person]?
+    /// The complete saved list, before a screen waits for a network request. Nil is not [].
+    func cachedPeople() async throws -> [Person]?
 }
 
 extension APIClient: PeopleSource {}
@@ -23,7 +25,7 @@ final class PeopleDirectory: Sendable {
     private let source: any PeopleSource
     private let pageSize: Int
     let pageCap: Int
-    private let flight = Mutex<Task<[Person], any Error>?>(nil)
+    private let flight = Mutex<Task<CollectionListing<Person>, any Error>?>(nil)
 
     init(source: any PeopleSource, pageSize: Int = 100, pageCap: Int = 50) {
         self.source = source; self.pageSize = max(1, pageSize); self.pageCap = max(1, pageCap)
@@ -31,7 +33,15 @@ final class PeopleDirectory: Sendable {
 
     /// Every visible person, in the server's order.
     func allVisible() async throws -> [Person] {
-        let task = flight.withLock { slot -> Task<[Person], any Error> in
+        try await listing().items
+    }
+
+    func cachedVisible() async throws -> [Person]? {
+        try await source.cachedPeople()?.filter { $0.isHidden != true }
+    }
+
+    func listing() async throws -> CollectionListing<Person> {
+        let task = flight.withLock { slot -> Task<CollectionListing<Person>, any Error> in
             if let slot { return slot }
             let task = Task { try await self.run() }
             slot = task
@@ -41,7 +51,7 @@ final class PeopleDirectory: Sendable {
         return try await task.value
     }
 
-    private func run() async throws -> [Person] {
+    private func run() async throws -> CollectionListing<Person> {
         var all: [Person] = [], known = Set<String>(), page = 1
         while true {
             try Task.checkCancellation()
@@ -51,7 +61,7 @@ final class PeopleDirectory: Sendable {
                 // Only the first page may turn to the offline library, for the whole run; a later
                 // page's failure fails the run rather than finishing it from another source.
                 guard page == 1, let offline = try await source.offlinePeople(after: error) else { throw error }
-                return offline.filter { $0.isHidden != true }
+                return CollectionListing(items: offline.filter { $0.isHidden != true }, isOffline: true)
             }
             try Task.checkCancellation()
             let fresh = response.people.filter { known.insert($0.id).inserted }
@@ -63,6 +73,6 @@ final class PeopleDirectory: Sendable {
             guard page < pageCap else { break }
             page += 1
         }
-        return all
+        return CollectionListing(items: all)
     }
 }

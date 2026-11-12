@@ -5,7 +5,7 @@ private let logger = Logger(subsystem: "app.ilyich.native", category: "Transfers
 
 /// The completion handlers iOS passes to application(_:handleEventsForBackgroundURLSession:
 /// completionHandler:). iOS suspends the app once a handler runs, so each runs only after the
-/// engine has durably committed what its session delivered, or after a 20-second deadline,
+/// app has durably retained what its session delivered, or after a 20-second deadline,
 /// whichever comes first; iOS allows about 30. TransferHost registers each handler first and only
 /// then touches the session (B9).
 ///
@@ -82,8 +82,9 @@ private let logger = Logger(subsystem: "app.ilyich.native", category: "Transfers
         sessions[identifier] = session
     }
 
-    /// The engine has durably committed every outcome the session delivered up to the drain its
-    /// drained event numbered. Answers the handlers waiting for that drain or an earlier one.
+    /// Every delivered outcome through this drain is durable: committed to the account's database,
+    /// or retained in its outcome journal while purchase access keeps the account closed.
+    /// Answers the handlers waiting for that drain or an earlier one.
     func committed(identifier: String, through drain: Int) {
         var session = sessions[identifier] ?? Session()
         if drain > session.committed {

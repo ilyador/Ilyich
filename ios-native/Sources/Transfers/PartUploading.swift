@@ -45,14 +45,16 @@ enum UploadOutcomeFailure: Error, Equatable, Sendable, LocalizedError {
 final class TransportPartUploader: PartUploading {
     private let transport: any TransferTransport
     private let outcomes: TransportOutcomes
+    private let allowsSubmission: @Sendable () -> Bool
 
-    init(transport: any TransferTransport, outcomes: TransportOutcomes) {
+    init(transport: any TransferTransport, outcomes: TransportOutcomes, allowsSubmission: @escaping @Sendable () -> Bool = { true }) {
         self.transport = transport
         self.outcomes = outcomes
+        self.allowsSubmission = allowsSubmission
     }
 
     func submit(_ request: URLRequest, key: AttemptKey) async throws -> Int {
-        try await transport.submit(request, key: key)
+        try await transport.submit(request, key: key, allowing: allowsSubmission)
     }
 
     func recordedOutcome(for key: AttemptKey) throws -> OutcomeRecord? {

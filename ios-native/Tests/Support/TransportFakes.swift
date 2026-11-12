@@ -26,10 +26,12 @@ final class FakeTransportSession: TransportSession {
     private let state: Mutex<State>
     /// When set, listing the tasks waits for it, so a test can hold a submit mid-way.
     let listGate: StubServer.Gate?
+    let resumeGate: StubServer.Gate?
 
-    init(tasks: [SessionTask] = [], listGate: StubServer.Gate? = nil) {
+    init(tasks: [SessionTask] = [], listGate: StubServer.Gate? = nil, resumeGate: StubServer.Gate? = nil) {
         state = Mutex(State(tasks: tasks))
         self.listGate = listGate
+        self.resumeGate = resumeGate
     }
 
     /// Keeps the handler the transport passes to its session factory.
@@ -59,6 +61,13 @@ final class FakeTransportSession: TransportSession {
     }
 
     func resumeTask(_ id: Int) async { state.withLock { $0.resumed.append(id) } }
+
+    func resumeTask(_ id: Int, allowing: @escaping @Sendable () -> Bool) async -> Bool {
+        if let resumeGate { await resumeGate.wait() }
+        guard allowing() else { return false }
+        await resumeTask(id)
+        return true
+    }
 
     func cancelTask(_ id: Int) async {
         state.withLock { state in

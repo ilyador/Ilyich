@@ -92,7 +92,6 @@ private struct FreeUpSpaceContent: View {
             }
         }.navigationTitle("Free up space").disabled(store.removing)
         .safeAreaInset(edge: .bottom) {
-            // Unavailable until the owner's device test (CleanupRemovalGate).
             if !store.selection.isEmpty {
                 Button("Remove \(store.selection.count) from Photos", role: .destructive) { confirming = true }.buttonStyle(.glassProminent).padding()
                     .disabled(store.checking || store.removing || !store.removeAvailable).requiresWriteAccess()

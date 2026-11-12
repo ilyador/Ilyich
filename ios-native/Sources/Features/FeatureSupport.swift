@@ -16,6 +16,25 @@ struct FeatureEmpty: View {
     }
 }
 
+/// Connectivity is shown beside saved content, so a failed refresh never masquerades as an
+/// empty collection or requires dismissing an alert before the saved library can be browsed.
+struct CollectionConnectionNotice: View {
+    let isOffline: Bool
+    let hasSnapshot: Bool
+    let failure: String?
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label(isOffline ? (hasSnapshot ? "Offline · Showing saved items" : "Server unavailable") : (failure ?? "Couldn’t refresh"),
+                  systemImage: isOffline ? "wifi.slash" : "exclamationmark.circle")
+                .font(.footnote).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button("Retry", action: retry).font(.footnote)
+        }.padding(.horizontal, 20).padding(.vertical, 12).accessibilityIdentifier("collection.connection")
+    }
+}
+
 /// The pixels a tile of `size` points decodes its thumbnail at: its long side, so a photo of any
 /// shape aspect-fills it without being stretched (a shelf row is wide and low, and the photo's
 /// shape is unknown here), and no less than the grid's smallest cell. Square tiles, which most
@@ -161,7 +180,8 @@ struct PersonThumbnail: View {
                 let result = try await pipeline.personImage(person: person, pixelSize: pixelSize)
                 try Task.checkCancellation()
                 image = result.uiImage
-            } catch is CancellationError { } catch { image = nil }
+            } catch is CancellationError { }
+            catch { if CollectionFailure.clearsSavedContent(error) { image = nil } }
         }
         .accessibilityHidden(true)
     }

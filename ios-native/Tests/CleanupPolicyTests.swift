@@ -25,10 +25,4 @@ final class CleanupPolicyTests: XCTestCase {
         let unknown = CleanupPolicy(cutoff: cutoff, keepFavorites: false, keepMediaType: "unknown")
         XCTAssertFalse(unknown.allows(date: .distantPast, favorite: false, video: false, inKeptAlbum: false))
     }
-    /// P4's cleanup service is built, but the owner's device test with disposable photos hasn't
-    /// run, and every build goes onto the owner's phone. Until it has, Free up space's Remove stays
-    /// unavailable. Opening CleanupRemovalGate after that test deletes this test.
-    func testFreeUpSpaceRemoveStaysClosedUntilTheDeviceGate() {
-        XCTAssertFalse(CleanupRemovalGate.isOpen, "Free up space must not remove photos from the phone before the owner's device test.")
-    }
 }

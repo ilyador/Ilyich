@@ -10,12 +10,8 @@ final class LibraryRepository: LibraryFeedSource {
     let index: LibraryIndex?
     /// The account's sync, which runs refreshes as its own passes. Nil where nothing syncs.
     let sync: SyncEngine?
-    /// Whether the library includes the partners shown in the timeline (QUERY-1). Off: adopting it
-    /// changes what the library shows and its cache key, which waits for the owner's answer.
-    let includesPartners: Bool
-
-    init(client: APIClient, index: LibraryIndex?, sync: SyncEngine?, includesPartners: Bool = false) {
-        self.client = client; self.index = index; self.sync = sync; self.includesPartners = includesPartners
+    init(client: APIClient, index: LibraryIndex?, sync: SyncEngine?) {
+        self.client = client; self.index = index; self.sync = sync
     }
 
     var cacheScope: String { client.cacheScope }
@@ -34,7 +30,7 @@ final class LibraryRepository: LibraryFeedSource {
 
     func summary(_ query: LibraryQuery, plan: QueryPlan) async throws -> [TimeBucket] {
         switch plan.backend {
-        case .index: return try await requireIndex(query).timeBuckets(query, includesPartners: includesPartners)
+        case .index: return try await requireIndex(query).timeBuckets(query)
         case .serverTimeline: return try await client.timeBuckets(try timelineRequest(query))
         case .serverSearch: throw Self.noMonths(query)
         }
@@ -44,7 +40,7 @@ final class LibraryRepository: LibraryFeedSource {
         switch plan.backend {
         case .index:
             FeedMonthProbe.note(.index)
-            return try await requireIndex(query).timeBucket(bucket, of: query, includesPartners: includesPartners)
+            return try await requireIndex(query).timeBucket(bucket, of: query)
         case .serverTimeline:
             FeedMonthProbe.note(.serverTimeline)
             return try await client.timeBucket(bucket, of: try timelineRequest(query))
@@ -54,7 +50,7 @@ final class LibraryRepository: LibraryFeedSource {
 
     func monthPlaces(_ query: LibraryQuery, plan: QueryPlan) async throws -> [MonthPlaceCount] {
         guard case .index = plan.backend else { return [] }
-        return try await requireIndex(query).monthPlaces(query, includesPartners: includesPartners)
+        return try await requireIndex(query).monthPlaces(query)
     }
 
     private func requireIndex(_ query: LibraryQuery) throws -> LibraryIndex {
@@ -62,7 +58,7 @@ final class LibraryRepository: LibraryFeedSource {
         return index
     }
     private func timelineRequest(_ query: LibraryQuery) throws(Unsupported) -> ServerTimelineRequest {
-        try ServerTimelineRequest(query, userID: client.userID, includesPartners: includesPartners)
+        try ServerTimelineRequest(query, userID: client.userID)
     }
     private static func noMonths(_ query: LibraryQuery) -> Unsupported {
         if query.predicates.place != nil { return .placeNeedsIndex }

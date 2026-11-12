@@ -68,6 +68,25 @@ import XCTest
         service.cancel()
     }
 
+    func testPartnerMembershipInvalidationDropsAnEarlierCount() async throws {
+        let kept = MemoryPlacesStore()
+        let counter = PlacesCounter(holding: true)
+        await counter.queue([Self.kyoto, Self.oslo])
+        let service = MonthPlacesService(source: counter, store: kept, delay: .zero)
+        service.show(.library, plan: try plan)
+        try await until("The earlier count did not start.") { await counter.calls.count == 1 }
+        service.invalidateMembership()
+        XCTAssertNil(service.places(of: .library))
+        service.show(.library, plan: try plan)
+        try await until("The new membership was not counted.") { await counter.calls.count == 2 }
+        await counter.release()
+        try await until("The new count was not saved.") { await kept.rows[LibraryQuery.library.stableKey] == Self.oslo }
+        XCTAssertEqual(service.places(of: .library)?.months["2024-10-01"]?.first?.name, "Oslo")
+        let writes = await kept.writes
+        XCTAssertEqual(writes, [LibraryQuery.library.stableKey], "The cancelled count never writes the old membership.")
+        service.cancel()
+    }
+
     /// A feed planned again while its places are being counted (the offline library became
     /// readable, say) is counted under the new plan; the count the old plan began is dropped when
     /// it lands, however late, so it never stands in for the new one.

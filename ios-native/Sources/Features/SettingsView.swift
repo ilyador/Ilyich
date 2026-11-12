@@ -68,6 +68,7 @@ struct SettingsView: View {
     var pipeline: MediaPipeline? = nil
     var session: AccountSession? = nil
     let onSignOut: () -> Void
+    @Environment(\.purchaseStore) private var purchases
     @State private var user: User?
     @State private var failure: FeatureFailure?
     @State private var confirmSignOut = false
@@ -78,6 +79,15 @@ struct SettingsView: View {
                     Label { VStack(alignment: .leading) { Text(user?.name ?? "Account"); if let email = user?.email { Text(email).font(.caption).foregroundStyle(.secondary) } } } icon: { Image(systemName: "person.crop.circle") }
                 }
                 NavigationLink { SettingsDestinationView(api: api, destination: .backup) } label: { Label("Backup", systemImage: "icloud.and.arrow.up") }
+            }
+            if let purchases {
+                Section("Ilyich access") {
+                    NavigationLink {
+                        PurchaseAccessView(store: purchases, session: session)
+                    } label: {
+                        Label("Purchases and subscription", systemImage: "checkmark.seal")
+                    }.accessibilityIdentifier("settings.purchases")
+                }
             }
             ReadOnlySettingsSection(session: session)
             Section("Library") {
@@ -290,6 +300,14 @@ private struct AboutIlyichView: View {
                 HStack(spacing: 16) { Image("IlyichLogo").resizable().scaledToFit().frame(width: 48, height: 48); VStack(alignment: .leading) { Text("Ilyich").font(.headline); Text("Your memories, with you.").foregroundStyle(.secondary) } }
                 LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
                 LabeledContent("Build", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")
+            }
+            Section("Privacy") {
+                Link("Privacy Policy", destination: URL(string: "https://github.com/ilyador/Ilyich/blob/dev/ios-native/PRIVACY.md")!)
+                    .accessibilityIdentifier("about.privacyPolicy")
+                Link("Terms of Use (Apple Standard EULA)", destination: URL(string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")!)
+            }
+            Section("Support") {
+                Link("Help and support", destination: URL(string: "https://github.com/ilyador/Ilyich/issues")!)
             }
             Section("Credits") {
                 Text("Open source under the GNU AGPL v3.")

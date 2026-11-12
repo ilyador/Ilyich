@@ -370,19 +370,16 @@ import XCTest
         XCTAssertEqual(h.photos.performed, 0)
     }
 
-    /// The shipped gate: closed, a removal asks Photos for nothing, while checking still finds
-    /// the real candidates.
+    /// Disabling removal asks Photos for nothing, while checking still finds real candidates.
     func testAClosedGateNeverAsksPhotos() async throws {
-        let h = CleanupHarness(self, removalAllowed: CleanupRemovalGate.isOpen)
+        let h = CleanupHarness(self, removalAllowed: false)
         h.addBackedUp("a")
         let result = try await h.scan()
         XCTAssertEqual(result.candidates.map(\.localID), ["a"])
-        if !CleanupRemovalGate.isOpen {
-            let removal = await h.service.remove(["a"])
-            XCTAssertEqual(removal, .blocked(.unavailable))
-            XCTAssertEqual(h.photos.performed, 0)
-            XCTAssertNotNil(h.photos.asset("a"))
-        }
+        let removal = await h.service.remove(["a"])
+        XCTAssertEqual(removal, .blocked(.unavailable))
+        XCTAssertEqual(h.photos.performed, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
     }
 
     // MARK: - Bookkeeping
@@ -488,6 +485,182 @@ import XCTest
         let result = await h.service.remove(["a"])
         XCTAssertEqual(result, .changed(["a"]), "DS7: membership is fresh at remove.")
         XCTAssertEqual(h.photos.performed, 0)
+    }
+
+    /// Photos can report an album-membership change without naming a changed asset or moving
+    /// its modification date. The previous check must no longer authorize any removal.
+    func testAlbumMembershipChangeWithoutAssetIDsInvalidatesTheScan() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("a")
+        h.photos.addAlbum("kept", title: "Kept", members: [])
+        h.settings.setKeptAlbumIDs(["kept"])
+        _ = try await h.scan()
+        let events = listen(to: await h.service.events())
+        h.photos.addAlbum("kept", title: "Kept", members: ["a"])
+        h.photos.emit(PhotoLibraryChangeDetails(albumsChanged: true))
+        try await waitFor { events.value.contains(.invalidated(.library)) }
+
+        let result = await h.service.remove(["a"])
+        XCTAssertEqual(result, .blocked(.checkAgain))
+        XCTAssertEqual(h.photos.requestsMade, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
+    }
+
+    /// No change notification is needed to catch a protected membership acquired while the
+    /// server was being checked: the selection's local protections are read again afterward.
+    func testKeptAlbumAcquiredDuringRemoteVerificationPreventsRemoval() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("a")
+        h.photos.addAlbum("kept", title: "Kept", members: [])
+        h.settings.setKeptAlbumIDs(["kept"])
+        _ = try await h.scan()
+        let photos = h.photos
+        h.remote.onRequest { _ in photos.addAlbum("kept", title: "Kept", members: ["a"]) }
+
+        let result = await h.service.remove(["a"])
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(h.photos.performed, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
+        XCTAssertTrue(h.receipts.marked.isEmpty)
+    }
+
+    /// A membership acquired after the last async check, while Photos waits to run its block,
+    /// must also be protected. Album membership does not have to change the photo's revision.
+    func testKeptAlbumAcquiredInsidePhotosChangePreventsAnyDeletionRequest() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("a")
+        h.photos.addAlbum("kept", title: "Kept", members: [])
+        h.settings.setKeptAlbumIDs(["kept"])
+        _ = try await h.scan()
+        let photos = h.photos
+        photos.beforeBlock { photos.addAlbum("kept", title: "Kept", members: ["a"]) }
+
+        let result = await h.service.remove(["a"])
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(photos.requestsMade, 0)
+        XCTAssertNotNil(photos.asset("a"))
+        XCTAssertTrue(h.receipts.marked.isEmpty)
+        let records = try await h.journal.records()
+        XCTAssertEqual(records.map(\.outcome), [.notPermitted], "A refused, journaled change is finished, never left to replay.")
+    }
+
+    func testFavoriteAcquiredInsidePhotosChangeIsKeptEvenWithoutARevisionChange() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("a")
+        _ = try await h.scan()
+        let photos = h.photos
+        photos.beforeBlock { photos.setFavorite("a", true) }
+
+        let result = await h.service.remove(["a"])
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(photos.requestsMade, 0)
+        XCTAssertNotNil(photos.asset("a"))
+        XCTAssertTrue(h.receipts.marked.isEmpty)
+    }
+
+    /// Read-only on and off again cannot revive a removal that was already waiting to commit.
+    func testReadOnlyToggleWhilePhotosWaitsFencesTheOldRemoval() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("a")
+        _ = try await h.scan()
+        let authorization = h.authorization
+        h.photos.beforeBlock {
+            authorization.setReadOnly(true)
+            authorization.setReadOnly(false)
+        }
+
+        let result = await h.service.remove(["a"])
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(h.photos.requestsMade, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
+        XCTAssertTrue(h.receipts.marked.isEmpty)
+        let records = try await h.journal.records()
+        XCTAssertEqual(records.map(\.outcome), [.notPermitted])
+    }
+
+    func testCredentialChangeWhilePhotosWaitsPreventsTheDeletionRequest() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("a")
+        _ = try await h.scan()
+        let credential = h.credentialCurrent
+        h.photos.beforeBlock { credential.mutate { $0 = false } }
+
+        let result = await h.service.remove(["a"])
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(h.photos.requestsMade, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
+        XCTAssertTrue(h.receipts.marked.isEmpty)
+    }
+
+    func testSettingsChangeWhilePhotosWaitsPreventsTheDeletionRequest() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("a")
+        _ = try await h.scan()
+        let settings = h.settings
+        h.photos.beforeBlock { settings.setKeepMediaType("photos") }
+
+        let result = await h.service.remove(["a"])
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(h.photos.requestsMade, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
+        XCTAssertTrue(h.receipts.marked.isEmpty)
+    }
+
+    func testCancellationWhilePhotosWaitsPreventsTheDeletionRequest() async throws {
+        let h = CleanupHarness(self)
+        h.addBackedUp("a")
+        _ = try await h.scan()
+        let beforeBlock = StubServer.Gate()
+        addTeardownBlock { beforeBlock.open() }
+        h.photos.beforeBlock { await beforeBlock.wait() }
+        let service = h.service
+        let removal = Task { await service.remove(["a"]) }
+        try await waitFor { beforeBlock.waiting == 1 }
+        removal.cancel()
+        beforeBlock.open()
+
+        let result = await removal.value
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(h.photos.requestsMade, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
+        XCTAssertTrue(h.receipts.marked.isEmpty)
+        let records = try await h.journal.records()
+        XCTAssertEqual(records.map(\.outcome), [.notPermitted])
+    }
+
+    func testReceiptReplacementDuringRemoteVerificationPreventsRemovalWithoutAStreamEvent() async throws {
+        let h = CleanupHarness(self)
+        let receipt = h.addBackedUp("a")
+        _ = try await h.scan()
+        let receipts = h.receipts
+        let replacement = CleanupReceipt(localID: receipt.localID, revision: receipt.revision,
+                                         original: .init(id: "replacement", checksum: "replacement"), motion: nil)
+        h.remote.onRequest { _ in receipts.put(replacement, notify: false) }
+
+        let result = await h.service.remove(["a"])
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(h.photos.performed, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
+        XCTAssertTrue(receipts.marked.isEmpty)
+    }
+
+    func testReceiptInvalidationWhilePhotosWaitsRevokesTheDeletionPermit() async throws {
+        let h = CleanupHarness(self)
+        let receipt = h.addBackedUp("a")
+        _ = try await h.scan()
+        let receipts = h.receipts, service = h.service
+        let replacement = CleanupReceipt(localID: receipt.localID, revision: receipt.revision,
+                                         original: .init(id: "replacement", checksum: "replacement"), motion: nil)
+        h.photos.beforeBlock {
+            receipts.put(replacement, notify: false)
+            await service.receiptsChanged()
+        }
+
+        let result = await service.remove(["a"])
+        XCTAssertEqual(result, .changed(["a"]))
+        XCTAssertEqual(h.photos.requestsMade, 0)
+        XCTAssertNotNil(h.photos.asset("a"))
+        XCTAssertTrue(receipts.marked.isEmpty)
     }
 
     // MARK: - Property test

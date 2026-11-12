@@ -22,6 +22,11 @@ struct LiveAccountDevice: AccountDevice {
 
     func clearDiagnostics() async { await DiagnosticsStore.shared.clear() }
 
+    func cancelTransfers(of account: AccountID) async {
+        let host = await host()
+        await host.cancelTransfers(of: account)
+    }
+
     /// Each time the phone's protected data becomes available after it was locked away, as after
     /// the first unlock since the phone started.
     @MainActor static func protectedDataAvailable() -> AsyncStream<Void> {
@@ -60,16 +65,21 @@ extension AccountClients {
         return AccountClients { server, credential, purpose in
             switch purpose {
             case .session(let authorization):
+                let configuration = environment.apiProtocolClasses.map { protocols in
+                    let configuration = URLSessionConfiguration.ephemeral
+                    configuration.protocolClasses = protocols
+                    return configuration
+                }
                 return try APIClient(baseURL: server, accessToken: credential?.token, userID: credential?.userID,
-                                     networkConfiguration: network, authorization: authorization)
+                                     sessionConfiguration: configuration, networkConfiguration: network, authorization: authorization)
             case .check:
                 let configuration = URLSessionConfiguration.ephemeral
                 configuration.timeoutIntervalForRequest = 4
                 configuration.timeoutIntervalForResource = 6
                 return try APIClient(baseURL: server, accessToken: credential?.token, userID: credential?.userID,
                                      sessionConfiguration: configuration, networkConfiguration: network)
-            case .signIn:
-                return try APIClient(baseURL: server, networkConfiguration: network)
+            case .signIn(let fence):
+                return try APIClient(baseURL: server, networkConfiguration: network, purchaseFence: fence)
             }
         }
     }

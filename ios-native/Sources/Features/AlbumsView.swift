@@ -4,14 +4,19 @@ struct AlbumsView: View {
     let api: APIClient
     let pipeline: MediaPipeline
     let onSelect: (Album) -> Void
-    @State private var albums: [Album] = []
+    @State private var store: AlbumsStore
     @State private var query = ""
-    @State private var loading = true
-    @State private var failure: FeatureFailure?
     @State private var creating = false
     @State private var editing: Album?
     @State private var sort = AlbumSort.updated
     @AppStorage("albumLayout") private var layout = "grid"
+
+    init(api: APIClient, pipeline: MediaPipeline, onSelect: @escaping (Album) -> Void) {
+        self.api = api; self.pipeline = pipeline; self.onSelect = onSelect
+        _store = State(initialValue: AlbumsStore(source: api))
+    }
+
+    private var albums: [Album] { store.albums }
 
     private enum AlbumSort: String, CaseIterable { case updated = "Recently updated", name = "Name", count = "Photo count" }
     private var visible: [Album] {
@@ -25,7 +30,20 @@ struct AlbumsView: View {
     }
     var body: some View {
         ScrollView {
-            if loading && albums.isEmpty { ProgressView().padding(60) }
+            if store.isOffline || store.failure != nil {
+                CollectionConnectionNotice(isOffline: store.isOffline, hasSnapshot: store.hasSnapshot, failure: store.failure) {
+                    Task { await store.load() }
+                }
+            }
+            if !store.hasSnapshot && store.failure == nil { ProgressView().padding(60) }
+            else if albums.isEmpty && store.failure != nil {
+                FeatureEmpty(title: store.isOffline ? (store.hasSnapshot ? "No saved albums" : "Albums aren’t saved on this phone") : "Albums couldn’t load", symbol: "rectangle.stack",
+                             description: store.isOffline ? "Connect to your server to load your albums." : "Try again when your server is available.")
+            }
+            else if store.isLoading && albums.isEmpty { ProgressView("Refreshing albums").padding(60) }
+            else if store.isOffline && albums.isEmpty {
+                FeatureEmpty(title: "No saved albums", symbol: "rectangle.stack", description: "Connect to your server to refresh the album list.")
+            }
             else if visible.isEmpty {
                 FeatureEmpty(title: query.isEmpty ? "Your albums" : "No matching albums", symbol: "rectangle.stack", description: query.isEmpty ? "Create an album to keep a story together." : "Try another album name.")
             } else {
@@ -73,15 +91,16 @@ struct AlbumsView: View {
             }
             ToolbarItem(placement: .topBarTrailing) { Button("Create album", systemImage: "plus") { creating = true }.requiresWriteAccess() }
         }
-        .task { await load() }.refreshable { await load() }
+        .task { await store.load() }.refreshable { await store.load() }
         // An album made, changed, deleted or left anywhere, this screen's editors included, shows
         // here at once (N4).
-        .onCollectionChange { change in albums = CollectionsStore.applying([change], to: albums) }
+        .onCollectionChange { store.apply($0) }
+        .onLibraryChange { change in
+            if change.reset || !change.accessLost.isEmpty { store.invalidateSavedContent() }
+            if change.reloadsCollections || !change.accessLost.isEmpty { Task { await store.load() } }
+        }
         .sheet(isPresented: $creating) { NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: nil) } }
         .sheet(item: $editing) { album in NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: album) } }
-        .alert("Couldn’t load albums", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("Retry") { Task { await load() } }; Button("Cancel", role: .cancel) { }
-        } message: { Text(failure?.message ?? "") }
     }
     private func albumLabels(_ album: Album) -> some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -92,11 +111,6 @@ struct AlbumsView: View {
             Text("\(album.assetCount.formatted()) item\(album.assetCount == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
             if let dates = albumDateRange(album) { Text(dates).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
         }.frame(maxWidth: .infinity, alignment: .leading)
-    }
-    private func load() async {
-        loading = true
-        defer { loading = false }
-        do { albums = try await api.albums() } catch is CancellationError { } catch { failure = .init(error) }
     }
 }
 

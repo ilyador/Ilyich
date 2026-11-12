@@ -115,7 +115,7 @@ final class TransportRegistryTests: XCTestCase {
         })
     }
 
-    func testEventsWaitForTheEngineWhichStartsOnce() async throws {
+    func testEventsConnectForDurableDrainingAndTheEngineStartsOnce() async throws {
         let group = try TemporaryAppGroup()
         defer { group.remove() }
         let registries = Locked(0)
@@ -123,9 +123,9 @@ final class TransportRegistryTests: XCTestCase {
         var answered = 0
         host.handleEvents(identifier: TransferSessionID.backup.identifier) { answered += 1 }
         host.handleEvents(identifier: "com.example.downloads") { answered += 10 }
-        XCTAssertEqual(answered, 10, "Another app's identifier is answered at once; ours waits for the engine.")
-        XCTAssertEqual(registries.value, 0, "No session is made before the engine starts.")
-        XCTAssertEqual(host.summary, "Not started")
+        XCTAssertEqual(answered, 10, "Another app's identifier is answered at once; ours waits for a durable drain.")
+        XCTAssertEqual(registries.value, 1, "Existing OS transfers can deliver outcomes even before an account is unlocked.")
+        XCTAssertEqual(host.summary, "Transfer engine")
 
         host.startEngine()
         XCTAssertEqual(registries.value, 1)
@@ -134,6 +134,56 @@ final class TransportRegistryTests: XCTestCase {
         host.handleEvents(identifier: TransferSessionID.shareUpload.identifier) {}
         XCTAssertEqual(registries.value, 1, "The sessions are made once per process.")
         XCTAssertEqual(host.summary, "Transfer engine")
+    }
+
+    func testLockedPurchaseDrainsExistingOSCompletionWithoutOpeningAccountOrUploading() async throws {
+        let group = try TemporaryAppGroup()
+        defer { group.remove() }
+        let fakes = Locked<[TransferSessionID: FakeTransportSession]>([:])
+        let journal = group.journal
+        let host = TransferHost(scheduler: FakeTaskScheduler(), makeRegistry: {
+            TransportRegistry { session, emit in
+                let fake = FakeTransportSession()
+                fakes.mutate { $0[session] = fake }
+                return BackgroundTransport(session: session, journal: journal, emit: emit) { fake.attach($0) }
+            }
+        })
+        host.setPurchaseAccess(PurchaseAccess(state: .locked))
+        var answered = false
+        host.handleEvents(identifier: TransferSessionID.backup.identifier) { answered = true }
+        let fake = try XCTUnwrap(fakes.value[.backup])
+        let key = AttemptKey(attempt: AttemptID(), scope: LegacyGoldens.digest, folder: "Backup/\(LegacyGoldens.digest)/fixture")
+        try group.write("staged-original", to: key.bodyPath)
+        XCTAssertTrue(fake.handler.task(7, didReceive: Data(#"{"id":"00000000-0000-4000-8000-000000000007","status":"created"}"#.utf8)))
+        fake.handler.taskDidComplete(CompletedTask(id: 7, description: key.descriptor.taskDescription, httpStatus: 201, failure: nil))
+        fake.handler.sessionDidFinishEvents()
+        for _ in 0..<100 where !answered { await Task.yield() }
+
+        XCTAssertTrue(answered, "Durably journaled completion is acknowledged without waiting for a purchase or an account runtime.")
+        XCTAssertNotNil(try journal.read(key.outcomePath)?.receipt)
+        XCTAssertTrue(group.exists(key.bodyPath), "Locked processing never consumes a staged original.")
+        XCTAssertNil(host.current)
+        let transport = try XCTUnwrap(host.registry).transport(.backup)
+        do {
+            _ = try await transport.submit(URLRequest(url: URL(string: "https://example.test/api/assets")!), key: key)
+            XCTFail("A new upload was admitted while locked.")
+        } catch { XCTAssertEqual(error as? TransportSubmitError, .unavailable) }
+        XCTAssertTrue(fake.uploads.isEmpty)
+    }
+
+    func testPurchaseGateRefusesNewWindowRequestsAndFinishesHeldWindows() {
+        let scheduler = FakeTaskScheduler()
+        let router = BackgroundTaskRouter(system: scheduler)
+        router.registerWithSystem {}
+        let held = scheduler.launch(.processing)
+        router.setPurchaseAccess(PurchaseAccess(state: .locked))
+        router.suspend()
+        XCTAssertEqual(held.completions, [true])
+        var refusal: String?
+        router.submit(WindowRequest(kind: .processing, shape: .init(), earliestBeginDate: nil)) { refusal = $0 }
+        XCTAssertNotNil(refusal)
+        XCTAssertTrue(scheduler.submitted.isEmpty)
+        XCTAssertEqual(Set(scheduler.cancelled), Set(BackgroundWindowKind.allCases.map(\.identifier)))
     }
 
     /// A background task that comes before the engine starts waits for the engine's handler.

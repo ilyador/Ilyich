@@ -15,6 +15,9 @@ final class BackgroundTransport: TransferTransport {
     private let journal: any OutcomeJournaling
     private let events: TransportEventProcessor
     private let submitting = Mutex<Set<AttemptID>>([])
+    private let purchaseAccess = Mutex<PurchaseAccess?>(nil)
+
+    func setPurchaseAccess(_ access: PurchaseAccess) { purchaseAccess.withLock { $0 = access } }
 
     /// `makeSession` is handed the event handler that the session's delegate must call.
     init(session: TransferSessionID, journal: any OutcomeJournaling, emit: @escaping @Sendable (TransportEvent) -> Void,
@@ -37,12 +40,25 @@ final class BackgroundTransport: TransferTransport {
     }
 
     func submit(_ request: URLRequest, key: AttemptKey) async throws(TransportSubmitError) -> Int {
+        try await submit(request, key: key, allowing: { true })
+    }
+
+    func submit(_ request: URLRequest, key: AttemptKey, allowing: @escaping @Sendable () -> Bool) async throws(TransportSubmitError) -> Int {
+        let access = purchaseAccess.withLock { $0 }
+        let generation = access?.snapshot.generation
+        let permitted: @Sendable () -> Bool = {
+            guard allowing() else { return false }
+            guard let access, let generation else { return true }
+            return access.permits(generation: generation)
+        }
+        guard permitted() else { throw .unavailable }
         guard key.isValid, let description = key.descriptor.taskDescription else { throw .invalidKey }
         guard submitting.withLock({ $0.insert(key.attempt).inserted }) else { throw .alreadySubmitting }
         defer { submitting.withLock { _ = $0.remove(key.attempt) } }
         let held = await inventory().tasks(for: key.attempt)
+        guard permitted() else { throw .unavailable }
         if let live = held.first(where: \.isLive) {
-            await tasks.resumeTask(live.taskID)
+            guard await tasks.resumeTask(live.taskID, allowing: permitted) else { throw .unavailable }
             return live.taskID
         }
         // A cancelled or finished task writes its outcome to the attempt's file once iOS reports it,
@@ -52,6 +68,7 @@ final class BackgroundTransport: TransferTransport {
         guard !journal.exists(key.outcomePath) else { throw .unacknowledgedOutcome }
         guard let body = journal.url(for: key.bodyPath) else { throw .unavailable }
         guard FileManager.default.fileExists(atPath: body.path) else { throw .missingBody }
+        guard permitted() else { throw .unavailable }
         return tasks.startUpload(request, fromFile: body, description: description)
     }
 

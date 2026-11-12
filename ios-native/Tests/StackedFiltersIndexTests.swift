@@ -3,7 +3,8 @@ import XCTest
 @testable import Ilyich
 
 /// N6: the offline index lays every stack of the shelves' facets out by month, and counts the
-/// people, albums and places under a stack for the shelves and the Earth. Partners never come in.
+/// people, albums and places under a stack for the shelves and the Earth. Eligible library feeds
+/// include incoming partners shown in the timeline.
 final class StackedFiltersIndexTests: XCTestCase {
     private let maya = Person(id: "maya", name: "Maya", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: false, isFavorite: nil)
     private let noah = Person(id: "noah", name: "Noah", birthDate: nil, thumbnailPath: nil, updatedAt: nil, isHidden: false, isFavorite: nil)
@@ -82,7 +83,7 @@ final class StackedFiltersIndexTests: XCTestCase {
             ("two people", FilterStack([.collection(.person(maya)), .collection(.person(noah))]), ["a2", "m1"]),
             ("two albums", FilterStack([.collection(.album(coast)), .collection(.album(harbor))]), ["a2"]),
             ("an album and a person", FilterStack([.collection(.album(harbor)), .collection(.person(maya))]), ["a2", "c1"]),
-            ("videos", FilterStack([.collection(.videos)]), ["v1"]),
+            ("videos", FilterStack([.collection(.videos)]), ["b2", "v1"]),
             ("videos of Maya in Lisbon", FilterStack([place, .collection(.videos), .collection(.person(maya))]), ["v1"]),
             ("motion", FilterStack([.collection(.motion)]), ["m1"]),
             ("motion of Noah", FilterStack([.collection(.motion), .collection(.person(noah))]), ["m1"]),
@@ -104,11 +105,11 @@ final class StackedFiltersIndexTests: XCTestCase {
             let shown = try await photos(stack, in: index)
             XCTAssertEqual(shown, expected, name)
         }
-        // Partners stay out of the library and every stack on it (QUERY-1 waits for the owner).
+        // Shared timeline feeds include Bob, while own-only filters keep their scope.
         let library = try await photos(FilterStack(), in: index)
-        XCTAssertFalse(library.contains { $0.hasPrefix("b") })
+        XCTAssertTrue(library.contains("b1")); XCTAssertTrue(library.contains("b2"))
         let videos = try await photos(FilterStack([.collection(.videos)]), in: index)
-        XCTAssertFalse(videos.contains("b2"), "Bob's video stays out of Videos.")
+        XCTAssertTrue(videos.contains("b2"), "Videos narrows the same shared timeline.")
     }
 
     /// People, albums and places under a stack are counted from the index: with Lisbon chosen,

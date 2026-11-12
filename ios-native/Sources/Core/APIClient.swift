@@ -29,6 +29,8 @@ actor APIClient {
     /// The signed-in account's authorization, for the client its AccountRuntime makes. Other
     /// clients follow the account's read-only flag.
     nonisolated let authorization: AuthorizationState?
+    /// A pre-account sign-in flow is bound to its original process-local purchase grant.
+    nonisolated let purchaseFence: PurchaseRequestFence?
     nonisolated var isReadOnly: Bool {
         if let authorization { return authorization.snapshot.readOnly }
         return userID.map { ReadOnlyPolicy.isEnabled(server: baseURL, userID: $0) } ?? false
@@ -39,19 +41,28 @@ actor APIClient {
     private nonisolated var connection: ServerConnection { transport.connection }
     private var entityStore: LibraryIndex?
     private var cachedServerFeatures: ServerFeatures?
+    /// An explicit refusal closes cached collection reads until a server read succeeds again.
+    private var albumsRefused = false
+    private var peopleRefused = false
+    private var albumReadSequence: UInt64 = 0
+    private var peopleReadSequence: UInt64 = 0
+    private var albumsRefusedAt: UInt64 = 0
+    private var peopleRefusedAt: UInt64 = 0
 
     /// `sessionConfiguration` replaces the transport's default configuration, for tests. With
     /// `authorization`, a write is refused while read-only mode is on and when read-only mode
     /// changed while it waited; without it, while the account's read-only flag is set.
     init(baseURL: URL, accessToken: String? = nil, userID: String? = nil, sessionConfiguration: URLSessionConfiguration? = nil,
          networkConfiguration: NetworkConfiguration? = nil, wifiName: any WiFiNameProviding = SystemWiFiName(),
-         authorization: AuthorizationState? = nil) throws {
+         authorization: AuthorizationState? = nil, purchaseFence: PurchaseRequestFence? = nil) throws {
         let server = try Self.normalizedBaseURL(baseURL)
         self.baseURL = server
         self.accessToken = accessToken
         self.userID = userID
         self.authorization = authorization
+        self.purchaseFence = purchaseFence
         let authority: (any RequestAuthority)? = if let authorization { authorization }
+            else if let purchaseFence { purchaseFence }
             else if let userID { ReadOnlyFlagAuthority(server: server, userID: userID) } else { nil }
         transport = try ServerTransport(server: server, token: accessToken,
                                         configuration: networkConfiguration ?? NetworkConfigurationStore.connectionSettings(server: server),
@@ -157,6 +168,8 @@ actor APIClient {
     }
     func attachEntityStore(_ store: LibraryIndex?) async {
         entityStore = store.flatMap { $0.scope == cacheScope && $0.userID == userID ? $0 : nil }
+        if albumsRefused { try? await entityStore?.refuseCollectionCache(.albums) }
+        if peopleRefused { try? await entityStore?.refuseCollectionCache(.people) }
         if let cachedServerFeatures, let entityStore {
             try? await entityStore.persistCachedServerFeatures(cachedServerFeatures)
         }
@@ -177,11 +190,47 @@ actor APIClient {
     func search(_ query: SearchQuery) async throws -> SearchResponse { try await request(.post, path: "search/smart", body: query) }
     func metadataSearch(_ query: MetadataQuery) async throws -> SearchResponse { try await request(.post, path: "search/metadata", body: query) }
     func albums() async throws -> [Album] {
-        do { return try await request(.get, path: "albums") }
-        catch {
-            guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .readable) else { throw error }
-            return try await store.albums()
+        try await albumListing().items
+    }
+    func albumListing() async throws -> CollectionListing<Album> {
+        albumReadSequence &+= 1
+        let sequence = albumReadSequence
+        let epoch = authorization?.snapshot.epoch
+        let store = entityStore
+        let savedAccess = try? await store?.collectionCacheAccess(.albums)
+        do {
+            let albums: [Album] = try await request(.get, path: "albums")
+            try checkCollectionEpoch(epoch)
+            guard sequence >= albumsRefusedAt else { throw CollectionReadError.accessChanged }
+            if let store, let savedAccess {
+                guard try await store.permitCollectionCache(.albums, after: savedAccess.generation) else { throw CollectionReadError.accessChanged }
+                try checkCollectionEpoch(epoch)
+                guard sequence >= albumsRefusedAt else { throw CollectionReadError.accessChanged }
+            }
+            albumsRefused = false
+            return CollectionListing(items: albums)
         }
+        catch {
+            if CollectionFailure.clearsSavedContent(error) {
+                albumsRefused = true; albumsRefusedAt = max(albumsRefusedAt, sequence)
+                if !(error is CollectionReadError) { try? await store?.refuseCollectionCache(.albums) }
+            }
+            if OfflineFallback.allows(error) { try await checkCollectionCacheAccess(.albums) }
+            guard OfflineFallback.allows(error), let albums = try await cachedAlbums() else { throw error }
+            return CollectionListing(items: albums, isOffline: true)
+        }
+    }
+    /// Seeds an album screen before it waits for the server. Nil means no trustworthy saved
+    /// list, whereas [] is a saved library that has no albums.
+    func cachedAlbums() async throws -> [Album]? {
+        let epoch = authorization?.snapshot.epoch
+        guard !albumsRefused, authorization?.hasEnded != true, let store = entityStore else { return nil }
+        let access = try await store.collectionCacheAccess(.albums)
+        guard !access.refused, try await store.isReadable() else { return nil }
+        let albums = try await store.albums()
+        let after = try await store.collectionCacheAccess(.albums)
+        try checkCollectionEpoch(epoch)
+        return albumsRefused || after.refused ? nil : albums
     }
     func album(id: String) async throws -> Album {
         do { return try await request(.get, path: "albums/\(id)") }
@@ -194,16 +243,58 @@ actor APIClient {
     /// One page of people from the server, numbered from one. Nothing stands in for a failure:
     /// PeopleDirectory and PeoplePager fall back to the offline library as one source per run.
     func peoplePage(_ page: Int, size: Int, name: String?) async throws -> PeopleResponse {
+        peopleReadSequence &+= 1
+        let sequence = peopleReadSequence
         let name = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         var query = [URLQueryItem(name: "page", value: String(page)), .init(name: "size", value: String(size))]
         if !name.isEmpty { query.append(.init(name: "name", value: name)) }
-        return try await request(.get, path: "people", query: query)
+        let epoch = authorization?.snapshot.epoch
+        let store = entityStore
+        let savedAccess = try? await store?.collectionCacheAccess(.people)
+        do {
+            let response: PeopleResponse = try await request(.get, path: "people", query: query)
+            try checkCollectionEpoch(epoch)
+            guard sequence >= peopleRefusedAt else { throw CollectionReadError.accessChanged }
+            if let store, let savedAccess {
+                guard try await store.permitCollectionCache(.people, after: savedAccess.generation) else { throw CollectionReadError.accessChanged }
+                try checkCollectionEpoch(epoch)
+                guard sequence >= peopleRefusedAt else { throw CollectionReadError.accessChanged }
+            }
+            peopleRefused = false
+            return response
+        } catch {
+            if CollectionFailure.clearsSavedContent(error) {
+                peopleRefused = true; peopleRefusedAt = max(peopleRefusedAt, sequence)
+                if !(error is CollectionReadError) { try? await store?.refuseCollectionCache(.people) }
+            }
+            if OfflineFallback.allows(error) { try await checkCollectionCacheAccess(.people) }
+            throw error
+        }
+    }
+    func cachedPeople() async throws -> [Person]? {
+        let epoch = authorization?.snapshot.epoch
+        guard !peopleRefused, authorization?.hasEnded != true, let store = entityStore else { return nil }
+        let access = try await store.collectionCacheAccess(.people)
+        guard !access.refused, try await store.isComplete() else { return nil }
+        let people = try await store.people()
+        let after = try await store.collectionCacheAccess(.people)
+        try checkCollectionEpoch(epoch)
+        return peopleRefused || after.refused ? nil : people
     }
     /// Every person the offline library holds, when it may answer for `error`: a definite transport
     /// failure, and a complete first sync. Nil otherwise.
     func offlinePeople(after error: any Error) async throws -> [Person]? {
-        guard let store = try await OfflineFallback.index(after: error, entityStore, requires: .complete) else { return nil }
-        return try await store.people()
+        guard OfflineFallback.allows(error) else { return nil }
+        try await checkCollectionCacheAccess(.people)
+        return try await cachedPeople()
+    }
+    private func checkCollectionCacheAccess(_ kind: CollectionKind) async throws {
+        if (kind == .albums ? albumsRefused : peopleRefused) { throw CollectionReadError.accessChanged }
+        if let store = entityStore, try await store.collectionCacheAccess(kind).refused { throw CollectionReadError.accessChanged }
+    }
+    private func checkCollectionEpoch(_ epoch: AuthorizationEpoch?) throws {
+        try Task.checkCancellation()
+        if let authorization, let epoch, !authorization.isCurrent(epoch) { throw CollectionReadError.accessChanged }
     }
     func person(id: String) async throws -> Person {
         do { return try await request(.get, path: "people/\(id)") }

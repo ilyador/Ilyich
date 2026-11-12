@@ -204,7 +204,7 @@ final class QueryPlannerTests: XCTestCase {
         let place = FilterLayer.place(lisbon, title: "Lisbon")
         let table: [(String, FilterStack, Bool)] = [
             ("favorites and videos", FilterStack([.collection(.favorites), .collection(.videos)]), true),
-            ("videos", FilterStack([.collection(.videos)]), true),
+            ("videos", FilterStack([.collection(.videos)]), false),
             ("a place and favorites", FilterStack([place, .collection(.favorites)]), true),
             ("a place and a person", FilterStack([place, .collection(.person(maya))]), true),
             ("a place in the archive", FilterStack([place, .collection(.archive)]), true),
@@ -223,7 +223,7 @@ final class QueryPlannerTests: XCTestCase {
             XCTAssertEqual(QueryPlanner.keepsToOwnPhotos(query), ownOnly, name)
             // As the index lays the stack out (IndexReader's owner rule).
             let index = try IndexFeedRequest(query, userID: me)
-            XCTAssertEqual(ownOnly, index.albumIDs.isEmpty && !index.placeAlone, name)
+            XCTAssertEqual(ownOnly, index.albumIDs.isEmpty && !index.placeAlone && !index.withPartners, name)
             let feed = try ServerSearchRequest(stack.searchScope, userID: me, keepsToOwnPhotos: QueryPlanner.keepsToOwnPhotos(query))
             XCTAssertEqual(feed.owner, ownOnly ? me : nil, name)
             XCTAssertEqual(feed.limitations.contains(.ownerPostFilter), ownOnly, name)
@@ -268,19 +268,18 @@ final class QueryPlannerTests: XCTestCase {
         XCTAssertFalse(ServerTimelineRequest.allowsPartners(albumInLibrary))
         XCTAssertFalse(ServerTimelineRequest.allowsPartners(.person(person)))
         XCTAssertFalse(ServerTimelineRequest.allowsPartners(.place(lisbon)))
-        // Until the owner decides it (QUERY-1), the library leaves partners out.
-        XCTAssertFalse(try ServerTimelineRequest(.library, userID: me).queryItems.contains { $0.name == "withPartners" })
+        XCTAssertTrue(try ServerTimelineRequest(.library, userID: me).queryItems.contains(URLQueryItem(name: "withPartners", value: "true")))
     }
 
     /// The server timeline is asked exactly as the feeds asked it before Q5, so their caches keep
     /// their names: these strings are what TimelineFilter wrote, pinned.
     func testTimelineRequestsKeepTodaysQueryItems() throws {
         let table: [(LibraryQuery, String)] = [
-            (.library, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline"),
+            (.library, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&withPartners=true"),
             (.favorites, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isFavorite=true"),
             (.archive, "order=desc&orderBy=takenAt&withStacked=true&visibility=archive"),
             (.trash, "order=desc&orderBy=takenAt&withStacked=true&isTrashed=true"),
-            (.lightroom, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isDeveloped=true"),
+            (.lightroom, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isDeveloped=true&withPartners=true"),
             (.recentlyTaken, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&userId=\(me)&isTrashed=false"),
             (.recentlyAdded, "order=desc&orderBy=createdAt&withStacked=true&userId=\(me)&isTrashed=false"),
             (.partner(partner), "order=desc&orderBy=takenAt&withStacked=true&userId=\(partner)"),
@@ -308,6 +307,21 @@ final class QueryPlannerTests: XCTestCase {
     }
 
     // MARK: Server search
+
+    func testTextVerificationIsExplicitOnlyForTheCursorAPI() throws {
+        let query = LibraryQuery.library.refined(text: "red hat", mode: .context)
+        for checksContent in [false, true] {
+            let request = try ServerSearchRequest(query, userID: me, checksContent: checksContent)
+            let paged = request.smartBody(cursor: "next")
+            XCTAssertEqual(paged.verify, checksContent)
+            XCTAssertEqual(paged.cursor, "next")
+            let stock = request.smartBody(cursor: "next", pages: false)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: APIJSON.encoder().encode(stock)) as? [String: Any])
+            XCTAssertNil(body["verify"], "Stock servers must never receive the fork's verification field, with either switch setting.")
+            XCTAssertNil(body["cursor"])
+            XCTAssertEqual(stock.size, ServerSearchRequest.unpagedSmartSize)
+        }
+    }
 
     /// Every search states its visibility and trash; locked and hidden are never asked for.
     func testEverySearchStatesTrashAndVisibility() throws {

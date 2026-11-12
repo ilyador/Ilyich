@@ -95,6 +95,13 @@ protocol MonthPlacesStore: Sendable {
         load?.task.cancel(); load = nil; recount = false
     }
 
+    /// A partner's timeline membership changed. Cancel older counts and forget their memory
+    /// copy; the sync transaction has already discarded the index's saved counts.
+    func invalidateMembership() {
+        cancel()
+        kept.removeAll(); counts.removeAll()
+    }
+
     private func run(_ query: LibraryQuery, plan: QueryPlan, id: UUID) async {
         defer { finish(id) }
         if kept[query] == nil, let store, let rows = try? await store.monthPlaces(forKey: query.stableKey), !Task.isCancelled {
@@ -122,9 +129,9 @@ protocol MonthPlacesStore: Sendable {
     /// Whether the account's access is still what it is now, for what is counted or read from now
     /// on: false once the access epoch moves or the session ends.
     private func fence() -> @Sendable () -> Bool {
-        guard let authorization else { return { true } }
+        guard let authorization else { return { !Task.isCancelled } }
         let epoch = authorization.snapshot.epoch
-        return { authorization.isCurrent(epoch) }
+        return { !Task.isCancelled && authorization.isCurrent(epoch) }
     }
 
     private func finish(_ id: UUID) {

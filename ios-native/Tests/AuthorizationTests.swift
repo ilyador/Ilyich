@@ -8,6 +8,35 @@ import XCTest
 /// mirror the extensions and upload delegates read, the updates stream, and what a read-only
 /// toggle does to uploads.
 final class AuthorizationTests: XCTestCase {
+    func testExpiredSignedAccessRefusesReadsWritesAndUploadsWithoutAnObserver() throws {
+        let now = Locked(Date(timeIntervalSince1970: 1_800_000_000))
+        let entitlement = PurchaseEntitlement(productID: AccessProductID.monthly.rawValue, transactionID: 1, originalTransactionID: 1,
+            purchaseDate: now.value, expirationDate: now.value.addingTimeInterval(60), isLifetime: false)
+        let access = PurchaseAccess(state: .unlocked(entitlement), now: { now.value })
+        let state = AuthorizationState(account: LegacyGoldens.account, token: "token", readOnly: false,
+            requiresPasswordChange: false, mirror: nil, purchaseAccess: access)
+        let read = try state.admit(method: "GET", path: "albums")
+        let write = try state.admit(method: "POST", path: "albums")
+        XCTAssertNotNil(state.current())
+
+        now.mutate { $0 = $0.addingTimeInterval(61) }
+
+        XCTAssertThrowsError(try state.confirm(method: "GET", path: "albums", admittedUnder: read)) { XCTAssertTrue($0 is PurchaseAccessRequired) }
+        XCTAssertThrowsError(try state.confirm(method: "POST", path: "albums", admittedUnder: write)) { XCTAssertTrue($0 is PurchaseAccessRequired) }
+        XCTAssertThrowsError(try state.admit(method: "GET", path: "albums"))
+        XCTAssertNil(state.current())
+        XCTAssertFalse(state.hasEnded, "The purchase fence itself never signs out or destroys an account.")
+        XCTAssertNoThrow(try state.admit(method: "POST", path: "auth/logout"))
+
+        access.update(.unlocked(PurchaseEntitlement(productID: AccessProductID.lifetime.rawValue, transactionID: 2, originalTransactionID: 2,
+            purchaseDate: now.value, expirationDate: nil, isLifetime: true)))
+        XCTAssertFalse(state.permitsServiceUse, "A new grant never revives work from an earlier grant.")
+        XCTAssertNil(state.current())
+        let reopened = AuthorizationState(account: LegacyGoldens.account, token: "token", readOnly: false,
+            requiresPasswordChange: false, mirror: nil, purchaseAccess: access)
+        XCTAssertTrue(reopened.permitsServiceUse)
+    }
+
     private let account = LegacyGoldens.account
 
     /// A mirror in preferences of its own, removed when the test ends.

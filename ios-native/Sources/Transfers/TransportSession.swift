@@ -10,8 +10,17 @@ protocol TransportSession: Sendable {
     func startUpload(_ request: URLRequest, fromFile body: URL, description: String) -> Int
     /// Resumes a task. Resuming a running task changes nothing.
     func resumeTask(_ id: Int) async
+    func resumeTask(_ id: Int, allowing: @escaping @Sendable () -> Bool) async -> Bool
     /// Cancels a task. A task that is gone is ignored.
     func cancelTask(_ id: Int) async
+}
+
+extension TransportSession {
+    func resumeTask(_ id: Int, allowing: @escaping @Sendable () -> Bool) async -> Bool {
+        guard allowing() else { return false }
+        await resumeTask(id)
+        return true
+    }
 }
 
 struct SessionTask: Equatable, Sendable {
@@ -123,6 +132,13 @@ final class URLSessionTransportSession: TransportSession {
     }
 
     func resumeTask(_ id: Int) async { await session.allTasks.first { $0.taskIdentifier == id }?.resume() }
+
+    func resumeTask(_ id: Int, allowing: @escaping @Sendable () -> Bool) async -> Bool {
+        let held = await session.allTasks
+        guard allowing() else { return false }
+        held.first { $0.taskIdentifier == id }?.resume()
+        return true
+    }
 
     func cancelTask(_ id: Int) async { await session.allTasks.first { $0.taskIdentifier == id }?.cancel() }
 }

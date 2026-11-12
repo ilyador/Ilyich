@@ -8,6 +8,8 @@ enum AccountPhase: Equatable, Sendable {
     /// The phone has not been unlocked since it started, so the Keychain is closed. Restoring
     /// starts again once it opens.
     case waitingForUnlock
+    /// Saved sign-in is kept while verified purchase access is unavailable.
+    case purchaseRequired
     /// Nobody is signed in. Carries the reason when a session just ended.
     case signedOut(SignOutReason?)
     /// Signed in, but the server requires a new password before anything else.
@@ -30,6 +32,12 @@ struct AccountState: Sendable {
     var runtime: AccountRuntime?
     /// For the sign-in screen: why the session ended, or why it couldn't be restored.
     var message: String?
+    var savedAccount: SavedAccountSummary? = nil
+}
+
+struct SavedAccountSummary: Equatable, Sendable {
+    let name: String
+    let server: URL
 }
 
 /// What sign-out removes besides the session, by reason. Always kept, for either reason: the
@@ -65,6 +73,11 @@ protocol AccountDevice: Sendable {
     func removeLockedPIN(scope: String) async
     func removeNetworkSettings(server: URL) async throws
     func clearDiagnostics() async
+    func cancelTransfers(of account: AccountID) async
+}
+
+extension AccountDevice {
+    func cancelTransfers(of account: AccountID) async {}
 }
 
 /// Makes every client the account layer uses, so that tests can route them to a stub server.
@@ -75,7 +88,12 @@ struct AccountClients: Sendable {
         /// A quick check of a saved session, with short timeouts.
         case check
         /// Signing in, and asking a server how it signs in, before there is a session.
-        case signIn
+        case signIn(PurchaseRequestFence?)
+
+        var purchaseFence: PurchaseRequestFence? {
+            if case .signIn(let fence) = self { return fence }
+            return nil
+        }
     }
 
     let make: @Sendable (_ server: URL, _ credential: StoredCredential?, _ purpose: Purpose) throws -> APIClient
@@ -110,13 +128,20 @@ actor AccountManager {
     /// The last transition asked for; the next one starts after it.
     private var lastTransition: Task<Void, Never>?
     private var unlockWatch: Task<Void, Never>?
+    private var purchaseWatch: Task<Void, Never>?
+    private let purchaseAccess: PurchaseAccess?
+    private var savedCredential: StoredCredential?
+
+    deinit { purchaseWatch?.cancel(); unlockWatch?.cancel() }
 
     init(environment: AccountEnvironment, dependencies: AccountDependencies, presence: AppPresence,
+         purchaseAccess: PurchaseAccess? = nil,
          present: @escaping @MainActor @Sendable (AccountState) -> Void) {
         self.environment = environment
         self.dependencies = dependencies
         self.presence = presence
         self.present = present
+        self.purchaseAccess = purchaseAccess
     }
 
     // MARK: Restore
@@ -126,7 +151,64 @@ actor AccountManager {
     /// leaves the app signed out with the reason, and the saved session untouched: nothing here
     /// ever signs out, clears a credential or resets the offline library.
     func restore() async {
+        watchPurchases()
         await transition { await $0.performRestore() }
+    }
+
+    /// Called by the UI and background restore path, and followed independently
+    /// here so a paywall view is never the only thing stopping account work.
+    func purchaseAccessChanged() async {
+        watchPurchases()
+        await transition { await $0.reconcilePurchaseAccess() }
+    }
+
+    private func watchPurchases() {
+        guard purchaseWatch == nil, let purchaseAccess else { return }
+        let changes = purchaseAccess.changes()
+        purchaseWatch = Task { [weak self] in
+            for await _ in changes {
+                guard let self, !Task.isCancelled else { return }
+                await self.purchaseAccessChanged()
+            }
+        }
+    }
+
+    private func reconcilePurchaseAccess() async {
+        guard let purchaseAccess else { return }
+        if !purchaseAccess.hasAccess {
+            if let runtime {
+                savedCredential = runtime.credential
+                self.runtime = nil
+                runtime.authorization.end()
+                phase = .purchaseRequired
+                message = nil
+                await publish()
+                await runtime.transferRuntime?.suspendForPurchase()
+                await runtime.cancelAndJoin()
+                await runtime.api.shutdown()
+            } else {
+                if let saved = try? dependencies.credentials.load() { savedCredential = saved }
+                stopWatchingForUnlock()
+                phase = .purchaseRequired
+                message = nil
+                await publish()
+            }
+            return
+        }
+        // A new signed grant never revives work admitted under the old one.
+        if let runtime, !runtime.authorization.permitsServiceUse {
+            savedCredential = runtime.credential
+            self.runtime = nil
+            runtime.authorization.end()
+            await runtime.transferRuntime?.suspendForPurchase()
+            await runtime.cancelAndJoin()
+            await runtime.api.shutdown()
+            phase = .purchaseRequired
+        }
+        if phase == .purchaseRequired || phase == .restoring || phase == .waitingForUnlock {
+            phase = .restoring
+            await performRestore()
+        }
     }
 
     /// Tries the restore again if it waits for the phone to be unlocked.
@@ -136,7 +218,7 @@ actor AccountManager {
     }
 
     private func performRestore() async {
-        guard phase == .restoring || phase == .waitingForUnlock else { return }
+        guard phase == .restoring || phase == .waitingForUnlock || phase == .purchaseRequired else { return }
         if environment.resetsInterfaceState { resetInterfaceState() }
         let saved: StoredCredential?
         do {
@@ -155,7 +237,15 @@ actor AccountManager {
         }
         stopWatchingForUnlock()
         guard var saved else {
+            savedCredential = nil
             phase = .signedOut(nil)
+            message = nil
+            await publish()
+            return
+        }
+        savedCredential = saved
+        guard purchaseAccess?.hasAccess != false else {
+            phase = .purchaseRequired
             message = nil
             await publish()
             return
@@ -210,46 +300,56 @@ actor AccountManager {
     /// Signs in with a password, to a server no older than the app needs. The login goes out at
     /// once; the session it returns opens only once any sign-out in progress has finished.
     func signIn(server: String, email: String, password: String) async throws {
+        let fence = try purchaseAccess.map(PurchaseRequestFence.init)
         guard let url = URL(string: server.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw APIError.invalidServerURL }
-        let client = try dependencies.clients.make(url, nil, .signIn)
+        let client = try dependencies.clients.make(url, nil, .signIn(fence))
         let login: LoginResponse
         do {
             try await client.requireSupportedVersion()
+            try fence?.requireAccess()
             login = try await client.login(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
         } catch { await client.shutdown(); throw error }
         await client.shutdown()
-        try await completeSignIn(login, server: client.baseURL)
+        try fence?.requireAccess()
+        try await completeSignIn(login, server: client.baseURL, purchaseFence: fence)
     }
 
     /// Accepts the login single sign-on returned from `server`.
-    func completeSSO(_ login: LoginResponse, server: URL) async throws {
-        try await completeSignIn(login, server: server)
+    func completeSSO(_ login: LoginResponse, server: URL, purchaseFence: PurchaseRequestFence? = nil) async throws {
+        try await completeSignIn(login, server: server, purchaseFence: purchaseFence)
     }
 
     /// A client for signing in to `server`, made off the main actor, once the server proved no
     /// older than the app needs. The caller shuts it down.
     func signInClient(for server: URL) async throws -> APIClient {
-        let client = try dependencies.clients.make(server, nil, .signIn)
-        do { try await client.requireSupportedVersion() } catch { await client.shutdown(); throw error }
+        let fence = try purchaseAccess.map(PurchaseRequestFence.init)
+        let client = try dependencies.clients.make(server, nil, .signIn(fence))
+        do {
+            try await client.requireSupportedVersion()
+            try fence?.requireAccess()
+        } catch { await client.shutdown(); throw error }
         return client
     }
 
     /// How `server` lets people sign in, or nil when it can't be asked.
     func serverFeatures(at server: URL) async -> ServerFeatures? {
-        guard let client = try? dependencies.clients.make(server, nil, .signIn) else { return nil }
+        let fence: PurchaseRequestFence?
+        do { fence = try purchaseAccess.map(PurchaseRequestFence.init) } catch { return nil }
+        guard let client = try? dependencies.clients.make(server, nil, .signIn(fence)) else { return nil }
         let features = try? await client.serverFeatures()
         await client.shutdown()
         return features
     }
 
-    private func completeSignIn(_ login: LoginResponse, server: URL) async throws {
+    private func completeSignIn(_ login: LoginResponse, server: URL, purchaseFence: PurchaseRequestFence?) async throws {
         let credential = StoredCredential(server: server, token: login.accessToken, userID: login.userId, name: login.name,
                                           requiresPasswordChange: login.requiresPasswordChange)
-        let outcome: Result<Void, any Error> = await transition { await $0.accept(credential) }
+        let outcome: Result<Void, any Error> = await transition { await $0.accept(credential, purchaseFence: purchaseFence) }
         try outcome.get()
     }
 
-    private func accept(_ credential: StoredCredential) async -> Result<Void, any Error> {
+    private func accept(_ credential: StoredCredential, purchaseFence: PurchaseRequestFence?) async -> Result<Void, any Error> {
+        do { try requirePurchase(purchaseFence) } catch { return .failure(error) }
         // Unreachable from the screens, which offer sign-in only while signed out. A session open
         // here still ends first, with none of its data removed.
         if let runtime {
@@ -258,29 +358,52 @@ actor AccountManager {
             message = nil
             await publish()
         }
+        do { try requirePurchase(purchaseFence) } catch { return .failure(error) }
         do { try dependencies.credentials.save(credential) } catch { return .failure(error) }
+        savedCredential = credential
         stopWatchingForUnlock()
         await open(credential)
         return .success(())
+    }
+
+    private func requirePurchase(_ fence: PurchaseRequestFence?) throws {
+        guard let purchaseAccess else { return }
+        guard let fence, fence.access === purchaseAccess else { throw PurchaseAccessRequired() }
+        try fence.requireAccess()
     }
 
     /// Opens `credential`'s runtime. Transitions run one at a time and every runtime is shut down
     /// within the transition that ends it, so an account reopens only after its previous runtime
     /// has shut down.
     private func open(_ credential: StoredCredential) async {
+        guard purchaseAccess?.hasAccess != false else {
+            phase = .purchaseRequired
+            await publish()
+            return
+        }
         do {
             let runtime = try await AccountRuntime.open(credential, environment: environment, dependencies: dependencies,
-                                                        presence: presence, refused: { [weak self] id, unsupported in
+                                                        presence: presence, purchaseAccess: purchaseAccess,
+                                                        refused: { [weak self] id, unsupported in
                 await self?.serverRefused(id, unsupported)
             }, expired: { [weak self] id, error in
                 await self?.sessionMayHaveExpired(id, after: error) ?? false
             })
+            guard runtime.authorization.permitsServiceUse else {
+                runtime.authorization.end()
+                await runtime.cancelAndJoin()
+                await runtime.api.shutdown()
+                phase = .purchaseRequired
+                await publish()
+                return
+            }
             self.runtime = runtime
             phase = runtime.requiresPasswordChange ? .passwordChangeRequired : .active
             message = nil
             await publish()
+            guard runtime.authorization.permitsServiceUse else { return await reconcilePurchaseAccess() }
             await runtime.start()
-            if phase == .active, environment.usesDevicePhotos {
+            if phase == .active, environment.usesDevicePhotos, runtime.authorization.permitsServiceUse {
                 await dependencies.device.activateBackup(runtime)
             }
         } catch {
@@ -303,7 +426,10 @@ actor AccountManager {
     /// Signs out, as architecture section 4 orders it. Only an explicit request or a confirmed
     /// expiry leads here.
     func signOut(_ reason: SignOutReason) async {
-        await transition { await $0.performSignOut(reason, runtimeID: nil) }
+        await transition { manager in
+            if manager.runtime != nil { await manager.performSignOut(reason, runtimeID: nil) }
+            else { await manager.forgetSavedAccount() }
+        }
     }
 
     private func performSignOut(_ reason: SignOutReason, runtimeID: UUID?) async {
@@ -347,7 +473,57 @@ actor AccountManager {
         await device.clearDiagnostics()
         // 7.
         phase = .signedOut(reason)
+        savedCredential = nil
         message = reason == .sessionExpired ? ServerFailure.sessionExpired(nil).localizedDescription : problem
+        await publish()
+    }
+
+    /// Explicit sign-out while the purchase screen owns the app. It never opens
+    /// AccountRuntime, starts sync or removes staged originals. Offline cache
+    /// files remain account-scoped; credentials and connection secrets are removed.
+    private func forgetSavedAccount() async {
+        let saved = (try? dependencies.credentials.load()) ?? savedCredential
+        guard saved != nil || phase == .purchaseRequired || phase == .waitingForUnlock else { return }
+        phase = .signingOut
+        await publish()
+        stopWatchingForUnlock()
+        var problem: String?
+        do { try dependencies.credentials.remove() } catch { problem = error.localizedDescription }
+        if let mirror = dependencies.mirror {
+            let next = max(mirror.read()?.epoch ?? 0, mirror.accessEpoch() ?? 0) &+ 1
+            mirror.keepAccessEpoch(next)
+            mirror.publish(.init(digest: "", epoch: next))
+        }
+        if let saved {
+            await dependencies.device.cancelTransfers(of: saved.account)
+            let url = TransferStore.url(for: saved.account, in: environment.transfersDirectory)
+            if environment.keepsTransfers, FileManager.default.fileExists(atPath: url.path) {
+                let store = TransferStore(url: url)
+                if (try? await store.meta().engine) == .transfer {
+                    if var preferences = try? await store.preferences() {
+                        preferences.automatic = false
+                        try? await store.savePreferences(preferences)
+                    }
+                    try? await store.saveEngineState(intent: .paused, blocker: nil, lastMessage: nil)
+                }
+                await store.close()
+            }
+            if let client = try? dependencies.clients.make(saved.server, saved, .check) {
+                await Self.within(dependencies.serverSignOutBudget) { try? await client.logout() }
+                await client.shutdown()
+            }
+            let scope = saved.server.absoluteString + "|" + saved.userID
+            await dependencies.device.removeLockedPIN(scope: scope)
+            if environment.usesDeviceStorage {
+                do { try await dependencies.device.removeNetworkSettings(server: saved.server) }
+                catch { problem = problem ?? error.localizedDescription }
+            }
+        }
+        await dependencies.device.clearNotifications()
+        await dependencies.device.clearDiagnostics()
+        savedCredential = nil
+        phase = .signedOut(.user)
+        message = problem
         await publish()
     }
 
@@ -416,7 +592,8 @@ actor AccountManager {
     }
 
     private func publish() async {
-        await present(AccountState(phase: phase, runtime: runtime, message: message))
+        let summary = savedCredential.map { SavedAccountSummary(name: $0.name, server: $0.server) }
+        await present(AccountState(phase: phase, runtime: runtime, message: message, savedAccount: summary))
     }
 
     /// Runs `work`, and waits for it at most `budget`. Past the budget `work` is cancelled and no

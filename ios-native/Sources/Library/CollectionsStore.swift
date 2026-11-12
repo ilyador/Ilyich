@@ -31,7 +31,8 @@ import Foundation
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var retry: Task<Void, Never>?
     /// The collection changes since the newest load began, in order, which its answer may not know of.
-    @ObservationIgnored private var changes: [CollectionChange] = []
+    @ObservationIgnored private var albumChanges: [CollectionChange] = []
+    @ObservationIgnored private var peopleChanges: [CollectionChange] = []
     @ObservationIgnored private let follower = LibraryFollower()
 
     /// `pipeline` warms the faces of the People shelf once they are known.
@@ -48,7 +49,9 @@ import Foundation
     private func libraryEvent(_ event: LibraryEvent) {
         switch event {
         case .collection(let change): apply(change)
-        case .changed(let change, _): if change.reloadsCollections { reload() }
+        case .changed(let change, let accessChanged):
+            if accessChanged { people = []; albums = []; albumChanges = []; peopleChanges = []; generation = UUID() }
+            if change.reloadsCollections || accessChanged { reload() }
         case .mutation, .cachesCleared: break
         }
     }
@@ -60,23 +63,69 @@ import Foundation
         generation = token
         // Only the collection changes made while this load is on its way are applied again over
         // its albums and people; the server held the earlier ones before it was asked.
-        changes = []
         peopleOrder = order.ids(.people); albumOrder = order.ids(.albums)
-        async let featuresResult = try? api.serverFeatures()
-        async let albumResult = try? api.albums()
-        async let peopleResult = try? directory.allVisible()
-        let loadedFeatures = await featuresResult
-        if let loadedFeatures, token == generation { features = loadedFeatures }
-        let loadedAlbums = await albumResult
-        if let loadedAlbums, token == generation { albums = Self.applying(changes, to: loadedAlbums) }
-        let loadedPeople = await peopleResult
-        guard token == generation else { return }
-        if let loadedPeople { people = Self.applying(changes, to: loadedPeople) }
-        lastLoadFailed = loadedFeatures == nil || loadedAlbums == nil || loadedPeople == nil
-        // A scrub flies past every face in a second, so they all load before the shelf is opened.
-        if loadedPeople != nil, let pipeline {
-            let faces = orderedPeople
-            Task { await pipeline.warmFaces(faces, pixelSize: PersonThumbnail.small) }
+        lastLoadFailed = false
+        // Each part publishes independently: a server-features timeout must not hold the saved
+        // albums and people (or their successful server responses) behind it.
+        async let featureLoad: Void = loadFeatures(token)
+        async let albumLoad: Void = loadAlbums(token)
+        async let peopleLoad: Void = loadPeople(token)
+        _ = await (featureLoad, albumLoad, peopleLoad)
+    }
+
+    private func loadFeatures(_ token: UUID) async {
+        do {
+            let value = try await api.serverFeatures()
+            if generation == token { features = value }
+        } catch { if generation == token, !Task.isCancelled { lastLoadFailed = true } }
+    }
+
+    private func loadAlbums(_ token: UUID) async {
+        let earlierChanges = albumChanges.count
+        if albums.isEmpty, let saved = try? await api.cachedAlbums(), generation == token, !Task.isCancelled {
+            albums = Self.applying(albumChanges, to: saved)
+        }
+        do {
+            let value = try await api.albumListing()
+            guard generation == token, !Task.isCancelled else { return }
+            if value.isOffline {
+                if albums.isEmpty { albums = Self.applying(albumChanges, to: value.items) }
+            } else {
+                albumChanges = Array(albumChanges.dropFirst(earlierChanges))
+                albums = Self.applying(albumChanges, to: value.items)
+            }
+            if value.isOffline { lastLoadFailed = true }
+        } catch {
+            guard generation == token, !Task.isCancelled else { return }
+            if CollectionFailure.clearsSavedContent(error) { albums = [] }
+            lastLoadFailed = true
+        }
+    }
+
+    private func loadPeople(_ token: UUID) async {
+        let earlierChanges = peopleChanges.count
+        if people.isEmpty, let saved = try? await directory.cachedVisible(), generation == token, !Task.isCancelled {
+            people = Self.applying(peopleChanges, to: saved)
+        }
+        do {
+            let value = try await directory.listing()
+            guard generation == token, !Task.isCancelled else { return }
+            if value.isOffline {
+                if people.isEmpty { people = Self.applying(peopleChanges, to: value.items) }
+            } else {
+                peopleChanges = Array(peopleChanges.dropFirst(earlierChanges))
+                people = Self.applying(peopleChanges, to: value.items)
+            }
+            if value.isOffline { lastLoadFailed = true }
+            // Cached face pixels remain visible if a higher-resolution refresh cannot load.
+            if let pipeline {
+                let faces = orderedPeople
+                Task { await pipeline.warmFaces(faces, pixelSize: PersonThumbnail.small) }
+            }
+        } catch {
+            guard generation == token, !Task.isCancelled else { return }
+            if CollectionFailure.clearsSavedContent(error) { people = [] }
+            lastLoadFailed = true
         }
     }
 
@@ -123,13 +172,13 @@ import Foundation
     func apply(_ change: CollectionChange) {
         switch change {
         case .albumCreated, .albumUpdated, .albumDeleted, .albumLeft:
-            changes.append(change)
+            albumChanges.append(change)
             albums = Self.applying([change], to: albums)
             if case .albumCreated(let album) = change, !albumOrder.isEmpty {
                 saveOrder([album.id] + albumOrder.filter { $0 != album.id }, for: .albums)
             }
         case .personUpdated:
-            changes.append(change)
+            peopleChanges.append(change)
             people = Self.applying([change], to: people)
         case .partnersChanged, .memorySaved:
             break

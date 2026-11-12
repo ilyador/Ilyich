@@ -5,7 +5,7 @@ on:
     inputs:
       version:
         description: App version
-        default: '3.3.3'
+        default: '3.3.5'
         required: true
         type: string
 
@@ -21,7 +21,9 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 60
     env:
-      APP_VERSION: ${{ inputs.version || '3.3.3' }}
+      APP_VERSION: ${{ inputs.version || '3.3.5' }}
+      APP_BUNDLE_ID: io.ilyador.ilyich
+      APP_GROUP_ID: group.io.ilyador.ilyich
       ARTIFACT_DIR: ${{ github.workspace }}/ios-native/build/artifacts
     defaults:
       run:
@@ -37,7 +39,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "DERIVED_DATA=$RUNNER_TEMP/ilyich-native-derived-data" >> "$GITHUB_ENV"
-          echo "TEST_RESULTS=$RUNNER_TEMP/Ilyich-native.xcresult" >> "$GITHUB_ENV"
+          echo "UNIT_TEST_RESULTS=$RUNNER_TEMP/Ilyich-unit-tests.xcresult" >> "$GITHUB_ENV"
+          echo "PURCHASE_UI_NORMAL_TEST_RESULTS=$RUNNER_TEMP/Ilyich-purchase-ui-normal-tests.xcresult" >> "$GITHUB_ENV"
+          echo "PURCHASE_UI_EXPIRY_TEST_RESULTS=$RUNNER_TEMP/Ilyich-purchase-ui-expiry-tests.xcresult" >> "$GITHUB_ENV"
           sudo xcode-select -s /Applications/Xcode_27.app/Contents/Developer
           xcodebuild -version
           sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
@@ -86,7 +90,7 @@ jobs:
               output.write(f"SIMULATOR_ID={udid}\n")
           PY
 
-      - name: Run unit and UI tests
+      - name: Run unit and purchase UI tests
         working-directory: ios-native
         run: |
           set -euo pipefail
@@ -95,22 +99,78 @@ jobs:
           trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
           xcrun simctl bootstatus "$SIMULATOR_ID" -b
           # This disposable simulator saves only synthetic fixture images.
-          xcrun simctl privacy "$SIMULATOR_ID" grant photos-add app.alextran.immich
-          xcodebuild test \
+          xcrun simctl privacy "$SIMULATOR_ID" grant photos-add "$APP_BUNDLE_ID"
+          if xcodebuild test \
             -project Ilyich.xcodeproj -scheme Ilyich -configuration Debug \
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
-            -derivedDataPath "$DERIVED_DATA" -resultBundlePath "$TEST_RESULTS" \
+            -derivedDataPath "$DERIVED_DATA" -resultBundlePath "$UNIT_TEST_RESULTS" \
             -parallel-testing-enabled NO \
             -collect-test-diagnostics never \
+            -only-testing:IlyichTests \
             MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_BUILD" \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-; then
+            unit_status=0
+          else
+            unit_status=$?
+          fi
+
+          # Legacy library UI suites need an explicit purchase bootstrap. This CI run scopes UI
+          # coverage to the native purchase flows and does not claim to run those legacy suites.
+          # SKTestSession's clock is shared by the StoreKit test environment. Run all real-time
+          # purchases first, then the accelerated expiry case in a separate test invocation.
+          if xcodebuild test \
+            -project Ilyich.xcodeproj -scheme IlyichCommerce -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$DERIVED_DATA" -resultBundlePath "$PURCHASE_UI_NORMAL_TEST_RESULTS" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:IlyichUITests/PurchaseAccessUITests/testLifetimePurchaseOpensNativeSignInAndSurvivesRelaunch \
+            -only-testing:IlyichUITests/PurchaseAccessUITests/testLockedPaywallUsesStoreKitPricesAndKeepsRecoveryAndLegalControlsAvailable \
+            -only-testing:IlyichUITests/PurchaseAccessUITests/testMonthlyTrialPurchaseOpensNativeSignInWithSevenDayExpiration \
+            MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_BUILD" \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-; then
+            purchase_ui_normal_status=0
+          else
+            purchase_ui_normal_status=$?
+          fi
+
+          if [ "$purchase_ui_normal_status" -eq 0 ]; then
+            if xcodebuild test \
+              -project Ilyich.xcodeproj -scheme IlyichCommerce -configuration Debug \
+              -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+              -derivedDataPath "$DERIVED_DATA" -resultBundlePath "$PURCHASE_UI_EXPIRY_TEST_RESULTS" \
+              -parallel-testing-enabled NO \
+              -collect-test-diagnostics never \
+              -only-testing:IlyichUITests/PurchaseAccessUITests/testMonthlyTrialExpiresNaturallyAfterAutoRenewIsDisabled \
+              MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_BUILD" \
+              CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-; then
+              purchase_ui_expiry_status=0
+            else
+              purchase_ui_expiry_status=$?
+            fi
+          else
+            purchase_ui_expiry_status=125
+          fi
+
+          if [ "$unit_status" -ne 0 ] || [ "$purchase_ui_normal_status" -ne 0 ] || [ "$purchase_ui_expiry_status" -ne 0 ]; then
+            echo "Unit test exit: $unit_status; normal purchase UI exit: $purchase_ui_normal_status; accelerated expiry UI exit: $purchase_ui_expiry_status"
+            exit 1
+          fi
 
       - name: Export test screenshots and diagnostics
         if: always()
         run: |
-          if [ -d "$TEST_RESULTS" ]; then
-            xcrun xcresulttool export attachments --path "$TEST_RESULTS" \
-              --output-path "$RUNNER_TEMP/ilyich-native-test-attachments"
+          if [ -d "$UNIT_TEST_RESULTS" ]; then
+            xcrun xcresulttool export attachments --path "$UNIT_TEST_RESULTS" \
+              --output-path "$RUNNER_TEMP/ilyich-native-unit-test-attachments"
+          fi
+          if [ -d "$PURCHASE_UI_NORMAL_TEST_RESULTS" ]; then
+            xcrun xcresulttool export attachments --path "$PURCHASE_UI_NORMAL_TEST_RESULTS" \
+              --output-path "$RUNNER_TEMP/ilyich-native-purchase-ui-normal-test-attachments"
+          fi
+          if [ -d "$PURCHASE_UI_EXPIRY_TEST_RESULTS" ]; then
+            xcrun xcresulttool export attachments --path "$PURCHASE_UI_EXPIRY_TEST_RESULTS" \
+              --output-path "$RUNNER_TEMP/ilyich-native-purchase-ui-expiry-test-attachments"
           fi
 
       - name: Upload test results
@@ -118,7 +178,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Ilyich-native-test-results
-          path: ${{ runner.temp }}/Ilyich-native.xcresult
+          path: |
+            ${{ runner.temp }}/Ilyich-unit-tests.xcresult
+            ${{ runner.temp }}/Ilyich-purchase-ui-normal-tests.xcresult
+            ${{ runner.temp }}/Ilyich-purchase-ui-expiry-tests.xcresult
           if-no-files-found: warn
           retention-days: 7
 
@@ -127,7 +190,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Ilyich-native-test-attachments
-          path: ${{ runner.temp }}/ilyich-native-test-attachments
+          path: |
+            ${{ runner.temp }}/ilyich-native-unit-test-attachments
+            ${{ runner.temp }}/ilyich-native-purchase-ui-normal-test-attachments
+            ${{ runner.temp }}/ilyich-native-purchase-ui-expiry-test-attachments
           if-no-files-found: warn
           retention-days: 7
 
@@ -180,7 +246,8 @@ jobs:
               assert archive.testzip() is None, 'Corrupt IPA archive'
               assert all(name.startswith('Payload/') for name in archive.namelist()), 'Unexpected IPA root'
               info = plistlib.loads(archive.read('Payload/Ilyich.app/Info.plist'))
-              assert info['CFBundleIdentifier'] == 'app.alextran.immich'
+              assert info['CFBundleIdentifier'] == os.environ['APP_BUNDLE_ID']
+              assert info['AppGroupId'] == os.environ['APP_GROUP_ID']
               assert info['CFBundleDisplayName'] == 'Ilyich'
               assert info['CFBundleShortVersionString'] == os.environ['APP_VERSION']
               assert info['CFBundleVersion'] == os.environ['APP_BUILD']
@@ -188,6 +255,7 @@ jobs:
               for extension in ('ShareExtension',):
                   extension_path = f'Payload/Ilyich.app/PlugIns/{extension}.appex'
                   extension_info = plistlib.loads(archive.read(f'{extension_path}/Info.plist'))
+                  assert extension_info['CFBundleIdentifier'] == info['CFBundleIdentifier'] + '.' + extension
                   assert extension_info['CFBundleVersion'] == info['CFBundleVersion']
                   assert extension_info['CFBundleShortVersionString'] == info['CFBundleShortVersionString']
                   assert extension_info['AppGroupId'] == info['AppGroupId']

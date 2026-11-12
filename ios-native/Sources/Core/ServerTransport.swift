@@ -142,24 +142,30 @@ actor ServerTransport {
     /// A request to `path` with the token, on the address the connection chooses, and the route
     /// it was built for, so a caller that sends it itself can report a lost route.
     func prepare(path: String, query: [URLQueryItem] = []) async throws -> (request: URLRequest, route: ServerConnection.Route) {
+        let admitted = try authority?.admit(method: "GET", path: path)
         let route = try await connection.route()
-        return (try await connection.request(path: path, query: query, token: token, route: route), route)
+        let request = try await connection.request(path: path, query: query, token: token, route: route)
+        try authority?.confirm(method: "GET", path: path, admittedUnder: admitted)
+        return (request, route)
     }
 
     /// The answer to a request built here, as URLSession gives it, without reading its status.
     nonisolated func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        _ = try authority?.admit(method: "GET", path: "")
         do { return try await session.data(for: request) } catch { throw settled(error) }
     }
 
     /// Downloads a request's answer into a temporary file the caller owns. `starting` sees the
     /// task before it runs.
     nonisolated func download(_ request: URLRequest, starting: (@Sendable (URLSessionTask) -> Void)? = nil) async throws -> (URL, URLResponse) {
+        _ = try authority?.admit(method: "GET", path: "")
         do { return try await streaming.download(for: request, starting: starting) } catch { throw settled(error) }
     }
 
     /// Sends a request whose answer is read as it arrives, once its status says it succeeded.
     /// Otherwise the start of its body is read to tell what refused it, and that is thrown.
     nonisolated func stream(_ request: URLRequest, path: String) async throws -> (HTTPURLResponse, ResponseBody) {
+        _ = try authority?.admit(method: "GET", path: path)
         do {
             let (response, body) = try await streaming.stream(for: request)
             guard let http = response as? HTTPURLResponse else { throw ServerFailure.undecodable }
@@ -177,6 +183,7 @@ actor ServerTransport {
 
     /// A WebSocket for a request built here, not yet resumed.
     nonisolated func webSocket(with request: URLRequest) throws -> URLSessionWebSocketTask {
+        _ = try authority?.admit(method: "GET", path: "")
         guard let task = streaming.webSocketTask(with: request) else { throw CancellationError() }
         return task
     }

@@ -13,12 +13,12 @@ final class LibraryQueryTests: XCTestCase {
     }
 
     func testTodaysTimelineFeedsKeepTheirCacheKeys() {
-        XCTAssertEqual(LibraryQuery.library.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline")
+        XCTAssertEqual(LibraryQuery.library.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&withPartners=true")
         // The keys TimelineFilter.cacheKey wrote before Q5, pinned.
         XCTAssertEqual(LibraryQuery.favorites.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isFavorite=true")
         XCTAssertEqual(LibraryQuery.archive.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=archive")
         XCTAssertEqual(LibraryQuery.trash.stableKey, "order=desc&orderBy=takenAt&withStacked=true&isTrashed=true")
-        XCTAssertEqual(LibraryQuery.lightroom.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isDeveloped=true")
+        XCTAssertEqual(LibraryQuery.lightroom.stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&isDeveloped=true&withPartners=true")
         XCTAssertEqual(LibraryQuery.partner(partner).stableKey, "order=desc&orderBy=takenAt&withStacked=true&userId=\(partner)")
         XCTAssertEqual(LibraryQuery.album(album).stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&albumId=\(album)")
         XCTAssertEqual(LibraryQuery.album(album, ascending: true).stableKey, "order=asc&orderBy=takenAt&withStacked=true&visibility=timeline&albumId=\(album)")
@@ -94,7 +94,7 @@ final class LibraryQueryTests: XCTestCase {
             XCTAssertEqual(similar.ranking, .relevance(.similar(to: "asset")))
             XCTAssertTrue(similar.stableKey.contains("&similar=asset"), similar.stableKey)
         }
-        XCTAssertEqual(LibraryQuery.library.similar(to: "asset").stableKey, "order=relevance&withStacked=true&visibility=timeline&similar=asset")
+        XCTAssertEqual(LibraryQuery.library.similar(to: "asset").stableKey, "order=relevance&withStacked=true&visibility=timeline&withPartners=true&similar=asset")
     }
 
     func testPlaceIsKnownByItsMembershipNotItsCount() {
@@ -106,7 +106,7 @@ final class LibraryQueryTests: XCTestCase {
         XCTAssertNotEqual(lisbon, sameCount)
         XCTAssertNotEqual(lisbon, otherMarkers)
         XCTAssertNotEqual(LibraryQuery.place(lisbon).stableKey, LibraryQuery.place(sameCount).stableKey)
-        XCTAssertEqual(LibraryQuery.place(lisbon).stableKey, LibraryQuery.library.stableKey + "&place=Lisbon#" + lisbon.revision)
+        XCTAssertEqual(LibraryQuery.place(lisbon).stableKey, "order=desc&orderBy=takenAt&withStacked=true&visibility=timeline&place=Lisbon#" + lisbon.revision)
         // A real place ID joins its names with '|' and goes in raw, as the feed's cache key had it
         // before Q5, so the place keeps its cached months and places across the upgrade.
         let portugal = PlaceMembership(placeID: "Portugal|Lisboa|São Paulo", assetIDs: ["a"], markerQuery: "")
