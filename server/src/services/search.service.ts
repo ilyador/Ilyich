@@ -390,10 +390,18 @@ export class SearchService extends BaseService {
       response.verification = { status: 'complete', checked: 0, rejected: 0 };
       return response;
     }
+    // An incomplete check must be retried from the request's starting page.
+    // Advancing past the current batch could permanently skip its unchecked
+    // tail. Previously checked decisions are cached by the verifier.
+    const retryPage: SearchPagination = isNewShapeRequest(dto)
+      ? { nextCursor: dto.cursor ?? encodeSearchCursor(0) }
+      : { nextPage: String(dto.page ?? 1) };
     const options = this.configRepository.getEnv().searchVerification;
     if (!options || auth.sharedLink || this.verifying) {
-      response.verification = { status: 'unavailable', checked: 0, rejected: 0 };
-      return response;
+      return {
+        ...this.mapResponse([], { auth }, retryPage),
+        verification: { status: 'unavailable', checked: 0, rejected: 0 },
+      };
     }
     this.verifying = true;
     const accepted: MapAsset[] = [];
@@ -442,34 +450,27 @@ export class SearchService extends BaseService {
           checked++;
         }
         const more = batch.page.nextPage || batch.page.nextCursor;
-        if (accepted.length > 0 || !more || !loadNext) {
+        if (accepted.length > 0 || !more || !loadNext || pageIndex + 1 >= verificationScanPages) {
           return {
             ...this.mapResponse(accepted, { auth }, batch.page),
             verification: { status: 'complete', checked, rejected: checked - accepted.length },
           };
         }
-        if (pageIndex + 1 >= verificationScanPages) {
-          // An empty nonterminal page ends pagination in older phone clients.
-          // Keep the bounded-work fallback traversable instead of hiding later matches.
-          response.verification = { status: 'unavailable', checked, rejected: checked };
-          return response;
-        }
-        // Older phone clients cannot advance an empty results grid themselves.
+        // Continue past rejected-only batches, but never return rejected or
+        // unchecked candidates as the result of a requested AI check.
         verificationSignal.throwIfAborted();
         batch = await loadNext(batch.page);
       }
     } catch {
       if (!signal?.aborted) this.logger.warn('Visual search verification incomplete.');
-      if (accepted.length > 0) {
-        // Preserve confirmed matches on timeout/failure. This batch is incomplete;
-        // retrying the search can revisit its unchecked tail using cached decisions.
-        return {
-          ...this.mapResponse(accepted, { auth }, batch.page),
-          verification: { status: 'partial', checked, rejected: checked - accepted.length },
-        };
-      }
-      response.verification = { status: 'unavailable', checked, rejected: checked };
-      return response;
+      return {
+        ...this.mapResponse(accepted, { auth }, retryPage),
+        verification: {
+          status: checked > 0 ? 'partial' : 'unavailable',
+          checked,
+          rejected: checked - accepted.length,
+        },
+      };
     } finally {
       this.verifying = false;
     }

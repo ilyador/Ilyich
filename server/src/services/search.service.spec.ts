@@ -425,8 +425,15 @@ describe(SearchService.name, () => {
     });
 
     it.each([false, true])('allows opting out of automatic verification (v3=%s)', async (v3) => {
+      const items = [AssetFactory.create(), AssetFactory.create()].map((asset) => ({
+        ...asset,
+        isDeveloped: false,
+        exifInfo: undefined,
+        faces: undefined,
+      }));
       mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
-      mocks.search.searchSmartV3.mockResolvedValue({ hasNextPage: false, items: [] });
+      mocks.search.searchSmart.mockResolvedValue({ hasNextPage: false, items });
+      mocks.search.searchSmartV3.mockResolvedValue({ hasNextPage: false, items });
       const result = await sut.searchSmart(authStub.user1, {
         query: 'a red hat',
         size: 100,
@@ -434,6 +441,7 @@ describe(SearchService.name, () => {
         ...(v3 && { filter: {} }),
       });
       expect(result.verification).toBeUndefined();
+      expect(result.assets.items.map(({ id }) => id)).toEqual(items.map(({ id }) => id));
       expect(mocks.machineLearning.verifySearchCandidate).not.toHaveBeenCalled();
       if (v3) expect(mocks.search.searchSmartV3.mock.calls[0][0]).toEqual({ take: 100, skip: 0 });
       else expect(mocks.search.searchSmart.mock.calls[0][0]).toEqual({ page: 1, size: 100 });
@@ -499,7 +507,7 @@ describe(SearchService.name, () => {
     );
 
     it.each([false, true])(
-      'falls back after three rejected-only batches without ending pagination (v3=%s)',
+      'returns no rejected photos after three checked batches and advances pagination (v3=%s)',
       async (v3) => {
         const item = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
         mocks.config.getEnv.mockReturnValue(
@@ -514,11 +522,11 @@ describe(SearchService.name, () => {
           size: 1,
           ...(v3 && { filter: {} }),
         });
-        expect(result.assets.items.map(({ id }) => id)).toEqual([item.id]);
-        expect(result.verification).toEqual({ status: 'unavailable', checked: 3, rejected: 3 });
+        expect(result.assets.items).toEqual([]);
+        expect(result.verification).toEqual({ status: 'complete', checked: 3, rejected: 3 });
         expect(repository).toHaveBeenCalledTimes(3);
-        if (v3) expect(decodeSearchCursor(result.assets.nextCursor ?? undefined).offset).toBe(1);
-        else expect(result.assets.nextPage).toBe('2');
+        if (v3) expect(decodeSearchCursor(result.assets.nextCursor ?? undefined).offset).toBe(3);
+        else expect(result.assets.nextPage).toBe('4');
       },
     );
 
@@ -547,8 +555,8 @@ describe(SearchService.name, () => {
       );
       const query = { query: 'a red hat', size: 1, ...(v3 && { filter: {} }) };
       const first = await sut.searchSmart(authStub.user1, query);
-      expect(first.assets.items).toHaveLength(1);
-      expect(first.verification?.status).toBe('unavailable');
+      expect(first.assets.items).toEqual([]);
+      expect(first.verification).toEqual({ status: 'complete', checked: 3, rejected: 3 });
 
       const next = await sut.searchSmart(authStub.user1, {
         ...query,
@@ -556,7 +564,7 @@ describe(SearchService.name, () => {
       });
 
       expect(next.assets.items.map(({ id }) => id)).toEqual([items[3].id]);
-      expect(next.verification).toEqual({ status: 'complete', checked: 3, rejected: 2 });
+      expect(next.verification).toEqual({ status: 'complete', checked: 1, rejected: 0 });
       expect(next.assets.nextPage).toBeNull();
       expect(next.assets.nextCursor).toBeNull();
     });
@@ -572,14 +580,15 @@ describe(SearchService.name, () => {
         return Promise.resolve(false);
       });
       const result = await sut.searchSmart(authStub.user1, { query: 'a red hat', size: 1 }, controller.signal);
-      expect(result.verification?.status).toBe('unavailable');
+      expect(result.assets.items).toEqual([]);
+      expect(result.verification).toEqual({ status: 'partial', checked: 1, rejected: 1 });
       expect(mocks.search.searchSmart).toHaveBeenCalledTimes(1);
       mocks.machineLearning.verifySearchCandidate.mockResolvedValue(true);
       const retry = await sut.searchSmart(authStub.user1, { query: 'a red hat', size: 1 });
       expect(retry.verification?.status).toBe('complete');
     });
 
-    it('returns regular results with an explicit status when inference fails', async () => {
+    it.each([false, true])('returns no unchecked photos when inference fails (v3=%s)', async (v3) => {
       const items = [AssetFactory.create()].map((asset) => ({
         ...asset,
         isDeveloped: false,
@@ -588,11 +597,19 @@ describe(SearchService.name, () => {
       }));
       mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
       mocks.search.searchSmart.mockResolvedValue({ hasNextPage: false, items });
+      mocks.search.searchSmartV3.mockResolvedValue({ hasNextPage: false, items });
       mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
       mocks.machineLearning.verifySearchCandidate.mockRejectedValue(new Error('Timeout'));
-      const result = await sut.searchSmart(authStub.user1, { query: 'a dog running', verify: true, size: 100 });
-      expect(result.assets.items.map((item) => item.id)).toEqual([items[0].id]);
+      const result = await sut.searchSmart(authStub.user1, {
+        query: 'a dog running',
+        verify: true,
+        size: 100,
+        ...(v3 ? { filter: {}, cursor: encodeSearchCursor(20) } : { page: 3 }),
+      });
+      expect(result.assets.items).toEqual([]);
       expect(result.verification?.status).toBe('unavailable');
+      if (v3) expect(decodeSearchCursor(result.assets.nextCursor!).offset).toBe(20);
+      else expect(result.assets.nextPage).toBe('3');
     });
 
     it.each([false, true])('preserves confirmed matches if the next candidate fails (v3=%s)', async (v3) => {
@@ -605,7 +622,9 @@ describe(SearchService.name, () => {
       mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
       const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
       repository.mockResolvedValue({ hasNextPage: true, items });
-      mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
+      mocks.assetJob.getForClipEncoding.mockImplementation((id) =>
+        Promise.resolve({ files: [{ path: `/preview/${id}.jpg` }] } as never),
+      );
       mocks.machineLearning.verifySearchCandidate
         .mockResolvedValueOnce(false)
         .mockResolvedValueOnce(true)
@@ -618,8 +637,130 @@ describe(SearchService.name, () => {
       expect(result.assets.items.map(({ id }) => id)).toEqual([items[1].id]);
       expect(result.verification).toEqual({ status: 'partial', checked: 2, rejected: 1 });
       expect(mocks.machineLearning.verifySearchCandidate).toHaveBeenCalledTimes(3);
-      if (v3) expect(result.assets.nextCursor).toBeTruthy();
-      else expect(result.assets.nextPage).toBe('2');
+      if (v3) expect(decodeSearchCursor(result.assets.nextCursor!).offset).toBe(0);
+      else expect(result.assets.nextPage).toBe('1');
+
+      mocks.machineLearning.verifySearchCandidate.mockImplementation((path) =>
+        Promise.resolve([items[1].id, items[2].id].some((id) => path === `/preview/${id}.jpg`)),
+      );
+      const retry = await sut.searchSmart(authStub.user1, {
+        query: 'a dog running',
+        size: 100,
+        ...(v3 ? { filter: {}, cursor: result.assets.nextCursor! } : { page: Number(result.assets.nextPage) }),
+      });
+      expect(retry.assets.items.map(({ id }) => id)).toEqual([items[1].id, items[2].id]);
+      expect(retry.verification).toEqual({ status: 'complete', checked: 4, rejected: 2 });
+    });
+
+    it.each([false, true])(
+      'retries an all-rejected timeout without skipping its unchecked tail (v3=%s)',
+      async (v3) => {
+        const items = Array.from({ length: 3 }, () => ({
+          ...AssetFactory.create(),
+          isDeveloped: false,
+          exifInfo: undefined,
+          faces: undefined,
+        }));
+        mocks.config.getEnv.mockReturnValue(
+          mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }),
+        );
+        const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
+        repository.mockResolvedValue({ hasNextPage: true, items });
+        mocks.assetJob.getForClipEncoding.mockImplementation((id) =>
+          Promise.resolve({ files: [{ path: `/preview/${id}.jpg` }] } as never),
+        );
+        const timeout = new AbortController();
+        const clock = vitest.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+        let checked = 0;
+        mocks.machineLearning.verifySearchCandidate.mockImplementation(() => {
+          if (++checked === 2) timeout.abort(new DOMException('Test verification budget expired', 'TimeoutError'));
+          return Promise.resolve(false);
+        });
+        const query = {
+          query: 'a dog running',
+          verify: true,
+          size: 3,
+          ...(v3 ? { filter: {}, cursor: encodeSearchCursor(6) } : { page: 3 }),
+        };
+        let first;
+        try {
+          first = await sut.searchSmart(authStub.user1, query);
+        } finally {
+          clock.mockRestore();
+        }
+        expect(first.assets.items).toEqual([]);
+        expect(first.verification).toEqual({ status: 'partial', checked: 2, rejected: 2 });
+        if (v3) expect(decodeSearchCursor(first.assets.nextCursor!).offset).toBe(6);
+        else expect(first.assets.nextPage).toBe('3');
+
+        mocks.machineLearning.verifySearchCandidate.mockImplementation((path) =>
+          Promise.resolve(path === `/preview/${items[2].id}.jpg`),
+        );
+        const retry = await sut.searchSmart(authStub.user1, {
+          ...query,
+          ...(v3 ? { cursor: first.assets.nextCursor! } : { page: Number(first.assets.nextPage) }),
+        });
+        expect(retry.assets.items.map(({ id }) => id)).toEqual([items[2].id]);
+        expect(retry.verification).toEqual({ status: 'complete', checked: 3, rejected: 2 });
+        if (v3)
+          expect(mocks.search.searchSmartV3.mock.calls.map(([page]) => page)).toEqual([
+            { take: 3, skip: 6 },
+            { take: 3, skip: 6 },
+          ]);
+        else
+          expect(mocks.search.searchSmart.mock.calls.map(([page]) => page)).toEqual([
+            { size: 3, page: 3 },
+            { size: 3, page: 3 },
+          ]);
+      },
+    );
+
+    it.each([false, true])(
+      'returns no candidates when checking is requested but not configured (v3=%s)',
+      async (v3) => {
+        const item = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+        mocks.config.getEnv.mockReturnValue(mockEnvData({}));
+        const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
+        repository.mockResolvedValue({ hasNextPage: true, items: [item] });
+        const result = await sut.searchSmart(authStub.user1, {
+          query: 'a dog running',
+          verify: true,
+          size: 10,
+          ...(v3 ? { filter: {}, cursor: encodeSearchCursor(20) } : { page: 3 }),
+        });
+        expect(result.assets.items).toEqual([]);
+        expect(result.verification).toEqual({ status: 'unavailable', checked: 0, rejected: 0 });
+        expect(mocks.machineLearning.verifySearchCandidate).not.toHaveBeenCalled();
+        if (v3) expect(decodeSearchCursor(result.assets.nextCursor!).offset).toBe(20);
+        else expect(result.assets.nextPage).toBe('3');
+      },
+    );
+
+    it.each([false, true])('does not leak unchecked candidates while another check is running (v3=%s)', async (v3) => {
+      const item = { ...AssetFactory.create(), isDeveloped: false, exifInfo: undefined, faces: undefined };
+      mocks.config.getEnv.mockReturnValue(mockEnvData({ searchVerification: { url: 'http://ollama', model: 'test' } }));
+      const repository = v3 ? mocks.search.searchSmartV3 : mocks.search.searchSmart;
+      repository.mockResolvedValue({ hasNextPage: false, items: [item] });
+      mocks.assetJob.getForClipEncoding.mockResolvedValue({ files: [{ path: '/preview/test.jpg' }] } as never);
+      const started = Promise.withResolvers<void>();
+      const decision = Promise.withResolvers<boolean>();
+      mocks.machineLearning.verifySearchCandidate.mockImplementationOnce(() => {
+        started.resolve();
+        return decision.promise;
+      });
+      const query = { query: 'a dog running', verify: true, size: 10, ...(v3 && { filter: {} }) };
+      const first = sut.searchSmart(authStub.user1, query);
+      await started.promise;
+      try {
+        const second = await sut.searchSmart(authStub.user1, query);
+        expect(second.assets.items).toEqual([]);
+        expect(second.verification).toEqual({ status: 'unavailable', checked: 0, rejected: 0 });
+      } finally {
+        decision.resolve(true);
+      }
+      const confirmed = await first;
+      expect(confirmed.assets.items.map(({ id }) => id)).toEqual([item.id]);
+      expect(mocks.machineLearning.verifySearchCandidate).toHaveBeenCalledTimes(1);
     });
 
     it('should raise a BadRequestException if machine learning is disabled', async () => {
