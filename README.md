@@ -39,6 +39,10 @@
 
 ## iPhone app
 
+<a href="https://apps.apple.com/app/ilyich/id6833595725"><img src="https://toolbox.marketingtools.apple.com/api/v2/badges/download-on-the-app-store/black/en-us" alt="Download on the App Store" height="48"></a>
+
+Get it on the App Store: https://apps.apple.com/app/ilyich/id6833595725
+
 Ilyich for iPhone is a native app written for iOS 27 in Liquid Glass, not a port of the Immich mobile app.
 
 Your whole library is one feed. There are no tabs and no separate gallery: people, places, albums, videos and favorites are filters, and filters stack. Pick a person, add a place, add an album, and the feed narrows to what matches all of them.
