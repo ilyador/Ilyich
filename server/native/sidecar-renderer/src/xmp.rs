@@ -1,6 +1,6 @@
 use lightcraft_engine::{
     crs,
-    develop::{DevelopSettings, Profile, apply_partial},
+    develop::{DevelopSettings, apply_partial},
 };
 use lightcraft_geom::Orientation;
 use lightcraft_meta::XmpData;
@@ -83,49 +83,16 @@ fn has_crs_development(packet: &XmpData) -> bool {
     if !crs::has_adjustments(&packet.properties) {
         return false;
     }
-    let (mut partial, unmapped) = crs::to_partial_report(
+    let (mut partial, _unmapped) = crs::to_partial_report(
         &packet.properties,
         Some(&packet.values),
         crs::Target::Any,
         1.0,
     );
-    // The mapper synthesizes a neutral profile to clear old state when a Look
-    // contains only identifiers or unsupported fields. This stateless helper
-    // has no old profile. Explicit supported controls remain authoritative,
-    // including False/0/identity curves and Amount0, over embedded RAW edits.
-    let supported_profile = partial
-        .get("profile")
-        .and_then(|profile| serde_json::from_value::<Profile>(profile.clone()).ok())
-        .is_some_and(|profile| {
-            profile.imported_look().is_some_and(|look| {
-                look.look_table.is_some()
-                    || packet
-                        .properties
-                        .get("crs:Look/crs:Parameters/crs:ConvertToGrayscale")
-                        .and_then(|values| values.first())
-                        .is_some_and(|value| !value.trim().is_empty())
-                    || (!unmapped
-                        .iter()
-                        .any(|name| name.starts_with("Look (invalid profile "))
-                        && packet.properties.keys().any(|key| {
-                            matches!(
-                                key.as_str(),
-                                "crs:Look/crs:Parameters/crs:Contrast2012"
-                                    | "crs:Look/crs:Parameters/crs:Highlights2012"
-                                    | "crs:Look/crs:Parameters/crs:Shadows2012"
-                                    | "crs:Look/crs:Parameters/crs:Clarity2012"
-                                    | "crs:Look/crs:Parameters/crs:ToneCurvePV2012"
-                                    | "crs:Look/crs:Parameters/crs:ToneCurvePV2012Red"
-                                    | "crs:Look/crs:Parameters/crs:ToneCurvePV2012Green"
-                                    | "crs:Look/crs:Parameters/crs:ToneCurvePV2012Blue"
-                            )
-                        }))
-            })
-        });
+    // A Look names a profile; this stateless helper cannot resolve the name, so the reference
+    // alone is not an edit. A monochrome Look's conversion arrives as `treatment`.
     if let Some(object) = partial.as_object_mut() {
-        if !supported_profile {
-            object.remove("profile");
-        }
+        object.remove("profile");
         // A schema promotion describes settings; it is not an edit by itself.
         object.remove("version");
     }
@@ -232,22 +199,32 @@ mod tests {
     }
 
     #[test]
-    fn supported_profile_controls_remain_applicable() {
-        for (amount, parameters) in [
-            ("1", r#"crs:LookTable="E96CB8AF6484F8402BB0E6ECFC8AD0FC""#),
-            ("0", r#"crs:LookTable="E96CB8AF6484F8402BB0E6ECFC8AD0FC""#),
-            ("0", r#"crs:ConvertToGrayscale="True""#),
-            ("1", r#"crs:Contrast2012="12""#),
-            ("1", r#"crs:Contrast2012="0""#),
+    fn a_look_is_development_only_through_its_monochrome_conversion() {
+        for (amount, parameters, expected) in [
+            (
+                "0",
+                r#"crs:ConvertToGrayscale="True""#,
+                Development::Adjustments,
+            ),
+            (
+                "1",
+                r#"crs:ConvertToGrayscale="False""#,
+                Development::Adjustments,
+            ),
+            // The profile's own table and parameters are not rendered: alone they are no edit.
+            (
+                "1",
+                r#"crs:LookTable="E96CB8AF6484F8402BB0E6ECFC8AD0FC""#,
+                Development::Skipped,
+            ),
+            ("1", r#"crs:Contrast2012="12""#, Development::Skipped),
         ] {
             let xml = format!(
-                r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:Look rdf:parseType="Resource" crs:Amount="{amount}"><crs:Parameters rdf:parseType="Resource" {parameters}/></crs:Look></rdf:Description>"#
+                r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:Look><rdf:Description crs:Amount="{amount}"><crs:Parameters><rdf:Description {parameters}/></crs:Parameters></rdf:Description></crs:Look></rdf:Description>"#
             );
             let packet = parse(&xml).unwrap();
-            assert_eq!(development(&packet), Development::Adjustments, "{xml}");
+            assert_eq!(development(&packet), expected, "{xml}");
         }
-        let curve = parse(r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:Look rdf:parseType="Resource"><crs:Parameters rdf:parseType="Resource"><crs:ToneCurvePV2012><rdf:Seq><rdf:li>0, 0</rdf:li><rdf:li>128, 180</rdf:li><rdf:li>255, 255</rdf:li></rdf:Seq></crs:ToneCurvePV2012></crs:Parameters></crs:Look></rdf:Description>"#).unwrap();
-        assert_eq!(development(&curve), Development::Adjustments);
     }
 
     #[test]
@@ -281,7 +258,7 @@ mod tests {
         assert!(
             unmapped
                 .iter()
-                .any(|name| name == "WhiteBalance (missing AsShotTemperature)")
+                .any(|name| name.contains("without AsShotTemperature"))
         );
     }
 
@@ -294,9 +271,8 @@ mod tests {
             settings(&packet, crs::Target::RawAbsolute, 1.5, Orientation::Normal);
         assert_eq!(
             settings.treatment,
-            lightcraft_engine::develop::Treatment::Color
+            lightcraft_engine::develop::Treatment::Bw
         );
-        assert!(settings.is_bw());
         assert_eq!(settings.bw_mix.blue, -35.0);
         assert_eq!(settings.light.exposure, 0.0);
         assert!(unmapped.iter().any(|k| k == "Look"));

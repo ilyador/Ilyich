@@ -34,16 +34,37 @@ pub fn develop(
     let mut request = RenderRequest::fit(width, height);
     request.space = space;
     let rendered = pipeline::render(&source.pixels, &source.info, &settings, &request);
-    let unmapped = lightcraft_engine::develop::unsupported_edits::bounded_names(
-        unmapped
-            .iter()
-            .chain(rendered.unsupported_edits.iter())
-            .map(String::as_str),
-    );
+    let unmapped = bounded_names(unmapped);
     Ok(ResultImage {
         pixels: rendered.image,
         native_width: native_w.round().max(1.0) as usize,
         native_height: native_h.round().max(1.0) as usize,
         unmapped,
     })
+}
+
+/// Sorted, de-duplicated names, bounded so the response header stays within the protocol's
+/// 64 KiB: at most 256 names of at most 128 bytes, with a marker when any were left out.
+fn bounded_names(names: Vec<String>) -> Vec<String> {
+    const MAX_NAMES: usize = 256;
+    const MAX_NAME_BYTES: usize = 128;
+    const OMITTED: &str = "AdditionalUnsupportedSettingsOmitted";
+    let all: std::collections::BTreeSet<String> = names.into_iter().collect();
+    let mut omitted = false;
+    let mut out: Vec<String> = all
+        .into_iter()
+        .filter(|name| {
+            let fits = name.len() <= MAX_NAME_BYTES;
+            omitted |= !fits;
+            fits
+        })
+        .collect();
+    if out.len() > MAX_NAMES - 1 {
+        out.truncate(MAX_NAMES - 1);
+        omitted = true;
+    }
+    if omitted {
+        out.push(OMITTED.into());
+    }
+    out
 }

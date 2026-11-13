@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 const LIGHTCRAFT_REV: &str = match option_env!("IMMICH_LIGHTCRAFT_REV") {
     Some(revision) => revision,
-    None => "80b44dee4e7d37f41871a0ee03d733a5679a5f0a",
+    None => "9e0cfec581d25808bba7fa7da4f339713ad27691",
 };
 
 fn version() -> String {
@@ -187,6 +187,16 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    // Previews must not depend on the host: Lightcraft reads user camera profiles from this
+    // directory, or from the user's configuration directory when it is unset. Name one that
+    // cannot exist so only the profiles built into Lightcraft apply.
+    // SAFETY: no other thread exists yet; this is the first statement of the process.
+    unsafe {
+        std::env::set_var(
+            "LIGHTCRAFT_CAMERA_PROFILES",
+            "/nonexistent/immich-sidecar-renderer/camera-profiles",
+        )
+    };
     match std::panic::catch_unwind(run) {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {

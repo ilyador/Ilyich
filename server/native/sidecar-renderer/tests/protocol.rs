@@ -211,43 +211,37 @@ fn external_xmp_takes_precedence_over_embedded_development() {
 }
 
 #[test]
-fn missing_runtime_profile_table_is_reported_and_amount_zero_preserves_monochrome() {
+fn a_monochrome_look_renders_in_grayscale_at_any_amount_and_is_reported() {
     let dir = fixture(255);
+    // Lightroom's own form: the Look and its Parameters are nested descriptions.
     let packet = |amount: &str| {
         format!(
-            r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:ConvertToGrayscale="False"><crs:Look rdf:parseType="Resource" crs:Amount="{amount}"><crs:Parameters rdf:parseType="Resource" crs:ConvertToGrayscale="True" crs:LookTable="E96CB8AF6484F8402BB0E6ECFC8AD0FC"/></crs:Look></rdf:Description>"#
+            r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:ConvertToGrayscale="False"><crs:Look><rdf:Description crs:Name="Own monochrome" crs:Amount="{amount}"><crs:Parameters><rdf:Description crs:ConvertToGrayscale="True" crs:LookTable="E96CB8AF6484F8402BB0E6ECFC8AD0FC"/></crs:Parameters></rdf:Description></crs:Look></rdf:Description>"#
         )
     };
-    let unresolved = call(&dir, &packet("1.2"), &[]);
-    let (header, pixels) = frame(&unresolved);
-    assert_eq!(header["status"], "developed");
-    assert!(header["unmapped"].as_array().unwrap().iter().any(|name| {
-        name.as_str().is_some_and(|name| {
-            name.starts_with("LookTable E96CB8AF6484F8402BB0E6ECFC8AD0FC")
-                && name.contains("missing resource")
-        })
-    }));
-    assert!(
-        pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|p| p[0].abs_diff(p[1]) <= 1 && p[1].abs_diff(p[2]) <= 1)
-    );
-
-    let bypassed = call(&dir, &packet("0"), &[]);
-    let (header, pixels) = frame(&bypassed);
-    assert!(!header["unmapped"].as_array().unwrap().iter().any(|name| {
-        name.as_str()
-            .is_some_and(|name| name.contains("missing resource"))
-    }));
-    assert!(
-        pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|p| p[0].abs_diff(p[1]) <= 1 && p[1].abs_diff(p[2]) <= 1)
-    );
+    for amount in ["1.2", "0"] {
+        let output = call(&dir, &packet(amount), &[]);
+        let (header, pixels) = frame(&output);
+        assert_eq!(header["status"], "developed", "amount {amount}");
+        // The profile's table is not rendered; the response says so.
+        assert!(
+            header["unmapped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|name| name.as_str().is_some_and(|name| name.starts_with("Look"))),
+            "amount {amount}: {}",
+            header["unmapped"]
+        );
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[0].abs_diff(p[1]) <= 1 && p[1].abs_diff(p[2]) <= 1),
+            "amount {amount}"
+        );
+    }
 }
 
 #[test]
@@ -371,32 +365,19 @@ fn long_diagnostics_do_not_discard_developed_pixels() {
 }
 
 #[test]
-fn external_supported_neutral_profiles_override_embedded_monochrome() {
+fn an_external_color_look_overrides_embedded_monochrome() {
     let dir = raw_fixture(Some(&packet(r#"crs:ConvertToGrayscale="True""#)));
-    for definition in [
-        r#"<crs:Look rdf:parseType="Resource"><crs:Parameters rdf:parseType="Resource" crs:ConvertToGrayscale="False"/></crs:Look>"#,
-        r#"<crs:Look rdf:parseType="Resource"><crs:Parameters rdf:parseType="Resource" crs:Contrast2012="0"/></crs:Look>"#,
-        r#"<crs:Look rdf:parseType="Resource"><crs:Parameters rdf:parseType="Resource"><crs:ToneCurvePV2012><rdf:Seq><rdf:li>0, 0</rdf:li><rdf:li>255, 255</rdf:li></rdf:Seq></crs:ToneCurvePV2012></crs:Parameters></crs:Look>"#,
-        r#"<crs:Look rdf:parseType="Resource" crs:Amount="0"><crs:Parameters rdf:parseType="Resource" crs:LookTable="E96CB8AF6484F8402BB0E6ECFC8AD0FC"/></crs:Look>"#,
-    ] {
-        let xml = format!(
-            r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">{definition}</rdf:Description>"#
-        );
-        let output = call_raw(&dir, &xml, &[]);
-        let (header, pixels) = frame(&output);
-        assert_eq!(header["status"], "developed", "{definition}");
-        assert!(
-            pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .any(|p| p[0].abs_diff(p[2]) > 10)
-        );
-        assert!(!header["unmapped"].as_array().unwrap().iter().any(|name| {
-            name.as_str()
-                .is_some_and(|name| name.contains("missing resource"))
-        }));
-    }
+    let xml = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"><crs:Look><rdf:Description crs:Name="Own colour"><crs:Parameters><rdf:Description crs:ConvertToGrayscale="False"/></crs:Parameters></rdf:Description></crs:Look></rdf:Description>"#;
+    let output = call_raw(&dir, xml, &[]);
+    let (header, pixels) = frame(&output);
+    assert_eq!(header["status"], "developed");
+    assert!(
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|p| p[0].abs_diff(p[2]) > 10)
+    );
 }
 
 #[test]
