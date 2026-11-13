@@ -7,13 +7,16 @@ edits remain on Immich's normal preview path.
 
 Lightcraft is a pinned Cargo Git dependency; the Lightcraft app is not required.
 Its public CRS mapper, source loader and CPU pipeline provide the rendering.
-The current [fork pin](https://github.com/ilyador/lightcraft/commit/80b44dee4e7d37f41871a0ee03d733a5679a5f0a)
-includes the work in [Lightcraft PR #1226](https://github.com/storytold/lightcraft/pull/1226).
+The current [fork pin](https://github.com/ilyador/lightcraft/commit/9e0cfec581d25808bba7fa7da4f339713ad27691)
+is upstream Lightcraft `main` plus three fixes that are not upstream yet: a monochrome
+Lightroom profile develops in B&W, an enhanced DNG develops its enhanced image, and
+an Auto or named white balance keeps the numbers Lightroom saved. A profile's own
+table, curve and parameters are not rendered and are reported as `Look`.
 Appearance calibration belongs in Lightcraft; Lightroom parity remains incomplete.
 
 ## Build and test
 
-Use Rust 1.94 or newer (Docker and CI use 1.98.0) and `libraw-dev` version 0.21 or
+Use Rust 1.95 or newer (Docker and CI use 1.98.0) and `libraw-dev` version 0.21 or
 newer on Debian/Ubuntu:
 
 ```sh
@@ -49,7 +52,7 @@ Stdout contains one JSON line (at most 64 KiB), then exactly
 ```json
 {
   "version": 1,
-  "rendererVersion": "immich-sidecar-renderer/0.1.0/adapter/BUILD_HASH/lightcraft/80b44dee4e7d37f41871a0ee03d733a5679a5f0a/libraw/0.21.5-Release",
+  "rendererVersion": "immich-sidecar-renderer/0.1.0/adapter/BUILD_HASH/lightcraft/9e0cfec581d25808bba7fa7da4f339713ad27691/libraw/0.21.5-Release",
   "status": "developed",
   "width": 2160,
   "height": 1440,
@@ -75,7 +78,8 @@ preparation. It rejects Lightcraft's embedded-JPEG fallback and instead uses
 LibRaw for unsupported RAW variants, including CR3. A small C++ shim calls
 LibRaw's public API and owns its allocation; no decoder implementation is copied.
 Camera support follows the decoders and file metadata, without camera-model
-branches in this adapter. Only bundled camera profiles are used, so external
+branches in this adapter. Only bundled camera profiles are used: the process points
+Lightcraft's user profile directory at a path that cannot exist, so the host's
 profile directories cannot alter previews.
 The adapter preserves the calibration returned by Lightcraft's loader; appearance
 corrections belong in that dependency rather than Immich.
@@ -95,7 +99,7 @@ adapter does not add an unverified transform.
 XMP is limited to 128 MiB, 64 nesting levels and 200,000 XML nodes. Source decoding
 is limited to 100 million pixels. Transparent inputs with applicable edits are
 rejected because the current pipeline discards alpha. Unsupported adjustments are
-reported through `unmapped`, including unresolved profile tables; they are not
+reported through `unmapped`, including a profile's own look (`Look`); they are not
 claims of Lightroom fidelity. `LIGHTCRAFT_PROFILE=1` enables timing diagnostics
 on stderr.
 
@@ -103,6 +107,6 @@ Response diagnostics are bounded to fit the protocol header. If names are too
 long or numerous, `AdditionalUnsupportedSettingsOmitted` reports the omission.
 
 Procedural unit/protocol fixtures cover sidecar-only invocation, RAW/native detail,
-external precedence, grayscale, crop/orientation, sizing without upscaling, neutral
-profile controls, colorspaces, malformed XML and transparency. They verify the
+external precedence, grayscale, monochrome looks, crop/orientation, sizing without
+upscaling, colorspaces, malformed XML and transparency. They verify the
 integration contract, not Lightroom appearance parity.

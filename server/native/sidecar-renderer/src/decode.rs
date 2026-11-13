@@ -137,7 +137,14 @@ pub fn load(path: &Path) -> Result<Source, String> {
         // The loader preserves upstream camera calibration and tone. Its
         // unsupported-RAW fallback is an embedded JPEG: accept only raw=true.
         let orientation = info.orientation;
-        match lightcraft_engine::files::load_vec_builtin_profiles(bytes, native_edge) {
+        // New photos remove single outlier photosites by default; a sidecar has no say in it.
+        let with = lightcraft_engine::media::RawDecode {
+            dcp: None,
+            outliers: lightcraft_engine::develop::DevelopSettings::default()
+                .detail
+                .nr_outliers,
+        };
+        match lightcraft_engine::files::load_vec(bytes, native_edge, with) {
             Ok((pixels, info)) if info.raw => {
                 if std::env::var_os("LIGHTCRAFT_PROFILE").is_some() {
                     eprintln!(
@@ -245,7 +252,7 @@ pub fn load_libraw(path: &Path) -> Result<Source, String> {
             pixels: image.into_oriented(orientation),
             orientation,
             info: SourceInfo {
-                native_long,
+                native_long: Some(native_long),
                 raw: true,
                 as_shot_temp: temp,
                 as_shot_tint: tint,
@@ -275,7 +282,7 @@ pub fn load_libraw(path: &Path) -> Result<Source, String> {
             .to_working()
             .into_oriented(Orientation::from_exif(decoded.orientation)),
         info: SourceInfo {
-            native_long: decoded.source_width.max(decoded.source_height) as usize,
+            native_long: Some(decoded.source_width.max(decoded.source_height) as usize),
             ..Default::default()
         },
         orientation: Orientation::from_exif(decoded.orientation),
