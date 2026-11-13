@@ -20,6 +20,9 @@
 > [!NOTE]
 > Ilyich is a fork of [Immich](https://github.com/immich-app/immich). It runs Immich's server and web app, adds the features marked ★ below, and has its own native iPhone app. Ilyich is not affiliated with or endorsed by Immich.
 
+> [!IMPORTANT]
+> Use the `dev` branch. `main` is an unchanged copy of Immich's latest stable release and contains none of Ilyich.
+
 > [!WARNING]
 > ⚠️ Always follow [3-2-1](https://www.backblaze.com/blog/the-3-2-1-backup-strategy/) backup plan for your precious photos and videos!
 
@@ -106,8 +109,12 @@ Lightroom previews and the AI check depend on how the server is configured.
 
 ## Branches
 
-- **`dev`** is Ilyich: the latest stable Immich release with the fork's work on top. Build and run from it.
-- **`main`** mirrors the latest stable Immich release and contains no fork changes.
+- **`dev`** is Ilyich: the latest stable Immich release with the fork's work on top. Clone, build and run from it.
+- **`main`** is a plain copy of the latest stable Immich release with no Ilyich changes. It exists only to track Immich; don't build from it.
+
+```bash
+git clone --branch dev https://github.com/ilyador/Ilyich.git
+```
 
 ## Contributors
 
