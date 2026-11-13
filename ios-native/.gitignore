@@ -2,3 +2,5 @@
 DerivedData/
 *.xcresult/
 build/
+# App Store submission notes stay local.
+APP_STORE.md
