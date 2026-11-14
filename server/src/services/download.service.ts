@@ -94,6 +94,12 @@ export class DownloadService extends BaseService {
     const assets = await this.assetRepository.getForOriginals(dto.assetIds, dto.edited ?? false);
     const assetMap = new Map(assets.map((asset) => [asset.id, asset]));
     const paths: Record<string, number> = {};
+    // For Lightroom, each original travels with its sidecar named after it (DSC_0001.NEF and
+    // DSC_0001.xmp), which Lightroom reads on import. Lightroom finds duplicates itself.
+    const sidecars = dto.lightroom
+      ? await this.assetRepository.getSidecarPaths(dto.assetIds)
+      : new Map<string, string>();
+    const sidecarNames = new Set<string>();
 
     for (const assetId of dto.assetIds) {
       const asset = assetMap.get(assetId);
@@ -120,6 +126,23 @@ export class DownloadService extends BaseService {
       }
 
       zip.addFile(realpath, filename);
+
+      const sidecar = sidecars.get(assetId);
+      if (!sidecar) {
+        continue;
+      }
+      // Two originals sharing a name stem (DSC_0001.NEF and DSC_0001.JPG) can't both take
+      // DSC_0001.xmp; the second keeps its extension in the sidecar's name instead.
+      const paired = `${parse(filename).name}.xmp`;
+      const sidecarName = sidecarNames.has(paired) ? `${filename}.xmp` : paired;
+      sidecarNames.add(sidecarName);
+      let sidecarPath = sidecar;
+      try {
+        sidecarPath = await this.storageRepository.realpath(sidecar);
+      } catch {
+        this.logger.warn('Unable to resolve realpath', { sidecar });
+      }
+      zip.addFile(sidecarPath, sidecarName);
     }
 
     void zip.finalize();

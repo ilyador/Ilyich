@@ -45,6 +45,18 @@ const DownloadArchiveSchema = z
       }, z.boolean())
       .optional()
       .describe('Download edited asset if available'),
+    lightroom: z
+      .preprocess((val) => {
+        if (val === 'true') {
+          return true;
+        }
+        if (val === 'false') {
+          return false;
+        }
+        return val;
+      }, z.boolean())
+      .optional()
+      .describe("Include each asset's XMP sidecar, named the way Lightroom pairs it with its original"),
     archiveName: z.string().optional().describe('The name of the archive to download, without extension'),
   })
   .meta({ id: 'DownloadArchiveDto' });

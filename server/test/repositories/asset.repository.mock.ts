@@ -54,6 +54,7 @@ export const newAssetRepositoryMock = (): Mocked<RepositoryInterface<AssetReposi
     deleteBulkMetadata: vitest.fn(),
     getForOriginal: vitest.fn(),
     getForOriginals: vitest.fn(),
+    getSidecarPaths: vitest.fn().mockResolvedValue(new Map()),
     getForThumbnail: vitest.fn(),
     getForVideo: vitest.fn(),
     getForEdit: vitest.fn(),
