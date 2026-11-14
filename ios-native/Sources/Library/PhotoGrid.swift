@@ -67,8 +67,9 @@ struct PhotoGrid: UIViewRepresentable {
         let coordinator = context.coordinator
         coordinator.parent = self
         if coordinator.binder.pipeline !== pipeline { coordinator.binder = ThumbnailBinder(pipeline: pipeline) }
-        view.isScrollEnabled = !store.isReplacingFeed
-        view.isUserInteractionEnabled = !store.isReplacingFeed
+        // A feed being replaced stays usable while the next one loads, however long a checked
+        // search takes: it scrolls and opens its photos. Only selecting waits for the next feed,
+        // which a selection begun here would not belong to.
         coordinator.rangeDrag?.isEnabled = store.isSelecting && !store.isReplacingFeed
         if !store.isSelecting || store.isReplacingFeed { coordinator.dragSelector.end() }
         let sections = store.sections
@@ -276,6 +277,7 @@ struct PhotoGrid: UIViewRepresentable {
             else if let photo = entry.local { parent.onOpenLocal?(photo) }
         }
         @objc func selectByDragging(_ gesture: UILongPressGestureRecognizer) {
+            guard !parent.store.isReplacingFeed else { return }
             guard let collection, let index = collection.indexPathForItem(at: gesture.location(in: collection)),
                   let entry = parent.store.entry(section: index.section, item: index.item) else { return }
             if gesture.state == .began { parent.store.isSelecting = true; Haptics.selectionChanged() }
@@ -435,7 +437,8 @@ struct PhotoGrid: UIViewRepresentable {
         // The scroll delegate goes to the viewport, which measures the motion, knows where a
         // fling lands and sends the demand once per frame; the policy decides what may download.
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            publishVisiblePosition()
+            // A feed being replaced is no longer the store's: where it scrolls to isn't the feed's place.
+            if !parent.store.isReplacingFeed { publishVisiblePosition() }
             viewport.didScroll()
         }
         func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
