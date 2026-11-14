@@ -697,16 +697,13 @@ extension FrozenFeed: DisplayedFeed {
     /// Adds a layer to the filters shown (N6): the feed narrows to it as well, by AND. A layer
     /// already there stays as it is, and a new place takes the place of the one there. A feed that
     /// is no layer (a partner's, similar photos, More's filtered library) gives way to it. A search
-    /// typed ends, as choosing a filter always ended it.
+    /// typed stays and runs again inside the filters, AI check and all, as it does when a layer
+    /// goes; a filter already shown changes nothing.
     func add(_ layer: FilterLayer) {
         if case .place(let membership, _) = layer, membership.assetIDs.isEmpty { return }
         var next = stack
-        guard next.add(layer) else {
-            // Already shown: only a search typed ends.
-            if !query.isEmpty { search("") }
-            return
-        }
-        open(next)
+        guard next.add(layer) else { return }
+        open(next, keepingSearch: !query.isEmpty)
     }
 
     /// Removes only one layer (N6). The others stay, and so does a search typed in them or More's

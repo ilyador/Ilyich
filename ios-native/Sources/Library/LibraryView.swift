@@ -692,7 +692,7 @@ struct LibraryView: View {
         case .show(let collection):
             Haptics.itemChosen()
             // The pill stays hidden until the finger lifts.
-            store.show(collection); searchText = ""
+            store.show(collection); keepSearchedText()
             if edgeInteraction.isShelfDragging { chosenThisStroke = item.id } else { closeIntoTag(item.id) }
         case .clear:
             Haptics.itemChosen(); closeShelves(feedback: false)
@@ -974,8 +974,8 @@ struct LibraryView: View {
                 store.applySearchOptions(mode: mode, filter: filter)
             }
         // Choosing from Manage people or Manage albums stacks the choice too (N6).
-        case .people: PeopleView(api: api, pipeline: pipeline) { store.show(.person($0)); navigator.dismiss(level: level); searchText = "" }
-        case .albums: AlbumsView(api: api, pipeline: pipeline) { store.show(.album($0)); navigator.dismiss(level: level); searchText = "" }
+        case .people: PeopleView(api: api, pipeline: pipeline) { store.show(.person($0)); navigator.dismiss(level: level); keepSearchedText() }
+        case .albums: AlbumsView(api: api, pipeline: pipeline) { store.show(.album($0)); navigator.dismiss(level: level); keepSearchedText() }
         case .settings(let route):
             if let destination = SettingsDestination(rawValue: route.rawValue) {
                 SettingsDestinationView(api: api, destination: destination, pipeline: pipeline, session: session)
@@ -988,7 +988,7 @@ struct LibraryView: View {
             // replaces the filters.
             MoreCollectionsView(api: api, pipeline: pipeline, features: features, onOpenAsset: { navigator.send(.openAsset($0)) }, onFilter: { query, title in
                 if let collection = LibraryCollection.more(showing: query) { store.show(collection) } else { store.setFeed(query, title: title) }
-                searchText = ""; navigator.dismiss(level: level)
+                keepSearchedText(); navigator.dismiss(level: level)
             }, onPlayMemory: { navigator.present(.memoryPlayer($0), from: level + 1) })
         default:
             EmptyView()
@@ -1008,7 +1008,13 @@ struct LibraryView: View {
 
     /// A place chosen on the Earth joins the filters, taking the place of one already there (N6).
     private func selectPlace(_ place: PlaceCollection) {
-        store.add(.place(place.membership, title: place.title)); searchText = ""
+        store.add(.place(place.membership, title: place.title)); keepSearchedText()
+    }
+
+    /// After a filter is chosen the field keeps a search that runs in the filters now; text never
+    /// searched, or a search a feed with no layer ended, goes.
+    private func keepSearchedText() {
+        if store.query.isEmpty { searchText = "" }
     }
 
     /// Hands the navigator what runs once everything over the library has closed: the timeline,

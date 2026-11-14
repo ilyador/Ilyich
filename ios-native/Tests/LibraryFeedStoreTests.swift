@@ -395,6 +395,31 @@ import XCTest
         store.stop()
     }
 
+    func testAFilterAddedToASearchNarrowsItInsteadOfEndingIt() async throws {
+        let api = LibraryAPIFixture([.page(["dog-photo", "dog-video"]), .page(["dog-video"])])
+        let store = LibraryFeedStore(source: api)
+        store.setChecksContent(true)
+        store.search("dog jumping in the sea")
+        try await settle(store, calls: 1, api: api)
+        store.show(.videos)
+        try await settle(store, calls: 2, api: api)
+        XCTAssertEqual(store.query, "dog jumping in the sea", "Adding a filter keeps the search typed, as removing one does.")
+        XCTAssertEqual(store.stack.layers.map(\.id), [FilterLayer.collection(.videos).id])
+        XCTAssertEqual(store.results.map(\.id), ["dog-video"])
+        let searches = await api.searches
+        let narrowed = try XCTUnwrap(searches.last)
+        XCTAssertEqual(narrowed.query, "dog jumping in the sea")
+        XCTAssertEqual(narrowed.filter.type?.eq, "VIDEO", "The search runs again inside the filter.")
+        XCTAssertEqual(narrowed.verify, true, "The AI check stays on.")
+        // Choosing a filter already shown changes nothing, the search included.
+        store.show(.videos)
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(store.query, "dog jumping in the sea")
+        let calls = await api.cursors.count
+        XCTAssertEqual(calls, 2)
+        store.stop()
+    }
+
     func testSwitchingScopeClearsSelectionAndInvalidatesPendingSearch() async throws {
         let api = LibraryAPIFixture([.page(["old-query"])], delayed: true)
         let store = LibraryFeedStore(source: api)
@@ -1201,8 +1226,9 @@ private actor LibraryAPIFixture: FakeFeedSource {
     private func assets(for query: LibraryQuery) -> [Asset] {
         scopedTimelineAssets[scopeKey(query)] ?? timelineAssets
     }
+    var searches: [SearchQuery] = []
     func search(_ query: SearchQuery) async throws -> SearchResponse {
-        cursors.append(query.cursor)
+        cursors.append(query.cursor); searches.append(query)
         if delayed { try await Task.sleep(for: .seconds(3)) }
         guard !pages.isEmpty else { throw ServerFailure.http(500, nil) }
         return pages.removeFirst()
