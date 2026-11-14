@@ -1553,6 +1553,20 @@ export class AssetRepository {
       .select('originalPath');
   }
 
+  /** Each asset's XMP sidecar, by asset ID; assets without one are left out. */
+  async getSidecarPaths(ids: string[]): Promise<Map<string, string>> {
+    if (ids.length === 0) {
+      return new Map();
+    }
+    const rows = await this.db
+      .selectFrom('asset_file')
+      .select(['assetId', 'path'])
+      .where('assetId', 'in', ids)
+      .where('type', '=', AssetFileType.Sidecar)
+      .execute();
+    return new Map(rows.map(({ assetId, path }) => [assetId, path]));
+  }
+
   @GenerateSql({ params: [DummyValue.UUID, true] })
   getForOriginal(id: string, isEdited: boolean) {
     return this.buildGetForOriginal([id], isEdited).executeTakeFirstOrThrow();

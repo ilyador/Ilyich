@@ -22659,6 +22659,10 @@
           "edited": {
             "description": "Download edited asset if available",
             "type": "boolean"
+          },
+          "lightroom": {
+            "description": "Include each asset's XMP sidecar, named the way Lightroom pairs it with its original",
+            "type": "boolean"
           }
         },
         "required": [
@@ -28338,7 +28342,7 @@
             "$ref": "#/components/schemas/SearchAssetResponseDto"
           },
           "verification": {
-            "description": "Visual verification status; partial preserves confirmed matches from an incomplete batch; unavailable means regular search results were returned. Retry the search to revisit unchecked candidates.",
+            "description": "Checked searches return only confirmed matches. Complete may be empty with a continuation; partial preserves confirmed matches from an incomplete check; unavailable returns no candidates. Retry an incomplete check from the returned continuation without skipping unchecked candidates. Set verify to false for regular search results.",
             "properties": {
               "checked": {
                 "maximum": 9007199254740991,

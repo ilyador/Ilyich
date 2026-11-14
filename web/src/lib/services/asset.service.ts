@@ -13,7 +13,7 @@ import { executeMutation, readPreloadedQuery } from '#lib/queries/client.ts';
 import { getUserConfigQuery } from '#lib/queries/config-user.query.ts';
 import { Route } from '#lib/route.ts';
 import { SlideshowState, slideshowStore } from '#lib/stores/slideshow.store.ts';
-import { downloadUrl, getAssetMediaUrl, getSharedLink, sleep } from '#lib/utils.ts';
+import { downloadUrl, getAssetMediaUrl, getSharedLink, sleep, downloadUrlPost } from '#lib/utils.ts';
 import type { OnFavorite } from '#lib/utils/actions.ts';
 import { handleError } from '#lib/utils/handle-error.ts';
 import { getFormatter } from '#lib/utils/i18n.ts';
@@ -24,6 +24,7 @@ import {
   AssetVisibility,
   bulkTagAssets,
   getAssetInfo,
+  getBaseUrl,
   runAssetJobs,
   updateAsset,
   updateAssets,
@@ -43,6 +44,7 @@ import {
   mdiDatabaseRefreshOutline,
   mdiDownload,
   mdiDownloadBox,
+  mdiDownloadMultiple,
   mdiFaceRecognition,
   mdiHeadSyncOutline,
   mdiHeart,
@@ -204,6 +206,14 @@ export const getAssetActions = (
     icon: mdiDownloadBox,
     $if: () => !!authUser && asset.isEdited,
     onAction: () => handleDownloadAsset(asset, { edited: false }),
+  };
+
+  // The original with its XMP sidecar, if it has one, named so Lightroom pairs them on import.
+  const DownloadForLightroom: ActionItem = {
+    title: $t('download_for_lightroom'),
+    icon: mdiDownloadMultiple,
+    $if: () => !!authUser,
+    onAction: () => handleDownloadForLightroom(asset),
   };
 
   const SharedLinkDownload: ActionItem = {
@@ -396,6 +406,7 @@ export const getAssetActions = (
     Share,
     Download,
     DownloadOriginal,
+    DownloadForLightroom,
     SharedLinkDownload,
     Offline,
     Info,
@@ -470,6 +481,25 @@ export const handleDownloadAsset = async (asset: AssetResponseDto, { edited }: {
     } catch (error) {
       handleError(error, $t('errors.error_downloading', { values: { filename } }));
     }
+  }
+};
+
+/**
+ * A zip of the untouched original and, when the photo has one, its XMP sidecar renamed to pair with it
+ * (DSC_0001.NEF and DSC_0001.xmp). Lightroom applies the sidecar's edits on import and skips photos it
+ * already has.
+ */
+const handleDownloadForLightroom = async (asset: AssetResponseDto) => {
+  const $t = await getFormatter();
+  const dot = asset.originalFileName.lastIndexOf('.');
+  const archiveName = dot > 0 ? asset.originalFileName.slice(0, dot) : asset.originalFileName;
+  const queryParams = asQueryString(authManager.params);
+  const url = getBaseUrl() + '/download/archive' + (queryParams ? `?${queryParams}` : '');
+  try {
+    toastManager.primary($t('downloading_asset_filename', { values: { filename: `${archiveName}.zip` } }));
+    downloadUrlPost(url, [asset.id], archiveName, { edited: false, lightroom: true });
+  } catch (error) {
+    handleError(error, $t('errors.error_downloading', { values: { filename: asset.originalFileName } }));
   }
 };
 

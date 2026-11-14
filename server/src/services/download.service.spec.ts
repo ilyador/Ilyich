@@ -240,6 +240,56 @@ describe(DownloadService.name, () => {
       expect(archiveMock.addFile).toHaveBeenNthCalledWith(2, '/data/library/b.jpg', '......tmppwn+1.jpg');
     });
 
+    it('should pair each original with its sidecar for Lightroom', async () => {
+      const archiveMock = {
+        addFile: vitest.fn(),
+        finalize: vitest.fn(),
+        stream: new Readable(),
+      };
+      const raw = AssetFactory.create({ originalFileName: 'DSC_0001.NEF', originalPath: '/archive/DSC_0001.NEF' });
+      const jpeg = AssetFactory.create({ originalFileName: 'DSC_0001.JPG', originalPath: '/archive/DSC_0001.JPG' });
+      const plain = AssetFactory.create({ originalFileName: 'IMG_0002.HEIC', originalPath: '/archive/IMG_0002.HEIC' });
+
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([raw.id, jpeg.id, plain.id]));
+      mocks.asset.getForOriginals.mockResolvedValue([raw, jpeg, plain]);
+      mocks.asset.getSidecarPaths.mockResolvedValue(
+        new Map([
+          [raw.id, '/archive/DSC_0001.xmp'],
+          [jpeg.id, '/archive/DSC_0001.JPG.xmp'],
+        ]),
+      );
+      mocks.storage.createZipStream.mockReturnValue(archiveMock);
+
+      await sut.downloadArchive(authStub.admin, { assetIds: [raw.id, jpeg.id, plain.id], lightroom: true });
+
+      expect(mocks.asset.getSidecarPaths).toHaveBeenCalledWith([raw.id, jpeg.id, plain.id]);
+      expect(archiveMock.addFile.mock.calls).toEqual([
+        ['/archive/DSC_0001.NEF', 'DSC_0001.NEF'],
+        ['/archive/DSC_0001.xmp', 'DSC_0001.xmp'],
+        ['/archive/DSC_0001.JPG', 'DSC_0001.JPG'],
+        ['/archive/DSC_0001.JPG.xmp', 'DSC_0001.JPG.xmp'],
+        ['/archive/IMG_0002.HEIC', 'IMG_0002.HEIC'],
+      ]);
+    });
+
+    it('should leave sidecars out unless asked for Lightroom', async () => {
+      const archiveMock = {
+        addFile: vitest.fn(),
+        finalize: vitest.fn(),
+        stream: new Readable(),
+      };
+      const raw = AssetFactory.create({ originalFileName: 'DSC_0001.NEF', originalPath: '/archive/DSC_0001.NEF' });
+
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([raw.id]));
+      mocks.asset.getForOriginals.mockResolvedValue([raw]);
+      mocks.storage.createZipStream.mockReturnValue(archiveMock);
+
+      await sut.downloadArchive(authStub.admin, { assetIds: [raw.id] });
+
+      expect(mocks.asset.getSidecarPaths).not.toHaveBeenCalled();
+      expect(archiveMock.addFile.mock.calls).toEqual([['/archive/DSC_0001.NEF', 'DSC_0001.NEF']]);
+    });
+
     it('should resolve symlinks', async () => {
       const archiveMock = {
         addFile: vitest.fn(),

@@ -302,7 +302,12 @@ export const downloadUrl = (url: string, filename: string) => {
   URL.revokeObjectURL(url);
 };
 
-export const downloadUrlPost = (url: string, assetIds: string[], archiveName: string) => {
+export const downloadUrlPost = (
+  url: string,
+  assetIds: string[],
+  archiveName: string,
+  { edited = true, lightroom = false }: { edited?: boolean; lightroom?: boolean } = {},
+) => {
   const form = document.createElement('form');
   form.method = 'post';
   form.action = url;
@@ -318,7 +323,10 @@ export const downloadUrlPost = (url: string, assetIds: string[], archiveName: st
 
   mkInput('assetIds', assetIds.join(','));
   mkInput('archiveName', archiveName);
-  mkInput('edited', 'true');
+  mkInput('edited', String(edited));
+  if (lightroom) {
+    mkInput('lightroom', 'true');
+  }
 
   document.body.append(form);
   form.submit();
