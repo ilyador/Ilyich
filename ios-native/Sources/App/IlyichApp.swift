@@ -11,7 +11,11 @@ import SwiftUI
     init() {
         // Inert unless launched with -IlyichPerfScenario; then it measures from the first frame.
         if !Self.isHostedUnitTest { PerfScenarioDriver.arm() }
+        #if ILYICH_OWNER_BUILD
+        let purchases = PurchaseStore(client: OwnerPurchaseClient())
+        #else
         let purchases = PurchaseStore()
+        #endif
         let session = AccountSession(environment: .current, purchaseAccess: purchases.access)
         _session = State(initialValue: session)
         _purchases = State(initialValue: purchases)

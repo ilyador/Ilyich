@@ -64,6 +64,12 @@ case "$action" in
             -derivedDataPath "$native_root/build/AppStoreDerivedData" -jobs 3 \
             ${provisioning:+"$provisioning"} DEVELOPMENT_TEAM="$team" CODE_SIGN_STYLE="$signing" CODE_SIGNING_ALLOWED=YES \
             MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build_number" "${signing_arguments[@]}"
+        # The owner's phone builds skip the paywall (ILYICH_OWNER_BUILD). That must never be archived.
+        if /usr/bin/strings -a "$archive/Products/Applications/Ilyich.app/Ilyich" | grep -q OwnerPurchaseClient; then
+            rm -rf "$archive"
+            echo 'This archive contained the owner unlock and was removed. Archive without ILYICH_OWNER_BUILD.' >&2
+            exit 1
+        fi
         echo "Archive: $archive"
         ;;
     export)
