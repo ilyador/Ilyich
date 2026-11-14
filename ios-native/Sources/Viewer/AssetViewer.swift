@@ -283,6 +283,11 @@ struct AssetViewer: View {
     /// Every action that has no button of its own, in sections as in the Photos menu.
     private func actionsMenu(_ can: AssetCapabilities) -> some View {
         Menu {
+            if model.canShowInFeed {
+                Section {
+                    menuItem(.showInFeed, can, "Show in feed", systemImage: "square.grid.3x3") { model.showInFeed() }
+                }
+            }
             Section {
                 menuItem(.addToAlbum, can, "Add to album", systemImage: "rectangle.stack.badge.plus") { model.sheet = .addToAlbum }
                 menuItem(.sharedLink, can, "Create shared link", systemImage: "link") { model.sheet = .sharedLink }

@@ -42,6 +42,8 @@ enum AssetCapabilityPolicy {
         view(.openInBrowser, when: !locked)
         view(.findSimilar, when: context.features?.smartSearch == true && !locked)
         view(.selectText, when: context.features?.ocr == true && asset.type == .image)
+        // The library's feed holds the timeline alone: not the archive, the Locked Folder or Trash.
+        view(.showInFeed, when: asset.visibility == .timeline && !trashed)
         // Locked photos keep these, the roadmap's default until the owner decides otherwise.
         view(.share, when: true)
         view(.download, when: true)

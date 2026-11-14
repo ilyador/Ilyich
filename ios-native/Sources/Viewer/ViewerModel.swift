@@ -534,6 +534,18 @@ enum ViewerConfirmation: Hashable {
     /// closes, unless it is already writing to Photos, which finishes.
     func stopExport() { if !exports.isCommitting { exports.cancel() } }
 
+    // MARK: Feed
+
+    /// Whether this viewer is over the library, which can show a photo in its whole feed.
+    var canShowInFeed: Bool { navigator != nil }
+
+    /// The photo in the whole library: the viewer closes, every filter and search goes, and the
+    /// feed lands on the photo's date, as Show in timeline does from a memory.
+    func showInFeed() {
+        guard let navigator else { return }
+        navigator.send(.showInTimeline(current))
+    }
+
     // MARK: Places
 
     /// Explores a place. From the library, the viewer closes and the Earth rises turned to it,

@@ -10,6 +10,8 @@ enum AssetAction: String, CaseIterable, Hashable, Sendable {
     case selectText
     /// Changing what the info sheet shows: date, location, caption, rating, faces and tags.
     case editInfo
+    /// Going to the photo in the whole library, every filter and search gone.
+    case showInFeed
 }
 
 enum ActionAvailability: Hashable, Sendable {

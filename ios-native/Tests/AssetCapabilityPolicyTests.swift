@@ -31,6 +31,18 @@ final class AssetCapabilityPolicyTests: XCTestCase {
         AssetCapabilityPolicy.evaluate(asset, context: context ?? self.context())
     }
 
+    /// Show in feed goes to the photo in the library's feed, which holds the timeline alone.
+    func testShowInFeedIsOfferedOnlyForPhotosTheFeedHolds() {
+        XCTAssertEqual(evaluate(photo())[.showInFeed], .offered)
+        XCTAssertEqual(evaluate(photo(), context(writable: false))[.showInFeed], .offered, "Going to a photo changes nothing.")
+        XCTAssertEqual(evaluate(photo(type: .video))[.showInFeed], .offered)
+        XCTAssertEqual(evaluate(photo(owner: "partner"))[.showInFeed], .offered)
+        XCTAssertEqual(evaluate(photo(visibility: .archive))[.showInFeed], .hidden)
+        XCTAssertEqual(evaluate(photo(visibility: .locked))[.showInFeed], .hidden)
+        var trashed = photo(); trashed.isTrashed = true
+        XCTAssertEqual(evaluate(trashed)[.showInFeed], .hidden)
+    }
+
     /// The server's editor refuses panoramas, by projection or as an Insta360 file. The server
     /// writes the projection upper-cased.
     func testEditIsHiddenForPanoramasAndInspFiles() {
