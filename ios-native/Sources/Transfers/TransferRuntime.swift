@@ -62,6 +62,7 @@ final class TransferRuntime: Sendable {
         /// The system's notifications when nil.
         var poster: (any TransferNotificationPosting)?
         var clock = ContinuousClock()
+        var knownBackupChecker: (any KnownBackupCopyChecking)? = nil
     }
 
     @MainActor init(_ parts: Parts) {
@@ -82,7 +83,7 @@ final class TransferRuntime: Sendable {
         }
         let library = LibraryJobExecutor(store: parts.store, staging: parts.staging, server: parts.server,
                                          uploader: TransportPartUploader(transport: backup, outcomes: outcomes, allowsSubmission: permits), layout: parts.layout,
-                                         account: parts.account, conditionsPermit: parts.conditionsPermit)
+                                         account: parts.account, conditionsPermit: parts.conditionsPermit, knownBackupChecker: parts.knownBackupChecker)
         let shares = ShareJobExecutor(store: parts.store, inbox: parts.inbox, server: parts.server,
                                       uploader: TransportPartUploader(transport: share, outcomes: outcomes, allowsSubmission: permits), layout: parts.layout, account: parts.account)
         self.shares = shares
@@ -320,7 +321,7 @@ struct EngineWindowWork: BackgroundWindowWork {
     /// Automatic backup looks for new photos; with it off, a window only carries on what is queued.
     func discover() async throws {
         guard allowsWork() else { throw PurchaseAccessRequired() }
-        guard await preferences()?.automatic == true else { return }
+        guard let preferences = await preferences(), preferences.automatic, preferences.hasSelection else { return }
         guard allowsWork() else { throw PurchaseAccessRequired() }
         _ = try await engine.discover(discovery)
     }
@@ -329,7 +330,7 @@ struct EngineWindowWork: BackgroundWindowWork {
 
     func automaticTriggerDelay() async -> Duration? {
         guard allowsWork() else { return nil }
-        guard let preferences = await preferences(), preferences.automatic else { return nil }
+        guard let preferences = await preferences(), preferences.automatic, preferences.hasSelection else { return nil }
         return .seconds(max(0, preferences.triggerDelay))
     }
 }
@@ -435,7 +436,8 @@ struct EngineBackend: TransferControlling {
 
     /// The status line, in the words backup always used.
     static func activity(_ snapshot: TransferSnapshot, preferences: TransferPreferences?) -> String {
-        switch snapshot.phase {
+        if snapshot.checkingExistingBackups { return "Checking existing backups" }
+        switch snapshot.backupPhase ?? snapshot.phase {
         case .blocked(let restriction):
             return restriction == .readOnly ? "Backup paused" : "Backup needs attention"
         case .waiting(.deviceConditions):
@@ -447,12 +449,24 @@ struct EngineBackend: TransferControlling {
         case .discovering:
             return "Finding new photos"
         case .running:
+            if snapshot.backupPhase != nil, (snapshot.backupProgress?.expectedBytes ?? 0) <= 0 { return "Preparing photos" }
             return "Uploading"
         case .idle:
-            if snapshot.remaining > 0 { return snapshot.intent == .paused ? "Backup paused" : "Waiting to upload" }
+            if snapshot.remaining > 0 {
+                if snapshot.intent == .paused { return "Backup paused" }
+                return (snapshot.selectionProgress?.unchecked ?? 0) > 0 ? "Waiting to check existing backups" : "Waiting to upload"
+            }
             if snapshot.failed > 0 { return "\(snapshot.failed.formatted()) uploads need retry" }
-            if preferences?.includedAlbums.isEmpty ?? true { return "Choose albums to back up" }
-            return "Selected photos backed up"
+            if snapshot.lastMessage != nil { return "Backup needs attention" }
+            if !(preferences?.hasSelection ?? false) { return "Choose photos to back up" }
+            if !snapshot.backupSelectionChecked {
+                return preferences?.automatic == true && snapshot.intent != .paused ? "Waiting to check Photos" : "Ready to back up"
+            }
+            if let selected = snapshot.selectionProgress, selected.remaining > 0 {
+                if selected.unchecked > 0 { return snapshot.intent == .paused ? "Ready to check existing backups" : "Waiting to check existing backups" }
+                return snapshot.intent == .paused ? "Ready to back up" : "Waiting to back up selected photos"
+            }
+            return preferences?.scope == .entireLibrary ? "Photo library backed up" : "Selected photos backed up"
         }
     }
 }
@@ -464,6 +478,17 @@ struct EngineBackend: TransferControlling {
 struct TransferReceiptSource: ReceiptRepository, DeviceIndexBackupSource {
     let store: TransferStore
     let broadcast: ChangeBroadcast
+
+    func receipt(for localID: String, account: String) async -> DeviceBackupReceipt {
+        do {
+            guard let receipt = try await store.receipts(for: [localID])[localID], receipt.localDeletedAt == nil else {
+                return .available(nil)
+            }
+            return .available(CleanupReceipt(localID: receipt.localID, revision: receipt.revision,
+                                              original: .init(id: receipt.original.id, checksum: receipt.original.checksum),
+                                              motion: receipt.motion.map { .init(id: $0.id, checksum: $0.checksum) }))
+        } catch { return .unavailable }
+    }
 
     func receipts(account: String) async -> [String: CleanupReceipt]? {
         try? await store.cleanupReceipts()
@@ -488,7 +513,7 @@ struct TransferReceiptSource: ReceiptRepository, DeviceIndexBackupSource {
     func inputs(account: String) async -> DeviceIndexBackupInputs? {
         guard let receipts = try? await store.cleanupReceipts() else { return nil }
         let preferences = try? await store.preferences()
-        return DeviceIndexBackupInputs(included: preferences?.includedAlbums ?? [], excluded: preferences?.excludedAlbums ?? [],
+        return DeviceIndexBackupInputs(scope: preferences?.scope ?? .selectedAlbums, included: preferences?.includedAlbums ?? [], excluded: preferences?.excludedAlbums ?? [],
                                        receipts: receipts.filter { !$0.value.locallyDeleted })
     }
 

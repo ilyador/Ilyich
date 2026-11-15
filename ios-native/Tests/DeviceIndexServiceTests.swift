@@ -1,4 +1,5 @@
 import Foundation
+import IlyichPlatform
 import Photos
 import Synchronization
 import XCTest
@@ -10,6 +11,23 @@ import XCTest
 final class DeviceIndexServiceTests: XCTestCase {
     private let album = "album"
     private let taken = Date(timeIntervalSinceReferenceDate: 790_000_000)
+
+    func testScopeChangesRefreshTimelineWithoutChangingAlbumSelection() async throws {
+        let photos = FakeIndexReader()
+        photos.add(item("albumed", offset: 0), in: album)
+        photos.add(item("unfiled", offset: 1), in: "elsewhere")
+        photos.leave("unfiled", album: "elsewhere")
+        photos.add(item("excluded", offset: 2), in: "private")
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(included: [album], excluded: ["private"]))
+        let service = makeService(photos: photos, server: FakeIndexServer(rows: []), backup: backup)
+        let snapshots = listen(await service.snapshots())
+        try await until("The album selection did not show.") { Set(snapshots.last?.items.keys.map { $0 } ?? []) == ["albumed"] }
+        backup.inputs.scope = .entireLibrary
+        try await until("The unfiled photo did not join the timeline.") { Set(snapshots.last?.items.keys.map { $0 } ?? []) == ["albumed", "unfiled"] }
+        backup.inputs.scope = .selectedAlbums
+        try await until("Returning to albums did not remove the unfiled photo.") { Set(snapshots.last?.items.keys.map { $0 } ?? []) == ["albumed"] }
+        await service.shutdown()
+    }
 
     func testSingleAssetChangeRereadsOnlyThatAsset() async throws {
         let photos = FakeIndexReader()
@@ -219,6 +237,202 @@ final class DeviceIndexServiceTests: XCTestCase {
         XCTAssertEqual(try DeviceSQLite(url: url).query("PRAGMA user_version").first?.first, .real(2))
     }
 
+    func testWholeLibraryKeepsUnresolvedCopiesOutOfTheServerTimelineWithoutDroppingBackupItems() async throws {
+        let photos = FakeIndexReader()
+        photos.add(item("unknown-copy", offset: 0), in: album)
+        photos.add(item("distinct-local", offset: 1), in: album)
+        photos.checksums = ["distinct-local": "new-local-checksum"]
+        let server = FakeIndexServer(rows: [match("already-on-server", checksum: "server-checksum")])
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(scope: .entireLibrary))
+        let service = makeService(photos: photos, server: server, backup: backup)
+        let snapshots = listen(await service.snapshots())
+        try await until("The locally readable distinct photo did not become visible.") {
+            snapshots.last?.timeline.localOnly.values.joined().map(\.id) == ["distinct-local"]
+        }
+        let snapshot = try XCTUnwrap(snapshots.last)
+        XCTAssertEqual(Set(snapshot.items.keys), ["unknown-copy", "distinct-local"], "Backup still indexes the full selection.")
+        XCTAssertNil(snapshot.associations["unknown-copy"], "An unavailable original is unknown, not a guessed match or a proven cloud-only file.")
+        let remote = Asset(id: "already-on-server")
+        let rows = MonthProjector.entries(remote: [remote], phoneOnly: Array(snapshot.timeline.localOnly.values.joined()), matches: [:])
+        XCTAssertEqual(Set(rows.map(\.id)), ["already-on-server", "local:distinct-local"])
+        await service.shutdown()
+    }
+
+    func testWholeLibraryWaitsForCompleteServerIdentitiesAndUsesLaterExactMatches() async throws {
+        let photos = FakeIndexReader()
+        let local = item("phone", offset: 0)
+        photos.add(local, in: album)
+        let database = DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite"))
+        try await database.saveFingerprints(["phone": DeviceFingerprint(modified: local.photo.modified, checksum: "same")])
+        let server = ResolvingIndexServer(rows: nil)
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(scope: .entireLibrary))
+        let service = makeService(photos: photos, server: server, backup: backup, database: database)
+        let snapshots = listen(await service.snapshots())
+        try await until("The unresolved phone item was not indexed.") { snapshots.last?.items.count == 1 }
+        XCTAssertTrue(snapshots.last?.timeline.localOnly.isEmpty == true, "A partial server index cannot prove a local copy is distinct.")
+        server.rows = [match("server", checksum: "same")]
+        // A server change wakes a fresh identity read, without hashing the original again.
+        try await until("The server change stream did not subscribe.") { server.listenerCount > 0 }
+        server.changed()
+        try await until("The completed server identity did not replace the unresolved local row.") {
+            snapshots.last?.associations == ["phone": "server"]
+        }
+        XCTAssertTrue(snapshots.last?.timeline.localOnly.isEmpty == true)
+        XCTAssertEqual(photos.hashed, [])
+        await service.shutdown()
+    }
+
+    func testKnownServerCopyResolvesBeforeAnyOriginalRequestEvenWithoutAnInitialIndexPass() async throws {
+        let photos = FakeIndexReader()
+        let local = item("phone", offset: 0)
+        photos.add(local, in: album)
+        photos.failing = true
+        let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "alice")
+        let authorization = AuthorizationState(account: account, token: "token", readOnly: true, requiresPasswordChange: false, mirror: nil)
+        let receipt = CleanupReceipt(localID: "phone", revision: AssetRevision(local.photo.modified!),
+                                     original: .init(id: "server", checksum: "exact"), motion: nil)
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(receipts: ["phone": receipt]))
+        let copy = DeviceServerCopy(identity: match("server", checksum: "exact"), asset: Asset(id: "server", ownerId: "alice"))
+        let server = ResolvingIndexServer(rows: nil, lookup: { _ in copy })
+        let service = DeviceIndexService(account: account.digest, reader: photos, server: server, backup: backup,
+                                        database: DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite")),
+                                        presence: AppPresence(isForeground: true), authorization: authorization)
+        let resolved = await service.resolveSource(of: local.photo)
+        XCTAssertEqual(resolved, .server(copy.asset), "Read-only browsing may open an exact owned server copy.")
+        XCTAssertEqual(photos.hashed, [], "Resolving a known server copy never asks for the unavailable original.")
+        XCTAssertEqual(server.lookedUp, ["server"])
+        photos.setAccess(.denied)
+        let denied = await service.resolveSource(of: local.photo)
+        if case .unavailable = denied {} else { XCTFail("Denied Photos access must not open either source.") }
+        photos.setAccess(.authorized)
+        authorization.end()
+        let signedOut = await service.resolveSource(of: local.photo)
+        if case .unavailable = signedOut {} else { XCTFail("An ended account cannot open a source.") }
+        await service.shutdown()
+    }
+
+    func testServerResolutionRechecksAuthorizationAndLocalRevisionAfterTheLookup() async throws {
+        for revokeAccess in [false, true] {
+            let photos = FakeIndexReader()
+            let local = item("phone", offset: 0)
+            photos.add(local, in: album)
+            let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "alice")
+            let authorization = AuthorizationState(account: account, token: "token", readOnly: false, requiresPasswordChange: false, mirror: nil)
+            let receipt = CleanupReceipt(localID: "phone", revision: AssetRevision(local.photo.modified!),
+                                         original: .init(id: "server", checksum: "exact"), motion: nil)
+            let backup = FakeBackupSource(DeviceIndexBackupInputs(receipts: ["phone": receipt]))
+            let gate = TransferGate()
+            let copy = DeviceServerCopy(identity: match("server", checksum: "exact"), asset: Asset(id: "server", ownerId: "alice"))
+            let server = ResolvingIndexServer(rows: [], lookup: { _ in await gate.wait(); return copy })
+            let service = DeviceIndexService(account: account.digest, reader: photos, server: server, backup: backup,
+                                            database: DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite")),
+                                            presence: AppPresence(isForeground: true), authorization: authorization)
+            let lookup = Task { await service.resolveSource(of: local.photo) }
+            try await until("The exact server lookup did not start.") { gate.waiting == 1 }
+            if revokeAccess { authorization.accessChanged() }
+            else { photos.add(item("phone", offset: 1), in: album) }
+            gate.open()
+            let resolved = await lookup.value
+            if case .unavailable = resolved {} else { XCTFail("An earlier local revision or access epoch cannot authorize a viewer after its lookup finishes.") }
+            await service.shutdown()
+        }
+    }
+
+    func testServerResolutionRejectsMissingForeignHiddenAndStaleReceiptsWithoutGuessing() async throws {
+        let photos = FakeIndexReader()
+        let local = item("phone", offset: 0)
+        photos.add(local, in: album)
+        let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "alice")
+        let authorization = AuthorizationState(account: account, token: "token", readOnly: false, requiresPasswordChange: false, mirror: nil)
+        let receipt = CleanupReceipt(localID: "phone", revision: AssetRevision(local.photo.modified!),
+                                     original: .init(id: "server", checksum: "exact"), motion: nil)
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(receipts: ["phone": receipt]))
+        var hidden = Asset(id: "server", ownerId: "alice")
+        hidden.visibility = .locked
+        let replies = [DeviceServerCopy(identity: match("server", checksum: "exact"), asset: Asset(id: "server", ownerId: "someone-else")),
+                       DeviceServerCopy(identity: match("server", checksum: "exact"), asset: hidden),
+                       DeviceServerCopy(identity: match("server", checksum: "changed"), asset: Asset(id: "server", ownerId: "alice"))]
+        for reply in replies {
+            let server = ResolvingIndexServer(rows: [], lookup: { _ in reply })
+            let service = DeviceIndexService(account: account.digest, reader: photos, server: server, backup: backup,
+                                            database: DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite")),
+                                            presence: AppPresence(isForeground: true), authorization: authorization)
+            let resolved = await service.resolveSource(of: local.photo)
+            XCTAssertEqual(resolved, .device(local.photo))
+            await service.shutdown()
+        }
+        let missing = ResolvingIndexServer(rows: [], lookup: { _ in throw ServerFailure.notFound })
+        let service = makeService(photos: photos, server: missing, backup: backup)
+        let removed = await service.resolveSource(of: local.photo)
+        XCTAssertEqual(removed, .device(local.photo), "A 404 must fall back to the local route rather than a stale offline record.")
+        backup.inputs.receipts = [:]
+        let unknown = await service.resolveSource(of: local.photo)
+        XCTAssertEqual(unknown, .device(local.photo))
+        XCTAssertEqual(missing.lookedUp, ["server"], "No known identity means no filename, date or unrelated ID search.")
+        XCTAssertEqual(photos.hashed, [])
+        await service.shutdown()
+    }
+
+    func testKnownServerOutagesStayDistinctFromDeviceSourcesAndAccessRefusals() async throws {
+        let photos = FakeIndexReader()
+        let local = item("phone", offset: 0)
+        photos.add(local, in: album)
+        let receipt = CleanupReceipt(localID: "phone", revision: AssetRevision(local.photo.modified!),
+                                     original: .init(id: "known-server", checksum: "exact"), motion: nil)
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(receipts: ["phone": receipt]))
+        let failures: [any Error] = [URLError(.notConnectedToInternet), ServerFailure.http(500, "Unavailable"), ServerFailure.forbidden(nil)]
+        for (index, failure) in failures.enumerated() {
+            let server = ResolvingIndexServer(rows: [], lookup: { _ in throw failure })
+            let service = makeService(photos: photos, server: server, backup: backup)
+            let resolved = await service.resolveSource(of: local.photo)
+            if index == 2 {
+                if case .unavailable = resolved {} else { XCTFail("A refusal cannot authorize a server or device fallback.") }
+            } else if case .serverUnavailable(let photo, let serverID, let message) = resolved {
+                XCTAssertEqual(photo, local.photo)
+                XCTAssertEqual(serverID, "known-server")
+                XCTAssertFalse(message.isEmpty)
+            } else { XCTFail("A known server outage must not become an unmatched device source or iCloud prompt.") }
+            await service.shutdown()
+        }
+        XCTAssertEqual(photos.hashed, [])
+    }
+
+    func testAPersistedExactMatchWithoutAnIlyichReceiptResolvesBeforeTheTimelineIndexStarts() async throws {
+        let photos = FakeIndexReader()
+        let local = item("phone", offset: 0)
+        photos.add(local, in: album)
+        let database = DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite"))
+        try await database.saveFingerprints(["phone": DeviceFingerprint(modified: local.photo.modified, checksum: "exact")])
+        photos.failing = true
+        let copy = DeviceServerCopy(identity: match("known-server", checksum: "exact"), asset: Asset(id: "known-server", ownerId: "alice"))
+        let server = ResolvingIndexServer(rows: [copy.identity], lookup: { _ in copy })
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(scope: .entireLibrary))
+        let service = makeService(photos: photos, server: server, backup: backup, database: database)
+        let resolved = await service.resolveSource(of: local.photo)
+        XCTAssertEqual(resolved, .server(copy.asset))
+        let snapshot = await service.snapshot
+        XCTAssertNil(snapshot, "Opening the phone browser does not need a full timeline/index pass first.")
+        XCTAssertEqual(photos.hashed, [], "Receipt-less resolution reuses exact known identity and never downloads or rehashes the original.")
+        await service.shutdown()
+    }
+
+    func testTargetedServerIdentitiesAreExactOwnerScopedAndAvailableDuringInitialSync() async throws {
+        let entities = try LibraryIndex(scope: "server|alice", userID: "alice", directory: temporaryDirectory())
+        _ = try await entities.prepare(sessionFingerprint: "session")
+        _ = try await entities.apply([
+            serverAsset("own", checksum: "exact"), serverAsset("other", checksum: "different"),
+            serverAsset("foreign", checksum: "exact", owner: "bob"),
+        ], epoch: entities.epoch())
+        let ready = try await entities.isComplete()
+        XCTAssertFalse(ready)
+        let matches = try await entities.identities(checksum: "exact", cloudID: nil)
+        XCTAssertEqual(matches.map(\.assetID), ["own"])
+        let absent = try await entities.identities(checksum: "not-present", cloudID: nil)
+        XCTAssertTrue(absent.isEmpty)
+        let foreign = try await entities.identity(id: "foreign")
+        XCTAssertNil(foreign)
+    }
+
     // MARK: - Support
 
     private func makeService(photos: FakeIndexReader, server: (any DeviceIndexServer)?, backup: FakeBackupSource? = nil,
@@ -242,9 +456,9 @@ final class DeviceIndexServiceTests: XCTestCase {
                         latitude: latitude, longitude: longitude, visible: visible)
     }
 
-    private func serverAsset(_ id: String, checksum: String, visibility: String = "timeline", deleted: Bool = false) -> EntitySyncEvent {
+    private func serverAsset(_ id: String, checksum: String, visibility: String = "timeline", deleted: Bool = false, owner: String = "alice") -> EntitySyncEvent {
         SyncEvents.event("AssetV2", """
-        {"id":"\(id)","ownerId":"alice","type":"IMAGE","originalFileName":"\(id).jpg","checksum":"\(checksum)","fileCreatedAt":"2026-02-01T05:00:00Z","localDateTime":"2026-02-01T05:00:00Z","createdAt":"2026-03-01T00:00:00Z","visibility":"\(visibility)","isFavorite":false,"deletedAt":\(deleted ? "\"2026-03-04T00:00:00Z\"" : "null"),"stackId":null,"isEdited":false,"isDeveloped":false,"mediaRevision":"r1"}
+        {"id":"\(id)","ownerId":"\(owner)","type":"IMAGE","originalFileName":"\(id).jpg","checksum":"\(checksum)","fileCreatedAt":"2026-02-01T05:00:00Z","localDateTime":"2026-02-01T05:00:00Z","createdAt":"2026-03-01T00:00:00Z","visibility":"\(visibility)","isFavorite":false,"deletedAt":\(deleted ? "\"2026-03-04T00:00:00Z\"" : "null"),"stackId":null,"isEdited":false,"isDeveloped":false,"mediaRevision":"r1"}
         """, ack: "AssetV2|\(id)")
     }
 
@@ -289,10 +503,14 @@ private final class FakeIndexReader: DeviceIndexReading {
         var reads: [String] = []
         var hashed: [String] = []
         var failing = false
+        var access = DeviceAccess(status: .authorized, generation: 1)
         var continuations: [AsyncStream<DeviceLibraryChange>.Continuation] = []
     }
     private let state = Mutex(State())
-    private let accessValue = DeviceAccess(status: .authorized, generation: 1)
+    private var accessValue: DeviceAccess { state.withLock { $0.access } }
+    func setAccess(_ status: PHAuthorizationStatus) {
+        state.withLock { $0.access = DeviceAccess(status: status, generation: $0.access.generation + 1) }
+    }
 
     func add(_ item: DeviceTimelineItem, in album: String) {
         state.withLock { $0.items[item.photo.id] = item; $0.albums[album, default: []].insert(item.photo.id) }
@@ -334,9 +552,9 @@ private final class FakeIndexReader: DeviceIndexReading {
         state.withLock { $0.continuations.append(continuation) }
         return stream
     }
-    func members(included: Set<String>, excluded: Set<String>) async throws -> Set<String> {
+    func members(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) async throws -> Set<String> {
         state.withLock { state in
-            included.reduce(into: Set<String>()) { $0.formUnion(state.albums[$1] ?? []) }
+            (scope == .entireLibrary ? Set(state.items.keys) : included.reduce(into: Set<String>()) { $0.formUnion(state.albums[$1] ?? []) })
                 .subtracting(excluded.reduce(into: Set<String>()) { $0.formUnion(state.albums[$1] ?? []) })
         }
     }
@@ -360,6 +578,43 @@ private struct FakeIndexServer: DeviceIndexServer {
     let rows: [LocalAssetMatch]
     func identities() async throws -> [LocalAssetMatch]? { rows }
     func changes() async -> AsyncStream<LibraryChange> { AsyncStream { _ in } }
+}
+
+private final class ResolvingIndexServer: DeviceIndexServer {
+    private struct State {
+        var rows: [LocalAssetMatch]?
+        var lookedUp: [String] = []
+        var listeners: [AsyncStream<LibraryChange>.Continuation] = []
+    }
+    private let state: Mutex<State>
+    private let lookup: @Sendable (String) async throws -> DeviceServerCopy?
+
+    init(rows: [LocalAssetMatch]?, lookup: @escaping @Sendable (String) async throws -> DeviceServerCopy? = { _ in nil }) {
+        state = Mutex(State(rows: rows))
+        self.lookup = lookup
+    }
+    var rows: [LocalAssetMatch]? {
+        get { state.withLock { $0.rows } }
+        set { state.withLock { $0.rows = newValue } }
+    }
+    var lookedUp: [String] { state.withLock { $0.lookedUp } }
+    var listenerCount: Int { state.withLock { $0.listeners.count } }
+    func identities() async throws -> [LocalAssetMatch]? { rows }
+    func copy(id: String) async throws -> DeviceServerCopy? {
+        state.withLock { $0.lookedUp.append(id) }
+        return try await lookup(id)
+    }
+    func changes() async -> AsyncStream<LibraryChange> {
+        let (stream, continuation) = AsyncStream.makeStream(of: LibraryChange.self)
+        state.withLock { $0.listeners.append(continuation) }
+        return stream
+    }
+    func changed() {
+        // A minimal account change is enough to invalidate the identity rows.
+        let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "alice")
+        let change = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1), indexRevision: 1, origin: .sync)
+        for listener in state.withLock({ $0.listeners }) { listener.yield(change) }
+    }
 }
 
 private final class FakeBackupSource: DeviceIndexBackupSource {

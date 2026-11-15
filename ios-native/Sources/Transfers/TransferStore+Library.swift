@@ -196,8 +196,19 @@ extension TransferStore {
                 try db.run("DELETE FROM jobs WHERE id IN (\(match))", [keys])
                 dropped = db.changes
             }
+            // The same transaction that merged discovery measures its exact eligible inventory.
+            // Overlapping album membership is counted once; an old revision's confirmation does
+            // not prove the currently selected version is backed up.
+            let unique = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+            let revisions = unique.mapValues { $0.modified.map(AssetRevision.init) }
+            var confirmed: Set<String> = []
+            try db.run("""
+                SELECT d.local_id FROM temp.discovered d JOIN confirmations c ON c.local_id=d.local_id \
+                WHERE d.modification_date IS NOT NULL AND c.modification_date=d.modification_date
+                """) { row in if let id = row.text(0) { confirmed.insert(id) } }
             try db.run("DELETE FROM temp.discovered")
-            return DiscoveryMerge(found: found.count, queued: queued, dropped: dropped)
+            return DiscoveryMerge(found: found.count, queued: queued, dropped: dropped,
+                                  inventory: SelectionInventory(revisions: revisions, confirmed: confirmed))
         }
         return merge
     }
@@ -266,4 +277,12 @@ struct DiscoveryMerge: Hashable, Sendable {
     var queued = 0
     /// Jobs dropped because their photo left Photos.
     var dropped = 0
+    var inventory: SelectionInventory? = nil
+}
+
+struct SelectionInventory: Hashable, Sendable {
+    /// A nil revision remains in the measured total, but cannot establish a current copy.
+    let revisions: [String: AssetRevision?]
+    var confirmed: Set<String>
+    var pending: Set<String> = []
 }

@@ -10,13 +10,13 @@ struct SlideshowSettingsView: View {
             Section {
                 Picker("Photo duration", selection: $duration) { ForEach([5, 10, 15, 20, 25, 30], id: \.self) { Text("\($0) seconds").tag($0) } }
                 Toggle("Repeat slideshow", isOn: $loop)
-            } footer: { Text("Videos play to the end before the next item appears.") }
-            Section("Order") {
+            } footer: { Text("Photo duration sets how long each still remains on screen. Videos play to the end before the next item appears.") }
+            Section {
                 Picker("Direction", selection: $direction) { Text("Forward").tag("forward"); Text("Backward").tag("backward"); Text("Shuffle").tag("shuffle") }.pickerStyle(.inline)
-            }
-            Section("Photo display") {
+            } header: { Text("Order") } footer: { Text("Forward uses the current order, Backward reverses it, and Shuffle picks a random order.") }
+            Section {
                 Picker("Look", selection: $look) { Text("Fit entire photo").tag("contain"); Text("Fill screen").tag("cover"); Text("Blurred background").tag("blurredBackground") }.pickerStyle(.inline)
-            }
+            } header: { Text("Photo display") } footer: { Text("Fit keeps the whole photo visible. Fill crops to cover the screen; Blurred background fills the space around a fitted photo.") }
         }.navigationTitle("Slideshow")
     }
 }

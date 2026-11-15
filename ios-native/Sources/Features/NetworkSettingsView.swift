@@ -49,7 +49,7 @@ struct NetworkSettingsView: View {
                 }.onMove { endpoints.move(fromOffsets: $0, toOffset: $1) }
                 Button("Add address", systemImage: "plus") { endpoints.append(.init()) }
             } header: { Text("Other addresses for this server") } footer: {
-                Text("Addresses are tried in this order, then your main server address. Add only addresses for this same server, such as its local network address. These addresses receive your sign-in credentials and custom headers.")
+                Text("When on, Ilyich checks your preferred local address when you’re on that Wi-Fi, then these addresses in order, and the main address. It uses a responding address. When off, it uses only the main address. Add only addresses for this same server; each receives your sign-in credentials and custom headers.")
             }
             Section {
                 TextField("Wi-Fi name", text: $preferredWifiName)
@@ -72,7 +72,7 @@ struct NetworkSettingsView: View {
                 }
                 if certificatePresent { Button("Remove client certificate", role: .destructive) { confirmRemoveCertificate = true } }
             } header: { Text("Client certificate") } footer: {
-                Text("Use a PKCS#12 (.p12 or .pfx) file containing your certificate and private key. Importing or removing it takes effect for new secure connections to this server.")
+                Text("If your server asks the app to identify itself with a client certificate, choose a PKCS#12 (.p12 or .pfx) file containing the certificate and private key. Importing or removing it affects new secure connections to this server.")
             }
         }.navigationTitle("Network settings").disabled(!loaded || busy)
         .toolbar {

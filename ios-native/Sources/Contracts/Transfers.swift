@@ -155,6 +155,21 @@ struct TransferSnapshot: Hashable, Sendable {
     /// What backup is doing, in words, for the status line: EngineBackend words the engine's
     /// phase, and the screens' router its placeholders.
     var activity: String? = nil
+    /// Scheduling restrictions do not make a completed upload a failure.
+    var backgroundIssue: BackgroundBackupIssue? = nil
+    /// The library lane's phase, separate from shared-file uploads. Nil on router placeholders.
+    var backupPhase: TransferPhase? = nil
+    /// Current parts of active photo uploads only. This is never a whole-queue byte total.
+    var backupProgress: TransferProgress? = nil
+    /// Changes when saved preferences change, even if the queue and phase stay the same. This
+    /// lets the backend refresh its activity and the screens adopt preferences without polling.
+    var preferencesRevision: UInt64 = 0
+    /// A successful discovery checked the current photo selection in this runtime. An empty
+    /// queue alone cannot prove that a newly selected library has been checked.
+    var backupSelectionChecked: Bool = false
+    /// Measured selected inventory, absent until the current selection has actually been read.
+    var selectionProgress: SelectionProgress? = nil
+    var checkingExistingBackups: Bool = false
 }
 
 enum EnqueueResult: Hashable, Sendable {

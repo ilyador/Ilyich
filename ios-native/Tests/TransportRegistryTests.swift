@@ -179,9 +179,9 @@ final class TransportRegistryTests: XCTestCase {
         router.setPurchaseAccess(PurchaseAccess(state: .locked))
         router.suspend()
         XCTAssertEqual(held.completions, [true])
-        var refusal: String?
+        var refusal: BackgroundSchedulingFailure?
         router.submit(WindowRequest(kind: .processing, shape: .init(), earliestBeginDate: nil)) { refusal = $0 }
-        XCTAssertNotNil(refusal)
+        XCTAssertEqual(refusal, .purchaseRequired)
         XCTAssertTrue(scheduler.submitted.isEmpty)
         XCTAssertEqual(Set(scheduler.cancelled), Set(BackgroundWindowKind.allCases.map(\.identifier)))
     }

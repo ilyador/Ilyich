@@ -103,6 +103,14 @@ actor DeviceDatabase {
         return result
     }
 
+    /// One known fingerprint, for opening a photo before the timeline index has loaded. This
+    /// reads a stored identity only and never asks Photos for the original.
+    func fingerprint(for localID: String) throws -> DeviceFingerprint? {
+        guard let row = try database().query("SELECT revision,checksum FROM device_fingerprint WHERE local_id=?", [.text(localID)]).first,
+              row.count == 2, let checksum = row[1].text else { return nil }
+        return DeviceFingerprint(revision: row[0].real, checksum: checksum)
+    }
+
     /// Keeps `values`, all in one transaction, each replacing the photo's row.
     func saveFingerprints(_ values: [String: DeviceFingerprint]) throws {
         guard !values.isEmpty else { return }

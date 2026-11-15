@@ -78,7 +78,7 @@ struct SettingsView: View {
                 NavigationLink { SettingsDestinationView(api: api, destination: .account) } label: {
                     Label { VStack(alignment: .leading) { Text(user?.name ?? "Account"); if let email = user?.email { Text(email).font(.caption).foregroundStyle(.secondary) } } } icon: { Image(systemName: "person.crop.circle") }
                 }
-                NavigationLink { SettingsDestinationView(api: api, destination: .backup) } label: { Label("Backup", systemImage: "icloud.and.arrow.up") }
+                NavigationLink { SettingsDestinationView(api: api, destination: .backup) } label: { BackupSettingsLabel() }
             }
             if let purchases {
                 Section("Ilyich access") {
@@ -133,7 +133,7 @@ private struct AppearanceSettingsSection: View {
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
 
     var body: some View {
-        Section("Appearance") {
+        Section {
             Picker("Theme", selection: $appearance) {
                 Text("System").tag("system")
                 Text("Light").tag("light")
@@ -143,7 +143,7 @@ private struct AppearanceSettingsSection: View {
                 ForEach(AppearanceAccent.allCases) { Text($0.title).tag($0.rawValue) }
             }
             NavigationLink("Slideshow") { SlideshowSettingsView() }
-        }
+        } header: { Text("Appearance") } footer: { Text("System follows your iPhone’s appearance setting. Accent color changes Ilyich’s interactive controls.") }
     }
 }
 
@@ -153,16 +153,16 @@ private struct GridSettingsSection: View {
     @AppStorage("hapticFeedback") private var haptics = true
 
     var body: some View {
-        Section("Grid") {
-            Picker("Grid", selection: $columns) {
+        Section {
+            Picker("Columns", selection: $columns) {
                 ForEach(2...6, id: \.self) { Text("\($0) columns").tag($0) }
             }
-            Picker("Timeline", selection: $timelineGrouping) {
+            Picker("Group timeline by", selection: $timelineGrouping) {
                 Text("Month").tag("month")
                 Text("Day").tag("day")
             }
             Toggle("Haptic feedback", isOn: $haptics)
-        }
+        } header: { Text("Grid") } footer: { Text("Fewer columns show larger thumbnails. The timeline can group photos by month or day. Haptics cover selection and shelf interactions.") }
     }
 }
 
@@ -179,16 +179,20 @@ private struct ViewerSettingsView: View {
             Section {
                 Toggle("Full-resolution photos", isOn: $originalImage)
                 Toggle("Tap edges to navigate", isOn: $tapNavigation)
-            } header: { Text("Photos") } footer: { Text("Full-resolution photos use more data. Lightroom edits are preserved.") }
+            } header: { Text("Photos") } footer: {
+                Text("Full-resolution photos use more data. Lightroom edits are preserved. When enabled, tap the left or right edge to move to the previous or next photo.")
+            }
             Section {
-                Picker("Share photos as", selection: $shareFileType) { Text("Original").tag("original"); Text("Displayed").tag("preview") }
-            } footer: { Text("Displayed keeps the edits you see in the viewer. Videos are always shared as originals.") }
+                Picker("Share photos as", selection: $shareFileType) { Text("Original file").tag("original"); Text("Displayed version").tag("preview") }
+            } footer: { Text("Original shares the source file. Displayed shares the version shown in the viewer, with its edits. Videos are always shared as originals.") }
             Section {
                 Toggle("Play automatically", isOn: $autoplay)
                 Toggle("Repeat videos", isOn: $loop)
                 Toggle("Start muted", isOn: $mute)
                 Toggle("Play original videos", isOn: $originalVideo)
-            } header: { Text("Videos") } footer: { Text("Original files can use more data and take longer to load. Video formats unsupported by this phone may need server playback.") }
+            } header: { Text("Videos") } footer: {
+                Text("Play original videos uses the source file instead of server playback. Original files can use more data, take longer to load, and may not play on this phone if their format is unsupported.")
+            }
         }.navigationTitle("Photo and video viewer")
     }
 }

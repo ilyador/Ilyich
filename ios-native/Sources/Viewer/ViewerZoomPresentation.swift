@@ -39,6 +39,7 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
     /// Outside the app's scene the viewer would always read as in the background, which keeps
     /// videos and animations from playing, so it is handed the app's phase too.
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.mediaSources) private var mediaSources
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
@@ -166,7 +167,8 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
             guard let parent, let state else { return AnyView(EmptyView()) }
             return AnyView(ViewerRoot(content: parent.content(route, state, { [weak self] in self?.close() }), authorization: parent.authorization,
                                       mutations: parent.mutations, bus: parent.bus, collections: parent.collections,
-                                      settings: parent.settings, places: parent.places, naming: parent.naming, scenePhase: parent.scenePhase)
+                                      settings: parent.settings, places: parent.places, naming: parent.naming,
+                                      mediaSources: parent.mediaSources, scenePhase: parent.scenePhase)
                 .id(route.asset.id))
         }
     }
@@ -236,12 +238,13 @@ private struct ViewerRoot: View {
     let settings: AccountSettingsService?
     let places: PlaceDirectory?
     let naming: PlaceNaming?
+    let mediaSources: MediaSourceResolver?
     let scenePhase: ScenePhase
-    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     var body: some View {
-        content.tint((AppearanceAccent(rawValue: accentName) ?? .design).tint).environment(\.authorization, authorization)
+        content.appControlAppearance().environment(\.authorization, authorization)
             .environment(\.mutations, mutations).environment(\.libraryBus, bus).environment(\.collectionsService, collections)
             .environment(\.accountSettings, settings).environment(\.placeDirectory, places).environment(\.placeNaming, naming)
+            .environment(\.mediaSources, mediaSources)
             .environment(\.scenePhase, scenePhase)
     }
 }

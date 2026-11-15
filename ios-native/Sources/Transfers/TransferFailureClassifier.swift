@@ -62,6 +62,8 @@ enum TransferFailureClassifier {
 
     static func classify(_ error: any Error, context: Context = Context()) -> FailureClass {
         switch error {
+        case is BackupIdentityIndexNotReady:
+            return .transient(retryAfter: .seconds(5))
         case let deferral as TransferDeferral:
             return switch deferral {
             case .deviceConditions: .waiting(.deviceConditions, jobScoped: false)

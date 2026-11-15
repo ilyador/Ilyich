@@ -22,7 +22,7 @@ struct NotificationSettingsView: View {
                         .frame(minHeight: 44)
                 }
             } footer: {
-                Text("Show item counts when downloads, photo saves, shared uploads, or backups finish. No photo names are included.")
+                Text("When notifications are allowed, Ilyich shows item counts after downloads, photo saves, shared uploads, or backups finish. Photo names are not included.")
             }
             if let error { Section { Text(error).foregroundStyle(.red) } }
         }

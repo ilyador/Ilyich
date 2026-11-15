@@ -432,10 +432,10 @@ struct StagedFile: Codable, Hashable, Sendable {
     let contentType: String
 }
 
-/// Backup preferences as the transfers database keeps them: the keys earlier builds' backup
-/// preferences had, with album sets written as sorted arrays and keys sorted, so the same
-/// preferences always give the same text.
+/// Backup preferences as the transfers database keeps them. Album sets and JSON keys are
+/// sorted so the same preferences always give the same text.
 struct TransferPreferences: Codable, Equatable, Sendable {
+    var scope: PhotoSelectionScope = .selectedAlbums
     var includedAlbums: Set<String> = []
     var excludedAlbums: Set<String> = []
     var cellularPhotos = false
@@ -447,16 +447,35 @@ struct TransferPreferences: Codable, Equatable, Sendable {
     var triggerDelay = 30
     var syncAlbums = false
 
+    /// An entire library remains a selection even when it has no albums.
+    var hasSelection: Bool { scope == .entireLibrary || !includedAlbums.isEmpty }
+
     /// Backup's defaults: no albums chosen, nothing on cellular, automatic backup off.
     init() {}
 
     private enum CodingKeys: String, CodingKey {
         case includedAlbums, excludedAlbums, cellularPhotos, cellularVideos, downloadCloudOriginals
-        case automatic, requireCharging, triggerDelay, syncAlbums
+        case automatic, requireCharging, triggerDelay, syncAlbums, scope
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Existing accounts keep their album selection; installing an update never broadens it.
+        scope = try c.decodeIfPresent(PhotoSelectionScope.self, forKey: .scope) ?? .selectedAlbums
+        includedAlbums = try c.decode(Set<String>.self, forKey: .includedAlbums)
+        excludedAlbums = try c.decode(Set<String>.self, forKey: .excludedAlbums)
+        cellularPhotos = try c.decode(Bool.self, forKey: .cellularPhotos)
+        cellularVideos = try c.decode(Bool.self, forKey: .cellularVideos)
+        downloadCloudOriginals = try c.decode(Bool.self, forKey: .downloadCloudOriginals)
+        automatic = try c.decode(Bool.self, forKey: .automatic)
+        requireCharging = try c.decode(Bool.self, forKey: .requireCharging)
+        triggerDelay = try c.decode(Int.self, forKey: .triggerDelay)
+        syncAlbums = try c.decode(Bool.self, forKey: .syncAlbums)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(scope, forKey: .scope)
         try c.encode(includedAlbums.sorted(), forKey: .includedAlbums)
         try c.encode(excludedAlbums.sorted(), forKey: .excludedAlbums)
         try c.encode(cellularPhotos, forKey: .cellularPhotos)

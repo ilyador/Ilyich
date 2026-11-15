@@ -1,8 +1,8 @@
 import Foundation
 import Photos
 
-/// Finds the photos to back up (B3): every photo and video in the selected
-/// albums and in none of the excluded ones, read from Photos a batch at a time through P2's
+/// Finds the photos to back up (B3): every readable photo and video in the chosen scope,
+/// minus excluded albums, read from Photos a batch at a time through P2's
 /// PhotoLibraryStaging, then merged in one transaction at commit time (TransferStore
 /// mergeDiscovery). A photo gets a job unless a confirmation has its date or a job has it already,
 /// judged as the tables are at the merge, so a photo confirmed while discovery read Photos is not
@@ -21,12 +21,12 @@ struct LibraryDiscovery: Sendable {
 
     func run() async throws -> DiscoveryMerge {
         guard allowsDiscovery() else { throw PurchaseAccessRequired() }
-        guard let preferences = try await store.preferences(), !preferences.includedAlbums.isEmpty else { return DiscoveryMerge() }
+        guard let preferences = try await store.preferences(), preferences.hasSelection else { return DiscoveryMerge() }
         guard allowsDiscovery() else { throw PurchaseAccessRequired() }
         let access = staging.authorization
         guard access == .authorized || access == .limited else { throw PHPhotosError(.accessUserDenied) }
         var found: [DeviceCandidate] = []
-        for try await batch in staging.candidates(included: preferences.includedAlbums, excluded: preferences.excludedAlbums) {
+        for try await batch in staging.candidates(scope: preferences.scope, included: preferences.includedAlbums, excluded: preferences.excludedAlbums) {
             guard allowsDiscovery() else { throw PurchaseAccessRequired() }
             found += batch
         }

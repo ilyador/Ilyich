@@ -284,9 +284,13 @@ import XCTest
         var preferences = TransferPreferences()
         func shown(_ phase: TransferPhase, intent: RunIntent = .automatic, remaining: Int = 0, failed: Int = 0) -> TransferSnapshot {
             EngineBackend.presented(TransferSnapshot(intent: intent, phase: phase, remaining: remaining, confirmed: 5, failed: failed, fileProgress: nil,
-                                                     bytesSent: 0, bytesExpected: 0, bytesPerSecond: nil, lastMessage: nil), preferences: preferences)
+                                                     bytesSent: 0, bytesExpected: 0, bytesPerSecond: nil, lastMessage: nil,
+                                                     backupSelectionChecked: true), preferences: preferences)
         }
-        XCTAssertEqual(shown(.idle).activity, "Choose albums to back up")
+        XCTAssertEqual(shown(.idle).activity, "Choose photos to back up")
+        preferences.scope = .entireLibrary
+        XCTAssertEqual(shown(.idle).activity, "Photo library backed up")
+        preferences.scope = .selectedAlbums
         preferences.includedAlbums = ["album"]
         XCTAssertEqual(shown(.idle).activity, "Selected photos backed up")
         XCTAssertEqual(shown(.idle, failed: 2).activity, "2 uploads need retry")

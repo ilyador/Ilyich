@@ -29,6 +29,8 @@ struct LibraryView: View {
     /// The time rail's finger, month and lens, which the edge pan drives in its own callback.
     @State private var rail: TimeRailController
     @State private var librarySize: CGSize = .zero
+    /// Only changes when the compact backup control appears or wraps, never on byte ticks.
+    @State private var backupIndicatorHeight: CGFloat = 0
     @State private var shelf: ShelfLevel = .root
     /// The people, albums, features and shelf order the shelves show.
     @State private var collections: CollectionsStore
@@ -117,7 +119,7 @@ struct LibraryView: View {
                           // so a short result list is never hidden.
                           topInset: chromeHeight > 0 ? geometry.safeAreaInsets.top + chromeHeight + 14
                                                      : photoSide(width: geometry.size.width) / 2,
-                          bottomInset: geometry.safeAreaInsets.bottom + 90 + (showsSearchChoices ? Self.choicesRowHeight : 0),
+                          bottomInset: geometry.safeAreaInsets.bottom + 90 + backupIndicatorHeight + (showsSearchChoices ? Self.choicesRowHeight : 0),
                           onDensityChange: { columns = $0 }, onOpenLocal: { photo in
                     // While typing, a tap on the grid only puts the keyboard away.
                     if searchFocused { searchFocused = false } else { navigator.present(.phoneViewer(photo)) }
@@ -154,6 +156,10 @@ struct LibraryView: View {
                             errorBanner("Some photos couldn’t load.", retry: store.retryFailedBuckets)
                         }
                         Spacer(minLength: 0)
+                        BackupActivityIndicator { navigator.present(.settings(.backup)) }
+                            .padding(.horizontal, 16)
+                            .environment(\.colorScheme, .dark)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { backupIndicatorHeight = $0 }
                         if showPlaces {
                             placesPanel(height: geometry.size.height * 0.4 + geometry.safeAreaInsets.bottom, bottomInset: geometry.safeAreaInsets.bottom)
                                 .padding(.bottom, -geometry.safeAreaInsets.bottom)
@@ -218,7 +224,7 @@ struct LibraryView: View {
                         // While selecting the rail can't be scrubbed (its edge pan is off), and its strip
                         // would swallow a range drag that starts on the last column (owner report).
                         .allowsHitTesting(!store.isSelecting)
-                        .frame(width: 44).padding(.top, max(52, chromeHeight + 16)).padding(.bottom, showPlaces ? geometry.size.height * 0.42 : 100)
+                        .frame(width: 44).padding(.top, max(52, chromeHeight + 16)).padding(.bottom, showPlaces ? geometry.size.height * 0.42 + backupIndicatorHeight : 100 + backupIndicatorHeight)
                         .frame(maxWidth: .infinity, alignment: .trailing).zIndex(2)
                 }
             }
@@ -226,7 +232,7 @@ struct LibraryView: View {
             .coordinateSpace(name: "library")
             .gesture(LibraryEdgePanGesture(size: geometry.size,
                 activeY: (chromeHeight + 16)...max(chromeHeight + 16, geometry.size.height - (showPlaces ? geometry.size.height * 0.4
-                                                                                                  : 90 + (showsSearchChoices ? Self.choicesRowHeight : 0))),
+                                                                                                  : 90 + backupIndicatorHeight + (showsSearchChoices ? Self.choicesRowHeight : 0))),
                 leadingEnabled: !shelves,
                 // The rail scrubs above the Earth too; its band ends where the Earth begins.
                 trailingEnabled: !shelves && store.canScrubTimeline && store.query.isEmpty,

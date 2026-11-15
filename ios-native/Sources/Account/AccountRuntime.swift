@@ -35,6 +35,8 @@ final class AccountRuntime: Sendable {
     /// The phone's side of the merged library (REBUILD_ROADMAP.md P5). Nil when the environment
     /// runs without the phone's photos. It starts once the library subscribes.
     let deviceIndex: DeviceIndexService?
+    /// The common viewer's account-scoped source selection, shared by every phone-photo entry.
+    let mediaSources: MediaSourceResolver
     /// The account's changes to its library on the server (REBUILD_ROADMAP.md N2), followed by a
     /// sync pass when the offline library syncs. Shut down first at teardown.
     let mutations: LibraryMutationService
@@ -102,6 +104,7 @@ final class AccountRuntime: Sendable {
         self.work = work
         self.cleanup = cleanup
         self.deviceIndex = deviceIndex
+        self.mediaSources = MediaSourceResolver(api: api, pipeline: pipeline, index: deviceIndex, authorization: authorization)
         self.mutations = mutations
         self.collections = collections
         self.settings = settings
@@ -172,10 +175,12 @@ final class AccountRuntime: Sendable {
         var deviceIndex: DeviceIndexService?
         if environment.usesDevicePhotos {
             let server = library.map { library in
-                LibraryIndexIdentities(entities: library.entities, libraryChanges: { await library.sync.changes() })
+                LibraryIndexIdentities(entities: library.entities, libraryChanges: { await library.sync.changes() },
+                                       lookup: { try await api.deviceServerCopy(id: $0) })
             }
             deviceIndex = DeviceIndexService(account: credential.account.digest, reader: PhotoKitIndexReader(adapter: .shared), server: server,
-                                             backup: receipts, database: PhotoKitAdapter.shared.database, presence: presence)
+                                             backup: receipts, database: PhotoKitAdapter.shared.database, presence: presence,
+                                             authorization: authorization)
         }
         // A mutation's follow-up is a pass of the account's sync, which publishes its change like any.
         var followUp: (@Sendable () async throws -> LibraryChange?)?

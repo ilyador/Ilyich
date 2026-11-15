@@ -100,8 +100,8 @@ protocol BackgroundWindowWork: Sendable {
 ///
 /// - A background window runs runWindow's steps. One window works at a time; another that comes
 ///   meanwhile completes at once, as today.
-/// - In the foreground, the app coming forward, a Photos change or a settings change looks for new
-///   photos after the trigger delay. A later trigger restarts the delay, but never stops a search
+/// - In the foreground, a settings change looks for new photos immediately. The app coming
+///   forward and Photos changes use the trigger delay. A later trigger never stops a search
 ///   already under way: it searches once more when that one finishes.
 /// - A condition change (network, power, temperature) only ends the engine's waits; it never stops
 ///   a search or a window.
@@ -126,6 +126,7 @@ actor TransferLifecycle<C: Clock> where C.Duration == Duration {
     /// The foreground search under way.
     private var foreground: Task<Void, Never>?
     private var searchAgain = false
+    private var searchAgainImmediately = false
     /// The assertion held after going to the background.
     private var holding: Task<Void, Never>?
     private var others: [UUID: Task<Void, Never>] = [:]
@@ -174,8 +175,10 @@ actor TransferLifecycle<C: Clock> where C.Duration == Duration {
             holdUntilHandedOff()
         case .environment:
             await work.conditionsChanged()
-        case .photoLibraryChanged, .preferencesChanged:
+        case .photoLibraryChanged:
             if appActive { requestSearch() }
+        case .preferencesChanged:
+            if appActive { requestSearch(immediately: true) }
         case .urlSessionEvents:
             spawn { [work] in try? await work.applyOutcomes() }
         case .readOnlyChanged:
@@ -246,9 +249,10 @@ actor TransferLifecycle<C: Clock> where C.Duration == Duration {
 
     // MARK: Foreground
 
-    private func requestSearch() {
+    private func requestSearch(immediately: Bool = false) {
         if foreground != nil {
             searchAgain = true
+            searchAgainImmediately = searchAgainImmediately || immediately
             return
         }
         pendingStart?.cancel()
@@ -256,7 +260,9 @@ actor TransferLifecycle<C: Clock> where C.Duration == Duration {
         let clock = self.clock
         pendingStart = Task {
             guard let delay = await work.automaticTriggerDelay() else { return }
-            do { try await clock.sleep(for: delay) } catch { return }
+            if !immediately {
+                do { try await clock.sleep(for: delay) } catch { return }
+            }
             self.beginSearch()
         }
     }
@@ -276,8 +282,10 @@ actor TransferLifecycle<C: Clock> where C.Duration == Duration {
     private func searchFinished() {
         foreground = nil
         guard searchAgain else { return }
+        let immediately = searchAgainImmediately
         searchAgain = false
-        if appActive { requestSearch() }
+        searchAgainImmediately = false
+        if appActive { requestSearch(immediately: immediately) }
     }
 
     private func holdUntilHandedOff() {

@@ -256,7 +256,14 @@ final class FakePhotoKit: PhotoLibraryPerforming, AssetFetching, PhotoStagingRea
         }
     }
 
-    func members(of albumIDs: Set<String>) -> Set<String> {
+    func allAssetIDs() -> Set<String> {
+        waitIfHeld()
+        return read { Set($0.assets.keys.map(\.rawValue)) }
+    }
+
+    func members(of albumIDs: Set<String>) -> Set<String> { members(of: albumIDs, scope: .selectedAlbums) }
+
+    func members(of albumIDs: Set<String>, scope: PhotoSelectionScope) -> Set<String> {
         waitIfHeld()
         return read { state in Set(albumIDs.flatMap { state.albums[$0]?.members ?? [] }) }
     }

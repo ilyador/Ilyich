@@ -286,6 +286,31 @@ import XCTest
 
     // MARK: Engine
 
+    func testAutomaticWindowsNeedASelectionButStillCarryExplicitlyQueuedPhotos() async throws {
+        let scheduler = RecordingWindowScheduler()
+        let h = try await TransferEngineHarness(scheduler: scheduler)
+        var preferences = TransferPreferences()
+        preferences.automatic = true
+        try await h.store.savePreferences(preferences)
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        await untilTransfers("The engine starts without windows.") { scheduler.plans == [.none] }
+        preferences.scope = .entireLibrary
+        try await h.engine.setPreferences(preferences)
+        await untilTransfers("The entire library asks for windows without album IDs.") { scheduler.plans.last == .automatic(requireCharging: false, triggerDelay: 30) }
+        preferences.scope = .selectedAlbums
+        try await h.engine.setPreferences(preferences)
+        await untilTransfers("An empty album selection releases its windows.") { scheduler.plans.last == SchedulePlan.none }
+        let gate = TransferGate()
+        h.executor.script("selected-photo", .hold(gate))
+        _ = try await h.engine.enqueue([h.photo("selected-photo")])
+        await untilTransfers("An explicit queued photo retains background handoff.") { scheduler.plans.last == .automatic(requireCharging: false, triggerDelay: 30) }
+        gate.open()
+        try await untilTransfers("The explicit photo finishes.") { try await h.allConfirmed("selected-photo") }
+        await untilTransfers("The idle engine releases windows again.") { scheduler.plans.last == SchedulePlan.none }
+        await h.tearDown()
+    }
+
     func testEngineHandsOverAPlanOnlyWhenItChanges() async throws {
         let scheduler = RecordingWindowScheduler()
         let h = try await TransferEngineHarness(scheduler: scheduler)
@@ -294,6 +319,7 @@ import XCTest
         try await h.engine.setIntent(.automatic)
         var preferences = TransferPreferences()
         preferences.automatic = true
+        preferences.includedAlbums = ["album"]
         try await h.engine.setPreferences(preferences)
         await untilTransfers("Automatic backup's plan.") { scheduler.plans.count == 2 }
         _ = try await h.engine.enqueue([h.photo("a"), h.photo("b")])
@@ -335,29 +361,117 @@ import XCTest
         let scheduler = FakeTaskScheduler()
         let source = LifecycleEventSource(initial: .launch(active: false), scheduler: scheduler)
         // The backup screen hears of each change (TransferHost passes it on).
-        var shown: [String?] = []
-        source.schedulingErrorChanged = { shown.append($0) }
+        var shown: [BackgroundBackupIssue?] = []
+        source.schedulingIssueChanged = { shown.append($0) }
         XCTAssertTrue(source.register())
         await source.schedule(.automatic(requireCharging: false, triggerDelay: 30))
         XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing, .refresh])
         scheduler.answer(.processing, nil)
-        scheduler.answer(.refresh, "Background App Refresh is off")
-        XCTAssertEqual(source.schedulingError,
-                       "iOS could not schedule automatic backup: Background App Refresh is off. You can still use Back up now.")
-        XCTAssertEqual(shown, [source.schedulingError])
+        scheduler.answer(.refresh, .unavailable)
+        XCTAssertEqual(source.schedulingIssue, .unavailable)
+        XCTAssertEqual(shown, [source.schedulingIssue])
 
         source.photoLibraryChanged()
-        XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing, .refresh, .refresh], "Only the refused request is asked for again.")
+        XCTAssertEqual(scheduler.submitted.count, 2, "A burst of new photos must not repeatedly submit refused requests.")
+        source.applicationBecameActive()
+        XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing, .refresh, .refresh], "Reopening retries only the refused request.")
         source.photoLibraryChanged()
         source.applicationBecameActive()
         XCTAssertEqual(scheduler.submitted.count, 3, "A request iOS has not answered is not replaced.")
         scheduler.answer(.refresh, nil)
-        XCTAssertNil(source.schedulingError, "iOS took the request.")
+        XCTAssertNil(source.schedulingIssue, "iOS took the request.")
         XCTAssertEqual(shown.count, 2)
-        XCTAssertNil(shown.last ?? "not told", "The screen hears it was taken.")
+        XCTAssertEqual(shown, [.unavailable, nil], "The screen hears it was taken.")
         source.applicationEnteredBackground()
         source.photoLibraryChanged()
         XCTAssertEqual(scheduler.submitted.count, 3, "Nothing more is asked for.")
+        source.finish()
+    }
+
+    func testDisabledBackgroundRefreshExplainsRecoveryAndReschedulesWhenEnabled() async {
+        let scheduler = FakeTaskScheduler()
+        scheduler.availability = .denied
+        let source = LifecycleEventSource(initial: .launch(active: true), scheduler: scheduler)
+        let plan = SchedulePlan.automatic(requireCharging: false, triggerDelay: 30)
+        await source.schedule(plan)
+        XCTAssertTrue(scheduler.submitted.isEmpty)
+        XCTAssertEqual(source.schedulingIssue, .refreshDisabled)
+        XCTAssertTrue(source.schedulingIssue?.canOpenSettings == true)
+        source.photoLibraryChanged()
+        await source.schedule(plan)
+        XCTAssertTrue(scheduler.submitted.isEmpty, "No futile scheduler calls while device policy blocks them.")
+
+        scheduler.availability = .available
+        source.backgroundAvailabilityChanged()
+        XCTAssertEqual(scheduler.submitted.map(\.kind), [.processing, .refresh])
+        XCTAssertNil(source.schedulingIssue)
+        source.backgroundAvailabilityChanged()
+        XCTAssertEqual(scheduler.submitted.count, 2, "The pending requests are retained, not delayed by resubmission.")
+        source.finish()
+    }
+
+    func testOldSameShapeSchedulerAnswerCannotInvalidateANewerRequest() async {
+        let scheduler = FakeTaskScheduler()
+        let source = LifecycleEventSource(initial: .launch(active: true), scheduler: scheduler)
+        let plan = SchedulePlan.automatic(requireCharging: false, triggerDelay: 30)
+        await source.schedule(plan)
+        let staleAnswer = scheduler.allAnswers[0]
+        await source.schedule(.none)
+        await source.schedule(plan)
+        staleAnswer(.notPermitted)
+        XCTAssertNil(source.schedulingIssue, "An old response must not reject the newer request of the same shape.")
+        scheduler.answer(.processing, nil)
+        scheduler.answer(.refresh, nil)
+        await source.schedule(plan)
+        XCTAssertEqual(scheduler.submitted.count, 4)
+        source.finish()
+    }
+
+    func testPauseWhileReadingPendingRequestsCannotRestoreAnOlderAutomaticPlan() async {
+        let scheduler = FakeTaskScheduler()
+        let gate = TransferGate()
+        scheduler.pendingGate = gate
+        let source = LifecycleEventSource(initial: .launch(active: true), scheduler: scheduler)
+        let automatic = Task { await source.schedule(.automatic(requireCharging: false, triggerDelay: 30)) }
+        await untilTransfers("The initial scheduler read is held.") { gate.waiting == 1 }
+        var pausing = false
+        let pause = Task {
+            pausing = true
+            await source.schedule(.none)
+        }
+        await untilTransfers("The newer pause has entered the source.") { pausing }
+        gate.open()
+        await automatic.value
+        await pause.value
+        XCTAssertTrue(scheduler.submitted.isEmpty, "A stale initial schedule must not restore automatic backup after a pause.")
+        XCTAssertNil(source.schedulingIssue)
+        source.finish()
+    }
+
+    func testOneAcceptedWindowDoesNotHideTheOtherWindowsRefusal() async {
+        let scheduler = FakeTaskScheduler()
+        let source = LifecycleEventSource(initial: .launch(active: false), scheduler: scheduler)
+        await source.schedule(.automatic(requireCharging: false, triggerDelay: 30))
+        scheduler.answer(.processing, .notPermitted)
+        scheduler.answer(.refresh, nil)
+        XCTAssertEqual(source.schedulingIssue, .notPermitted)
+        await source.schedule(.none)
+        XCTAssertNil(source.schedulingIssue)
+        source.finish()
+    }
+
+    func testLowPowerModeCancelsHeldRequestsAndReopeningRecovers() async {
+        let scheduler = FakeTaskScheduler()
+        let source = LifecycleEventSource(initial: .launch(active: true), scheduler: scheduler)
+        await source.schedule(.automatic(requireCharging: false, triggerDelay: 30))
+        scheduler.availability = .lowPower
+        source.lowPowerChanged(true)
+        XCTAssertEqual(source.schedulingIssue, .lowPower)
+        XCTAssertEqual(Set(scheduler.cancelled), Set(BackgroundWindowKind.allCases.map(\.identifier)))
+        scheduler.availability = .available
+        source.lowPowerChanged(false)
+        XCTAssertEqual(scheduler.submitted.count, 4)
+        XCTAssertNil(source.schedulingIssue)
         source.finish()
     }
 }

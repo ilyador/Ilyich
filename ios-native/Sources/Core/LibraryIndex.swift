@@ -171,6 +171,10 @@ final class LibraryIndex: Sendable {
 
     func entityData(kind: String, id: String) async throws -> Data? { try await mapped { try await viewport.entityData(kind: kind, id: id) } }
     func asset(id: String) async throws -> Asset? { try await mapped { try await viewport.asset(id: id) } }
+    func identity(id: String) async throws -> LocalAssetMatch? { try await mapped { try await viewport.identity(id: id) } }
+    func identities(checksum: String?, cloudID: String?) async throws -> [LocalAssetMatch] {
+        try await mapped { try await viewport.identities(checksum: checksum, cloudID: cloudID) }
+    }
     /// A feed's photos across months, newest first by the time taken unless it asks otherwise.
     /// `includesPartners` adds the partners shown in the timeline where the library allows them.
     func timelineAssets(_ query: LibraryQuery = .library, includesPartners: Bool = true, offset: Int = 0, limit: Int = 200) async throws -> [Asset] {

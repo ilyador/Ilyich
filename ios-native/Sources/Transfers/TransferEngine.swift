@@ -80,6 +80,8 @@ struct JobContext: Sendable {
     fileprivate let owned: @Sendable (Lease) async -> Bool
     fileprivate let advanceTo: @Sendable (Lease, JobState, String?) async throws -> Void
     fileprivate let report: @Sendable (Lease, Int64, Int64) async -> Void
+    fileprivate let checking: @Sendable (Lease, Bool) async -> Void
+    fileprivate let absent: @Sendable (Lease, AssetRevision) async -> Void
 
     /// Throws LeaseLost unless the lease still holds and the authorization it was taken under
     /// still allows uploads. Call it after every await.
@@ -96,6 +98,8 @@ struct JobContext: Sendable {
 
     /// Bytes of the current file sent so far.
     func progress(sent: Int64, expected: Int64) async { await report(lease, sent, expected) }
+    func checkingExistingBackups(_ value: Bool) async { await checking(lease, value) }
+    func checkedOriginalAbsent(revision: AssetRevision) async { await absent(lease, revision) }
 }
 
 // MARK: - Engine
@@ -150,6 +154,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// An engine-wide wait, and when it ends by itself (server backoff only).
     private var wait: WaitReason?
     private var waitUntil: Date?
+    /// A partial server identity catalog delays the library lane, never shared uploads.
+    private var identityIndexRetryAt: Date?
     private var consecutiveServerErrors = 0
 
     private struct Active {
@@ -163,11 +169,29 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var active: [Int64: Active] = [:]
     /// Bytes sent of each running job's current file.
     private var fileProgress: [Int64: (sent: Int64, expected: Int64)] = [:]
+    private var checkingExisting: Set<Int64> = []
     private let concurrency: Int
     /// Each running job's wait for its result and commit, by lease token.
     private var finishing: [UUID: Task<Void, Never>] = [:]
     /// Discovery passes under way.
     private var discovering = 0
+    /// Only the latest discovery may report an error. A stopped or cancelled pass is silent.
+    private var discoveryGeneration: UInt64 = 0
+    private var discoveryMessage: String?
+    private var backupSelectionChecked = false
+    private var selectionInventory: SelectionInventory?
+    private var selectionCheckedAt: Date?
+    private struct BackupSelection: Equatable {
+        let scope: PhotoSelectionScope
+        let included: Set<String>
+        let excluded: Set<String>
+
+        init(_ preferences: TransferPreferences) {
+            scope = preferences.scope
+            included = preferences.includedAlbums
+            excluded = preferences.excludedAlbums
+        }
+    }
     /// Manual runs still setting up: the run doesn't end meanwhile.
     private var manualHolds = 0
 
@@ -187,6 +211,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     // Snapshots.
     private var counts = TransferCounts()
+    private var preferencesRevision: UInt64 = 0
     private var subscribers: [UUID: AsyncStream<TransferSnapshot>.Continuation] = [:]
     private var latest: TransferSnapshot?
     private var lastSent: TransferSnapshot?
@@ -293,6 +318,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// A condition changed (network, power, temperature): every wait ends, whatever the intent.
     /// An account block stays.
     func conditionsChanged() async {
+        identityIndexRetryAt = nil
         wait = nil
         waitUntil = nil
         consecutiveServerErrors = 0
@@ -319,6 +345,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             followUp?(.manualRun)
         }
         if intent != .paused {
+            identityIndexRetryAt = nil
             // The user asked: lift a block whose cause has gone, and try again now.
             liftBlock()
             wait = nil
@@ -362,6 +389,15 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     func setPreferences(_ preferences: TransferPreferences) async throws {
         try await store.savePreferences(preferences)
+        if self.preferences.map(BackupSelection.init) != BackupSelection(preferences) {
+            backupSelectionChecked = false
+            selectionInventory = nil
+            selectionCheckedAt = nil
+            discoveryGeneration &+= 1
+            if let discoveryMessage, lastMessage == discoveryMessage { lastMessage = nil }
+            discoveryMessage = nil
+        }
+        if self.preferences != preferences { preferencesRevision &+= 1 }
         self.preferences = preferences
         await changed()
     }
@@ -372,7 +408,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     func setPreferencesFollowingAutomatic(_ preferences: TransferPreferences) async throws {
         let wasAutomatic = self.preferences?.automatic == true
         try await setPreferences(preferences)
-        if preferences.automatic, !wasAutomatic, intent == .paused {
+        if preferences.automatic, intent == .paused {
             try await setIntent(.automatic, requeueingFailures: false)
         } else if !preferences.automatic, wasAutomatic, intent == .automatic {
             try await setIntent(.manual, requeueingFailures: false)
@@ -417,16 +453,39 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// discovering meanwhile. Nil, with nothing read, while an account block or the session's
     /// authorization refuses transfers, as enqueue refuses.
     func discover(_ discovery: LibraryDiscovery) async throws -> DiscoveryMerge? {
-        if blocker != nil || restriction(authorization.current()) != nil { return nil }
+        if stopped || Task.isCancelled || blocker != nil || restriction(authorization.current()) != nil { return nil }
+        discoveryGeneration &+= 1
+        let generation = discoveryGeneration
+        let selection = preferences.map(BackupSelection.init)
+        let hasSelection = preferences?.hasSelection == true
+        backupSelectionChecked = false
+        selectionInventory = nil
+        selectionCheckedAt = nil
+        if let discoveryMessage, lastMessage == discoveryMessage { lastMessage = nil }
+        discoveryMessage = nil
         discovering += 1
         await publish()
         let merge: DiscoveryMerge
         do { merge = try await discovery.run() } catch {
             discovering -= 1
+            if !stopped, !Task.isCancelled, generation == discoveryGeneration,
+               restriction(authorization.current()) == nil, !(error is CancellationError), !(error is PurchaseAccessRequired) {
+                discoveryMessage = error.localizedDescription
+                lastMessage = discoveryMessage
+            }
             await changed()
             throw error
         }
         discovering -= 1
+        if !stopped, !Task.isCancelled, generation == discoveryGeneration, hasSelection,
+           restriction(authorization.current()) == nil, selection == preferences.map(BackupSelection.init) {
+            backupSelectionChecked = true
+            selectionInventory = merge.inventory
+            selectionCheckedAt = now()
+            // A job can commit after the merge transaction returns but before this actor
+            // adopts its inventory. Catch up once; later accepted commits update the set directly.
+            await refreshSelectionConfirmations()
+        }
         await changed()
         return merge
     }
@@ -469,7 +528,21 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// Something outside the engine changed the database (recovery committed an outcome): the
     /// counts and the snapshot are read again, and the loop looks for work.
     func refresh() async {
+        await refreshSelectionConfirmations()
         await changed()
+    }
+
+    private func refreshSelectionConfirmations() async {
+        guard let inventory = selectionInventory else { return }
+        let generation = discoveryGeneration
+        guard let confirmations = try? await store.confirmationRevisions(for: Array(inventory.revisions.keys)),
+              !stopped, generation == discoveryGeneration else { return }
+        for (id, revision) in confirmations {
+            if let selected = selectionInventory?.revisions[id] ?? nil, selected == revision {
+                selectionInventory?.confirmed.insert(id)
+                selectionInventory?.pending.remove(id)
+            }
+        }
     }
 
     // MARK: Background windows
@@ -524,7 +597,9 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// blocks the engine, as the old backup scheduled them. A manual run asks for them too, even
     /// with automatic backup off (the owner's decision), until it ends; a pause drops them.
     private func currentPlan() -> SchedulePlan {
-        guard intent != .paused, blocker == nil, preferences?.automatic == true || intent == .manual else { return .none }
+        guard intent != .paused, blocker == nil else { return .none }
+        let automaticWork = preferences?.automatic == true && (preferences?.hasSelection == true || counts.remaining > 0)
+        guard intent == .manual || automaticWork else { return .none }
         return .automatic(requireCharging: preferences?.requireCharging ?? false, triggerDelay: preferences?.triggerDelay ?? 0)
     }
 
@@ -561,6 +636,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     private func run() async {
         while !Task.isCancelled {
+            if let deadline = identityIndexRetryAt, now() >= deadline { identityIndexRetryAt = nil }
             if let refusal = restriction(authorization.current()) { await block(refusal) }
             if let until = waitUntil, now() >= until { wait = nil; waitUntil = nil }
             if blocker != nil || wait != nil {
@@ -596,8 +672,11 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                 // of this loop, or recovery applying an outcome after a relaunch (refresh).
                 if intent == .manual, counts.remaining == 0 { await settleManualRun() }
             }
-            let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
-            await sleep(until: active.count < concurrency ? try? await store.nextRetry(lanes: lanes) : nil)
+            let lanes: [TransferLane] = intent == .paused || identityIndexRetryAt != nil ? [.share] : [.share, .library]
+            let hasRoom = active.count < concurrency
+            let nextRetry = hasRoom ? try? await store.nextRetry(lanes: lanes) : nil
+            let catalogRetry = hasRoom && intent != .paused ? identityIndexRetryAt : nil
+            await sleep(until: [nextRetry, catalogRetry].compactMap { $0 }.min())
         }
     }
 
@@ -621,6 +700,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard let snapshot = authorization.current() else { return nil }
         let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
         for lane in lanes {
+            if lane == .library, let deadline = identityIndexRetryAt, now() < deadline { continue }
             let token = UUID()
             let generation = cancelGeneration
             if let stored = try await store.reserve(lane: lane, now: now(), token: token, epoch: snapshot.epoch.value) {
@@ -642,7 +722,9 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                         guard let self else { throw LeaseLost() }
                         try await self.advance(lease, to: state, phase: phase)
                     },
-                    report: { [weak self] lease, sent, expected in await self?.progress(lease, sent: sent, expected: expected) })
+                    report: { [weak self] lease, sent, expected in await self?.progress(lease, sent: sent, expected: expected) },
+                    checking: { [weak self] lease, value in await self?.checkingExisting(lease, value: value) },
+                    absent: { [weak self] lease, revision in await self?.checkedAbsent(lease, revision: revision) })
                 let executor = self.executor
                 active[stored.id] = Active(job: job, task: Task { try await executor.execute(job, context: context) },
                                            tokenDigest: current.tokenDigest, writeGeneration: current.writeGeneration)
@@ -661,6 +743,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard active[id]?.job.lease == job.lease else { return }
         active[id] = nil
         fileProgress[id] = nil
+        checkingExisting.remove(id)
         switch result {
         case .success(let outcome):
             do {
@@ -691,8 +774,13 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private func commit(_ outcome: JobResult, of job: LeasedJob) async throws -> Bool {
         switch (outcome, job.source) {
         case (.backedUp(let revision, let assetID, let receipt), .photo(let id)):
-            return try await store.complete(TransferCompletion(job: job.lease.job, lease: job.lease.token, localID: id.rawValue, revision: revision,
-                                                               assetID: assetID, receipt: receipt, confirmedAt: now()))
+            let committed = try await store.complete(TransferCompletion(job: job.lease.job, lease: job.lease.token, localID: id.rawValue, revision: revision,
+                                                                        assetID: assetID, receipt: receipt, confirmedAt: now()))
+            if committed, let selected = selectionInventory?.revisions[id.rawValue] ?? nil, selected == revision {
+                selectionInventory?.confirmed.insert(id.rawValue)
+                selectionInventory?.pending.remove(id.rawValue)
+            }
+            return committed
         case (.shared(let remoteID), .shared(let batch, let attachment)):
             return try await store.completeShare(job: job.lease.job, token: job.lease.token, batch: batch, attachment: attachment,
                                                  remoteID: remoteID, at: now())
@@ -704,6 +792,11 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     private func fail(_ job: LeasedJob, _ error: any Error) async {
+        if error is BackupIdentityIndexNotReady {
+            _ = try? await store.release(job: job.lease.job, token: job.lease.token)
+            identityIndexRetryAt = now().addingTimeInterval(5)
+            return
+        }
         let context = TransferFailureClassifier.Context(retryCount: job.retryCount, consecutiveServerErrors: consecutiveServerErrors,
                                                         downloadCloudOriginals: preferences?.downloadCloudOriginals ?? true)
         let failure = TransferFailureClassifier.classify(error, context: context)
@@ -762,6 +855,20 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private func progress(_ lease: Lease, sent: Int64, expected: Int64) async {
         guard active[lease.job]?.job.lease == lease else { return }
         fileProgress[lease.job] = (sent, expected)
+        await publish(refreshingCounts: false)
+    }
+
+    private func checkingExisting(_ lease: Lease, value: Bool) async {
+        guard owns(lease) else { return }
+        if value { checkingExisting.insert(lease.job) } else { checkingExisting.remove(lease.job) }
+        await publish(refreshingCounts: false)
+    }
+
+    private func checkedAbsent(_ lease: Lease, revision: AssetRevision) async {
+        guard owns(lease), let running = active[lease.job], case .photo(let id) = running.job.source,
+              let selected = selectionInventory?.revisions[id.rawValue] ?? nil, selected == revision,
+              selectionInventory?.confirmed.contains(id.rawValue) == false else { return }
+        selectionInventory?.pending.insert(id.rawValue)
         await publish(refreshingCounts: false)
     }
 
@@ -835,6 +942,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         for running in released {
             active[running.job.lease.job] = nil
             fileProgress[running.job.lease.job] = nil
+            checkingExisting.remove(running.job.lease.job)
             running.task.cancel()
         }
         for running in released { _ = try? await store.release(job: running.job.lease.job, token: running.job.lease.token) }
@@ -888,14 +996,33 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     private func snapshot() -> TransferSnapshot {
+        let catalogWaiting = identityIndexRetryAt != nil && intent != .paused && counts.remaining > 0 && blocker == nil && wait == nil
         let phase: TransferPhase = if let blocker { .blocked(blocker) } else if let wait { .waiting(wait) } else if !active.isEmpty { .running }
-            else if discovering > 0 { .discovering } else { .idle }
+            else if discovering > 0 { .discovering } else if catalogWaiting { .waiting(.serverBackoff) } else { .idle }
+        let libraryJobs = active.filter { $0.value.job.lane == .library }
+        let backupPhase: TransferPhase = if let blocker { .blocked(blocker) } else if !libraryJobs.isEmpty { .running }
+            else if discovering > 0 { .discovering }
+            else if catalogWaiting { .waiting(.serverBackoff) }
+            else if let wait, counts.remaining > 0, intent != .paused { .waiting(wait) } else { .idle }
+        let libraryReports = libraryJobs.keys.compactMap { fileProgress[$0] }
+        let expectedKnown = libraryReports.count == libraryJobs.count && libraryReports.allSatisfy { $0.expected > 0 }
+        let backupProgress: TransferProgress? = libraryJobs.isEmpty ? nil : TransferProgress(
+            activeFileCount: libraryJobs.count,
+            sentBytes: libraryReports.reduce(0) { $0 + max($1.sent, 0) },
+            expectedBytes: expectedKnown ? libraryReports.reduce(0) { $0 + $1.expected } : nil)
         let progress: (sent: Int64, expected: Int64)? = fileProgress.isEmpty ? nil
             : fileProgress.values.reduce((sent: Int64(0), expected: Int64(0))) { ($0.sent + $1.sent, $0.expected + max($1.expected, 0)) }
         return TransferSnapshot(intent: intent, phase: phase, remaining: counts.remaining, confirmed: counts.confirmed, failed: counts.failed,
                                 fileProgress: progress.flatMap { $0.expected > 0 ? min(Double($0.sent) / Double($0.expected), 1) : nil },
                                 bytesSent: progress?.sent ?? 0, bytesExpected: max(progress?.expected ?? 0, 0), bytesPerSecond: nil,
-                                lastMessage: lastMessage)
+                                lastMessage: lastMessage, backupPhase: backupPhase, backupProgress: backupProgress,
+                                preferencesRevision: preferencesRevision, backupSelectionChecked: backupSelectionChecked,
+                                selectionProgress: selectionInventory.flatMap { inventory in
+                                    selectionCheckedAt.map { SelectionProgress(total: inventory.revisions.count, backedUp: inventory.confirmed.count,
+                                                                               unchecked: inventory.revisions.count - inventory.confirmed.count - inventory.pending.count,
+                                                                               checkedAt: $0) }
+                                }, checkingExistingBackups: (catalogWaiting && libraryJobs.isEmpty)
+                                    || (!libraryJobs.isEmpty && libraryJobs.keys.allSatisfy { checkingExisting.contains($0) }))
     }
 
     /// Sends the snapshot now, or, within the interval of the last one, the latest at its end.

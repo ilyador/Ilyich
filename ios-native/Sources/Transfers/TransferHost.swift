@@ -157,7 +157,7 @@ import UIKit
         self.source = source
         // iOS turning automatic backup's windows down shows on the backup screen.
         let backend = self.backend
-        source.schedulingErrorChanged = { backend.schedulingErrorChanged($0) }
+        source.schedulingIssueChanged = { backend.schedulingIssueChanged($0) }
         source.register()
         let inputs = SystemLifecycleInputs()
         inputs.start(feeding: source)
@@ -261,10 +261,17 @@ import UIKit
             await MainActor.run { acks?.committed(identifier: session.identifier, through: drain) }
         }
         let scheduler: (any WindowScheduling)? = source
+        let knownBackupChecker = runtime.library.map { library in
+            KnownBackupCopyChecker(account: runtime.credential.account, reader: PhotoKitIndexReader(adapter: .shared),
+                                   database: PhotoKitAdapter.shared.database,
+                                   identities: LibraryIndexIdentities(entities: library.entities, libraryChanges: { await library.sync.changes() }),
+                                   server: runtime.transferServer)
+        }
         let parts = TransferRuntime.Parts(
             account: runtime.credential.account, store: transfers.store, authorization: runtime.authorization, server: runtime.transferServer,
             registry: registry, layout: layout, inbox: inbox, staging: PhotoKitAdapter.shared, scheduler: scheduler, time: SystemBackgroundTime(),
-            appActive: UIApplication.shared.applicationState == .active, preSync: preSync, acknowledge: acknowledge)
+            appActive: UIApplication.shared.applicationState == .active, preSync: preSync, acknowledge: acknowledge,
+            knownBackupChecker: knownBackupChecker)
         let made = TransferRuntime(parts)
         runtime.attachTransfers(made) { [weak self] in self?.detach(made) }
         return made
@@ -325,6 +332,8 @@ import UIKit
 
     init(system: any BackgroundTaskScheduling) { self.system = system }
 
+    var availability: BackgroundBackupAvailability { system.availability }
+
     func setPurchaseAccess(_ access: PurchaseAccess) { purchaseAccess = access }
 
     /// Registers both identifiers with iOS, as didFinishLaunching must. `waiting` runs when a
@@ -364,8 +373,8 @@ import UIKit
         return registered
     }
 
-    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void) {
-        guard purchaseAccess?.hasAccess != false else { return answered(PurchaseAccessRequired().localizedDescription) }
+    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (BackgroundSchedulingFailure?) -> Void) {
+        guard purchaseAccess?.hasAccess != false else { return answered(.purchaseRequired) }
         system.submit(request, answered: answered)
     }
     func cancel(identifier: String) { system.cancel(identifier: identifier) }
@@ -421,7 +430,7 @@ import UIKit
     private(set) var route: Route
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var subscribers: [UUID: Subscriber] = [:]
-    private var schedulingError: String?
+    private var schedulingIssue: BackgroundBackupIssue?
     /// The screen read the preferences of the backup in use.
     private var preferencesRead = false
 
@@ -449,9 +458,9 @@ import UIKit
 
     /// iOS turned a background window of automatic backup down, with its message, or took one
     /// again (nil).
-    func schedulingErrorChanged(_ message: String?) {
-        guard message != schedulingError else { return }
-        schedulingError = message
+    func schedulingIssueChanged(_ issue: BackgroundBackupIssue?) {
+        guard issue != schedulingIssue else { return }
+        schedulingIssue = issue
         for subscriber in subscribers.values {
             if let last = subscriber.last { subscriber.continuation.yield(shown(last)) }
         }
@@ -548,12 +557,11 @@ import UIKit
         }
     }
 
-    /// The engine's snapshot, with iOS's refusal to schedule automatic backup when there is no
-    /// other message.
+    /// Keep scheduling restrictions separate, so they never hide an upload failure or turn a
+    /// successful foreground backup into an error.
     private func shown(_ snapshot: TransferSnapshot) -> TransferSnapshot {
-        guard snapshot.lastMessage == nil, let schedulingError else { return snapshot }
         var shown = snapshot
-        shown.lastMessage = schedulingError
+        shown.backgroundIssue = schedulingIssue
         return shown
     }
 

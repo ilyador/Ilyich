@@ -71,6 +71,11 @@ final class TransferCutoverState: Sendable {
 struct CutoverReceipts: ReceiptRepository, DeviceIndexBackupSource {
     let cutover: TransferCutoverState
 
+    func receipt(for localID: String, account: String) async -> DeviceBackupReceipt {
+        guard case .engine(let source) = await cutover.choice(waitingAtMost: .seconds(3)) else { return .unavailable }
+        return await source.receipt(for: localID, account: account)
+    }
+
     func receipts(account: String) async -> [String: CleanupReceipt]? {
         guard case .engine(let source) = await cutover.choice() else { return nil }
         return await source.receipts(account: account)

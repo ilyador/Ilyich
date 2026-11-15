@@ -126,7 +126,7 @@ final class StagingRulesTests: XCTestCase {
         let adapter = PhotoKitAdapter(library: photos, assets: photos, journal: DeviceDatabase(url: deviceDatabaseURL()), staging: photos)
 
         var batches: [[DeviceCandidate]] = []
-        for try await batch in adapter.candidates(included: ["recents"], excluded: ["screenshots"], batchSize: 250) {
+        for try await batch in adapter.candidates(scope: .selectedAlbums, included: ["recents"], excluded: ["screenshots"], batchSize: 250) {
             XCTAssertTrue(Thread.isMainThread)
             batches.append(batch)
         }
@@ -138,6 +138,34 @@ final class StagingRulesTests: XCTestCase {
         XCTAssertEqual(photos.readsOnMainThread, 0, "Photos is never read on the main thread.")
         let members = await adapter.albumMembers("screenshots", excluded: [])
         XCTAssertEqual(members, Array(ids[10..<20]))
+    }
+
+    func testEntireLibraryIncludesUnalbumedPhotosAndVideosAndExcludesOverlappingAlbums() async throws {
+        let photos = FakePhotoKit(status: .limited)
+        for id in ["albumed", "unfiled-photo", "unfiled-video", "excluded", "overlap"] { photos.add(id) }
+        photos.setFacts("unfiled-video", FakePhotoKit.Facts(isVideo: true))
+        photos.addAlbum("trips", title: "Trips", members: ["albumed", "overlap", "excluded"])
+        photos.addAlbum("favorites", title: "Favorites", members: ["albumed", "overlap"])
+        photos.addAlbum("private", title: "Private", members: ["excluded", "overlap"])
+        let adapter = PhotoKitAdapter(library: photos, assets: photos, journal: DeviceDatabase(url: deviceDatabaseURL()), staging: photos)
+        var found: [String] = []
+        for try await batch in adapter.candidates(scope: .entireLibrary, included: [], excluded: ["private"], batchSize: 2) {
+            found += batch.map(\.id)
+        }
+        XCTAssertEqual(found, ["albumed", "unfiled-photo", "unfiled-video"])
+        let timeline = try await adapter.timelineMembers(scope: .entireLibrary, included: [], excluded: ["private"])
+        XCTAssertEqual(timeline, Set(found), "Backup and the merged timeline use the same selection.")
+        let syncedMembers = await adapter.albumMembers("trips", excluded: ["private"], scope: .entireLibrary)
+        XCTAssertEqual(syncedMembers, ["albumed"], "Whole-library backup never expands the members copied to a real server album.")
+        var selected: [String] = []
+        for try await batch in adapter.candidates(scope: .selectedAlbums, included: ["trips", "favorites"], excluded: ["private"]) {
+            selected += batch.map(\.id)
+        }
+        XCTAssertEqual(selected, ["albumed"], "Overlapping album memberships produce one candidate, and exclusions win.")
+        var empty: [DeviceCandidate] = []
+        for try await batch in adapter.candidates(scope: .selectedAlbums, included: [], excluded: []) { empty += batch }
+        XCTAssertTrue(empty.isEmpty, "An empty album selection never means the entire library.")
+        XCTAssertEqual(photos.readsOnMainThread, 0)
     }
 
     /// A favorite doesn't wait behind a long read of albums or their members, as it would if the
@@ -177,7 +205,7 @@ final class StagingRulesTests: XCTestCase {
         let adapter = PhotoKitAdapter(library: photos, assets: photos, journal: DeviceDatabase(url: deviceDatabaseURL()), staging: photos)
         let reader = Task {
             var count = 0
-            for try await batch in adapter.candidates(included: ["all"], excluded: [], batchSize: 10) {
+            for try await batch in adapter.candidates(scope: .selectedAlbums, included: ["all"], excluded: [], batchSize: 10) {
                 count += batch.count
                 if count >= 20 { break }
             }

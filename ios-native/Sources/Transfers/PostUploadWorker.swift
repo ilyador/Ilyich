@@ -293,7 +293,7 @@ actor PostUploadWorker {
         let included = await photos.albums().filter { preferences.includedAlbums.contains($0.id) && !preferences.excludedAlbums.contains($0.id) }
         for local in included.sorted(by: { $0.id < $1.id }) {
             try checkCancellation()
-            let members = await photos.albumMembers(local.id, excluded: preferences.excludedAlbums)
+            let members = await photos.albumMembers(local.id, excluded: preferences.excludedAlbums, scope: preferences.scope)
             let assetIDs = Set(try await store.receipts(for: members).values.map(\.original.id)).sorted()
             guard !assetIDs.isEmpty else { continue }
             try await ensureAllowed()

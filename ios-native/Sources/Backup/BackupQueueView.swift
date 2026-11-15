@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The upload queue or the confirmed uploads, a page at a time from the backup store; each row
+/// Pending checks/uploads or verified backups, a page at a time from the backup store; each row
 /// reads its photo's details from the Photos adapter.
 struct BackupQueueView: View {
     var showCompleted = false
@@ -26,12 +26,14 @@ struct BackupQueueView: View {
                             .onAppear { if item.localID == completed.last?.localID { Task { await loadMore() } } }
                     }
                 } footer: {
-                    Text("These files were verified when their backups completed. Ilyich checks the server again before offering to remove a local copy.")
+                    Text("Includes copies that were already on the server. The date shows when Ilyich verified the backup, not when it was first uploaded. Cleanup requires a separate file verification.")
                 }
             } else {
                 if loaded && queued.isEmpty {
-                    ContentUnavailableView("No pending uploads", systemImage: "checkmark.icloud")
+                    ContentUnavailableView("No pending items", systemImage: "checkmark.icloud")
                 } else {
+                    Text("These items still need checking or uploading. They may already be on your server.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     ForEach(queued, id: \.source) { item in
                         BackupQueueRow(localID: item.localID, failure: item.message) { viewing = $0 }
                             .onAppear { if item.source == queued.last?.source { Task { await loadMore() } } }
@@ -39,7 +41,7 @@ struct BackupQueueView: View {
                 }
             }
         }
-        .navigationTitle(showCompleted ? "Confirmed uploads" : "Upload queue")
+        .navigationTitle(showCompleted ? "Verified backups" : "Pending items")
         .task(id: listChange) { await reload() }
         .sheet(item: $viewing) { LocalPhotoViewer(photo: $0) }
     }
@@ -97,7 +99,7 @@ private struct BackupQueueRow: View {
                     Text(filename).foregroundStyle(.primary)
                     if let date = photo?.date { Text(date, format: .dateTime.year().month().day()).font(.caption).foregroundStyle(.secondary) }
                     if !sourceAlbums.isEmpty { Text(sourceAlbums).font(.caption).foregroundStyle(.secondary) }
-                    if let date = confirmedAt { Text("Backed up \(date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary) }
+                    if let date = confirmedAt { Text("Verified \(date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary) }
                     if let failure { Text(failure).font(.footnote).foregroundStyle(.red) }
                 }
             }

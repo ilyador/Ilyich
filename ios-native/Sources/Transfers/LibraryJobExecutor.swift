@@ -49,15 +49,18 @@ final class LibraryJobExecutor: JobExecuting {
     /// the phone is hot, and only while charging when the setting asks, as backup always checked
     /// before each photo. When they don't, the whole engine waits for them to change.
     private let conditionsPermit: @Sendable (_ requireCharging: Bool) async -> Bool
+    private let knownBackupChecker: (any KnownBackupCopyChecking)?
     /// Stage folders of jobs that returned a result, removed once the engine commits it.
     private let finishedFolders = Mutex<[Int64: String]>([:])
 
     init(store: TransferStore, staging: any PhotoLibraryStaging, server: any TransferServerAPI, uploader: any PartUploading,
          layout: AppGroupLayout, account: AccountID, pipeline: TransferPipeline = TransferPipeline(),
          checksum: @escaping @Sendable (URL) async throws -> String = { url in try await UploadBody.work { try UploadBody.checksum(url) } },
-         conditionsPermit: @escaping @Sendable (_ requireCharging: Bool) async -> Bool = { _ in true }) {
+         conditionsPermit: @escaping @Sendable (_ requireCharging: Bool) async -> Bool = { _ in true },
+         knownBackupChecker: (any KnownBackupCopyChecking)? = nil) {
         self.store = store
         self.conditionsPermit = conditionsPermit
+        self.knownBackupChecker = knownBackupChecker
         self.staging = staging
         self.server = server
         self.uploader = uploader
@@ -91,6 +94,17 @@ final class LibraryJobExecutor: JobExecuting {
             stage = existing
         } else {
             try await context.ensureOwned()
+            if let knownBackupChecker {
+                await context.checkingExistingBackups(true)
+                let checked = try await knownBackupChecker.check(id.rawValue, context: context)
+                try await context.ensureOwned()
+                await context.checkingExistingBackups(false)
+                switch checked {
+                case .backedUp(let result): return result
+                case .absent(let revision): await context.checkedOriginalAbsent(revision: revision)
+                case .unknown: break
+                }
+            }
             stage = try await stagePhoto(id.rawValue, job: job, context: context, preferences: preferences)
         }
         pipeline.record(bytes: bytes(of: stage), for: stagingTurn)
@@ -246,6 +260,7 @@ final class LibraryJobExecutor: JobExecuting {
             return assetID
         }
         guard result.action == "accept" else { throw APIError.invalidResponse("The server returned an unknown upload decision.") }
+        if part == .original { await run.context.checkedOriginalAbsent(revision: stage.revision) }
 
         // The body: kept from an unanswered attempt whose body was written in full, which iOS may
         // still be sending, else new. One left .created never finished its body: the app ended

@@ -31,13 +31,13 @@ protocol PhotoLibraryStaging: Sendable {
     var authorization: PHAuthorizationStatus { get }
     /// Albums holding at least one item, by title.
     func albums() async -> [DeviceAlbum]
-    /// The photos and videos in `included` but not in `excluded`, in identifier order, a batch at a time.
-    func candidates(included: Set<String>, excluded: Set<String>) -> AsyncThrowingStream<[DeviceCandidate], any Error>
+    /// All readable photos and videos, or those in `included`, minus `excluded`, in identifier order in batches.
+    func candidates(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) -> AsyncThrowingStream<[DeviceCandidate], any Error>
     /// Copies the asset's current files into `directory` for upload.
     func stage(_ localID: String, into directory: URL, stageID: String, policy: StagingPolicy,
                progress: @escaping @Sendable (Double) -> Void) async throws -> PreparedPhoto
     /// The photos and videos in one album and in none of `excluded`, in identifier order.
-    func albumMembers(_ albumID: String, excluded: Set<String>) async -> [String]
+    func albumMembers(_ albumID: String, excluded: Set<String>, scope: PhotoSelectionScope) async -> [String]
     /// Those of `localIDs` that Photos still has. With limited access, only those selected.
     func existing(_ localIDs: [String]) async throws -> Set<String>
 }
@@ -47,8 +47,10 @@ protocol PhotoLibraryStaging: Sendable {
 protocol PhotoStagingReading: Sendable {
     /// Every album and smart album with at least one asset, unsorted.
     func albums() -> [DeviceAlbum]
+    /// Every readable image and video, including assets in no album.
+    func allAssetIDs() -> Set<String>
     /// The photos and videos in any of the albums.
-    func members(of albumIDs: Set<String>) -> Set<String>
+    func members(of albumIDs: Set<String>, scope: PhotoSelectionScope) -> Set<String>
     /// The assets among `ids` that Photos still has, in no particular order.
     func candidates(_ ids: [String]) -> [DeviceCandidate]
 }
@@ -81,17 +83,17 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         return try await Task.detached(priority: .utility, operation: body).value
     }
 
-    nonisolated func candidates(included: Set<String>, excluded: Set<String>) -> AsyncThrowingStream<[DeviceCandidate], any Error> {
-        candidates(included: included, excluded: excluded, batchSize: Self.batchSize)
+    nonisolated func candidates(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) -> AsyncThrowingStream<[DeviceCandidate], any Error> {
+        candidates(scope: scope, included: included, excluded: excluded, batchSize: Self.batchSize)
     }
 
     /// Each batch is read on its own, off the adapter's queue and the caller's thread, so a change
     /// to Photos never waits behind discovery and dropping the stream stops it between batches.
-    nonisolated func candidates(included: Set<String>, excluded: Set<String>, batchSize: Int) -> AsyncThrowingStream<[DeviceCandidate], any Error> {
+    nonisolated func candidates(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>, batchSize: Int) -> AsyncThrowingStream<[DeviceCandidate], any Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: [DeviceCandidate].self)
         let producer = Task {
             do {
-                let ids = try await self.candidateIDs(included: included, excluded: excluded)
+                let ids = try await self.candidateIDs(scope: scope, included: included, excluded: excluded)
                 for start in stride(from: 0, to: ids.count, by: batchSize) {
                     try Task.checkCancellation()
                     continuation.yield(try await self.readCandidates(Array(ids[start..<min(start + batchSize, ids.count)])))
@@ -111,13 +113,17 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         return found
     }
 
-    nonisolated func albumMembers(_ albumID: String, excluded: Set<String>) async -> [String] {
-        (try? await candidateIDs(included: [albumID], excluded: excluded)) ?? []
+    nonisolated func albumMembers(_ albumID: String, excluded: Set<String>, scope: PhotoSelectionScope = .selectedAlbums) async -> [String] {
+        let reader = stagingReader
+        // Scope controls PhotoKit's hidden/burst filtering here, never the album's identity.
+        // Syncing a real album must not expand its members to the whole backup selection.
+        return (try? await Self.offQueue {
+            reader.members(of: [albumID], scope: scope).subtracting(reader.members(of: excluded, scope: scope)).sorted()
+        }) ?? []
     }
 
-    private nonisolated func candidateIDs(included: Set<String>, excluded: Set<String>) async throws -> [String] {
-        let reader = stagingReader
-        return try await Self.offQueue { reader.members(of: included).subtracting(reader.members(of: excluded)).sorted() }
+    private nonisolated func candidateIDs(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) async throws -> [String] {
+        try await selectedIDs(scope: scope, included: included, excluded: excluded).sorted()
     }
 
     private nonisolated func readCandidates(_ ids: [String]) async throws -> [DeviceCandidate] {
@@ -130,11 +136,19 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         stagingReader.candidates([localID]).first.flatMap(\.modified)
     }
 
-    /// The photos and videos in `included` and in none of `excluded`, for the merged library:
+    /// The selected photos and videos, minus excluded album members, for the merged library:
     /// identifiers only, read off the adapter's queue.
-    nonisolated func timelineMembers(included: Set<String>, excluded: Set<String>) async throws -> Set<String> {
+    nonisolated func timelineMembers(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) async throws -> Set<String> {
+        try await selectedIDs(scope: scope, included: included, excluded: excluded)
+    }
+
+    /// Backup and the merged timeline share selection and exclusion semantics.
+    private nonisolated func selectedIDs(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) async throws -> Set<String> {
         let reader = stagingReader
-        return try await Self.offQueue { reader.members(of: included).subtracting(reader.members(of: excluded)) }
+        return try await Self.offQueue {
+            let includedIDs = scope == .entireLibrary ? reader.allAssetIDs() : reader.members(of: included, scope: scope)
+            return includedIDs.subtracting(reader.members(of: excluded, scope: scope))
+        }
     }
 
     /// Phone photos for the merged library, read a batch at a time: each one, its cloud
@@ -150,7 +164,7 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
 
     private nonisolated static func timelineBatch(_ batch: [String]) -> [DeviceTimelineItem] {
         let clouds = PHPhotoLibrary.shared().cloudIdentifierMappings(forLocalIdentifiers: batch)
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: batch, options: nil)
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: batch, options: SystemPhotoKit.readableMediaOptions())
         return (0..<assets.count).map { index in
             let asset = assets.object(at: index)
             let types = PHAssetResource.assetResources(for: asset).map(\.type)
@@ -268,7 +282,7 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
     }
 
     private static func asset(_ localID: String) -> PHAsset? {
-        PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil).firstObject
+        PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: SystemPhotoKit.readableMediaOptions()).firstObject
     }
 
     private static func describe(_ resource: PHAssetResource) -> StagingResource {
@@ -311,11 +325,32 @@ extension SystemPhotoKit: PhotoStagingReading {
         return values
     }
 
-    func members(of albumIDs: Set<String>) -> Set<String> {
+    /// Asset enumeration is independent of album membership and respects Photos authorization,
+    /// including the user's limited-library selection. Only identifiers are held here.
+    func allAssetIDs() -> Set<String> {
+        var result = Set<String>()
+        PHAsset.fetchAssets(with: Self.readableMediaOptions()).enumerateObjects { asset, _, _ in
+            result.insert(asset.localIdentifier)
+        }
+        return result
+    }
+
+    static func readableMediaOptions() -> PHFetchOptions {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d", PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+        options.includeHiddenAssets = true
+        options.includeAllBurstAssets = true
+        return options
+    }
+
+    /// Cleanup and other album reads retain the established PhotoKit filtering.
+    func members(of albumIDs: Set<String>) -> Set<String> { members(of: albumIDs, scope: .selectedAlbums) }
+
+    func members(of albumIDs: Set<String>, scope: PhotoSelectionScope) -> Set<String> {
         guard !albumIDs.isEmpty else { return [] }
         var result = Set<String>()
         PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: Array(albumIDs), options: nil).enumerateObjects { collection, _, _ in
-            PHAsset.fetchAssets(in: collection, options: nil).enumerateObjects { asset, _, _ in
+            PHAsset.fetchAssets(in: collection, options: scope == .entireLibrary ? Self.readableMediaOptions() : nil).enumerateObjects { asset, _, _ in
                 if asset.mediaType == .image || asset.mediaType == .video { result.insert(asset.localIdentifier) }
             }
         }
@@ -324,7 +359,7 @@ extension SystemPhotoKit: PhotoStagingReading {
 
     func candidates(_ ids: [String]) -> [DeviceCandidate] {
         guard !ids.isEmpty else { return [] }
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: Self.readableMediaOptions())
         return (0..<assets.count).map { DeviceCandidate(id: assets.object(at: $0).localIdentifier, modified: assets.object(at: $0).modificationDate) }
     }
 }

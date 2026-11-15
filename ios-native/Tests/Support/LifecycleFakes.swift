@@ -16,11 +16,13 @@ import XCTest
 
 /// BGTaskScheduler as a test drives it: it records requests and launches tasks on demand.
 @MainActor final class FakeTaskScheduler: BackgroundTaskScheduling {
+    var availability = BackgroundBackupAvailability.available
     private var handlers: [String: @MainActor (any BackgroundTaskHandle) -> Void] = [:]
     private(set) var submitted: [WindowRequest] = []
     private(set) var cancelled: [String] = []
     /// What iOS held from an earlier launch.
     var pendingAtLaunch: [WindowRequest] = []
+    var pendingGate: TransferGate?
     /// The identifiers a launch handler is registered for.
     var registeredIdentifiers: Set<String> { Set(handlers.keys) }
 
@@ -30,18 +32,23 @@ import XCTest
         return true
     }
 
-    private var answers: [BackgroundWindowKind: @MainActor @Sendable (String?) -> Void] = [:]
+    private var answers: [BackgroundWindowKind: @MainActor @Sendable (BackgroundSchedulingFailure?) -> Void] = [:]
+    private(set) var allAnswers: [@MainActor @Sendable (BackgroundSchedulingFailure?) -> Void] = []
 
-    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void) {
+    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (BackgroundSchedulingFailure?) -> Void) {
         submitted.append(request)
+        allAnswers.append(answered)
         answers[request.kind] = answered
     }
 
     /// iOS answers the kind's latest request: nil takes it, a message turns it down.
-    func answer(_ kind: BackgroundWindowKind, _ error: String?) { answers.removeValue(forKey: kind)?(error) }
+    func answer(_ kind: BackgroundWindowKind, _ error: BackgroundSchedulingFailure?) { answers.removeValue(forKey: kind)?(error) }
 
     func cancel(identifier: String) { cancelled.append(identifier) }
-    func pending() async -> [WindowRequest] { pendingAtLaunch }
+    func pending() async -> [WindowRequest] {
+        if let pendingGate { await pendingGate.wait() }
+        return pendingAtLaunch
+    }
 
     /// iOS starts a window of this kind.
     @discardableResult

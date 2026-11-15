@@ -50,8 +50,28 @@ enum DeviceMediaEvent: @unchecked Sendable {
     case image(UIImage, final: Bool)
     case player(AVPlayerItem)
     case livePhoto(PHLivePhoto, final: Bool)
+    case progress(Double)
     /// `message` is Photos' own reason, when it gave one.
     case unavailable(inCloud: Bool, message: String?)
+}
+
+protocol DeviceMediaProviding: Sendable {
+    func media(_ localID: String, _ request: DeviceMediaRequest) -> AsyncStream<DeviceMediaEvent>
+}
+
+/// Photos error 3164 means the requested original needs network access, not that the asset failed.
+enum DeviceMediaFailure {
+    static func requiresNetwork(_ error: Error?) -> Bool {
+        guard let error else { return false }
+        let details = error as NSError
+        return details.domain == PHPhotosErrorDomain
+            && details.code == PHPhotosError.networkAccessRequired.rawValue
+    }
+
+    static func message(_ error: Error?) -> String? {
+        guard let error else { return nil }
+        return requiresNetwork(error) ? nil : "Photos couldn’t load this item. Try again."
+    }
 }
 
 /// A still Photos rendered for sharing, with the name of the file it came from.
@@ -136,6 +156,7 @@ extension PhotoKitAdapter {
         switch request {
         case .video(let network):
             let options = PHVideoRequestOptions(); options.version = .current; options.deliveryMode = .automatic; options.isNetworkAccessAllowed = network
+            options.progressHandler = { value, _, _, _ in continuation.yield(.progress(value)) }
             return manager.requestPlayerItem(forVideo: asset, options: options) { item, info in
                 let outcome = Outcome(info)
                 guard !outcome.cancelled else { continuation.finish(); return }
@@ -145,6 +166,7 @@ extension PhotoKitAdapter {
             }
         case .livePhoto(let pixels, let network):
             let options = PHLivePhotoRequestOptions(); options.version = .current; options.deliveryMode = .highQualityFormat; options.isNetworkAccessAllowed = network
+            options.progressHandler = { value, _, _, _ in continuation.yield(.progress(value)) }
             return manager.requestLivePhoto(for: asset, targetSize: CGSize(width: pixels, height: pixels), contentMode: .aspectFit, options: options) { live, info in
                 let outcome = Outcome(info)
                 guard !outcome.cancelled else { continuation.finish(); return }
@@ -162,6 +184,7 @@ extension PhotoKitAdapter {
                 targetSize = CGSize(width: pixels, height: pixels); contentMode = .aspectFill
             case .image(let pixels, let network):
                 options.resizeMode = pixels == nil ? .none : .fast; options.isNetworkAccessAllowed = network
+                options.progressHandler = { value, _, _, _ in continuation.yield(.progress(value)) }
                 targetSize = pixels.map { CGSize(width: $0, height: $0) } ?? PHImageManagerMaximumSize; contentMode = .aspectFit
             default: fatalError("Handled above.")
             }
@@ -213,13 +236,16 @@ extension PhotoKitAdapter {
     private struct Outcome {
         let cancelled: Bool
         let degraded: Bool
-        let inCloud: Bool
+        var inCloud: Bool
         let error: String?
         init(_ info: [AnyHashable: Any]?) {
             cancelled = (info?[PHImageCancelledKey] as? Bool) == true
             degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
             inCloud = (info?[PHImageResultIsInCloudKey] as? Bool) == true
-            error = (info?[PHImageErrorKey] as? any Error)?.localizedDescription
+            error = DeviceMediaFailure.message(info?[PHImageErrorKey] as? any Error)
+            if DeviceMediaFailure.requiresNetwork(info?[PHImageErrorKey] as? any Error) { inCloud = true }
         }
     }
 }
+
+extension PhotoKitAdapter: DeviceMediaProviding {}

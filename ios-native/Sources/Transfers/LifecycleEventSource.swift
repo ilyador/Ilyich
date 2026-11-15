@@ -1,6 +1,7 @@
 import BackgroundTasks
 import Foundation
 import Network
+import OSLog
 import UIKit
 
 // MARK: - Seams
@@ -29,11 +30,12 @@ struct WindowRequest: Hashable, Sendable {
 
 /// BGTaskScheduler, or a test's fake.
 @MainActor protocol BackgroundTaskScheduling: AnyObject {
+    var availability: BackgroundBackupAvailability { get }
     /// Registers the launch handler; iOS calls it on the main queue.
     func register(identifier: String, launch: @escaping @MainActor (any BackgroundTaskHandle) -> Void) -> Bool
     /// Replaces the kind's request. iOS answers later: `answered` gets nil once it took the request,
     /// or why it turned it down.
-    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void)
+    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (BackgroundSchedulingFailure?) -> Void)
     func cancel(identifier: String)
     /// The requests iOS holds, from this process or an earlier one.
     func pending() async -> [WindowRequest]
@@ -66,16 +68,21 @@ struct WindowRequest: Hashable, Sendable {
     private var plan = SchedulePlan.none
     /// The shape of each request iOS holds, as far as this process knows.
     private var held: [BackgroundWindowKind: WindowRequest.Shape] = [:]
-    /// Kinds whose last request iOS turned down. They are asked for again when the app comes
-    /// forward or goes to the background, or Photos changes, as the old backup asked again.
-    private var refused: Set<BackgroundWindowKind> = []
+    /// Refusals are retried on app or device-policy transitions, not on every Photos change.
+    private struct Refusal {
+        let shape: WindowRequest.Shape
+        let failure: BackgroundSchedulingFailure
+    }
+    private var refused: [BackgroundWindowKind: Refusal] = [:]
+    /// A shape can repeat after cancellation; only the latest submission may update its state.
+    private var submissions: [BackgroundWindowKind: UUID] = [:]
     /// Today's message while iOS turns a window down, which the backup screen shows as it showed
     /// the old backup's; nil once iOS takes a request again.
-    private(set) var schedulingError: String? {
-        didSet { if schedulingError != oldValue { schedulingErrorChanged?(schedulingError) } }
+    private(set) var schedulingIssue: BackgroundBackupIssue? {
+        didSet { if schedulingIssue != oldValue { schedulingIssueChanged?(schedulingIssue) } }
     }
-    /// Told each time `schedulingError` changes (TransferHost, for the backup screen).
-    var schedulingErrorChanged: (@MainActor (String?) -> Void)?
+    /// Told each time the scheduling restriction changes (TransferHost, for the backup screen).
+    var schedulingIssueChanged: (@MainActor (BackgroundBackupIssue?) -> Void)?
     /// Reads what iOS held at launch, once.
     private var seeding: Task<[WindowRequest], Never>?
     private var seeded = false
@@ -119,12 +126,21 @@ struct WindowRequest: Hashable, Sendable {
 
     func chargingChanged(_ charging: Bool) { update { $0.charging = charging } }
     func thermalChanged(_ thermal: ProcessInfo.ThermalState) { update { $0.thermal = thermal } }
-    func lowPowerChanged(_ lowPower: Bool) { update { $0.lowPower = lowPower } }
+    func lowPowerChanged(_ lowPower: Bool) {
+        update { $0.lowPower = lowPower }
+        backgroundAvailabilityChanged()
+    }
+
+    func backgroundAvailabilityChanged() {
+        guard seeded else { return }
+        retryRefused()
+        apply()
+    }
 
     func applicationBecameActive() {
+        backgroundAvailabilityChanged()
         guard !snapshot.appActive else { return }
         snapshot.appActive = true
-        retryRefused()
         continuation.yield(.becameActive)
     }
 
@@ -135,10 +151,8 @@ struct WindowRequest: Hashable, Sendable {
         continuation.yield(.enteredBackground)
     }
 
-    /// PhotoKitAdapter's coalesced changes. Passed on, never a reason to reschedule a window iOS
-    /// holds; only one it turned down is asked for again.
+    /// PhotoKitAdapter's coalesced changes do not resubmit pending or refused requests.
     func photoLibraryChanged() {
-        retryRefused()
         continuation.yield(.photoLibraryChanged)
     }
     func urlSessionEvents(_ identifier: String) { continuation.yield(.urlSessionEvents(identifier)) }
@@ -159,6 +173,8 @@ struct WindowRequest: Hashable, Sendable {
 
     /// Called by the transfer engine only, with a plan that changed.
     func schedule(_ plan: SchedulePlan) async {
+        // A newer pause/selection/account transition wins even while the first read is pending.
+        self.plan = plan
         if !seeded {
             let seeding = self.seeding ?? Task { await scheduler.pending() }
             self.seeding = seeding
@@ -168,7 +184,6 @@ struct WindowRequest: Hashable, Sendable {
                 for request in pending { held[request.kind] = request.shape }
             }
         }
-        self.plan = plan
         apply()
     }
 
@@ -177,6 +192,7 @@ struct WindowRequest: Hashable, Sendable {
         let lease = BGTaskLease(identifier: task.identifier) { success in complete.call(success) }
         // iOS used the request up: ask for the next window of this kind, if the plan still wants one.
         held[lease.kind] = nil
+        submissions[lease.kind] = nil
         if seeded { apply() }
         // Synchronous, so the task is completed before the handler returns.
         task.expirationHandler = { lease.expire() }
@@ -185,36 +201,59 @@ struct WindowRequest: Hashable, Sendable {
 
     private func retryRefused() {
         guard seeded, !refused.isEmpty else { return }
+        refused.removeAll()
         apply()
     }
 
     private func apply() {
+        if plan != .none, let issue = scheduler.availability.issue {
+            for kind in BackgroundWindowKind.allCases where held[kind] != nil {
+                scheduler.cancel(identifier: kind.identifier)
+            }
+            held.removeAll()
+            submissions.removeAll()
+            refused.removeAll()
+            schedulingIssue = issue
+            return
+        }
         for kind in BackgroundWindowKind.allCases {
             let wanted = plan.request(kind)
+            if wanted == nil { refused[kind] = nil }
             guard wanted?.shape != held[kind] else { continue }
-            refused.remove(kind)
             if let wanted {
                 let shape = wanted.shape
+                guard refused[kind]?.shape != shape else { continue }
+                refused[kind] = nil
                 held[kind] = shape
+                let submission = UUID()
+                submissions[kind] = submission
                 scheduler.submit(WindowRequest(kind: kind, shape: shape, earliestBeginDate: now().addingTimeInterval(wanted.delay))) { [weak self] error in
                     // An answer to a request since replaced or cancelled says nothing about now.
-                    guard let self, self.held[kind] == shape, !self.refused.contains(kind) else { return }
+                    guard let self, self.submissions[kind] == submission else { return }
+                    self.submissions[kind] = nil
                     guard let error else {
-                        if self.refused.isEmpty { self.schedulingError = nil }
+                        self.updateSchedulingIssue()
                         return
                     }
                     // iOS refused (too many requests, or background refresh is off): nothing is held,
                     // and the next plan, window or trigger asks again.
                     self.held[kind] = nil
-                    self.refused.insert(kind)
-                    self.schedulingError = "iOS could not schedule automatic backup: \(error). You can still use Back up now."
+                    self.refused[kind] = Refusal(shape: shape, failure: error)
+                    self.updateSchedulingIssue()
                 }
             } else {
                 scheduler.cancel(identifier: kind.identifier)
                 held[kind] = nil
+                submissions[kind] = nil
             }
         }
-        if plan == .none { schedulingError = nil }
+        updateSchedulingIssue()
+    }
+
+    private func updateSchedulingIssue() {
+        guard plan != .none else { schedulingIssue = nil; return }
+        schedulingIssue = scheduler.availability.issue
+            ?? BackgroundWindowKind.allCases.compactMap { refused[$0]?.failure.issue }.first
     }
 }
 
@@ -255,44 +294,77 @@ private final class CompletionBox: @unchecked Sendable {
 
 /// BGTaskScheduler behind the seam, for TransferHost's router.
 @MainActor final class SystemBackgroundTaskScheduler: BackgroundTaskScheduling {
+    private let logger = Logger(subsystem: "app.ilyich.native", category: "BackgroundBackup")
+    /// The scheduler API may block. Keep its requests off the main thread and preserve the
+    /// ordering of submit/cancel/read operations, including a cancellation during submission.
+    private let operations = DispatchQueue(label: "app.ilyich.native.background-scheduling", qos: .utility)
+
+    var availability: BackgroundBackupAvailability {
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return .lowPower }
+        switch UIApplication.shared.backgroundRefreshStatus {
+        case .available: return .available
+        case .denied: return .denied
+        case .restricted: return .restricted
+        @unknown default: return .restricted
+        }
+    }
+
     func register(identifier: String, launch: @escaping @MainActor (any BackgroundTaskHandle) -> Void) -> Bool {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { task in
             MainActor.assumeIsolated { launch(task) }
         }
     }
 
-    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (String?) -> Void) {
-        let task: BGTaskRequest
-        switch request.kind {
-        case .processing:
-            let processing = BGProcessingTaskRequest(identifier: request.kind.identifier)
-            processing.requiresExternalPower = request.shape.requiresExternalPower
-            processing.requiresNetworkConnectivity = request.shape.requiresNetworkConnectivity
-            task = processing
-        case .refresh:
-            task = BGAppRefreshTaskRequest(identifier: request.kind.identifier)
-        }
-        task.earliestBeginDate = request.earliestBeginDate
-        // A new request of a kind replaces the one iOS held.
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: request.kind.identifier)
-        BGTaskScheduler.shared.submitTaskRequest(task) { error in
-            let message = error?.localizedDescription
-            Task { @MainActor in answered(message) }
+    func submit(_ request: WindowRequest, answered: @escaping @MainActor @Sendable (BackgroundSchedulingFailure?) -> Void) {
+        let logger = logger
+        operations.async {
+            let task: BGTaskRequest
+            switch request.kind {
+            case .processing:
+                let processing = BGProcessingTaskRequest(identifier: request.kind.identifier)
+                processing.requiresExternalPower = request.shape.requiresExternalPower
+                processing.requiresNetworkConnectivity = request.shape.requiresNetworkConnectivity
+                task = processing
+            case .refresh:
+                task = BGAppRefreshTaskRequest(identifier: request.kind.identifier)
+            }
+            task.earliestBeginDate = request.earliestBeginDate
+            // A new request of a kind replaces the one iOS held.
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: request.kind.identifier)
+            BGTaskScheduler.shared.submitTaskRequest(task) { error in
+                let failure = error.map { error -> BackgroundSchedulingFailure in
+                    logger.error("Background request failed: \(String(describing: error))")
+                    let error = error as NSError
+                    guard error.domain == BGTaskScheduler.errorDomain else { return .other }
+                    switch error.code {
+                    case BGTaskScheduler.Error.Code.unavailable.rawValue: return .unavailable
+                    case BGTaskScheduler.Error.Code.tooManyPendingTaskRequests.rawValue: return .requestLimit
+                    case BGTaskScheduler.Error.Code.notPermitted.rawValue: return .notPermitted
+                    default: return .other
+                    }
+                }
+                Task { @MainActor in answered(failure) }
+            }
         }
     }
 
     func cancel(identifier: String) {
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+        operations.async { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier) }
     }
 
     func pending() async -> [WindowRequest] {
-        let requests = await BGTaskScheduler.shared.pendingTaskRequests()
-        return requests.compactMap { request in
-            guard let kind = BackgroundWindowKind(identifier: request.identifier) else { return nil }
-            let processing = request as? BGProcessingTaskRequest
-            return WindowRequest(kind: kind, shape: WindowRequest.Shape(requiresExternalPower: processing?.requiresExternalPower ?? false,
-                                                                        requiresNetworkConnectivity: processing?.requiresNetworkConnectivity ?? false),
-                                 earliestBeginDate: request.earliestBeginDate)
+        await withCheckedContinuation { continuation in
+            operations.async {
+                BGTaskScheduler.shared.getPendingTaskRequests { requests in
+                    continuation.resume(returning: requests.compactMap { request in
+                        guard let kind = BackgroundWindowKind(identifier: request.identifier) else { return nil }
+                        let processing = request as? BGProcessingTaskRequest
+                        return WindowRequest(kind: kind, shape: WindowRequest.Shape(requiresExternalPower: processing?.requiresExternalPower ?? false,
+                                                                                    requiresNetworkConnectivity: processing?.requiresNetworkConnectivity ?? false),
+                                             earliestBeginDate: request.earliestBeginDate)
+                    })
+                }
+            }
         }
     }
 }
@@ -332,6 +404,7 @@ private final class CompletionBox: @unchecked Sendable {
             (UIDevice.batteryStateDidChangeNotification, { $0.chargingChanged([.charging, .full].contains(UIDevice.current.batteryState)) }),
             (ProcessInfo.thermalStateDidChangeNotification, { $0.thermalChanged(ProcessInfo.processInfo.thermalState) }),
             (Notification.Name.NSProcessInfoPowerStateDidChange, { $0.lowPowerChanged(ProcessInfo.processInfo.isLowPowerModeEnabled) }),
+            (UIApplication.backgroundRefreshStatusDidChangeNotification, { $0.backgroundAvailabilityChanged() }),
             (UIApplication.didBecomeActiveNotification, { $0.applicationBecameActive() }),
             (UIApplication.didEnterBackgroundNotification, { $0.applicationEnteredBackground() }),
         ]

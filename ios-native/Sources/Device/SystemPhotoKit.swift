@@ -79,7 +79,9 @@ final class PhotoKitChangeObserver: NSObject, PHPhotoLibraryChangeObserver, @unc
 
     init(onChange: @escaping @Sendable (PhotoLibraryChangeDetails) -> Void) {
         self.onChange = onChange
-        assets = PHAsset.fetchAssets(with: nil)
+        // Observe the same readable images and videos that entire-library discovery can find,
+        // including hidden and burst assets, so later changes keep backup and the timeline current.
+        assets = PHAsset.fetchAssets(with: SystemPhotoKit.readableMediaOptions())
         collections = [PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil),
                        PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .any, options: nil)]
         super.init()

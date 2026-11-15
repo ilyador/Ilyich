@@ -367,6 +367,45 @@ final class LibraryTests: XCTestCase {
         let raisedText = labeled(NSPredicate(format: "label CONTAINS %@ AND label ENDSWITH %@", " of 3", "GB"))
         XCTAssertTrue(XCTWaiter.wait(for: [raised], timeout: 5) == .completed || raisedText.exists, "Against the 3 GB cap picked.")
     }
+    #if ILYICH_OWNER_BUILD
+    @MainActor func testOwnerReadOnlySwitchVisualsAcrossAppearanceAndTypeSize() {
+        let cases: [(name: String, appearance: String, arguments: [String])] = [
+            ("Light", "light", []),
+            ("Dark", "dark", []),
+            ("Large text", "light", ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]),
+        ]
+        for item in cases {
+            continueAfterFailure = true
+            let app = launch(appearance: item.appearance, extraArguments: item.arguments)
+            openShelves(app)
+            app.buttons["Settings"].tap()
+            let row = app.buttons["Read-only mode"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5))
+            row.tap()
+            let toggle = app.switches["Read-only mode"]
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+            func record(_ stage: String) {
+                let details = item.name + " " + stage + ": value=" + (toggle.value as? String ?? "nil") + ", enabled=" + String(toggle.isEnabled) + ", hittable=" + String(toggle.isHittable)
+                let attachment = XCTAttachment(string: details)
+                attachment.name = "Read-only native switch — " + details
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                capture(app, "Read-only mode — " + item.name + " — " + stage)
+            }
+            record("before tap")
+            if (toggle.value as? String) != "1" {
+                toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            }
+            let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "1"), object: toggle)
+            let result = XCTWaiter.wait(for: [enabled], timeout: 5)
+            record("after tap; wait=" + String(result.rawValue))
+            XCTAssertEqual(result, .completed, "Read-only mode should turn on in " + item.name + ".")
+            XCTAssertTrue(app.buttons["Done"].exists)
+            app.buttons["Done"].tap()
+        }
+    }
+    #endif
+
     @MainActor func testEverySettingIsReachableFromTheSettingsShelf() {
         let app = launch()
         openShelves(app)

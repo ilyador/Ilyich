@@ -90,15 +90,18 @@ import XCTest
         router.use(engine)
         await untilTransfers("The engine's snapshot shows.") { log.last?.confirmed == 3 }
         XCTAssertNil(log.last?.lastMessage)
-        let refusal = "iOS could not schedule automatic backup: Background App Refresh is off. You can still use Back up now."
-        router.schedulingErrorChanged(refusal)
-        await untilTransfers("The refusal shows.") { log.last?.lastMessage == refusal }
+        router.schedulingIssueChanged(.refreshDisabled)
+        await untilTransfers("The restriction shows separately.") { log.last?.backgroundIssue == .refreshDisabled }
+        XCTAssertNil(log.last?.lastMessage, "A scheduling restriction is not a failed upload.")
         engine.send(RecordingBackend.snapshot(lastMessage: "The server rejected IMG_0001.HEIC."))
         await untilTransfers("The engine's own message comes first.") { log.last?.lastMessage == "The server rejected IMG_0001.HEIC." }
+        XCTAssertEqual(log.last?.backgroundIssue, .refreshDisabled, "Neither message hides the other.")
         engine.send(RecordingBackend.snapshot(lastMessage: nil))
-        await untilTransfers("The refusal shows again.") { log.last?.lastMessage == refusal }
-        router.schedulingErrorChanged(nil)
-        await untilTransfers("iOS took the request again.") { log.last?.lastMessage == nil }
+        await untilTransfers("The upload error clears; the scheduling restriction remains.") {
+            log.last?.lastMessage == nil && log.last?.backgroundIssue == .refreshDisabled
+        }
+        router.schedulingIssueChanged(nil)
+        await untilTransfers("iOS took the request again.") { log.last?.backgroundIssue == nil }
     }
 
     /// The backup screens follow the account whose backup runs (the critic's correction to B8): as
@@ -115,12 +118,17 @@ import XCTest
         let store = BackupStore(backend: router, photos: .unavailable, debounce: .zero)
         router.use(alice)
         await untilTransfers("The screens show Alice's backup.") { store.confirmed == 3 }
+        XCTAssertEqual(store.statistics.backedUp, 3)
 
         router.deactivate()
         await untilTransfers("Signing out empties the screens.") { store.confirmed == 0 }
+        XCTAssertEqual(store.statistics.backedUp, 0)
+        XCTAssertEqual(store.statistics.remaining, 0)
+        XCTAssertNil(store.statistics.currentTransfer)
         router.prepare()
         router.use(bob)
         await untilTransfers("The screens show Bob's backup.") { store.confirmed == 1 && store.preferences.triggerDelay == 300 }
+        XCTAssertEqual(store.statistics.backedUp, 1, "No historical confirmation or current upload carries across accounts.")
         XCTAssertTrue(alice.calls.isEmpty && bob.calls.isEmpty, "Nothing was sent to either engine.")
     }
 

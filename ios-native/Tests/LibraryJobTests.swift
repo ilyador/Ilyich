@@ -416,6 +416,38 @@ final class LibraryJobTests: XCTestCase {
 
     // MARK: Discovery
 
+    func testEntireLibraryDiscoverySkipsServerDuplicatesAndConfirmedUnchangedAssets() async throws {
+        var preferences = TransferPreferences()
+        preferences.scope = .entireLibrary
+        preferences.excludedAlbums = ["private"]
+        let h = try await LibraryJobHarness(preferences: preferences)
+        h.staging.add("photo", album: nil)
+        h.staging.add("video", FakeStaging.Photo(modified: FakeStaging.date, isVideo: true), album: nil)
+        h.staging.add("excluded", album: "private")
+        // Obtain the file's checksum as the server would, before discovery has any receipt.
+        let probe = h.folder.appendingPathComponent("checksum-probe")
+        let prepared = try await h.staging.stage("photo", into: probe, stageID: "probe", policy: StagingPolicy()) { _ in }
+        let checksum = try UploadBody.checksum(prepared.original.url)
+        h.server.hold(checksum: checksum, as: .duplicate("already-on-server", trashed: false))
+        let discovered = try await h.discover()
+        XCTAssertEqual(discovered?.found, 2)
+        XCTAssertEqual(discovered?.queued, 2)
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        try await untilTransfers("The unfiled photo and video are confirmed.") { try await h.backedUp("photo", "video") }
+        XCTAssertEqual(h.uploads.uploads.map(\.filename), ["video.MOV"], "A server duplicate is confirmed without another upload.")
+        XCTAssertEqual(Set(h.server.checks.map(\.id)), ["photo", "video"], "Both media types pass the server checksum check.")
+        let receipt = try await h.receipt("photo")
+        XCTAssertEqual(receipt?.original.id, "already-on-server")
+        let checks = h.server.checks.count, stagings = h.staging.staged.count
+        let unchanged = try await h.discover()
+        XCTAssertEqual(unchanged?.queued, 0, "Confirmation at the same revision prevents reupload on later discovery.")
+        XCTAssertEqual(h.server.checks.count, checks)
+        XCTAssertEqual(h.staging.staged.count, stagings)
+        XCTAssertEqual(h.staging.stagings("excluded"), 0)
+        await h.tearDown()
+    }
+
     /// The merge runs against the tables as they are at its commit: a photo confirmed while
     /// discovery read Photos is not queued again.
     func testDiscoveryDoesNotRequeueItemConfirmedDuringDiscovery() async throws {

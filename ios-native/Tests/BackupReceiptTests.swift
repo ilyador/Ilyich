@@ -37,8 +37,43 @@ final class BackupReceiptTests: XCTestCase {
         XCTAssertFalse(preferences.cellularVideos)
         XCTAssertEqual(preferences.triggerDelay, 30)
         XCTAssertEqual(TransferJSON.encode(preferences),
-                       #"{"automatic":false,"cellularPhotos":false,"cellularVideos":false,"downloadCloudOriginals":false,"excludedAlbums":[],"includedAlbums":[],"requireCharging":false,"syncAlbums":false,"triggerDelay":30}"#)
+                       #"{"automatic":false,"cellularPhotos":false,"cellularVideos":false,"downloadCloudOriginals":false,"excludedAlbums":[],"includedAlbums":[],"requireCharging":false,"scope":"selectedAlbums","syncAlbums":false,"triggerDelay":30}"#)
         let restored = try JSONDecoder().decode(TransferPreferences.self, from: Data(TransferJSON.encode(preferences).utf8))
         XCTAssertEqual(preferences, restored)
     }
+
+    func testLegacyPreferencesKeepTheirSelectionAndAutomaticSetting() throws {
+        let legacy = #"{"automatic":false,"cellularPhotos":true,"cellularVideos":false,"downloadCloudOriginals":true,"excludedAlbums":["private"],"includedAlbums":["trips"],"requireCharging":true,"syncAlbums":true,"triggerDelay":60}"#
+        let preferences = try JSONDecoder().decode(TransferPreferences.self, from: Data(legacy.utf8))
+        XCTAssertEqual(preferences.scope, .selectedAlbums)
+        XCTAssertEqual(preferences.includedAlbums, ["trips"])
+        XCTAssertEqual(preferences.excludedAlbums, ["private"])
+        XCTAssertTrue(preferences.hasSelection)
+        XCTAssertFalse(preferences.automatic)
+        XCTAssertTrue(preferences.cellularPhotos)
+        XCTAssertTrue(preferences.downloadCloudOriginals)
+        XCTAssertTrue(preferences.requireCharging)
+        XCTAssertTrue(preferences.syncAlbums)
+        XCTAssertEqual(preferences.triggerDelay, 60)
+        let emptyLegacy = legacy.replacingOccurrences(of: #""includedAlbums":["trips"]"#, with: #""includedAlbums":[]"#)
+        let empty = try JSONDecoder().decode(TransferPreferences.self, from: Data(emptyLegacy.utf8))
+        XCTAssertEqual(empty.scope, .selectedAlbums)
+        XCTAssertFalse(empty.hasSelection)
+        XCTAssertFalse(empty.automatic)
+    }
+
+    func testEntireLibraryRoundTripsWithoutAlbumsOrEnablingAutomaticBackup() throws {
+        var preferences = TransferPreferences()
+        XCTAssertFalse(preferences.hasSelection)
+        preferences.scope = .entireLibrary
+        preferences.excludedAlbums = ["private"]
+        let restored = try JSONDecoder().decode(TransferPreferences.self, from: Data(TransferJSON.encode(preferences).utf8))
+        XCTAssertEqual(restored, preferences)
+        XCTAssertTrue(restored.hasSelection)
+        XCTAssertTrue(restored.includedAlbums.isEmpty)
+        XCTAssertFalse(restored.automatic)
+        preferences.scope = .selectedAlbums
+        XCTAssertFalse(preferences.hasSelection)
+    }
+
 }

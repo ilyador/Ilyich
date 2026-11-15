@@ -205,6 +205,7 @@ import SwiftUI
 /// Presents the navigator's layer at one level as a sheet or a full-screen cover, and reports
 /// once it has closed. The screen it presents hosts the level above.
 struct PresentationHost: ViewModifier {
+    @Environment(\.mediaSources) private var mediaSources
     let navigator: LibraryNavigator
     let level: Int
     /// The screen for a route presented at a level.
@@ -223,6 +224,9 @@ struct PresentationHost: ViewModifier {
     }
 
     private func presented(_ layer: LibraryNavigator.Layer) -> AnyView {
-        AnyView(screen(layer.route, level).modifier(PresentationHost(navigator: navigator, level: level + 1, screen: screen)))
+        AnyView(screen(layer.route, level)
+            .modifier(PresentationHost(navigator: navigator, level: level + 1, screen: screen))
+            .environment(\.mediaSources, mediaSources)
+            .appControlAppearance())
     }
 }

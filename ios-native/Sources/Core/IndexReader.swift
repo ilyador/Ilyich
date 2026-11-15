@@ -248,6 +248,34 @@ actor IndexReader {
         return try Self.identities(rows)
     }
 
+    /// One owner's exact identity, also available while initial sync is incomplete. Receipt
+    /// resolution must not wait for every unrelated asset to finish syncing.
+    func identity(id: String) throws -> LocalAssetMatch? {
+        let rows = try database.query("""
+        SELECT a.id,json_extract(a.payload,'$.checksum'),json_extract(m.payload,'$.value'),
+          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL)
+        FROM entities a LEFT JOIN entities m ON m.kind='assetMetadata' AND json_extract(m.payload,'$.assetId')=a.id AND json_extract(m.payload,'$.key')='mobile-app'
+        WHERE a.kind='asset' AND a.id=? AND json_extract(a.payload,'$.ownerId')=? LIMIT 1
+        """, [id, userID])
+        return try Self.identities(rows).first
+    }
+
+    /// Exact identity candidates for one phone item. This is usable during initial sync: a
+    /// present row proves a match even though missing rows cannot yet prove absence.
+    func identities(checksum: String?, cloudID: String?) throws -> [LocalAssetMatch] {
+        guard checksum != nil || cloudID != nil else { return [] }
+        let rows = try database.query("""
+        SELECT a.id,json_extract(a.payload,'$.checksum'),json_extract(m.payload,'$.value'),
+          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL)
+        FROM entities a LEFT JOIN entities m ON m.kind='assetMetadata' AND json_extract(m.payload,'$.assetId')=a.id AND json_extract(m.payload,'$.key')='mobile-app'
+        WHERE a.kind='asset' AND json_extract(a.payload,'$.ownerId')=?
+          AND ((? IS NOT NULL AND json_extract(a.payload,'$.checksum')=?)
+            OR (? IS NOT NULL AND json_extract(m.payload,'$.value.iCloudId')=?))
+        ORDER BY a.id
+        """, [userID, checksum, checksum, cloudID, cloudID])
+        return try Self.identities(rows)
+    }
+
     private static func identities(_ rows: [[String?]]) throws -> [LocalAssetMatch] {
         try rows.compactMap { row in
             guard let id = row[0], let checksum = row[1] else { return nil }

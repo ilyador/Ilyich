@@ -35,17 +35,39 @@ struct BackupSettingsView: View {
             } else {
                 if backup.permission == .limited {
                     Section {
-                        Text("Only the photos you allowed are available for backup.")
-                        Button("Change Photos access") { openSettings() }
+                        Text("Photos access is limited to the items you selected. Choose Full Access in Settings to back up your entire library.")
+                        Button("Open Photos Settings") { openSettings() }
                     }
                 }
-                Section("Albums") {
-                    Toggle("Sync albums to server", isOn: $backup.preferences.syncAlbums).disabled(backup.isRunning)
-                        .requiresWriteAccess()
+                Section {
+                    Picker("Photos to back up", selection: $backup.preferences.scope) {
+                        Text("Selected albums").tag(PhotoSelectionScope.selectedAlbums)
+                        Text("Back up entire library").tag(PhotoSelectionScope.entireLibrary)
+                    }
+                    .accessibilityIdentifier("backup.scope").disabled(backup.isRunning).requiresWriteAccess()
+                    if backup.preferences.scope == .entireLibrary {
+                        Text("Existing server copies are checked before upload. Includes hidden photos and burst frames.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("backup.scope.entireLibraryHelp")
+                    } else {
+                        Text("Choose albums below. Existing server copies are checked before upload.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Toggle("Automatic backup", isOn: $backup.preferences.automatic)
+                        .disabled(backup.isRunning).requiresWriteAccess()
+                    Toggle("Download iCloud originals", isOn: $backup.preferences.downloadCloudOriginals)
+                        .disabled(backup.isRunning).requiresWriteAccess()
+                } header: { Text("Backup scope") } footer: {
+                    Text("Automatic backup checks your selected scope for new items while Ilyich is open and when iOS grants background time. Download iCloud originals lets Ilyich upload files kept only in iCloud. You can also start a backup manually above.")
+                }
+
+                Section {
+                    Toggle("Create matching albums on server", isOn: $backup.preferences.syncAlbums)
+                        .disabled(backup.isRunning).requiresWriteAccess()
                     ForEach(backup.albums) { album in
                         Picker(selection: Binding(get: { selection(for: album.id) }, set: { setSelection($0, for: album.id) })) {
                             Text("Off").tag(0)
-                            Text("Back up").tag(1)
+                            Text(backup.preferences.scope == .selectedAlbums ? "Back up" : "Copy album").tag(1)
                             Text("Exclude").tag(2)
                         } label: {
                             VStack(alignment: .leading) {
@@ -56,17 +78,24 @@ struct BackupSettingsView: View {
                         }
                         .disabled(backup.isRunning)
                     }
+                } header: { Text("Apple Photos albums") } footer: {
+                    if backup.preferences.scope == .entireLibrary {
+                        Text("The entire library supplies files for backup. Choose Copy album to recreate only those album groupings on the server. Excluded albums stay out of the file backup.")
+                    } else {
+                        Text("Back up adds an album’s photos and videos to the backup. Exclude leaves those items out, even if they also appear in another selected album.")
+                    }
+                    Text("When enabled, Ilyich creates or matches a server album for each selected album and adds backed-up photos to it. Removing items in Photos does not remove them from server albums.")
                 }
+
                 Section {
-                    Toggle("Automatic backup", isOn: $backup.preferences.automatic)
-                        .requiresWriteAccess()
-                    Toggle("Only while charging", isOn: $backup.preferences.requireCharging)
-                    Stepper("Wait \(backup.preferences.triggerDelay) seconds", value: $backup.preferences.triggerDelay, in: 0...3600, step: 30)
-                    Toggle("Use cellular for photos", isOn: $backup.preferences.cellularPhotos)
-                    Toggle("Use cellular for videos", isOn: $backup.preferences.cellularVideos)
-                    Toggle("Download iCloud originals", isOn: $backup.preferences.downloadCloudOriginals)
-                } header: { Text("Transfers") } footer: {
-                    Text("iOS decides when background work can run. Cellular settings apply to uploads and iCloud downloads. Unavailable originals stay in the retry list while other files continue.")
+                    DisclosureGroup("Advanced transfer settings") {
+                        Toggle("Only while charging", isOn: $backup.preferences.requireCharging)
+                        Stepper("Check Photos after \(backup.preferences.triggerDelay) seconds", value: $backup.preferences.triggerDelay, in: 0...3600, step: 30)
+                        Toggle("Use cellular for photos", isOn: $backup.preferences.cellularPhotos)
+                        Toggle("Use cellular for videos", isOn: $backup.preferences.cellularVideos)
+                    }
+                } footer: {
+                    Text("Only while charging limits new uploads and background scheduling; transfers already under way may finish. The delay applies before checking Photos for new items after changes. iOS decides when background work can run. Cellular settings apply to uploads and iCloud downloads. Unavailable originals stay in the retry list while other files continue.")
                 }
                 .disabled(backup.isRunning)
             }
@@ -101,25 +130,40 @@ private struct BackupStatusSection: View {
     var body: some View {
     Section {
         Label(backup.activity, systemImage: backup.isRunning ? "arrow.triangle.2.circlepath" : "icloud.and.arrow.up")
-        if let progress = backup.snapshot.fileProgress { ProgressView(value: progress).accessibilityLabel("Current file progress") }
-        if backup.snapshot.bytesExpected > 0 {
-            LabeledContent("Transferred", value: "\(ByteCountFormatter.string(fromByteCount: backup.snapshot.bytesSent, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: backup.snapshot.bytesExpected, countStyle: .file))")
+        BackupStatisticsSummary(statistics: backup.statistics)
+        if let selection = backup.statistics.selectionProgress {
+            LabeledContent("Library checked", value: selection.checkedAt.formatted(date: .omitted, time: .shortened))
+                .font(.caption).foregroundStyle(.secondary)
         }
-        if let rate = backup.snapshot.bytesPerSecond { LabeledContent("Upload speed", value: "\(ByteCountFormatter.string(fromByteCount: rate, countStyle: .file))/s") }
-        LabeledContent("Remaining", value: backup.remaining.formatted())
-        if backup.remaining > 0 { NavigationLink("View upload queue") { BackupQueueView() } }
-        LabeledContent("Confirmed uploads", value: backup.confirmed.formatted())
-        if backup.confirmed > 0 { NavigationLink("View confirmed uploads") { BackupQueueView(showCompleted: true) } }
+        if backup.statistics.failed > 0 {
+            LabeledContent("Uploads needing retry", value: backup.statistics.failed.formatted())
+        }
+        if let progress = backup.statistics.currentTransfer, progress.expectedBytes != nil || progress.sentBytes > 0 { BackupTransferDetail(progress: progress) }
+        if backup.remaining > 0 { NavigationLink("View pending items") { BackupQueueView() } }
+        if backup.confirmed > 0 { NavigationLink("View verified backups") { BackupQueueView(showCompleted: true) } }
+        if let issue = backup.snapshot.backgroundIssue {
+            Label(issue.title, systemImage: "exclamationmark.triangle")
+                .font(.subheadline)
+            Text(issue.message).font(.footnote).foregroundStyle(.secondary)
+            if issue.canOpenSettings {
+                Button("Open app settings") { openSettings() }
+            }
+        }
         if let error = backup.error { Text(error).foregroundStyle(.red).accessibilityIdentifier("backup.error") }
         if backup.isRunning {
             Button("Pause backup", role: .destructive) { Task { await backup.pause() } }
         } else {
             Button(backup.remaining > 0 ? "Resume backup" : "Back up now") { Task { await backup.start() } }
-                .disabled(![PHAuthorizationStatus.authorized, .limited].contains(backup.permission) || (backup.remaining == 0 && backup.preferences.includedAlbums.isEmpty))
+                .disabled(![PHAuthorizationStatus.authorized, .limited].contains(backup.permission) || (backup.remaining == 0 && !backup.preferences.hasSelection))
                 .requiresWriteAccess()
         }
     } header: { Text("Backup") } footer: {
-        Text("Original files stay in Photos. Transfers already started can continue while Ilyich is in the background.")
+        Text("Verified means this phone has checked the server copy; it is not a count of new uploads. Unchecked photos may already be backed up. When a file cannot be identified from saved records, Ilyich may need to read or download its original to compare it. Identical files are skipped.")
     }
+    }
+
+    private func openSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 }

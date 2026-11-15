@@ -25,8 +25,8 @@ struct DiagnosticsView: View {
             }
             Section("Backup queue") {
                 LabeledContent("State", value: backup.isRunning ? "Running" : "Paused")
-                LabeledContent("Remaining", value: backup.remaining.formatted())
-                LabeledContent("Confirmed", value: backup.confirmed.formatted())
+                LabeledContent("Awaiting processing", value: backup.remaining.formatted())
+                LabeledContent("Verified backups", value: backup.confirmed.formatted())
                 LabeledContent("Failed", value: backup.snapshot.failed.formatted())
                 NavigationLink("Backup details") { BackupSettingsView() }
             }
@@ -79,7 +79,7 @@ struct DiagnosticsView: View {
                 Text("Offline thumbnails let you browse without a connection, up to the limit; a lower limit removes those viewed least recently. Clear browsing cache removes this account’s downloaded previews and the images held in memory; previews download again when you view them. Offline thumbnails stay. Originals, backup receipts, your upload queue and photos on the server stay intact.")
             }
             Section {
-                Picker("Record", selection: $level) { ForEach(DiagnosticLevel.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) } }
+                Picker("Request log", selection: $level) { ForEach(DiagnosticLevel.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) } }
                 if !events.isEmpty {
                     ShareLink(item: report, preview: SharePreview("Ilyich diagnostics")) { Label("Export diagnostics", systemImage: "square.and.arrow.up") }
                     Button("Clear log", role: .destructive) { Task { await DiagnosticsStore.shared.clearRequests(); await refresh() } }

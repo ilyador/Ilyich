@@ -36,10 +36,10 @@ final class FakeStaging: PhotoLibraryStaging {
     private let state = Mutex(State())
     static let album = "album-1"
 
-    func add(_ id: String, _ photo: Photo = Photo(modified: FakeStaging.date), album: String = FakeStaging.album) {
+    func add(_ id: String, _ photo: Photo = Photo(modified: FakeStaging.date), album: String? = FakeStaging.album) {
         state.withLock {
             $0.photos[id] = photo
-            if !($0.albums[album] ?? []).contains(id) { $0.albums[album, default: []].append(id) }
+            if let album, !($0.albums[album] ?? []).contains(id) { $0.albums[album, default: []].append(id) }
         }
     }
 
@@ -68,10 +68,11 @@ final class FakeStaging: PhotoLibraryStaging {
         state.withLock { $0.albums.map { DeviceAlbum(id: $0.key, title: $0.key, count: $0.value.count, isShared: false) } }
     }
 
-    func candidates(included: Set<String>, excluded: Set<String>) -> AsyncThrowingStream<[DeviceCandidate], any Error> {
+    func candidates(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) -> AsyncThrowingStream<[DeviceCandidate], any Error> {
         let (candidates, gate) = state.withLock { state -> ([DeviceCandidate], TransferGate?) in
             let excludedIDs = Set(excluded.flatMap { state.albums[$0] ?? [] })
-            let ids = Set(included.flatMap { state.albums[$0] ?? [] }).subtracting(excludedIDs).sorted()
+            let selected = scope == .entireLibrary ? Set(state.photos.keys) : Set(included.flatMap { state.albums[$0] ?? [] })
+            let ids = selected.subtracting(excludedIDs).sorted()
             return (ids.compactMap { id in state.photos[id].map { DeviceCandidate(id: id, modified: $0.modified) } }, state.discoveryGate)
         }
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: [DeviceCandidate].self)
@@ -116,8 +117,10 @@ final class FakeStaging: PhotoLibraryStaging {
                              fields: fields, isVideo: photo.isVideo, stageID: stageID)
     }
 
-    func albumMembers(_ albumID: String, excluded: Set<String>) async -> [String] {
-        state.withLock { $0.albums[albumID] ?? [] }.sorted()
+    func albumMembers(_ albumID: String, excluded: Set<String>, scope: PhotoSelectionScope = .selectedAlbums) async -> [String] {
+        state.withLock { state in
+            Set(state.albums[albumID] ?? []).subtracting(excluded.flatMap { state.albums[$0] ?? [] }).sorted()
+        }
     }
 
     func existing(_ localIDs: [String]) async throws -> Set<String> {
@@ -144,6 +147,7 @@ final class FakeTransferServer: TransferServerAPI {
 
     private struct State {
         var held: [String: Holding] = [:]
+        var remoteAssets: [String: BackupRemoteAsset] = [:]
         var checks: [Check] = []
         var requests: [Request] = []
         var pairings: [String: String] = [:]
@@ -154,6 +158,7 @@ final class FakeTransferServer: TransferServerAPI {
 
     /// The server already holds a file with this checksum.
     func hold(checksum: String, as holding: Holding) { state.withLock { $0.held[checksum] = holding } }
+    func remote(_ asset: BackupRemoteAsset) { state.withLock { $0.remoteAssets[asset.id] = asset } }
     func pair(_ asset: String, with motion: String) { state.withLock { $0.pairings[asset] = motion } }
     var checks: [Check] { state.withLock { $0.checks } }
     var requests: [Request] { state.withLock { $0.requests } }
@@ -192,7 +197,7 @@ final class FakeTransferServer: TransferServerAPI {
     }
 
     func remoteAsset(id: String) async throws -> BackupRemoteAsset {
-        BackupRemoteAsset(id: id, ownerId: "owner", checksum: "", isTrashed: false, livePhotoVideoId: state.withLock { $0.pairings[id] })
+        state.withLock { $0.remoteAssets[id] ?? BackupRemoteAsset(id: id, ownerId: "owner", checksum: "", isTrashed: false, livePhotoVideoId: $0.pairings[id]) }
     }
 
     func livePhotoVideoID(of assetID: String) async throws -> String? { state.withLock { $0.pairings[assetID] } }

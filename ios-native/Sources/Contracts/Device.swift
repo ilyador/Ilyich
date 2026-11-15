@@ -2,6 +2,13 @@ import CryptoKit
 import Foundation
 import Photos
 
+/// A Photos selection shared by backup discovery and the merged device timeline.
+/// Whole-library selection is independent of any smart album's name or membership.
+enum PhotoSelectionScope: String, Codable, Hashable, Sendable {
+    case selectedAlbums
+    case entireLibrary
+}
+
 /// A PHAsset's localIdentifier, unchanged.
 struct DeviceAssetID: RawRepresentable, Hashable, Sendable {
     let rawValue: String

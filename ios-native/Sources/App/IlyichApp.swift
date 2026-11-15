@@ -7,7 +7,6 @@ import SwiftUI
     @State private var purchases: PurchaseStore
     @State private var purchasesStarted = false
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     init() {
         // Inert unless launched with -IlyichPerfScenario; then it measures from the first frame.
         if !Self.isHostedUnitTest { PerfScenarioDriver.arm() }
@@ -97,7 +96,8 @@ import SwiftUI
         .environment(\.freeUpSpace, session.freeUpSpace)
         .environment(\.lockedFolder, session.lockedFolder)
         .environment(\.purchaseStore, purchases)
-        .tint((AppearanceAccent(rawValue: accentName) ?? .design).tint)
+        .environment(\.mediaSources, session.runtime?.mediaSources)
+        .appControlAppearance()
         .task {
             await purchases.start()
             purchasesStarted = true

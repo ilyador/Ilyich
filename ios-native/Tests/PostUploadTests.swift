@@ -359,6 +359,25 @@ final class PostUploadTests: XCTestCase {
         await h.tearDown()
     }
 
+    func testEntireLibrarySyncsOnlyChosenRealAlbumsAndHonorsExclusions() async throws {
+        let h = try await PostUploadHarness()
+        var preferences = TransferPreferences()
+        preferences.scope = .entireLibrary
+        preferences.includedAlbums = ["trips"]
+        preferences.excludedAlbums = ["private"]
+        preferences.syncAlbums = true
+        try await h.store.savePreferences(preferences)
+        h.staging.add("albumed", album: "trips")
+        h.staging.add("unfiled", album: nil)
+        h.staging.add("private", album: "trips")
+        h.staging.add("private", album: "private")
+        for id in ["albumed", "unfiled", "private"] { try await h.backUp(id) }
+        _ = await h.worker.runPass(linkedAlbums: true)
+        XCTAssertEqual(h.server.created, ["trips"], "Entire library never creates a synthetic server album.")
+        XCTAssertEqual(h.server.albumCalls, [.init(album: "server-trips", ids: ["asset-albumed"])])
+        await h.tearDown()
+    }
+
     func testLinkedAlbumsFailPerAlbum() async throws {
         let h = try await PostUploadHarness()
         var preferences = LibraryJobHarness.preferences()

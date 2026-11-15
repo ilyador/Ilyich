@@ -7,8 +7,8 @@ protocol DeviceIndexReading: Sendable {
     func access() async -> DeviceAccess
     /// The library's changes from now on.
     func changes() -> AsyncStream<DeviceLibraryChange>
-    /// The photos and videos in `included` and in none of `excluded`, identifiers only.
-    func members(included: Set<String>, excluded: Set<String>) async throws -> Set<String>
+    /// All readable photos and videos, or those in `included`, minus `excluded`, identifiers only.
+    func members(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) async throws -> Set<String>
     /// Reads these assets again. Those Photos no longer has are left out.
     func items(_ ids: [String]) async throws -> [DeviceTimelineItem]
     /// The SHA-1 of the asset's current full-size file, never downloaded from iCloud.
@@ -23,12 +23,36 @@ protocol DeviceIndexServer: Sendable {
     /// the offline library isn't complete, when it can't prove a phone photo is absent from the
     /// server.
     func identities() async throws -> [LocalAssetMatch]?
+    /// An exact owner's identity and its currently accessible server record. A missing/deleted
+    /// record is not a match, even if the offline library or an old receipt still names it.
+    func copy(id: String) async throws -> DeviceServerCopy?
+    /// Exact candidates for one stored checksum or cloud identity, without a full index pass.
+    func identities(checksum: String?, cloudID: String?) async throws -> [LocalAssetMatch]
+    /// Cheap completion check; absence from a partial catalog is not a missing server copy.
+    func identityIndexComplete() async throws -> Bool
     /// The library's changes from now on.
     func changes() async -> AsyncStream<LibraryChange>
 }
 
-/// What backup tells the device index: which albums join the library and what was uploaded.
+struct DeviceServerCopy: Sendable {
+    let identity: LocalAssetMatch
+    let asset: Asset
+}
+
+extension DeviceIndexServer {
+    func copy(id: String) async throws -> DeviceServerCopy? { nil }
+    func identityIndexComplete() async throws -> Bool { try await identities() != nil }
+    func identities(checksum: String?, cloudID: String?) async throws -> [LocalAssetMatch] {
+        guard checksum != nil || cloudID != nil else { return [] }
+        return try await identities()?.filter { row in
+            (checksum != nil && row.checksum == checksum) || (cloudID != nil && row.cloudID == cloudID)
+        } ?? []
+    }
+}
+
+/// What backup tells the device index: the Photos selection and what was uploaded.
 struct DeviceIndexBackupInputs: Equatable, Sendable {
+    var scope: PhotoSelectionScope = .selectedAlbums
     var included: Set<String> = []
     var excluded: Set<String> = []
     /// The account's receipts by local ID.
@@ -40,8 +64,22 @@ struct DeviceIndexBackupInputs: Equatable, Sendable {
 protocol DeviceIndexBackupSource: Sendable {
     /// The account's inputs, or nil while its backup state isn't the one taken up.
     func inputs(account: String) async -> DeviceIndexBackupInputs?
+    /// One current receipt for source selection, without loading the entire backup history.
+    func receipt(for localID: String, account: String) async -> DeviceBackupReceipt
     /// Tells of every change to them from now on, merged while unread.
     func changes() async -> AsyncStream<Void>
+}
+
+enum DeviceBackupReceipt: Sendable {
+    case available(CleanupReceipt?)
+    case unavailable
+}
+
+extension DeviceIndexBackupSource {
+    func receipt(for localID: String, account: String) async -> DeviceBackupReceipt {
+        guard let inputs = await inputs(account: account) else { return .unavailable }
+        return .available(inputs.receipts[localID])
+    }
 }
 
 /// The phone's photos as the merged library shows them at one moment.
@@ -91,6 +129,7 @@ actor DeviceIndexService {
     private struct Published: Equatable {
         var itemsVersion: UInt64
         var associations: [String: String]
+        var visibleLocalIDs: Set<String>
         var access: DeviceAccess
     }
 
@@ -103,6 +142,7 @@ actor DeviceIndexService {
     private let pause: Duration
     private let coalescing: Duration
     private let powerAllowsHashing: @Sendable () -> Bool
+    private let authorization: AuthorizationState?
 
     private var started = false
     private var ended = false
@@ -143,6 +183,7 @@ actor DeviceIndexService {
     /// can be matched; the hidden ones (archived, hidden, locked, trashed) only spare a phone photo
     /// uploaded as one of them a fingerprint that could never match.
     private struct Remotes {
+        var complete = false
         var rows: [LocalAssetMatch] = []
         var byID: [String: LocalAssetMatch] = [:]
         var byHash: [String: String] = [:]
@@ -150,7 +191,9 @@ actor DeviceIndexService {
         var hiddenByID: [String: LocalAssetMatch] = [:]
         var hiddenByCloud: [String: [LocalAssetMatch]] = [:]
 
-        init(_ all: [LocalAssetMatch] = []) {
+        init(_ identities: [LocalAssetMatch]? = nil) {
+            complete = identities != nil
+            let all = identities ?? []
             let rows = all.filter(\.visible), hidden = all.filter { !$0.visible }
             self.rows = rows
             byID = Dictionary(rows.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
@@ -166,7 +209,8 @@ actor DeviceIndexService {
     init(account: String, reader: any DeviceIndexReading, server: (any DeviceIndexServer)?, backup: any DeviceIndexBackupSource,
          database: DeviceDatabase, presence: AppPresence,
          pause: Duration = .milliseconds(30), coalescing: Duration = .seconds(1),
-         powerAllowsHashing: @escaping @Sendable () -> Bool = DeviceIndexService.powerAllowsHashing) {
+         powerAllowsHashing: @escaping @Sendable () -> Bool = DeviceIndexService.powerAllowsHashing,
+         authorization: AuthorizationState? = nil) {
         self.account = account
         self.reader = reader
         self.server = server
@@ -176,6 +220,7 @@ actor DeviceIndexService {
         self.pause = pause
         self.coalescing = coalescing
         self.powerAllowsHashing = powerAllowsHashing
+        self.authorization = authorization
         (wakes, wake) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -204,6 +249,108 @@ actor DeviceIndexService {
 
     /// The latest snapshot, nil before the first.
     var snapshot: DeviceIndexSnapshot? { latest }
+
+    /// Resolves a tapped phone row again, since matching may have finished after that row was
+    /// displayed. Reads metadata and known identities only: opening a photo never hashes or
+    /// downloads an original just to find its server copy. A known server outage remains
+    /// distinct from an unmatched phone item and cannot turn into an automatic iCloud request.
+    func resolveSource(of photo: LocalPhoto) async -> MediaSourceResolution {
+        let epoch = authorization?.snapshot.epoch
+        func authorized() -> Bool {
+            guard !ended, !Task.isCancelled else { return false }
+            guard let authorization else { return true }
+            return authorization.account.digest == account && authorization.permitsServiceUse
+                && authorization.snapshot.allows(.read) && epoch.map(authorization.isCurrent) == true
+        }
+        guard authorized() else { return .unavailable(message: "Your access changed. Open the photo again.") }
+        let access = await reader.access()
+        guard access.status == .authorized || access.status == .limited else {
+            return .unavailable(message: "Allow Photos access to open this phone photo.")
+        }
+        guard let current = try? await reader.items([photo.id]).first, current.photo.modified == photo.modified else {
+            return .unavailable(message: "This photo changed or is no longer on the phone. Open it again from the library.")
+        }
+        let receiptRead = await backup.receipt(for: photo.id, account: account)
+        guard authorized() else { return .unavailable(message: "Your access changed. Open the photo again.") }
+        var candidates: [(id: String, checksum: String)] = []
+        if let revision = current.photo.modified.map(AssetRevision.init),
+           case .available(let stored) = receiptRead, let receipt = stored, receipt.revision == revision {
+            candidates.append((receipt.original.id, receipt.original.checksum))
+        }
+        if items[photo.id]?.photo.modified == current.photo.modified,
+           let remoteID = associations[photo.id], let identity = remotes.byID[remoteID] {
+            candidates.append((remoteID, identity.checksum))
+        }
+        if current.unadjusted, let cloudID = current.cloudID,
+           let identity = remotes.byCloud[cloudID]?.first(where: { LocalIdentityMatch.matches(current.photo, remote: $0) }) {
+            candidates.append((identity.assetID, identity.checksum))
+        }
+        let fingerprint: DeviceFingerprint?
+        if let known = fingerprints?[photo.id] { fingerprint = known }
+        else { fingerprint = try? await database.fingerprint(for: photo.id) }
+        let checksum = fingerprint.flatMap { $0.isCurrent(for: current.photo.modified) ? $0.checksum : nil }
+        let cloudID = current.unadjusted ? current.cloudID : nil
+        if let server, checksum != nil || cloudID != nil {
+            let identities: [LocalAssetMatch]
+            do { identities = try await server.identities(checksum: checksum, cloudID: cloudID) }
+            catch { return .unavailable(message: "Could not check the photo’s server identity. Try again.") }
+            guard authorized() else { return .unavailable(message: "Your access changed. Open the photo again.") }
+            for identity in identities where identity.visible {
+                let exactChecksum = checksum != nil && identity.checksum == checksum
+                let exactCloud = cloudID != nil && identity.cloudID == cloudID && LocalIdentityMatch.matches(current.photo, remote: identity)
+                if (exactChecksum || exactCloud), !candidates.contains(where: { $0.id == identity.assetID && $0.checksum == identity.checksum }) {
+                    candidates.append((identity.assetID, identity.checksum))
+                }
+            }
+        }
+        for candidate in candidates {
+            let copy: DeviceServerCopy?
+            do {
+                guard let server else {
+                    guard await sourceIsCurrent(photo, access: access), authorized() else {
+                        return .unavailable(message: "Your access or this phone photo changed. Open it again.")
+                    }
+                    return .serverUnavailable(photo: photo, serverID: candidate.id, message: "The server library is unavailable. Try again shortly.")
+                }
+                copy = try await server.copy(id: candidate.id)
+            } catch {
+                guard authorized(), await sourceIsCurrent(photo, access: access), authorized() else {
+                    return .unavailable(message: "Your access or this phone photo changed. Open it again.")
+                }
+                if case ServerFailure.notFound = error { continue }
+                if error is CancellationError || error is PurchaseAccessRequired {
+                    return .unavailable(message: error.localizedDescription)
+                }
+                switch error {
+                case ServerFailure.sessionExpired, ServerFailure.forbidden, ServerFailure.proxyRejected,
+                     ServerFailure.passwordChangeRequired, ServerFailure.credentialsRejected, APIError.signedOut:
+                    return .unavailable(message: error.localizedDescription)
+                default:
+                    return .serverUnavailable(photo: photo, serverID: candidate.id, message: error.localizedDescription)
+                }
+            }
+            guard let copy, authorized(),
+                  copy.identity.assetID == candidate.id, copy.identity.visible,
+                  copy.identity.checksum == candidate.checksum,
+                  copy.asset.id == candidate.id, !copy.asset.isTrashed, copy.asset.visibility == .timeline else { continue }
+            if let authorization, copy.asset.ownerId != authorization.account.userID { continue }
+            guard await sourceIsCurrent(photo, access: access), authorized() else {
+                return .unavailable(message: "Your access or this phone photo changed. Open it again.")
+            }
+            return .server(copy.asset)
+        }
+        guard authorized(), await sourceIsCurrent(photo, access: access), authorized() else {
+            return .unavailable(message: "Your access or this phone photo changed. Open it again.")
+        }
+        if case .unavailable = receiptRead { return .unavailable(message: "Backup records are still being prepared. Try again shortly.") }
+        return .device(photo)
+    }
+
+    private func sourceIsCurrent(_ photo: LocalPhoto, access: DeviceAccess) async -> Bool {
+        let latest = try? await reader.items([photo.id]).first
+        let after = await reader.access()
+        return after == access && latest != nil && latest?.photo.modified == photo.modified
+    }
 
     /// The app came forward or went to the background, as AppPresence now says.
     func presenceChanged() async {
@@ -302,7 +449,7 @@ actor DeviceIndexService {
         if needsInputs {
             needsInputs = false
             let read = await backup.inputs(account: account)
-            if read?.included != inputs?.included || read?.excluded != inputs?.excluded { needsMembership = true }
+            if read?.scope != inputs?.scope || read?.included != inputs?.included || read?.excluded != inputs?.excluded { needsMembership = true }
             if read != inputs { dirty = true }
             inputs = read
             return true
@@ -314,7 +461,7 @@ actor DeviceIndexService {
             access = now
             fullReload = true
         }
-        guard PhotoKitAdapter.canRead(now.status), !inputs.included.isEmpty else {
+        guard PhotoKitAdapter.canRead(now.status), (inputs.scope == .entireLibrary || !inputs.included.isEmpty) else {
             if members != nil || !items.isEmpty || published == nil { clear() }
             pending = []; removed = []; fullReload = false; needsMembership = true
             dirty = false
@@ -329,7 +476,7 @@ actor DeviceIndexService {
         // A read that fails keeps what the index holds and is tried again at the next change.
         if needsMembership {
             needsMembership = false
-            guard let found = try? await reader.members(included: inputs.included, excluded: inputs.excluded) else {
+            guard let found = try? await reader.members(scope: inputs.scope, included: inputs.included, excluded: inputs.excluded) else {
                 needsMembership = true
                 return false
             }
@@ -361,7 +508,7 @@ actor DeviceIndexService {
         }
         if needsRemotes {
             needsRemotes = false
-            do { remotes = Remotes(try await server?.identities() ?? []) }
+            do { remotes = Remotes(try await server?.identities()) }
             catch {
                 needsRemotes = true
                 return false
@@ -429,7 +576,7 @@ actor DeviceIndexService {
         associations = result
         // An incomplete offline library can't prove a fingerprint is absent from the server, so
         // nothing is hashed until it is complete.
-        queue = remotes.rows.isEmpty ? [] : unhashed
+        queue = remotes.complete ? unhashed : []
         cursor = 0
     }
 
@@ -437,10 +584,18 @@ actor DeviceIndexService {
     @discardableResult
     private func publish() -> Bool {
         matchedSincePublish = 0
-        let next = Published(itemsVersion: itemsVersion, associations: associations, access: access)
+        // Broadening backup to the whole phone must not insert thousands of unverified duplicate
+        // rows into the server timeline. Only a complete identity set and a current fingerprint
+        // can prove an unmatched photo is distinct. The index still holds every item for backup;
+        // On this phone and the backup queue read Photos independently and remain available.
+        let visibleLocalIDs = Set(items.keys.filter { id in
+            inputs?.scope != .entireLibrary || associations[id] != nil
+                || (remotes.complete && fingerprints?[id]?.isCurrent(for: items[id]?.photo.modified) == true)
+        })
+        let next = Published(itemsVersion: itemsVersion, associations: associations, visibleLocalIDs: visibleLocalIDs, access: access)
         guard next != published else { return false }
         published = next
-        let photos = items.keys.sorted().compactMap { items[$0]?.photo }
+        let photos = visibleLocalIDs.sorted().compactMap { items[$0]?.photo }
         let snapshot = DeviceIndexSnapshot(access: access, timeline: MergedTimeline(photos: photos, associations: associations),
                                            items: items, associations: associations)
         latest = snapshot
@@ -473,9 +628,9 @@ actor DeviceIndexService {
                 if unsaved.count >= 25 { await saveFingerprints() }
                 if associations[id] == nil, let remote = remotes.byHash[checksum] {
                     associations[id] = remote
-                    matchedSincePublish += 1
-                    if matchedSincePublish >= 20 { publish() }
                 }
+                matchedSincePublish += 1
+                if matchedSincePublish >= 20 { publish() }
             } catch is CancellationError {
                 return false
             } catch {
@@ -531,8 +686,8 @@ struct PhotoKitIndexReader: DeviceIndexReading {
 
     func access() async -> DeviceAccess { await adapter.refreshAccess() }
     func changes() -> AsyncStream<DeviceLibraryChange> { adapter.changes() }
-    func members(included: Set<String>, excluded: Set<String>) async throws -> Set<String> {
-        try await adapter.timelineMembers(included: included, excluded: excluded)
+    func members(scope: PhotoSelectionScope, included: Set<String>, excluded: Set<String>) async throws -> Set<String> {
+        try await adapter.timelineMembers(scope: scope, included: included, excluded: excluded)
     }
     func items(_ ids: [String]) async throws -> [DeviceTimelineItem] { try await adapter.timelineItems(ids) }
     func fingerprint(of id: String) async throws -> String { try await adapter.fingerprint(of: id) }
@@ -543,6 +698,23 @@ struct PhotoKitIndexReader: DeviceIndexReading {
 struct LibraryIndexIdentities: DeviceIndexServer {
     let entities: LibraryIndex
     let libraryChanges: @Sendable () async -> AsyncStream<LibraryChange>
+    var lookup: (@Sendable (String) async throws -> DeviceServerCopy?)? = nil
+    func identityIndexComplete() async throws -> Bool { try await entities.isComplete() }
+
+    func identities(checksum: String?, cloudID: String?) async throws -> [LocalAssetMatch] {
+        try await entities.identities(checksum: checksum, cloudID: cloudID)
+    }
+
+    func copy(id: String) async throws -> DeviceServerCopy? {
+        if let lookup {
+            guard let copy = try await lookup(id), copy.asset.ownerId == entities.userID else { return nil }
+            return copy
+        }
+        guard let identity = try await entities.identity(id: id), identity.visible else { return nil }
+        let asset = try await entities.asset(id: id)
+        guard let asset, asset.id == id, !asset.isTrashed, asset.visibility == .timeline else { return nil }
+        return DeviceServerCopy(identity: identity, asset: asset)
+    }
 
     func identities() async throws -> [LocalAssetMatch]? {
         guard try await entities.isComplete() else { return nil }
@@ -558,4 +730,31 @@ struct LibraryIndexIdentities: DeviceIndexServer {
     }
 
     func changes() async -> AsyncStream<LibraryChange> { await libraryChanges() }
+}
+
+extension APIClient {
+    /// A direct authorized exact-ID read. It deliberately does not use the offline fallback:
+    /// a stale receipt must not turn a removed or inaccessible remote asset into a match.
+    func deviceServerCopy(id: String) async throws -> DeviceServerCopy? {
+        let record: DeviceServerCopyRecord = try await request(.get, path: "assets/\(id)")
+        let asset = record.asset
+        guard asset.id == id, asset.ownerId == userID, !asset.isTrashed, asset.visibility == .timeline,
+              let checksum = record.checksum, !checksum.isEmpty else { return nil }
+        return DeviceServerCopy(identity: LocalAssetMatch(assetID: id, checksum: checksum, cloudID: nil,
+                                                          createdAt: nil, adjustmentTime: nil, latitude: nil, longitude: nil), asset: asset)
+    }
+}
+
+private struct DeviceServerCopyRecord: Decodable, Sendable {
+    let asset: Asset
+    let checksum: String?
+    private enum CodingKeys: String, CodingKey { case checksum, deletedAt }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        var decoded = try Asset(from: decoder)
+        if try values.decodeIfPresent(Date.self, forKey: .deletedAt) != nil { decoded.isTrashed = true }
+        asset = decoded
+        checksum = try values.decodeIfPresent(String.self, forKey: .checksum)
+    }
 }

@@ -370,6 +370,20 @@ extension TransferStore {
         return counts
     }
 
+    /// Current confirmation revisions for a measured selection. Used after discovery adoption
+    /// and external outcome recovery; progress byte reports never run this query.
+    func confirmationRevisions(for localIDs: [String]) throws -> [String: AssetRevision] {
+        guard !localIDs.isEmpty else { return [:] }
+        var result: [String: AssetRevision] = [:]
+        try database().run("""
+            SELECT c.local_id,c.modification_date FROM confirmations c \
+            JOIN json_each(?) selected ON selected.value=c.local_id
+            """, [.text(TransferJSON.encode(localIDs))]) { row in
+                if let id = row.text(0), let value = row.real(1) { result[id] = AssetRevision(referenceSeconds: value) }
+            }
+        return result
+    }
+
     /// A lane's jobs that are not failed, in order, after the job whose seq is `after`.
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) throws -> [TransferQueueItem] {
         var page: [TransferQueueItem] = []

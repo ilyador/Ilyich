@@ -13,14 +13,15 @@ import AVKit
     var livePhoto: PHLivePhoto?
     var loading = false
     var cloud = false
+    var progress: Double?
     var failure: String?
     @ObservationIgnored private var request: Task<Void, Never>?
-    @ObservationIgnored private let device: PhotoKitAdapter
+    @ObservationIgnored private let device: any DeviceMediaProviding
 
-    init(device: PhotoKitAdapter = .shared) { self.device = device }
+    init(device: any DeviceMediaProviding = PhotoKitAdapter.shared) { self.device = device }
 
     func load(_ photo: LocalPhoto, network: Bool, motion: Bool = false, maximumResolution: Bool = false) {
-        cancel(); image = nil; livePhoto = nil; cloud = false; failure = nil; loading = true
+        cancel(); image = nil; livePhoto = nil; cloud = false; progress = nil; failure = nil; loading = true
         let kind: DeviceMediaRequest, missing: String
         if photo.video { kind = .video(network: network); missing = "The video is unavailable on this phone." }
         else if photo.live && motion { kind = .livePhoto(pixels: 1600, network: network); missing = "The Live Photo is unavailable on this phone." }
@@ -32,16 +33,19 @@ import AVKit
                 switch event {
                 case .image(let image, let final):
                     self.image = image
-                    if final { self.loading = false }
+                    if final { self.loading = false; self.progress = nil }
                 case .livePhoto(let live, let final):
                     self.livePhoto = live
-                    if final { self.loading = false }
+                    if final { self.loading = false; self.progress = nil }
                 case .player(let item):
-                    self.player = AVPlayer(playerItem: item); self.loading = false
+                    self.player = AVPlayer(playerItem: item); self.loading = false; self.progress = nil
+                case .progress(let value):
+                    self.progress = min(1, max(0, value))
                 case .unavailable(let inCloud, let message):
                     self.loading = false
                     self.cloud = inCloud && self.image == nil && self.livePhoto == nil
-                    self.failure = message ?? missing
+                    self.progress = nil
+                    self.failure = inCloud && message == nil ? nil : (message ?? missing)
                 }
             }
         }
@@ -50,7 +54,14 @@ import AVKit
     func cancel() {
         request?.cancel(); request = nil
         player?.pause(); player?.replaceCurrentItem(with: nil); player = nil
-        loading = false
+        loading = false; progress = nil
+    }
+
+    func cancelDownload() {
+        guard loading else { return }
+        cancel()
+        cloud = true
+        failure = "Download cancelled."
     }
 }
 
@@ -89,8 +100,11 @@ struct LocalPhotoViewer: View {
     @State private var showActions = false
     @State private var actionPhotos: [LocalPhoto] = []
     @State private var motion = false
-    @State private var retry = 0
+    @State private var reload = 0
+    @State private var sourceRetry = 0
+    @State private var source = LocalPhotoSourceSelection()
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mediaSources) private var mediaSources
 
     init(photo: LocalPhoto, photos: [LocalPhoto] = [], onChanged: (() -> Void)? = nil) {
         _photos = State(initialValue: photos.contains(where: { $0.id == photo.id }) ? photos : [photo])
@@ -100,42 +114,106 @@ struct LocalPhotoViewer: View {
 
     private var selectedIndex: Int { photos.firstIndex { $0.id == selectedID } ?? 0 }
     private var photo: LocalPhoto { photos[selectedIndex] }
+    private var sourceRequestID: LocalPhotoSourceRequestID {
+        LocalPhotoSourceRequestID(photoID: photo.id, resolverID: mediaSources.map { ObjectIdentifier($0) }, retry: sourceRetry)
+    }
 
     var body: some View {
+        resolvedContent
+        // Only the viewer turns with the phone; the rest of the app stays upright.
+        .onAppear { OrientationLock.viewerAppeared() }
+        .onDisappear { OrientationLock.viewerDisappeared() }
+        .task(id: sourceRequestID) { await source.resolve(photo, using: mediaSources) }
+        .onDisappear { source.cancel() }
+        .onChange(of: selectedID) { motion = false }
+    }
+
+    @ViewBuilder private var resolvedContent: some View {
+        switch source.resolution {
+        case .server(let asset):
+            if let mediaSources {
+                AssetViewer(api: mediaSources.api, pipeline: mediaSources.pipeline,
+                            route: ViewerRoute(asset: asset, source: .single, albumContext: nil),
+                            window: .single(asset), matchedLocalPhotos: [asset.id: photo], onClose: { dismiss() })
+            } else { unavailableSource("Photo sources are no longer available.", retryable: true) }
+        case .device(let localPhoto):
+            deviceViewer(localPhoto)
+        case .serverUnavailable(_, _, let message):
+            unavailableSource("The backed-up copy is unavailable.\n\(message)", retryable: true) {
+                source.viewOnPhone()
+            }
+        case .unavailable(let message):
+            unavailableSource(message, retryable: true)
+        case nil:
+            sourceLoadingView
+        }
+    }
+
+    private func deviceViewer(_ current: LocalPhoto) -> some View {
         NavigationStack {
             TabView(selection: $selectedID) {
                 ForEach(Array(photos.enumerated()), id: \.element.id) { index, page in
                     Group {
                         // Only the current photo and its neighbors hold full-size media.
                         if abs(index - selectedIndex) <= 1 {
-                            LocalPhotoPage(photo: page, active: page.id == selectedID, motion: motion && page.id == selectedID,
-                                           reload: retry, onDismiss: { dismiss() })
+                            LocalPhotoPage(photo: page.id == current.id ? current : page,
+                                           active: page.id == selectedID, motion: motion && page.id == selectedID,
+                                           reload: reload, onDismiss: { dismiss() })
                         } else { Color.black }
                     }.tag(page.id)
                 }
             }.tabViewStyle(.page(indexDisplayMode: .never))
             .background(Color.black.ignoresSafeArea())
-            .navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(current.title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Photo actions", systemImage: "ellipsis") { actionPhotos = [photo]; showActions = true }
+                    Button("Photo actions", systemImage: "ellipsis") { actionPhotos = [current]; showActions = true }
                 }
-                if photo.live { ToolbarItem(placement: .topBarTrailing) { Toggle("Live Photo", isOn: $motion).toggleStyle(.button) } }
+                if current.live { ToolbarItem(placement: .topBarTrailing) { Toggle("Live Photo", isOn: $motion).toggleStyle(.button) } }
             }
-        }.preferredColorScheme(.dark)
-        // Only the viewer turns with the phone; the rest of the app stays upright.
-        .onAppear { OrientationLock.viewerAppeared() }
-        .onDisappear { OrientationLock.viewerDisappeared() }
-        .onChange(of: selectedID) { motion = false }
+        }
         .sheet(isPresented: $showActions) {
             NavigationStack {
                 LocalPhotoActionsView(photos: actionPhotos) { change in
                     onChanged?()
-                    if case .removed(let ids) = change { remove(ids) } else { retry += 1 }
+                    if case .removed(let ids) = change { remove(ids) } else { reload += 1 }
                 }
             }
         }
+        .preferredColorScheme(.dark)
+    }
+
+    private func unavailableSource(_ message: String, retryable: Bool, viewOnPhone: (() -> Void)? = nil) -> some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                VStack(spacing: 18) {
+                    if source.isResolving { ProgressView().tint(.white) }
+                    else { Image(systemName: "photo.badge.exclamationmark").font(.largeTitle) }
+                    Text(message).multilineTextAlignment(.center)
+                    if retryable {
+                        Button("Retry") { sourceRetry += 1 }
+                    }
+                    if let viewOnPhone { Button("View on this phone", action: viewOnPhone) }
+                }.padding(28).foregroundStyle(.white)
+            }
+            .navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var sourceLoadingView: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                ProgressView().tint(.white).accessibilityLabel("Opening photo")
+            }
+            .navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+        }
+        .preferredColorScheme(.dark)
     }
 
     /// Takes removed photos out of the pages. The photo after the current one, or else the one
@@ -152,6 +230,51 @@ struct LocalPhotoViewer: View {
             selectedID = (after ?? before ?? remaining[0]).id
         }
         photos = remaining
+    }
+
+}
+
+private struct LocalPhotoSourceRequestID: Hashable {
+    let photoID: String
+    let resolverID: ObjectIdentifier?
+    let retry: Int
+}
+
+protocol LocalPhotoSourceResolving: Sendable {
+    func resolve(_ photo: LocalPhoto) async -> MediaSourceResolution
+}
+
+extension MediaSourceResolver: LocalPhotoSourceResolving {}
+
+@MainActor @Observable final class LocalPhotoSourceSelection {
+    private(set) var resolution: MediaSourceResolution?
+    private(set) var isResolving = false
+    @ObservationIgnored private var generation = 0
+
+    func resolve(_ photo: LocalPhoto, using resolver: (any LocalPhotoSourceResolving)?) async {
+        generation += 1
+        let request = generation
+        resolution = nil
+        isResolving = true
+        guard let resolver else {
+            resolution = .unavailable(message: "Photo sources are unavailable. Try again shortly.")
+            isResolving = false
+            return
+        }
+        let next = await resolver.resolve(photo)
+        guard !Task.isCancelled, generation == request else { return }
+        resolution = next
+        isResolving = false
+    }
+
+    func viewOnPhone() {
+        guard case .serverUnavailable(let photo, _, _) = resolution else { return }
+        resolution = .device(photo)
+    }
+
+    func cancel() {
+        generation += 1
+        isResolving = false
     }
 }
 
@@ -172,11 +295,18 @@ private struct LocalPhotoPage: View {
             if let player = media.player { VideoPlayer(player: player) }
             else if let live = media.livePhoto { LocalLivePhoto(livePhoto: live, active: active && scenePhase == .active) }
             else if let image = media.image { ZoomablePhoto(image: image, resetZoom: !active, onTap: { _ in }, onDismiss: onDismiss, onZoom: { }) }
-            else if media.loading { ProgressView().tint(.white) }
+            else if media.loading {
+                VStack(spacing: 14) {
+                    if let progress = media.progress { ProgressView(value: progress).frame(maxWidth: 220) }
+                    else { ProgressView().tint(.white) }
+                    if network { Button("Cancel download") { media.cancelDownload() } }
+                }
+            }
             else {
                 VStack(spacing: 18) {
                     Image(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark").font(.largeTitle)
-                    Text(media.failure ?? "This item is unavailable.").multilineTextAlignment(.center)
+                    Text(media.cloud ? (media.failure ?? "This item is stored in iCloud.") : (media.failure ?? "This item is unavailable."))
+                        .multilineTextAlignment(.center)
                     if !network { Button("Download from iCloud") { network = true } }
                     else { Button("Retry") { retry += 1 } }
                 }.padding(28).foregroundStyle(.white)

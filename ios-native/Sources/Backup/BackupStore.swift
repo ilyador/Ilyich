@@ -38,11 +38,16 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     /// A command the backend couldn't carry out. The engine's own errors arrive in the snapshot.
     private(set) var commandError: String?
 
-    var isRunning: Bool { snapshot.phase == .running || snapshot.phase == .discovering }
-    var activity: String { snapshot.activity ?? "Choose albums to back up" }
+    var isRunning: Bool {
+        let phase = snapshot.backupPhase ?? snapshot.phase
+        return phase == .running || phase == .discovering
+    }
+    var activity: String { snapshot.activity ?? "Choose photos to back up" }
     var error: String? { snapshot.lastMessage ?? commandError }
     var remaining: Int { snapshot.remaining }
     var confirmed: Int { snapshot.confirmed }
+    /// The same account-scoped numbers for Settings and the compact backup indicator.
+    var statistics: BackupStatistics { BackupStatistics(snapshot: snapshot) }
 
     @ObservationIgnored let backend: any TransferControlling
     @ObservationIgnored private let photos: BackupPhotoAccess

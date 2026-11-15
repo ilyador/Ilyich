@@ -36,12 +36,12 @@ private struct FreeUpSpaceContent: View {
                 }.padding(20)
             }
             VStack(alignment: .leading, spacing: 18) {
-                DatePicker("Remove only before", selection: Binding(get: { store.cutoff }, set: { store.setCutoff($0) }), in: ...Date(), displayedComponents: .date)
+                DatePicker("Keep items taken on or after", selection: Binding(get: { store.cutoff }, set: { store.setCutoff($0) }), in: ...Date(), displayedComponents: .date)
                 Toggle("Keep favorites", isOn: Binding(get: { store.keepFavorites }, set: { store.setKeepFavorites($0) }))
-                Picker("Always keep", selection: Binding(get: { store.keepMediaType }, set: { store.setKeepMediaType($0) })) {
-                    Text("Neither media type").tag("none")
-                    Text("Photos").tag("photos")
-                    Text("Videos").tag("videos")
+                Picker("Media-type preference", selection: Binding(get: { store.keepMediaType }, set: { store.setKeepMediaType($0) })) {
+                    Text("No media-type preference").tag("none")
+                    Text("Keep photos").tag("photos")
+                    Text("Keep videos").tag("videos")
                 }
                 NavigationLink("Keep albums (\(store.keptAlbumIDs.count))") {
                     Form {
@@ -50,6 +50,8 @@ private struct FreeUpSpaceContent: View {
                         }
                     }.navigationTitle("Keep albums")
                 }
+                Text("Only verified backups taken before the selected date are considered. Turn on Keep favorites or choose Keep albums to protect those items. No media-type preference allows both photos and videos to be considered.")
+                    .font(.footnote).foregroundStyle(.secondary)
                 Button("Check eligible backups", systemImage: "checkmark.shield") { store.check() }
                     .disabled(!store.filtersReady || store.checking || store.removing || !readable)
             }.padding(20).disabled(store.checking || store.removing)

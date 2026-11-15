@@ -43,3 +43,34 @@ enum AppearanceAccent: String, CaseIterable, Identifiable {
     /// Tint for selected controls. The design default keeps the approved cyan.
     var selectionTint: Color { self == .design ? .cyan : tint }
 }
+
+/// Gives native switches a legible, user-selected on color without changing link or toolbar tint.
+struct AccentSwitchStyle: ToggleStyle {
+    var accent: AppearanceAccent
+
+    func makeBody(configuration: Configuration) -> some View {
+        Toggle(isOn: configuration.$isOn) { configuration.label }
+            .toggleStyle(.switch)
+            .tint(accent.selectionTint)
+    }
+}
+
+/// Applies the app's control appearance at each independently hosted SwiftUI root.
+/// SwiftUI presentations and UIKit-hosted screens do not reliably inherit these modifiers.
+struct AppControlAppearance: ViewModifier {
+    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
+
+    private var accent: AppearanceAccent { AppearanceAccent(rawValue: accentName) ?? .design }
+
+    func body(content: Content) -> some View {
+        content
+            .tint(accent.tint)
+            .toggleStyle(AccentSwitchStyle(accent: accent))
+    }
+}
+
+extension View {
+    func appControlAppearance() -> some View {
+        modifier(AppControlAppearance())
+    }
+}
