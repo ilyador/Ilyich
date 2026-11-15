@@ -158,35 +158,7 @@ select
     from
       (
         select
-          "asset".*,
-          coalesce(
-            (
-              select
-                "development" -> 'publishedBase' ->> 'isDeveloped' = 'true'
-              from
-                "asset_job_status"
-              where
-                "assetId" = "asset"."id"
-            ),
-            false
-          ) as "isDeveloped",
-          coalesce(
-            (
-              select
-                "updateId"::text || ':' || coalesce(encode("asset"."thumbhash", 'base64'), '')
-              from
-                "asset_file"
-              where
-                "assetId" = "asset"."id"
-                and "type" = 'preview'
-              order by
-                "isEdited" desc
-              limit
-                1
-            ),
-            encode("asset"."thumbhash", 'base64'),
-            "asset"."id"::text
-          ) as "mediaRevision"
+          "asset".*
         from
           "shared_link_asset"
           inner join "asset" on "asset"."id" = "shared_link_asset"."assetId"

@@ -410,7 +410,8 @@ from
   "asset"
 where
   "ownerId" = $1::uuid
-  and "checksum" in ($2)
+  and "checksumAlgorithm" = $2
+  and "checksum" in ($3)
 
 -- AssetRepository.getUploadAssetIdByChecksum
 select

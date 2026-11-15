@@ -91,6 +91,19 @@ select
   "asset"."originalFileName",
   "asset"."thumbhash",
   "asset"."checksum",
+  "asset"."checksumAlgorithm",
+  (
+    SELECT
+      fp.checksum
+    FROM
+      asset_content_fingerprint fp
+    WHERE
+      fp."assetId" = asset.id
+      AND fp."originalPath" = asset."originalPath"
+      AND NOT asset."isOffline"
+      AND asset."deletedAt" IS NULL
+      AND asset.status = 'active'
+  ) as "contentChecksum",
   "asset"."fileCreatedAt",
   "asset"."fileModifiedAt",
   "asset"."createdAt",
@@ -156,6 +169,19 @@ select
   "asset"."originalFileName",
   "asset"."thumbhash",
   "asset"."checksum",
+  "asset"."checksumAlgorithm",
+  (
+    SELECT
+      fp.checksum
+    FROM
+      asset_content_fingerprint fp
+    WHERE
+      fp."assetId" = asset.id
+      AND fp."originalPath" = asset."originalPath"
+      AND NOT asset."isOffline"
+      AND asset."deletedAt" IS NULL
+      AND asset.status = 'active'
+  ) as "contentChecksum",
   "asset"."fileCreatedAt",
   "asset"."fileModifiedAt",
   "asset"."createdAt",
@@ -223,6 +249,19 @@ select
   "asset"."originalFileName",
   "asset"."thumbhash",
   "asset"."checksum",
+  "asset"."checksumAlgorithm",
+  (
+    SELECT
+      fp.checksum
+    FROM
+      asset_content_fingerprint fp
+    WHERE
+      fp."assetId" = asset.id
+      AND fp."originalPath" = asset."originalPath"
+      AND NOT asset."isOffline"
+      AND asset."deletedAt" IS NULL
+      AND asset.status = 'active'
+  ) as "contentChecksum",
   "asset"."fileCreatedAt",
   "asset"."fileModifiedAt",
   "asset"."createdAt",
@@ -529,6 +568,19 @@ select
   "asset"."originalFileName",
   "asset"."thumbhash",
   "asset"."checksum",
+  "asset"."checksumAlgorithm",
+  (
+    SELECT
+      fp.checksum
+    FROM
+      asset_content_fingerprint fp
+    WHERE
+      fp."assetId" = asset.id
+      AND fp."originalPath" = asset."originalPath"
+      AND NOT asset."isOffline"
+      AND asset."deletedAt" IS NULL
+      AND asset.status = 'active'
+  ) as "contentChecksum",
   "asset"."fileCreatedAt",
   "asset"."fileModifiedAt",
   "asset"."createdAt",
