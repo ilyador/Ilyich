@@ -23,6 +23,8 @@ protocol DeviceIndexServer: Sendable {
     /// the offline library isn't complete, when it can't prove a phone photo is absent from the
     /// server.
     func identities() async throws -> [LocalAssetMatch]?
+    /// Only these owner identities, including hidden/trashed rows. Nil if unsupported or incomplete.
+    func identities(ids: Set<String>) async throws -> [LocalAssetMatch]?
     /// An exact owner's identity and its currently accessible server record. A missing/deleted
     /// record is not a match, even if the offline library or an old receipt still names it.
     func copy(id: String) async throws -> DeviceServerCopy?
@@ -40,6 +42,8 @@ struct DeviceServerCopy: Sendable {
 }
 
 extension DeviceIndexServer {
+    /// Never fall back to a full-catalog scan for background receipt revalidation.
+    func identities(ids: Set<String>) async throws -> [LocalAssetMatch]? { nil }
     func copy(id: String) async throws -> DeviceServerCopy? { nil }
     func identityIndexComplete() async throws -> Bool { try await identities() != nil }
     func identities(checksum: String?, cloudID: String?) async throws -> [LocalAssetMatch] {
@@ -700,6 +704,10 @@ struct LibraryIndexIdentities: DeviceIndexServer {
     let libraryChanges: @Sendable () async -> AsyncStream<LibraryChange>
     var lookup: (@Sendable (String) async throws -> DeviceServerCopy?)? = nil
     func identityIndexComplete() async throws -> Bool { try await entities.isComplete() }
+    func identities(ids: Set<String>) async throws -> [LocalAssetMatch]? {
+        guard try await entities.isComplete() else { return nil }
+        return try await entities.identities(ids: ids)
+    }
 
     func identities(checksum: String?, cloudID: String?) async throws -> [LocalAssetMatch] {
         try await entities.identities(checksum: checksum, cloudID: cloudID)

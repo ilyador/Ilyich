@@ -325,6 +325,11 @@ final class KnownBackupCopyTests: XCTestCase {
         let observer = BackupConfirmationObserver(checker: checker, store: h.store, refreshed: { await h.engine.refresh() })
         await observer.start(changes: catalog.stream)
         await untilTransfers("The read-only startup pass checked the saved catalog.") { catalog.reads > 0 }
+        let readsBeforeUnrelatedChanges = catalog.reads
+        for _ in 0..<100 { catalog.unrelatedChange() }
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertEqual(catalog.reads, readsBeforeUnrelatedChanges, "Unrelated archive fingerprint batches do not re-read receipt identities.")
+        XCTAssertEqual(catalog.fullReads, 0, "Paused receipt reconciliation never scans the full catalog.")
         var changed = rows
         for index in 0..<52 { changed[index].backupAvailable = false; changed[index].visible = false }
         catalog.replace(changed)
@@ -343,6 +348,7 @@ final class KnownBackupCopyTests: XCTestCase {
         XCTAssertEqual(h.server.preparationCallCount, 0)
         let history = try await h.store.historyPage(offset: 0, limit: 100)
         XCTAssertEqual(history.count, 6)
+        XCTAssertEqual(catalog.fullReads, 0)
         await observer.stop()
         await h.tearDown()
     }
@@ -434,7 +440,7 @@ private final class MutableProofIdentities: DeviceIndexServer {
 }
 
 private final class ObservedProofIdentities: DeviceIndexServer {
-    private struct State { var rows: [LocalAssetMatch]; var reads = 0; var offline: Bool }
+    private struct State { var rows: [LocalAssetMatch]; var reads = 0; var fullReads = 0; var offline: Bool }
     private let state: Mutex<State>
     let stream: AsyncStream<LibraryChange>
     private let continuation: AsyncStream<LibraryChange>.Continuation
@@ -444,6 +450,13 @@ private final class ObservedProofIdentities: DeviceIndexServer {
         (stream, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
     var reads: Int { state.withLock { $0.reads } }
+    var fullReads: Int { state.withLock { $0.fullReads } }
+    func unrelatedChange() {
+        let account = LibraryJobHarness.account
+        var change = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1), indexRevision: 3, origin: .sync)
+        change.upserted["unrelated-asset"] = .init(from: nil, to: nil)
+        continuation.yield(change)
+    }
     func replace(_ rows: [LocalAssetMatch]) {
         state.withLock { $0.rows = rows }
         let account = LibraryJobHarness.account
@@ -452,10 +465,13 @@ private final class ObservedProofIdentities: DeviceIndexServer {
         continuation.yield(change)
     }
     func identities() async throws -> [LocalAssetMatch]? {
+        state.withLock { $0.fullReads += 1; return $0.rows }
+    }
+    func identities(ids: Set<String>) async throws -> [LocalAssetMatch]? {
         try state.withLock { state in
             state.reads += 1
             if state.offline { throw URLError(.notConnectedToInternet) }
-            return state.rows
+            return state.rows.filter { ids.contains($0.assetID) }
         }
     }
     func identityIndexComplete() async throws -> Bool { true }

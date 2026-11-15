@@ -46,11 +46,11 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
     func reconcileConfirmations(in store: TransferStore) async throws {
         try Task.checkCancellation()
         guard allowsReconciliation() else { return }
-        guard try await identities.identityIndexComplete(), var rows = try await identities.identities() else { return }
+        let checkedIDs = try await store.confirmationRemoteIDs()
+        guard try await identities.identityIndexComplete(), var rows = try await identities.identities(ids: checkedIDs) else { return }
         let indexed = Set(rows.map(\.assetID))
         // The local sync may not yet contain an upload that just completed. Absence in that
         // catalog cannot erase its receipt; only an exact server read can establish it is gone.
-        let checkedIDs = try await store.confirmationRemoteIDs()
         let missing = checkedIDs.subtracting(indexed)
         for id in missing.sorted() {
             do {
@@ -169,12 +169,20 @@ actor BackupConfirmationObserver {
         watcher = Task { [weak self] in
             for await change in changes {
                 guard !Task.isCancelled else { return }
-                if change.syncedThrough != nil || change.routingChanged || change.reset || change.overflow
-                    || !change.upserted.isEmpty || !change.removed.isEmpty || !change.accessLost.isEmpty {
-                    await self?.request()
-                }
+                await self?.receive(change)
             }
         }
+    }
+
+    private func receive(_ change: LibraryChange) async {
+        guard !stopped else { return }
+        if change.routingChanged || change.reset || change.overflow || (change.syncedThrough != nil && change.isEmpty) {
+            request()
+            return
+        }
+        guard let watched = try? await store.confirmationRemoteIDs() else { return }
+        if !watched.isDisjoint(with: change.upserted.keys) || !watched.isDisjoint(with: change.removed)
+            || !watched.isDisjoint(with: change.accessLost) || !watched.isDisjoint(with: change.mediaRevisions.keys) { request() }
     }
 
     /// Coming forward retries a read that failed offline; condition events never resume backup.

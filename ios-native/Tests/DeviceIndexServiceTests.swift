@@ -422,6 +422,7 @@ final class DeviceIndexServiceTests: XCTestCase {
         _ = try await entities.apply([
             serverAsset("own", checksum: "exact"), serverAsset("other", checksum: "different"),
             serverAsset("foreign", checksum: "exact", owner: "bob"),
+            serverAsset("trashed", checksum: "gone", deleted: true),
         ], epoch: entities.epoch())
         let ready = try await entities.isComplete()
         XCTAssertFalse(ready)
@@ -431,6 +432,11 @@ final class DeviceIndexServiceTests: XCTestCase {
         XCTAssertTrue(absent.isEmpty)
         let foreign = try await entities.identity(id: "foreign")
         XCTAssertNil(foreign)
+        let receiptRows = try await entities.identities(ids: ["own", "foreign", "trashed", "absent"])
+        XCTAssertEqual(Set(receiptRows.map(\.assetID)), ["own", "trashed"])
+        XCTAssertEqual(receiptRows.first { $0.assetID == "trashed" }?.backupAvailable, false)
+        let emptyBatch = try await entities.identities(ids: [])
+        XCTAssertTrue(emptyBatch.isEmpty)
     }
 
     // MARK: - Support

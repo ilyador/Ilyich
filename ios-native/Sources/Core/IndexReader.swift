@@ -250,6 +250,22 @@ actor IndexReader {
         return try Self.identities(rows)
     }
 
+    /// Receipt reconciliation reads only its saved server IDs. No metadata join or catalog walk.
+    func identities(ids: Set<String>) throws -> [LocalAssetMatch] {
+        guard !ids.isEmpty else { return [] }
+        let list = String(decoding: try JSONEncoder().encode(ids.sorted()), as: UTF8.self)
+        let rows = try database.query("""
+        SELECT a.id,json_extract(a.payload,'$.checksum'),NULL,
+          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL),
+          json_extract(a.payload,'$.checksumAlgorithm'),json_extract(a.payload,'$.contentChecksum'),
+          coalesce(json_extract(a.payload,'$.isExternal'),CASE json_type(a.payload,'$.libraryId') WHEN 'null' THEN 0 WHEN 'text' THEN 1 END),
+          (json_extract(a.payload,'$.deletedAt') IS NULL AND json_extract(a.payload,'$.visibility')!='locked' AND coalesce(json_extract(a.payload,'$.isOffline'),0)!=1)
+        FROM entities a WHERE a.kind='asset' AND a.id IN (SELECT value FROM json_each(?))
+          AND json_extract(a.payload,'$.ownerId')=?
+        """, [list, userID])
+        return try Self.identities(rows)
+    }
+
     /// One owner's exact identity, also available while initial sync is incomplete. Receipt
     /// resolution must not wait for every unrelated asset to finish syncing.
     func identity(id: String) throws -> LocalAssetMatch? {

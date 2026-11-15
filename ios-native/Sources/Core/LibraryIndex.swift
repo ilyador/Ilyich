@@ -171,6 +171,7 @@ final class LibraryIndex: Sendable {
 
     func entityData(kind: String, id: String) async throws -> Data? { try await mapped { try await viewport.entityData(kind: kind, id: id) } }
     func asset(id: String) async throws -> Asset? { try await mapped { try await viewport.asset(id: id) } }
+    func identities(ids: Set<String>) async throws -> [LocalAssetMatch] { try await mapped { try await aggregate.identities(ids: ids) } }
     func identity(id: String) async throws -> LocalAssetMatch? { try await mapped { try await viewport.identity(id: id) } }
     func identities(checksum: String?, cloudID: String?) async throws -> [LocalAssetMatch] {
         try await mapped { try await viewport.identities(checksum: checksum, cloudID: cloudID) }
