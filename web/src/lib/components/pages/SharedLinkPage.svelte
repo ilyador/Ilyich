@@ -1,7 +1,7 @@
 <script lang="ts">
-  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import AlbumViewer from '#lib/components/album-page/AlbumViewer.svelte';
   import IndividualSharedViewer from '#lib/components/share-page/IndividualSharedViewer.svelte';
+  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import ControlAppBar from '#lib/components/shared-components/ControlAppBar.svelte';
   import ThemeButton from '#lib/components/shared-components/ThemeButton.svelte';
   import { assetViewerManager } from '#lib/managers/asset-viewer-manager.svelte.ts';

@@ -1,10 +1,10 @@
 import { Selectable, ShallowDehydrateObject } from 'kysely';
-import type { ImageDevelopmentState } from 'src/schema/tables/asset-job-status.table.js';
 import { MapAsset } from 'src/dtos/asset-response.dto.js';
 import { AssetEditActionItem } from 'src/dtos/editing.dto.js';
 import { AssetFileType } from 'src/enum.js';
 import { FaceSearchResult } from 'src/repositories/search.repository.js';
 import { ActivityTable } from 'src/schema/tables/activity.table.js';
+import type { ImageDevelopmentState } from 'src/schema/tables/asset-job-status.table.js';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
 import { PartnerTable } from 'src/schema/tables/partner.table.js';
 import type { AudioStreamInfo, VideoFormat, VideoStreamInfo } from 'src/types.js';

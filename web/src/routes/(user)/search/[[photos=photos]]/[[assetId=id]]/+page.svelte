@@ -27,8 +27,8 @@
   import { parseUtcDate } from '#lib/utils/date-time.ts';
   import { handleError } from '#lib/utils/handle-error.ts';
   import { isAlbumsRoute, isPeopleRoute } from '#lib/utils/navigation.ts';
-  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import { mergeSearchVerification } from '#lib/utils/search-verification.ts';
+  import { toTimelineAsset } from '#lib/utils/timeline-util.ts';
   import {
     AssetVisibility,
     getPerson,
@@ -38,8 +38,8 @@
     type AlbumResponseDto,
     type AssetResponseDto,
     type MetadataSearchDto,
-    type SmartSearchDto,
     type SearchResponseDto,
+    type SmartSearchDto,
   } from '@immich/sdk';
   import { ActionButton, Button, CommandPaletteDefaultProvider, Icon, IconButton, LoadingSpinner } from '@immich/ui';
   import { mdiArrowLeft, mdiClose, mdiDotsVertical, mdiImageOffOutline, mdiSelectAll } from '@mdi/js';
@@ -73,7 +73,10 @@
   let terms = $derived<SearchTerms>(searchQuery ? JSON.parse(searchQuery) : {});
   let searchTermKeys = $derived(getObjectKeys(terms).filter((key) => key !== 'verify'));
   let verificationEnabled = $derived(
-    !!terms.query && smartSearchEnabled && featureFlagsManager.value.searchVerification && terms.verify !== false,
+    !!terms.query &&
+      config.machineLearning.clip.enabled &&
+      featureFlagsManager.value.searchVerification &&
+      terms.verify !== false,
   );
   let verificationActive = $derived(verificationEnabled && verification?.status !== 'not-needed');
 

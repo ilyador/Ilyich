@@ -130,8 +130,9 @@ describe('TimelineManager', () => {
       expect(timelineManager.totalViewerHeight).toBe(4434);
     });
 
-    it('preserves month geometry when the viewer hides the timeline during a refresh', async () => {
+    test('preserves month geometry when the viewer hides the timeline during a refresh', async () => {
       const geometry = timelineManager.months.map(({ top, height }) => ({ top, height }));
+      const originalHeight = timelineManager.totalViewerHeight;
       timelineManager.viewportWidth = 0;
       timelineManager.viewportHeight = 0;
       timelineManager.refreshLayout();
@@ -139,15 +140,23 @@ describe('TimelineManager', () => {
       expect(timelineManager.months.map(({ top, height }) => ({ top, height }))).toEqual(geometry);
       expect(timelineManager.months.every((month) => !month.isHeightActual)).toBe(true);
 
-      timelineManager.viewportHeight = 1000;
-      timelineManager.viewportWidth = 1588;
+      await timelineManager.updateViewport({ height: 1000, width: 1588 });
       await tick();
 
       expect(timelineManager.months.map(({ top, height }) => ({ top, height }))).toEqual(geometry);
-      expect(timelineManager.totalViewerHeight).toBe(8337);
+      expect(timelineManager.totalViewerHeight).toBe(originalHeight);
     });
 
-    it('defers geometry for a month loaded while the viewer hides the timeline', async () => {
+    test('defers geometry for a month loaded while the viewer hides the timeline', async ({ api }) => {
+      api.on({
+        getTimeBucket: () => ({
+          json: toResponseDto(
+            ...factory.many(3, () =>
+              factory.timelineAsset({ fileCreatedAt: fromISODateTimeUTCToObject('2024-01-01T00:00:00.000Z') }),
+            ),
+          ),
+        }),
+      });
       const month = getTimelineMonthByDate(timelineManager, { year: 2024, month: 1 })!;
       expect(month.isLoaded).toBe(false);
       const geometry = timelineManager.months.map(({ top, height }) => ({ top, height }));
@@ -159,8 +168,7 @@ describe('TimelineManager', () => {
       expect(month.getAssets()).toHaveLength(3);
       expect(timelineManager.months.map(({ top, height }) => ({ top, height }))).toEqual(geometry);
 
-      timelineManager.viewportHeight = 1000;
-      timelineManager.viewportWidth = 1588;
+      await timelineManager.updateViewport({ height: 1000, width: 1588 });
       await tick();
 
       let top = timelineManager.topSectionHeight;
@@ -543,15 +551,15 @@ describe('TimelineManager', () => {
       expect(timelineManager.months[0].getFirstAsset().isFavorite).toEqual(true);
     });
 
-    it('applies a new media revision from an asset update when thumbhash is unchanged', () => {
+    test('applies a new media revision from an asset update when thumbhash is unchanged', () => {
       const existing = deriveLocalDateTimeFromFileCreatedAt(
-        timelineAssetFactory.build({ mediaRevision: 'before-render', thumbhash: 'unchanged-hash' }),
+        factory.timelineAsset({ mediaRevision: 'before-render', thumbhash: 'unchanged-hash' }),
       );
       timelineManager.upsertAssets([existing]);
 
       eventManager.emit(
         'AssetUpdate',
-        assetFactory.build({
+        factory.asset({
           id: existing.id,
           ownerId: existing.ownerId,
           visibility: existing.visibility,

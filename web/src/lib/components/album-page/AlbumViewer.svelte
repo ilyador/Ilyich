@@ -1,7 +1,7 @@
 <script lang="ts">
-  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import { shortcut } from '#lib/actions/shortcut.ts';
   import AlbumMap from '#lib/components/album-page/AlbumMap.svelte';
+  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
   import Timeline from '#lib/components/timeline/Timeline.svelte';
   import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';

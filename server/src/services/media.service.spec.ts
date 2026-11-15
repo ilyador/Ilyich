@@ -2154,7 +2154,9 @@ describe(MediaService.name, () => {
       await sut.handleAssetEditThumbnailGeneration({ id: asset.id });
 
       expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
-        expect.objectContaining({ visibility: expect.objectContaining({ ocr: expect.objectContaining({ searchText: 'Hello World' }) }) }),
+        expect.objectContaining({
+          visibility: expect.objectContaining({ ocr: expect.objectContaining({ visible: [], hidden: [] }) }),
+        }),
       );
     });
 
@@ -2182,7 +2184,9 @@ describe(MediaService.name, () => {
       await sut.handleAssetEditThumbnailGeneration({ id: asset.id });
 
       expect(mocks.asset.publishImageGeneration).toHaveBeenCalledWith(
-        expect.objectContaining({ visibility: expect.objectContaining({ ocr: { visible: [inside.id], hidden: [outside.id], searchText: '東京 京タ タワ ワー' } }) }),
+        expect.objectContaining({
+          visibility: expect.objectContaining({ ocr: { visible: [inside.id], hidden: [outside.id] } }),
+        }),
       );
     });
   });

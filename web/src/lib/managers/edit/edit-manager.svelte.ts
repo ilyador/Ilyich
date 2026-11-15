@@ -3,7 +3,13 @@ import { transformManager } from '#lib/managers/edit/transform-manager.svelte.ts
 import { eventManager } from '#lib/managers/event-manager.svelte.ts';
 import { waitForWebsocketEvent } from '#lib/stores/websocket.ts';
 import { getFormatter } from '#lib/utils/i18n.ts';
-import { editAsset, removeAssetEdits, type AssetEditsCreateDto, type AssetResponseDto, type AssetEditsResponseDto } from '@immich/sdk';
+import {
+  editAsset,
+  removeAssetEdits,
+  type AssetEditsCreateDto,
+  type AssetEditsResponseDto,
+  type AssetResponseDto,
+} from '@immich/sdk';
 import { ConfirmModal, modalManager, toastManager } from '@immich/ui';
 import { mdiCropRotate } from '@mdi/js';
 import type { Component } from 'svelte';

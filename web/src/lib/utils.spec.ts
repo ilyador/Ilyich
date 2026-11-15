@@ -1,5 +1,5 @@
 import en from '#i18n/en.json';
-import { getAssetUrls, getAssetUrl, memoryLaneTitle, semverToName } from '#lib/utils.ts';
+import { getAssetUrl, getAssetUrls, memoryLaneTitle, semverToName } from '#lib/utils.ts';
 import { validThumbhash } from '#test/common/factories.ts';
 import { factory } from '#test/unit/factories.ts';
 import { AssetTypeEnum, MemoryType, type MemoryResponseDto } from '@immich/sdk';
@@ -48,7 +48,6 @@ describe('utils', () => {
         );
       },
     );
-
 
     it.each([
       { name: 'a static image', overrides: image, expected: preview },

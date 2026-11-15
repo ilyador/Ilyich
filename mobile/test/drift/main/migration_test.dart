@@ -41,6 +41,18 @@ void main() {
     }
   });
 
+  test('upgrades the fork v35 development schema alongside upstream group dates', () async {
+    final schema = await verifier.schemaAt(34);
+    schema.rawDatabase.execute('''
+      ALTER TABLE remote_asset_entity ADD COLUMN media_revision TEXT;
+      ALTER TABLE remote_asset_entity ADD COLUMN is_developed INTEGER NOT NULL DEFAULT 0 CHECK (is_developed IN (0, 1));
+      PRAGMA user_version = 35;
+    ''');
+    final db = Drift(schema.newConnection());
+    await verifier.migrateAndValidate(db, 36);
+    await db.close();
+  });
+
   group('v35 group_date backfill', () {
     Future<List<Bucket>> loadBuckets(Drift db) => TimelineRepository(
       db,
@@ -57,7 +69,7 @@ void main() {
         ''');
 
         final db = Drift(schema.newConnection());
-        await verifier.migrateAndValidate(db, 35);
+        await verifier.migrateAndValidate(db, 36);
         await backfillAssetGroupDates(db);
 
         final result = await loadBuckets(db);
@@ -77,7 +89,7 @@ void main() {
         ''');
 
         final db = Drift(schema.newConnection());
-        await verifier.migrateAndValidate(db, 35);
+        await verifier.migrateAndValidate(db, 36);
 
         await db.customStatement(
           "UPDATE local_asset_entity SET created_at = updated_at WHERE julianday(created_at) > julianday(updated_at)",

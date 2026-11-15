@@ -1,6 +1,6 @@
 <script lang="ts">
-  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import { shouldIgnoreEvent } from '#lib/actions/shortcut.ts';
+  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import { authManager } from '#lib/managers/auth-manager.svelte.ts';
   import { dragAndDropFilesStore } from '#lib/stores/drag-and-drop-files.store.ts';
   import { fileUploadHandler } from '#lib/utils/file-uploader.ts';

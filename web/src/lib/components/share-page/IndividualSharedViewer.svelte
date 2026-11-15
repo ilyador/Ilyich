@@ -1,6 +1,6 @@
 <script lang="ts">
-  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import type { Action } from '#lib/components/asset-viewer/actions/action.ts';
+  import Logo from '#lib/components/shared-components/BrandLogo.svelte';
   import AssetSelectControlBar from '#lib/components/timeline/AssetSelectControlBar.svelte';
   import DownloadAction from '#lib/components/timeline/actions/DownloadAction.svelte';
   import RemoveFromSharedLink from '#lib/components/timeline/actions/RemoveFromSharedLinkAction.svelte';

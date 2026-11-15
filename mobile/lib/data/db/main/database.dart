@@ -381,8 +381,27 @@ class Drift extends $Drift {
                 await m.createIndex(v35.idxLocalAssetGroup);
               },
               from35To36: (m, v36) async {
-                await m.addColumn(v36.remoteAssetEntity, v36.remoteAssetEntity.mediaRevision);
-                await m.addColumn(v36.remoteAssetEntity, v36.remoteAssetEntity.isDeveloped);
+                // The earlier fork also used v35, with development columns instead of group dates.
+                final remoteColumns = (await customSelect('PRAGMA table_info(remote_asset_entity)').get())
+                    .map((row) => row.read<String>('name'))
+                    .toSet();
+                final localColumns = (await customSelect('PRAGMA table_info(local_asset_entity)').get())
+                    .map((row) => row.read<String>('name'))
+                    .toSet();
+                if (!remoteColumns.contains('group_date')) {
+                  await m.addColumn(v36.remoteAssetEntity, v36.remoteAssetEntity.groupDate);
+                }
+                if (!localColumns.contains('group_date')) {
+                  await m.addColumn(v36.localAssetEntity, v36.localAssetEntity.groupDate);
+                }
+                await m.createIndex(v36.idxRemoteAssetGroup);
+                await m.createIndex(v36.idxLocalAssetGroup);
+                if (!remoteColumns.contains('media_revision')) {
+                  await m.addColumn(v36.remoteAssetEntity, v36.remoteAssetEntity.mediaRevision);
+                }
+                if (!remoteColumns.contains('is_developed')) {
+                  await m.addColumn(v36.remoteAssetEntity, v36.remoteAssetEntity.isDeveloped);
+                }
               },
             ),
           );

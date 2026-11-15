@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { Insertable } from 'kysely';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { JobOf, VideoFormat, VideoStreamInfo } from 'src/types.js';
 import { OnJob } from 'src/decorators.js';
 import { SystemConfig } from 'src/dtos/config.dto.js';
 import { AssetType, AssetVisibility, JobName, JobStatus, QueueName } from 'src/enum.js';
@@ -10,6 +9,7 @@ import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { AssetFaceTable } from 'src/schema/tables/asset-face.table.js';
 import { FaceSearchTable } from 'src/schema/tables/face-search.table.js';
 import { BaseService } from 'src/services/base.service.js';
+import type { JobOf, VideoFormat, VideoStreamInfo } from 'src/types.js';
 import { getVideoFrameCommand } from 'src/utils/media.js';
 import { batched, isFacialRecognitionEnabled } from 'src/utils/misc.js';
 import {

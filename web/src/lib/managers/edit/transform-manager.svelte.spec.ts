@@ -1,12 +1,12 @@
+import { transformManager } from '#lib/managers/edit/transform-manager.svelte.ts';
+import { factory } from '#test/unit/factories.ts';
 import { afterEach, describe, expect, it } from 'vitest';
-import { transformManager } from '$lib/managers/edit/transform-manager.svelte';
-import { assetFactory } from '@test-data/factories/asset-factory';
 
 describe('published editor base', () => {
   afterEach(() => transformManager.onDeactivate());
 
   it('uses the developed base coordinates and revision when preloading the editable image', async () => {
-    const asset = assetFactory.build({
+    const asset = factory.asset({
       mediaRevision: 'current-render',
       thumbhash: 'unchanged-hash',
       exifInfo: { exifImageWidth: 6000, exifImageHeight: 4000, orientation: '6' },
@@ -20,7 +20,7 @@ describe('published editor base', () => {
   });
 
   it('retains the oriented EXIF dimensions and legacy cache key without published state', async () => {
-    const asset = assetFactory.build({
+    const asset = factory.asset({
       thumbhash: 'legacy-hash',
       exifInfo: { exifImageWidth: 6000, exifImageHeight: 4000, orientation: '6' },
     });

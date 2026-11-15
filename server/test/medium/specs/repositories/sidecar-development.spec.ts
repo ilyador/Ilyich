@@ -13,6 +13,7 @@ import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { DB } from 'src/schema/index.js';
 import { BaseService } from 'src/services/base.service.js';
 import { MediaService } from 'src/services/media.service.js';
+import { tokenizeForSearch } from 'src/utils/database.js';
 import { newMediumService } from 'test/medium.factory.js';
 import { factory, newUuid } from 'test/small.factory.js';
 import { getKyselyDB, newTestService } from 'test/utils.js';
@@ -455,7 +456,7 @@ describe('sidecar development publication', () => {
       .values([
         {
           assetId: asset.id,
-          text: ' mapped ',
+          text: ' 東京タワー ',
           x1: 0,
           y1: 0,
           x2: 1,
@@ -494,7 +495,7 @@ describe('sidecar development publication', () => {
     await repository.publishImageGeneration(input);
     const expected = rows
       .sort((a, b) => a.id.localeCompare(b.id))
-      .map((row) => row.text.trim())
+      .flatMap((row) => tokenizeForSearch(row.text))
       .join(' ');
     await expect(
       database.selectFrom('ocr_search').select('text').where('assetId', '=', asset.id).executeTakeFirst(),

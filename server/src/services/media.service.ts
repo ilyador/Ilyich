@@ -3,12 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, parse } from 'node:path';
 import { FACE_THUMBNAIL_SIZE, THUMBNAIL_DECODING_TIER } from 'src/constants.js';
-import type { AuthDto } from 'src/dtos/auth.dto.js';
-import type { PersonRepository } from 'src/repositories/person.repository.js';
 import { ImagePathOptions, StorageCore, ThumbnailPathEntity } from 'src/cores/storage.core.js';
 import { AssetFile } from 'src/database.js';
 import { OnEvent, OnJob } from 'src/decorators.js';
 import { mapAsset } from 'src/dtos/asset-response.dto.js';
+import type { AuthDto } from 'src/dtos/auth.dto.js';
 import { ConfigFFmpegDto, SystemConfig } from 'src/dtos/config.dto.js';
 import { AssetEditAction, CropParameters } from 'src/dtos/editing.dto.js';
 import {
@@ -34,6 +33,7 @@ import {
 import { AssetJobRepository } from 'src/repositories/asset-job.repository.js';
 import { PublishImageGeneration } from 'src/repositories/asset.repository.js';
 import { BoundingBox } from 'src/repositories/machine-learning.repository.js';
+import type { PersonRepository } from 'src/repositories/person.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import type {
   AudioStreamInfo,
@@ -335,7 +335,6 @@ export class MediaService extends BaseService {
         ocr: {
           visible: visibility.ocr.visible.map((item) => item.id),
           hidden: visibility.ocr.hidden.map((item) => item.id),
-          searchText: visibility.ocr.searchText,
         },
       },
     });
@@ -1278,7 +1277,8 @@ export class MediaService extends BaseService {
       ocr: {
         ...checkOcrVisibility(ocrData, originalDimensions, cropBox),
         searchText: (cropBox ? checkOcrVisibility(ocrData, originalDimensions, cropBox).visible : ocrData)
-          .flatMap(({ text }) => tokenizeForSearch(text)).join(' '),
+          .flatMap(({ text }) => tokenizeForSearch(text))
+          .join(' '),
       },
     };
   }

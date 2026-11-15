@@ -1,4 +1,4 @@
-import { type EditActions, type EditToolManager } from '#lib/managers/edit/edit-manager.svelte.ts';
+import type { EditActions, EditToolManager } from '#lib/managers/edit/edit-manager.svelte.ts';
 import { getAssetMediaUrl } from '#lib/utils.ts';
 import { getDimensions } from '#lib/utils/asset-utils.ts';
 import { normalizeTransformEdits } from '#lib/utils/editor.ts';

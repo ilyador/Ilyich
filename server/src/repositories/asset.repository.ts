@@ -40,6 +40,7 @@ import {
   hasPeople,
   inSharedAlbum,
   removeUndefinedKeys,
+  tokenizeForSearch,
   truncatedDate,
   unnest,
   withDefaultVisibility,
@@ -74,7 +75,7 @@ export interface PublishImageGeneration {
   dimensions: { width: number; height: number };
   visibility: {
     faces: { visible: string[]; hidden: string[] };
-    ocr: { visible: string[]; hidden: string[]; searchText: string };
+    ocr: { visible: string[]; hidden: string[] };
   };
 }
 
@@ -638,9 +639,16 @@ export class AssetRepository {
             .execute();
         }
       }
+      const visibleOcr = await tx
+        .selectFrom('asset_ocr')
+        .select('text')
+        .where('assetId', '=', asset.id)
+        .where('isVisible', '=', true)
+        .orderBy('id')
+        .execute();
       await tx
         .updateTable('ocr_search')
-        .set({ text: input.visibility.ocr.searchText })
+        .set({ text: visibleOcr.flatMap(({ text }) => tokenizeForSearch(text)).join(' ') })
         .where('assetId', '=', asset.id)
         .execute();
       const development =
