@@ -189,6 +189,7 @@ final class KnownBackupCopyTests: XCTestCase {
         h.staging.add("a")
         let database = DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite"))
         try await database.saveFingerprints(["a": DeviceFingerprint(modified: FakeStaging.date, checksum: "file-sha1")])
+        h.server.prepareExternalFiles(pending: 18_000)
         h.server.hold(checksum: "file-sha1", as: .duplicate("external-a", trashed: false))
         h.server.remote(BackupRemoteAsset(id: "external-a", ownerId: "owner", checksum: "path-sha1", isTrashed: false, livePhotoVideoId: nil,
                                          visibility: "archive", checksumAlgorithm: "sha1-path", contentChecksum: "file-sha1", isExternal: true))
@@ -202,6 +203,7 @@ final class KnownBackupCopyTests: XCTestCase {
         let receipt = try await h.receipt("a")
         XCTAssertEqual(receipt?.original.checksum, "file-sha1")
         XCTAssertEqual(receipt?.original.id, "external-a")
+        XCTAssertEqual(h.server.preparationCallCount, 0, "Exact known content matches bypass preparation for unrelated archive files.")
         XCTAssertTrue(h.staging.staged.isEmpty)
         XCTAssertTrue(h.uploads.uploads.isEmpty)
         await engine.stop()
@@ -242,6 +244,58 @@ final class KnownBackupCopyTests: XCTestCase {
         XCTAssertEqual(paused.selectionProgress?.pending, 0)
         XCTAssertEqual(h.server.checkCallCount, 1)
         XCTAssertTrue(h.uploads.uploads.isEmpty)
+        await engine.stop()
+        await h.tearDown()
+    }
+
+    func testUnknownOriginalPreparationProbeStopsCloudStagingAndIsCachedAcrossPhotos() async throws {
+        let h = try await LibraryJobHarness()
+        let ids = (0..<100).map { "unknown-\($0)" }
+        for id in ids { h.staging.add(id) }
+        h.server.prepareExternalFiles(pending: 18_000)
+        let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: ProofReader(items: ids.map { item($0) }),
+                                            database: DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite")),
+                                            identities: ProofIdentities(rows: []), server: h.server)
+        let engine = makeEngine(h, checker: checker)
+        try await engine.start()
+        _ = try await engine.discover(LibraryDiscovery(store: h.store, staging: h.staging))
+        try await engine.setIntent(.manual)
+        await untilTransfers("Unknown resources wait before their first iCloud download.") { await engine.currentSnapshot.preparingServerLibrary }
+        XCTAssertTrue(h.staging.staged.isEmpty)
+        XCTAssertTrue(h.uploads.uploads.isEmpty)
+        XCTAssertEqual(h.server.preparationCallCount, 1)
+        XCTAssertEqual(h.server.checkCallCount, 0, "No original was downloaded just to compute a bulk-check hash.")
+        let status = await engine.currentSnapshot
+        XCTAssertEqual(status.selectionProgress?.pending, 0)
+        let gate = BackupPreparationGate()
+        for _ in 0..<100 {
+            do { try await gate.ensureReady(server: h.server); XCTFail("Pending preparation must hold unknown resources.") }
+            catch { XCTAssertEqual(error as? ServerFailure, .externalContentFingerprintsPending) }
+        }
+        XCTAssertEqual(h.server.preparationCallCount, 2, "The extra gate shares one probe across another 100 checks.")
+        await engine.stop()
+        await h.tearDown()
+    }
+
+    func testPreparationProbeWithoutNewServerFieldKeepsLegacyStagingBehavior() async throws {
+        let h = try await LibraryJobHarness()
+        h.staging.add("a")
+        let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: ProofReader(items: [item("a")]),
+                                            database: DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite")),
+                                            identities: ProofIdentities(rows: []), server: h.server)
+        let engine = makeEngine(h, checker: checker)
+        try await engine.start()
+        _ = try await engine.discover(LibraryDiscovery(store: h.store, staging: h.staging))
+        try await engine.setIntent(.manual)
+        await untilTransfers("An older server without preparation status still backs up unknown originals.") { await engine.currentSnapshot.selectionProgress?.backedUp == 1 }
+        XCTAssertEqual(h.server.preparationCallCount, 1)
+        XCTAssertEqual(h.staging.staged.count, 1)
+        XCTAssertEqual(h.uploads.uploads.count, 1)
+        let oldResponse = try JSONDecoder().decode(UploadCheckResponse.self, from: Data(#"{"results":[]}"#.utf8))
+        XCTAssertNil(oldResponse.contentFingerprintStatus)
+        let gate = BackupPreparationGate()
+        for _ in 0..<100 { try await gate.ensureReady(server: h.server) }
+        XCTAssertEqual(h.server.preparationCallCount, 2)
         await engine.stop()
         await h.tearDown()
     }

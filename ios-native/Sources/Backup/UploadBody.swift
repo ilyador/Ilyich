@@ -73,6 +73,12 @@ struct UploadCheck: Encodable, Sendable {
 }
 
 struct UploadCheckResponse: Decodable, Sendable {
+    struct ContentFingerprintStatus: Decodable, Sendable {
+        let total: Int
+        let prepared: Int
+        let pending: Int
+    }
+    var contentFingerprintStatus: ContentFingerprintStatus? = nil
     struct Result: Decodable, Sendable {
         let id: String
         let action: String

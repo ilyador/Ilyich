@@ -149,6 +149,8 @@ final class FakeTransferServer: TransferServerAPI {
         var held: [String: Holding] = [:]
         var checkFailure: ServerFailure?
         var checkCallCount = 0
+        var preparationCallCount = 0
+        var preparationStatus: UploadCheckResponse.ContentFingerprintStatus?
         var remoteAssets: [String: BackupRemoteAsset] = [:]
         var checks: [Check] = []
         var requests: [Request] = []
@@ -160,6 +162,11 @@ final class FakeTransferServer: TransferServerAPI {
 
     /// The server already holds a file with this checksum.
     func hold(checksum: String, as holding: Holding) { state.withLock { $0.held[checksum] = holding } }
+    func prepareExternalFiles(pending: Int) { state.withLock { $0.preparationStatus = .init(total: pending, prepared: 0, pending: pending) } }
+    var preparationCallCount: Int { state.withLock { $0.preparationCallCount } }
+    func contentFingerprintStatus() async throws -> UploadCheckResponse.ContentFingerprintStatus? {
+        state.withLock { $0.preparationCallCount += 1; return $0.preparationStatus }
+    }
     func failChecks(_ error: ServerFailure?) { state.withLock { $0.checkFailure = error } }
     func remote(_ asset: BackupRemoteAsset) { state.withLock { $0.remoteAssets[asset.id] = asset } }
     func pair(_ asset: String, with motion: String) { state.withLock { $0.pairings[asset] = motion } }

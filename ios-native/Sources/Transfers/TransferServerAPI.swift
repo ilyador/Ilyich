@@ -6,6 +6,8 @@ import Foundation
 protocol TransferServerAPI: Sendable {
     /// POST assets/bulk-upload-check: what the server holds for each checksum.
     func bulkUploadCheck(_ items: [UploadCheck.Item]) async throws -> [UploadCheckResponse.Result]
+    /// A lightweight empty bulk check. Nil when an older server has no preparation status.
+    func contentFingerprintStatus() async throws -> UploadCheckResponse.ContentFingerprintStatus?
     /// An authorized POST assets request for a multipart body with `boundary`, allowed onto
     /// cellular and other expensive networks only when `allowsCellular`.
     func uploadRequest(boundary: String, allowsCellular: Bool) async throws -> URLRequest
@@ -23,6 +25,10 @@ protocol TransferServerAPI: Sendable {
     func createAlbum(name: String) async throws -> Album
 }
 
+extension TransferServerAPI {
+    func contentFingerprintStatus() async throws -> UploadCheckResponse.ContentFingerprintStatus? { nil }
+}
+
 /// TransferServerAPI over the account's one client, AccountRuntime.api: its transport, its
 /// address choice and its read-only fence. Transfers never make a client of their own.
 struct APITransferServer: TransferServerAPI {
@@ -31,6 +37,11 @@ struct APITransferServer: TransferServerAPI {
     func bulkUploadCheck(_ items: [UploadCheck.Item]) async throws -> [UploadCheckResponse.Result] {
         let response: UploadCheckResponse = try await client.request(.post, path: "assets/bulk-upload-check", body: UploadCheck(assets: items))
         return response.results
+    }
+
+    func contentFingerprintStatus() async throws -> UploadCheckResponse.ContentFingerprintStatus? {
+        let response: UploadCheckResponse = try await client.request(.post, path: "assets/bulk-upload-check", body: UploadCheck(assets: []))
+        return response.contentFingerprintStatus
     }
 
     func uploadRequest(boundary: String, allowsCellular: Bool) async throws -> URLRequest {

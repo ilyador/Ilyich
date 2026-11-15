@@ -50,6 +50,7 @@ final class LibraryJobExecutor: JobExecuting {
     /// the phone is hot, and only while charging when the setting asks, as backup always checked
     /// before each photo. When they don't, the whole engine waits for them to change.
     private let conditionsPermit: @Sendable (_ requireCharging: Bool) async -> Bool
+    private let preparation = BackupPreparationGate()
     private let knownBackupChecker: (any KnownBackupCopyChecking)?
     /// Stage folders of jobs that returned a result, removed once the engine commits it.
     private let finishedFolders = Mutex<[Int64: String]>([:])
@@ -96,6 +97,7 @@ final class LibraryJobExecutor: JobExecuting {
             stage = existing
         } else {
             try await context.ensureOwned()
+            var exactOriginalCheckAccepted = false
             if let knownBackupChecker {
                 await context.checkingExistingBackups(true)
                 let checked = try await knownBackupChecker.check(id.rawValue, context: context)
@@ -103,9 +105,15 @@ final class LibraryJobExecutor: JobExecuting {
                 await context.checkingExistingBackups(false)
                 switch checked {
                 case .backedUp(let result): return result
-                case .absent(let revision): await context.checkedOriginalAbsent(revision: revision)
+                case .absent(let revision):
+                    exactOriginalCheckAccepted = true
+                    await context.checkedOriginalAbsent(revision: revision)
                 case .unknown: break
                 }
+            }
+            if !exactOriginalCheckAccepted {
+                try await preparation.ensureReady(server: server)
+                try await context.ensureOwned()
             }
             stage = try await stagePhoto(id.rawValue, job: job, context: context, preferences: preferences)
         }
@@ -377,4 +385,33 @@ final class LibraryJobExecutor: JobExecuting {
     }
 
     static func boundary(_ attempt: AttemptID) -> String { "Ilyich-" + attempt.rawValue }
+}
+
+/// One lightweight preparation probe per account executor and short interval, shared by
+/// concurrent jobs. Unknown iCloud resources must not be downloaded to learn the server is
+/// still preparing its archive. Exact known matches and accepted original checks bypass this.
+actor BackupPreparationGate {
+    private var checkedAt: Date?
+    private var pending = false
+    private var loading: Task<Bool, any Error>?
+
+    func ensureReady(server: any TransferServerAPI) async throws {
+        if checkedAt == nil || Date().timeIntervalSince(checkedAt!) >= 30 {
+            let task: Task<Bool, any Error>
+            if let loading { task = loading }
+            else {
+                task = Task { (try await server.contentFingerprintStatus()?.pending ?? 0) > 0 }
+                loading = task
+            }
+            do {
+                pending = try await task.value
+                checkedAt = Date()
+                loading = nil
+            } catch {
+                loading = nil
+                throw error
+            }
+        }
+        if pending { throw ServerFailure.externalContentFingerprintsPending }
+    }
 }
