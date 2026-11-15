@@ -104,3 +104,4 @@
 1792517020180-AddUpdateIdIndexes
 1792568637987-AddAssetOwnerIdUpdateIdIndex
 1793278158648-AddVideoFaceDetection
+1794790800000-AddExternalContentFingerprint

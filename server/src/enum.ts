@@ -928,6 +928,7 @@ export enum JobName {
   LibrarySyncFilesQueueAll = 'LibrarySyncFilesQueueAll',
   LibrarySyncFiles = 'LibrarySyncFiles',
   LibraryScanQueueAll = 'LibraryScanQueueAll',
+  LibraryContentFingerprint = 'LibraryContentFingerprint',
 
   HlsSessionCleanup = 'HlsSessionCleanup',
 

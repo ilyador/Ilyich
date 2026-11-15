@@ -306,6 +306,11 @@ const user2Columns = [
   'user2.profileChangedAt',
 ] as const;
 
+/** Advisory cached content identity; exact asset reads revalidate filesystem provenance. */
+export const assetContentChecksum = sql<Buffer | null>`(SELECT fp.checksum FROM asset_content_fingerprint fp
+  WHERE fp."assetId"=asset.id AND fp."originalPath"=asset."originalPath" AND NOT asset."isOffline"
+    AND asset."deletedAt" IS NULL AND asset.status='active')`.as('contentChecksum');
+
 export const assetIsDeveloped = sql<boolean>`coalesce((
   select "development"->'publishedBase'->>'isDeveloped' = 'true'
   from "asset_job_status" where "assetId" = "asset"."id"
@@ -455,6 +460,8 @@ export const columns = {
     'asset.originalFileName',
     'asset.thumbhash',
     'asset.checksum',
+    'asset.checksumAlgorithm',
+    assetContentChecksum,
     'asset.fileCreatedAt',
     'asset.fileModifiedAt',
     'asset.createdAt',
@@ -479,6 +486,8 @@ export const columns = {
     'asset.originalFileName',
     'asset.thumbhash',
     'asset.checksum',
+    'asset.checksumAlgorithm',
+    assetContentChecksum,
     'asset.fileCreatedAt',
     'asset.fileModifiedAt',
     'asset.createdAt',

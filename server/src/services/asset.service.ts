@@ -32,6 +32,7 @@ import {
   AssetStatus,
   AssetType,
   AssetVisibility,
+  ChecksumAlgorithm,
   JobName,
   JobStatus,
   Permission,
@@ -48,6 +49,7 @@ import {
   onBeforeLink,
   onBeforeUnlink,
 } from 'src/utils/asset.util.js';
+import { contentFingerprintIsCurrent } from 'src/utils/content-fingerprint.js';
 import { updateLockedColumns } from 'src/utils/database.js';
 import { extractTimeZone } from 'src/utils/date.js';
 import { batched, findOrFail } from 'src/utils/misc.js';
@@ -80,7 +82,40 @@ export class AssetService extends BaseService {
       throw new BadRequestException('Asset not found');
     }
 
-    return mapAsset(asset, { withStack: true, auth });
+    const data = mapAsset(asset, { withStack: true, auth });
+    // A path checksum must never masquerade as backup/cleanup proof. Only the exact asset read
+    // adds this secondary digest, after validating the source filesystem provenance again.
+    if (
+      asset.checksumAlgorithm === ChecksumAlgorithm.sha1Path &&
+      asset.ownerId === auth.user.id &&
+      !auth.sharedLink &&
+      !asset.isOffline &&
+      !asset.deletedAt &&
+      asset.visibility !== AssetVisibility.Locked
+    ) {
+      const [fingerprint] = await this.assetRepository.getContentFingerprints([asset.id]);
+      if (fingerprint) {
+        const stat = await this.storageRepository.stat(asset.originalPath).catch(() => null);
+        if (stat && contentFingerprintIsCurrent(fingerprint, asset.originalPath, stat)) {
+          data.contentChecksum = fingerprint.checksum.toString('base64');
+        } else {
+          await this.assetRepository.invalidateContentFingerprint(asset.id, fingerprint.sourceFingerprint);
+          await this.jobRepository.queue({ name: JobName.LibraryContentFingerprint, data: { id: asset.id } });
+        }
+      } else {
+        await this.jobRepository.queue({ name: JobName.LibraryContentFingerprint, data: { id: asset.id } });
+      }
+    }
+
+    if (auth.sharedLink) {
+      delete data.owner;
+    }
+
+    if (auth.sharedLink) {
+      data.people = [];
+    }
+
+    return data;
   }
 
   async update(auth: AuthDto, id: string, dto: UpdateAssetDto): Promise<AssetResponseDto> {

@@ -26,6 +26,7 @@ import {
   AssetType,
   AssetVisibility,
   CalendarHeatmapType,
+  ChecksumAlgorithm,
 } from 'src/enum.js';
 import { DB } from 'src/schema/index.js';
 import { AssetAudioTable, AssetKeyframeTable, AssetVideoTable } from 'src/schema/tables/asset-av.table.js';
@@ -999,7 +1000,6 @@ export class AssetRepository {
       .selectAll('asset')
       .where('ownerId', '=', asUuid(ownerId))
       .where('checksum', '=', checksum)
-      .$call((qb) => (libraryId ? qb.where('libraryId', '=', asUuid(libraryId)) : qb.where('libraryId', 'is', null)))
       .limit(1)
       .executeTakeFirst();
   }
@@ -1010,7 +1010,129 @@ export class AssetRepository {
       .selectFrom('asset')
       .select(['id', 'checksum', 'deletedAt'])
       .where('ownerId', '=', asUuid(userId))
+      .where('checksumAlgorithm', '=', ChecksumAlgorithm.sha1File)
       .where('checksum', 'in', checksums)
+      .execute();
+  }
+
+  getContentFingerprintTargets(ids: string[]) {
+    return this.db
+      .selectFrom('asset')
+      .select(['id', 'originalPath'])
+      .where('id', '=', anyUuid(ids))
+      .where('checksumAlgorithm', '=', ChecksumAlgorithm.sha1Path)
+      .where('libraryId', 'is not', null)
+      .where('isOffline', '=', false)
+      .where('deletedAt', 'is', null)
+      .where('status', '=', AssetStatus.Active)
+      .execute();
+  }
+
+  getContentFingerprints(ids: string[]) {
+    return this.db.selectFrom('asset_content_fingerprint').selectAll().where('assetId', '=', anyUuid(ids)).execute();
+  }
+
+  async invalidateContentFingerprint(assetId: string, sourceFingerprint?: string) {
+    const removed = await this.db
+      .deleteFrom('asset_content_fingerprint')
+      .where('assetId', '=', asUuid(assetId))
+      .$if(sourceFingerprint !== undefined, (qb) => qb.where('sourceFingerprint', '=', sourceFingerprint!))
+      .executeTakeFirst();
+    if (Number(removed.numDeletedRows) > 0) {
+      await this.db.updateTable('asset').set({ updatedAt: new Date() }).where('id', '=', asUuid(assetId)).execute();
+    }
+  }
+
+  async saveContentFingerprint(value: {
+    assetId: string;
+    checksum: Buffer;
+    originalPath: string;
+    sourceFingerprint: string;
+  }) {
+    // A changed/offline/deleted asset cannot acquire proof from an older hashing job.
+    await this.db.transaction().execute(async (tx) => {
+      const asset = await tx
+        .selectFrom('asset')
+        .select('id')
+        .where('id', '=', asUuid(value.assetId))
+        .where('originalPath', '=', value.originalPath)
+        .where('checksumAlgorithm', '=', ChecksumAlgorithm.sha1Path)
+        .where('isOffline', '=', false)
+        .where('deletedAt', 'is', null)
+        .where('status', '=', AssetStatus.Active)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!asset) {
+        return;
+      }
+      await tx
+        .insertInto('asset_content_fingerprint')
+        .values(value)
+        .onConflict((oc) => oc.column('assetId').doUpdateSet({ ...value, checkedAt: new Date() }))
+        .execute();
+      await tx.updateTable('asset').set({ updatedAt: new Date() }).where('id', '=', asUuid(value.assetId)).execute();
+    });
+  }
+
+  getByContentChecksums(ownerId: string, checksums: Buffer[]) {
+    return this.db
+      .selectFrom('asset_content_fingerprint as fp')
+      .innerJoin('asset', 'asset.id', 'fp.assetId')
+      .innerJoin('library', 'library.id', 'asset.libraryId')
+      .select(['asset.id', 'fp.checksum', 'fp.originalPath', 'fp.sourceFingerprint'])
+      .where('asset.ownerId', '=', asUuid(ownerId))
+      .where('fp.checksum', 'in', checksums)
+      .where('asset.checksumAlgorithm', '=', ChecksumAlgorithm.sha1Path)
+      .whereRef('asset.originalPath', '=', 'fp.originalPath')
+      .where('asset.isOffline', '=', false)
+      .where('asset.deletedAt', 'is', null)
+      .where('asset.status', '=', AssetStatus.Active)
+      .where('asset.visibility', '!=', AssetVisibility.Locked)
+      .where('library.deletedAt', 'is', null)
+      .orderBy('asset.id')
+      .execute();
+  }
+
+  async getContentFingerprintStatus(ownerId?: string, libraryId?: string) {
+    const row = await this.db
+      .selectFrom('asset')
+      .innerJoin('library', 'library.id', 'asset.libraryId')
+      .leftJoin('asset_content_fingerprint as fp', (join) =>
+        join.onRef('fp.assetId', '=', 'asset.id').onRef('fp.originalPath', '=', 'asset.originalPath'),
+      )
+      .select((eb) => [eb.fn.countAll<number>().as('total'), eb.fn.count<number>('fp.assetId').as('prepared')])
+      .$if(ownerId !== undefined, (qb) => qb.where('asset.ownerId', '=', asUuid(ownerId!)))
+      .$if(libraryId !== undefined, (qb) => qb.where('asset.libraryId', '=', asUuid(libraryId!)))
+      .where('asset.checksumAlgorithm', '=', ChecksumAlgorithm.sha1Path)
+      .where('asset.isOffline', '=', false)
+      .where('asset.deletedAt', 'is', null)
+      .where('asset.status', '=', AssetStatus.Active)
+      .where('asset.visibility', '!=', AssetVisibility.Locked)
+      .where('library.deletedAt', 'is', null)
+      .executeTakeFirstOrThrow();
+    return {
+      total: Number(row.total),
+      prepared: Number(row.prepared),
+      pending: Number(row.total) - Number(row.prepared),
+    };
+  }
+
+  getPendingContentFingerprintIds(ownerId: string, limit = 100) {
+    return this.db
+      .selectFrom('asset')
+      .innerJoin('library', 'library.id', 'asset.libraryId')
+      .leftJoin('asset_content_fingerprint as fp', 'fp.assetId', 'asset.id')
+      .select('asset.id')
+      .where('asset.ownerId', '=', asUuid(ownerId))
+      .where('asset.checksumAlgorithm', '=', ChecksumAlgorithm.sha1Path)
+      .where('fp.assetId', 'is', null)
+      .where('asset.isOffline', '=', false)
+      .where('asset.deletedAt', 'is', null)
+      .where('asset.status', '=', AssetStatus.Active)
+      .where('asset.visibility', '!=', AssetVisibility.Locked)
+      .where('library.deletedAt', 'is', null)
+      .orderBy('asset.id')
+      .limit(limit)
       .execute();
   }
 
@@ -1036,9 +1158,24 @@ export class AssetRepository {
       .innerJoin('asset_exif', 'asset.id', 'asset_exif.assetId')
       .where('id', '!=', asUuid(otherAssetId))
       .where('ownerId', '=', asUuid(ownerId))
-      .$call((qb) => (libraryId ? qb.where('libraryId', '=', asUuid(libraryId)) : qb.where('libraryId', 'is', null)))
       .where('type', '=', type)
       .where('asset_exif.livePhotoCID', '=', livePhotoCID)
+      .where('asset.libraryId', libraryId === null || libraryId === undefined ? 'is' : '=', libraryId ?? null)
+      .where('asset.deletedAt', 'is', null)
+      .where('asset.status', '=', AssetStatus.Active)
+      .where('asset.isOffline', '=', false)
+      .where((eb) =>
+        eb.exists(
+          eb
+            .selectFrom('asset as source')
+            .select('source.id')
+            .where('source.id', '=', asUuid(otherAssetId))
+            .where('source.deletedAt', 'is', null)
+            .where('source.status', '=', AssetStatus.Active)
+            .where('source.isOffline', '=', false),
+        ),
+      )
+      .orderBy('asset.id')
       .limit(1)
       .executeTakeFirst();
   }

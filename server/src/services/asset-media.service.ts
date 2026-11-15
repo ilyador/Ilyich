@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import sanitize from 'sanitize-filename';
 import { StorageCore } from 'src/cores/storage.core.js';
 import { Asset, AuthSharedLink } from 'src/database.js';
@@ -32,6 +38,7 @@ import { BaseService } from 'src/services/base.service.js';
 import type { UploadFile, UploadRequest } from 'src/types.js';
 import { requireUploadAccess } from 'src/utils/access.js';
 import { asUploadRequest, onBeforeLink } from 'src/utils/asset.util.js';
+import { contentFingerprintIsCurrent } from 'src/utils/content-fingerprint.js';
 import { isAssetChecksumConstraint } from 'src/utils/database.js';
 import { ImmichFileResponse, getFileNameWithoutExtension, getFilenameExtension } from 'src/utils/file.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
@@ -328,12 +335,75 @@ export class AssetMediaService extends BaseService {
   }
 
   async bulkUploadCheck(auth: AuthDto, dto: AssetBulkUploadCheckDto): Promise<AssetBulkUploadCheckResponseDto> {
+    if (dto.assets.length === 0) {
+      if (auth.sharedLink) {
+        return { results: [] };
+      }
+      const status = await this.assetRepository.getContentFingerprintStatus(auth.user.id);
+      if (status.pending > 0) {
+        const pending = await this.assetRepository.getPendingContentFingerprintIds(auth.user.id);
+        await this.jobRepository.queueAll(
+          pending.map(({ id }) => ({ name: JobName.LibraryContentFingerprint, data: { id } })),
+        );
+      }
+      return { results: [], contentFingerprintStatus: status };
+    }
     const checksums: Buffer[] = dto.assets.map((asset) => fromChecksum(asset.checksum));
     const results = await this.assetRepository.getByChecksums(auth.user.id, checksums);
-    const checksumMap: Record<string, { id: string; isTrashed: boolean }> = {};
+    const checksumMap: Record<string, { id: string; isTrashed: boolean; contentChecksum?: string }> = {};
 
     for (const { id, deletedAt, checksum } of results) {
-      checksumMap[checksum.toString('hex')] = { id, isTrashed: !!deletedAt };
+      const key = checksum.toString('hex');
+      const existing = checksumMap[key];
+      if (!existing || (existing.isTrashed && !deletedAt) || (existing.isTrashed === !!deletedAt && id < existing.id)) {
+        checksumMap[key] = { id, isTrashed: !!deletedAt };
+      }
+    }
+
+    const missing = checksums.filter(
+      (checksum) => !checksumMap[checksum.toString('hex')] || checksumMap[checksum.toString('hex')].isTrashed,
+    );
+    if (missing.length > 0) {
+      let stale = false;
+      const external = await this.assetRepository.getByContentChecksums(auth.user.id, missing);
+      for (const candidate of external) {
+        const key = candidate.checksum.toString('hex');
+        if (checksumMap[key] && !checksumMap[key].isTrashed) {
+          continue;
+        }
+        const stat = await this.storageRepository.stat(candidate.originalPath).catch(() => null);
+        if (!stat || !contentFingerprintIsCurrent(candidate, candidate.originalPath, stat)) {
+          await this.assetRepository.invalidateContentFingerprint(candidate.id, candidate.sourceFingerprint);
+          await this.jobRepository.queue({ name: JobName.LibraryContentFingerprint, data: { id: candidate.id } });
+          stale = true;
+          continue;
+        }
+        checksumMap[key] = {
+          id: candidate.id,
+          isTrashed: false,
+          contentChecksum: candidate.checksum.toString('base64'),
+        };
+      }
+      if (
+        !auth.sharedLink &&
+        missing.some(
+          (checksum) => !checksumMap[checksum.toString('hex')] || checksumMap[checksum.toString('hex')].isTrashed,
+        )
+      ) {
+        const status = await this.assetRepository.getContentFingerprintStatus(auth.user.id);
+        if (stale || status.pending > 0) {
+          const pending = await this.assetRepository.getPendingContentFingerprintIds(auth.user.id);
+          await this.jobRepository.queueAll(
+            pending.map(({ id }) => ({ name: JobName.LibraryContentFingerprint, data: { id } })),
+          );
+          throw new ServiceUnavailableException({
+            statusCode: 503,
+            code: 'EXTERNAL_CONTENT_FINGERPRINTS_PENDING',
+            message: 'Preparing external library content fingerprints. Retry backup after preparation completes.',
+            pending: status.pending,
+          });
+        }
+      }
     }
 
     return {
@@ -346,6 +416,7 @@ export class AssetMediaService extends BaseService {
             reason: AssetRejectReason.DUPLICATE,
             assetId: duplicate.id,
             isTrashed: duplicate.isTrashed,
+            ...(duplicate.contentChecksum && { contentChecksum: duplicate.contentChecksum }),
           };
         }
 

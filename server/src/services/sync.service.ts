@@ -22,18 +22,20 @@ import { ClientDisconnectedError, waitForDrain } from 'src/utils/response.js';
 import { SerializeOptions, fromAck, serialize, toAck } from 'src/utils/sync.js';
 
 type CheckpointMap = Partial<Record<SyncEntityType, SyncAck>>;
-type AssetLike = Omit<SyncAssetV2, 'checksum' | 'thumbhash'> & {
+type AssetLike = Omit<SyncAssetV2, 'checksum' | 'thumbhash' | 'contentChecksum'> & {
   checksum: Buffer<ArrayBufferLike>;
   thumbhash: Buffer<ArrayBufferLike> | null;
+  contentChecksum?: Buffer<ArrayBufferLike> | null;
 };
 
 const COMPLETE_ID = 'complete';
 const MAX_DAYS = 30;
 const MAX_DURATION = Duration.fromObject({ days: MAX_DAYS });
 
-const mapSyncAssetV2 = ({ checksum, thumbhash, ...data }: AssetLike): SyncAssetV2 => ({
+const mapSyncAssetV2 = ({ checksum, thumbhash, contentChecksum, ...data }: AssetLike): SyncAssetV2 => ({
   ...data,
   checksum: hexOrBufferToBase64(checksum),
+  contentChecksum: contentChecksum ? hexOrBufferToBase64(contentChecksum) : null,
   thumbhash: thumbhash ? hexOrBufferToBase64(thumbhash) : null,
 });
 

@@ -80,6 +80,8 @@ const LibraryStatsResponseSchema = z
     videos: z.int().describe('Number of videos'),
     total: z.int().describe('Total number of assets'),
     usage: z.int().describe('Storage usage in bytes'),
+    contentFingerprintCount: z.int().optional().describe('External originals with prepared file-content fingerprints'),
+    contentFingerprintPending: z.int().optional().describe('External originals awaiting file-content fingerprints'),
   })
   .meta({ id: 'LibraryStatsResponseDto' });
 

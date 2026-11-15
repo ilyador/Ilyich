@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { DateTime } from 'luxon';
+import type { Stats } from 'node:fs';
 import { AssetJobName, AssetStatsResponseDto } from 'src/dtos/asset.dto.js';
 import { AssetEditAction } from 'src/dtos/editing.dto.js';
 import {
@@ -8,11 +9,13 @@ import {
   AssetStatus,
   AssetType,
   AssetVisibility,
+  ChecksumAlgorithm,
   JobName,
   JobStatus,
 } from 'src/enum.js';
 import { AssetStats } from 'src/repositories/asset.repository.js';
 import { AssetService } from 'src/services/asset.service.js';
+import { contentSourceFingerprint } from 'src/utils/content-fingerprint.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
 import { AuthFactory } from 'test/factories/auth.factory.js';
 import { authStub } from 'test/fixtures/auth.stub.js';
@@ -78,6 +81,40 @@ describe(AssetService.name, () => {
   });
 
   describe('get', () => {
+    it('keeps path identity explicit and exposes content proof only while the original stat is current', async () => {
+      const asset = AssetFactory.create({
+        ownerId: authStub.admin.user.id,
+        checksumAlgorithm: ChecksumAlgorithm.sha1Path,
+        originalPath: '/archive/original.jpg',
+        checksum: Buffer.alloc(20, 1),
+      });
+      const stat = { dev: 1, ino: 2, size: 100, mtimeMs: 123, ctimeMs: 456, isFile: () => true } as Stats;
+      const content = Buffer.alloc(20, 2);
+      mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));
+      mocks.asset.getById.mockResolvedValue(getForAsset(asset));
+      mocks.asset.getContentFingerprints.mockResolvedValue([
+        {
+          assetId: asset.id,
+          originalPath: asset.originalPath,
+          sourceFingerprint: contentSourceFingerprint(stat),
+          checksum: content,
+          checkedAt: new Date(),
+        },
+      ]);
+      mocks.storage.stat.mockResolvedValue(stat);
+      const current = await sut.get(authStub.admin, asset.id);
+      expect(current).toMatchObject({
+        checksum: asset.checksum.toString('base64'),
+        checksumAlgorithm: 'sha1-path',
+        contentChecksum: content.toString('base64'),
+      });
+      mocks.storage.stat.mockResolvedValue({ ...stat, ctimeMs: 457 } as Stats);
+      const changed = await sut.get(authStub.admin, asset.id);
+      expect(changed).not.toHaveProperty('contentChecksum');
+      expect(mocks.asset.invalidateContentFingerprint).toHaveBeenCalledWith(asset.id, contentSourceFingerprint(stat));
+      expect(mocks.job.queue).toHaveBeenCalledWith({ name: JobName.LibraryContentFingerprint, data: { id: asset.id } });
+      expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+    });
     it('should allow owner access', async () => {
       const asset = AssetFactory.create();
       mocks.access.asset.checkOwnerAccess.mockResolvedValue(new Set([asset.id]));

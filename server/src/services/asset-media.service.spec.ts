@@ -2,8 +2,10 @@ import {
   BadRequestException,
   InternalServerErrorException,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Stats } from 'node:fs';
 import { AssetFile } from 'src/database.js';
 import { AssetMediaStatus, AssetRejectReason, AssetUploadAction } from 'src/dtos/asset-media-response.dto.js';
 import { AssetMediaCreateDto, AssetMediaSize, UploadFieldName } from 'src/dtos/asset-media.dto.js';
@@ -13,6 +15,7 @@ import { AssetFileType, AssetType, AssetVisibility, CacheControl, JobName } from
 import { AuthRequest } from 'src/middleware/auth.guard.js';
 import { AssetMediaService } from 'src/services/asset-media.service.js';
 import type { UploadBody } from 'src/types.js';
+import { contentSourceFingerprint } from 'src/utils/content-fingerprint.js';
 import { ASSET_CHECKSUM_CONSTRAINT } from 'src/utils/database.js';
 import { ImmichFileResponse } from 'src/utils/file.js';
 import { AssetFileFactory } from 'test/factories/asset-file.factory.js';
@@ -909,6 +912,113 @@ describe(AssetMediaService.name, () => {
   });
 
   describe('bulkUploadCheck', () => {
+    const stat = { dev: 1, ino: 2, size: 100, mtimeMs: 123, ctimeMs: 456, isFile: () => true } as Stats;
+
+    it('reports owner preparation status without reading originals before an empty pre-stage probe', async () => {
+      mocks.asset.getContentFingerprintStatus.mockResolvedValue({ total: 10, prepared: 3, pending: 7 });
+      const response = await sut.bulkUploadCheck(authStub.admin, { assets: [] });
+      expect(response).toEqual({ results: [], contentFingerprintStatus: { total: 10, prepared: 3, pending: 7 } });
+      expect(mocks.asset.getContentFingerprintStatus).toHaveBeenCalledWith(authStub.admin.user.id);
+      expect(mocks.storage.stat).not.toHaveBeenCalled();
+      expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+    });
+
+    it('does not expose private library counts or readiness through shared-link uploads', async () => {
+      mocks.asset.getByChecksums.mockResolvedValue([]);
+      mocks.asset.getContentFingerprintStatus.mockResolvedValue({ total: 10, prepared: 3, pending: 7 });
+      expect(await sut.bulkUploadCheck(authStub.adminSharedLink, { assets: [] })).toEqual({ results: [] });
+      const ordinary = await sut.bulkUploadCheck(authStub.adminSharedLink, {
+        assets: [{ id: 'file', checksum: file1.toString('base64') }],
+      });
+      expect(ordinary.results[0].action).toBe(AssetUploadAction.ACCEPT);
+      expect(mocks.asset.getContentFingerprintStatus).not.toHaveBeenCalled();
+      expect(mocks.asset.getPendingContentFingerprintIds).not.toHaveBeenCalled();
+    });
+
+    it('uses fresh external file content and skips stale copies deterministically without hashing in the request', async () => {
+      mocks.asset.getByChecksums.mockResolvedValue([]);
+      const checksum = file1;
+      mocks.asset.getByContentChecksums.mockResolvedValue([
+        { id: 'stale', checksum, originalPath: '/archive/stale', sourceFingerprint: 'old-stat' },
+        { id: 'valid', checksum, originalPath: '/archive/current', sourceFingerprint: contentSourceFingerprint(stat) },
+      ]);
+      mocks.storage.stat.mockResolvedValue(stat);
+      const response = await sut.bulkUploadCheck(authStub.admin, {
+        assets: [{ id: 'phone', checksum: checksum.toString('base64') }],
+      });
+      expect(response.results).toEqual([
+        {
+          id: 'phone',
+          action: AssetUploadAction.REJECT,
+          reason: AssetRejectReason.DUPLICATE,
+          assetId: 'valid',
+          isTrashed: false,
+          contentChecksum: checksum.toString('base64'),
+        },
+      ]);
+      expect(mocks.asset.getByContentChecksums).toHaveBeenCalledWith(authStub.admin.user.id, [checksum]);
+      expect(mocks.asset.invalidateContentFingerprint).toHaveBeenCalledWith('stale', 'old-stat');
+      expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+    });
+
+    it('defers an unmatched checksum while own external content preparation is incomplete', async () => {
+      mocks.asset.getByChecksums.mockResolvedValue([]);
+      mocks.asset.getContentFingerprintStatus.mockResolvedValue({ total: 10, prepared: 3, pending: 7 });
+      await expect(
+        sut.bulkUploadCheck(authStub.admin, { assets: [{ id: 'phone', checksum: file1.toString('base64') }] }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(mocks.asset.getContentFingerprintStatus).toHaveBeenCalledWith(authStub.admin.user.id);
+      expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+    });
+
+    it('prefers an active verified archive copy over a trashed uploaded duplicate', async () => {
+      mocks.asset.getByChecksums.mockResolvedValue([{ id: 'trashed-upload', checksum: file1, deletedAt: new Date() }]);
+      mocks.asset.getByContentChecksums.mockResolvedValue([
+        {
+          id: 'archive',
+          checksum: file1,
+          originalPath: '/archive/original',
+          sourceFingerprint: contentSourceFingerprint(stat),
+        },
+      ]);
+      mocks.storage.stat.mockResolvedValue(stat);
+      const response = await sut.bulkUploadCheck(authStub.admin, {
+        assets: [{ id: 'phone', checksum: file1.toString('base64') }],
+      });
+      expect(response.results[0]).toMatchObject({
+        assetId: 'archive',
+        isTrashed: false,
+        reason: AssetRejectReason.DUPLICATE,
+      });
+    });
+
+    it('still returns a known uploaded duplicate while external preparation is incomplete', async () => {
+      mocks.asset.getByChecksums.mockResolvedValue([{ id: 'uploaded', checksum: file1, deletedAt: null }]);
+      mocks.asset.getContentFingerprintStatus.mockResolvedValue({ total: 10, prepared: 0, pending: 10 });
+      const response = await sut.bulkUploadCheck(authStub.admin, {
+        assets: [{ id: 'phone', checksum: file1.toString('base64') }],
+      });
+      expect(response.results[0].assetId).toBe('uploaded');
+      expect(mocks.asset.getContentFingerprintStatus).not.toHaveBeenCalled();
+      expect(mocks.asset.getByContentChecksums).not.toHaveBeenCalled();
+    });
+
+    it('does not use offline, unreadable or changed cached paths as proof even when the database says prepared', async () => {
+      mocks.asset.getByChecksums.mockResolvedValue([]);
+      mocks.asset.getByContentChecksums.mockResolvedValue([
+        {
+          id: 'external',
+          checksum: file1,
+          originalPath: '/archive/offline',
+          sourceFingerprint: contentSourceFingerprint(stat),
+        },
+      ]);
+      mocks.storage.stat.mockRejectedValue(new Error('ENOENT'));
+      await expect(
+        sut.bulkUploadCheck(authStub.admin, { assets: [{ id: 'phone', checksum: file1.toString('base64') }] }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(mocks.asset.invalidateContentFingerprint).toHaveBeenCalledWith('external', contentSourceFingerprint(stat));
+    });
     it('should accept hex and base64 checksums', async () => {
       const file1 = Buffer.from('d2947b871a706081be194569951b7db246907957', 'hex');
       const file2 = Buffer.from('53be335e99f18a66ff12e9a901c7a6171dd76573', 'hex');

@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import AsyncLock from 'async-lock';
 import { Insertable } from 'kysely';
 import { R_OK } from 'node:constants';
 import { Stats } from 'node:fs';
@@ -33,6 +34,7 @@ import { AssetSyncResult } from 'src/repositories/library.repository.js';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
 import { BaseService } from 'src/services/base.service.js';
 import type { JobOf } from 'src/types.js';
+import { contentFingerprintIsCurrent, contentSourceFingerprint } from 'src/utils/content-fingerprint.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { batched, createLibraryMatcher, findOrFail, handlePromiseError } from 'src/utils/misc.js';
 
@@ -41,6 +43,7 @@ export class LibraryService extends BaseService {
   private watchLibraries = false;
   private lock = false;
   private watchers: Record<string, () => Promise<void>> = {};
+  private contentHashLock = new AsyncLock();
 
   @OnEvent({ name: 'ConfigInit', workers: [ImmichWorker.Microservices] })
   async onConfigInit({
@@ -116,6 +119,24 @@ export class LibraryService extends BaseService {
         await this.queueSidecarRefresh(library.id, path);
       } else if (matcher(path)) {
         this.logger.debug(`File ${event} event received for ${path} in library ${library.id}`);
+        const existing = await this.assetRepository.getByLibraryIdAndOriginalPath(library.id, path);
+        if (existing) {
+          if (event === 'change') {
+            await this.assetRepository.invalidateContentFingerprint(existing.id);
+          }
+          await this.jobRepository.queue({
+            name: JobName.LibrarySyncAssets,
+            data: {
+              libraryId: library.id,
+              assetIds: [existing.id],
+              importPaths: library.importPaths,
+              exclusionPatterns: library.exclusionPatterns,
+              progressCounter: 1,
+              totalAssets: 1,
+            },
+          });
+          return;
+        }
         await this.jobRepository.queue({
           name: JobName.LibrarySyncFiles,
           data: { libraryId: library.id, paths: [path] },
@@ -225,7 +246,12 @@ export class LibraryService extends BaseService {
     if (!statistics) {
       throw new BadRequestException(`Library ${id} not found`);
     }
-    return statistics;
+    const fingerprints = await this.assetRepository.getContentFingerprintStatus(undefined, id);
+    return {
+      ...statistics,
+      contentFingerprintCount: fingerprints.prepared,
+      contentFingerprintPending: fingerprints.pending,
+    };
   }
 
   async get(id: string): Promise<LibraryResponseDto> {
@@ -314,6 +340,7 @@ export class LibraryService extends BaseService {
     );
 
     await this.queuePostSyncJobs(assetIds);
+    await this.prepareContentFingerprints(assetIds);
 
     return JobStatus.Success;
   }
@@ -592,6 +619,7 @@ export class LibraryService extends BaseService {
     }
 
     await Promise.all(promises);
+    await this.prepareContentFingerprints(assets.map((asset) => asset.id));
 
     const remainingCount = assets.length - assetIdsToOffline.length - assetIdsToUpdate.length - assetIdsToOnline.length;
     const cumulativePercentage = ((100 * job.progressCounter) / job.totalAssets).toFixed(1);
@@ -599,6 +627,56 @@ export class LibraryService extends BaseService {
       `Checked existing asset(s): ${assetIdsToOffline.length + trashedAssetIdsToOffline.length} offlined, ${assetIdsToOnline.length + trashedAssetIdsToOnline.length} onlined, ${assetIdsToUpdate.length} updated, ${remainingCount} unchanged of current batch of ${assets.length} (Total progress: ${job.progressCounter} of ${job.totalAssets}, ${cumulativePercentage} %) in library ${job.libraryId}.`,
     );
 
+    return JobStatus.Success;
+  }
+
+  /** Bounded by the existing library job batch/concurrency. Restarting a scan skips current hashes. */
+  private async prepareContentFingerprints(ids: string[]) {
+    if (ids.length === 0) {
+      return;
+    }
+    const targets = await this.assetRepository.getContentFingerprintTargets(ids);
+    const saved = await this.assetRepository.getContentFingerprints(ids);
+    const cached = new Map(saved.map((row) => [row.assetId, row]));
+    for (const target of targets) {
+      await this.contentHashLock.acquire('content-hash', async () => {
+        try {
+          const before = await this.storageRepository.stat(target.originalPath);
+          if (!before.isFile()) {
+            throw new Error('Not a regular file');
+          }
+          const previous = cached.get(target.id);
+          if (previous && contentFingerprintIsCurrent(previous, target.originalPath, before)) {
+            return;
+          }
+          const [concurrent] = await this.assetRepository.getContentFingerprints([target.id]);
+          if (concurrent && contentFingerprintIsCurrent(concurrent, target.originalPath, before)) {
+            return;
+          }
+          await this.assetRepository.invalidateContentFingerprint(target.id);
+          const checksum = await this.cryptoRepository.hashFile(target.originalPath);
+          const after = await this.storageRepository.stat(target.originalPath);
+          if (!after.isFile() || contentSourceFingerprint(before) !== contentSourceFingerprint(after)) {
+            this.logger.warn(`Content fingerprint deferred for changing external asset ${target.id}`);
+            return;
+          }
+          await this.assetRepository.saveContentFingerprint({
+            assetId: target.id,
+            originalPath: target.originalPath,
+            checksum,
+            sourceFingerprint: contentSourceFingerprint(after),
+          });
+        } catch (error) {
+          await this.assetRepository.invalidateContentFingerprint(target.id);
+          this.logger.warn(`Could not fingerprint external asset ${target.id}: ${error}`);
+        }
+      });
+    }
+  }
+
+  @OnJob({ name: JobName.LibraryContentFingerprint, queue: QueueName.Library })
+  async handleContentFingerprint(job: JobOf<JobName.LibraryContentFingerprint>): Promise<JobStatus> {
+    await this.prepareContentFingerprints([job.id]);
     return JobStatus.Success;
   }
 

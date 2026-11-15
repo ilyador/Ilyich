@@ -38,6 +38,7 @@ import { AlbumTable } from 'src/schema/tables/album.table.js';
 import { ApiKeyTable } from 'src/schema/tables/api-key.table.js';
 import { AssetAuditTable } from 'src/schema/tables/asset-audit.table.js';
 import { AssetAudioTable, AssetKeyframeTable, AssetVideoTable } from 'src/schema/tables/asset-av.table.js';
+import { AssetContentFingerprintTable } from 'src/schema/tables/asset-content-fingerprint.table.js';
 import { AssetEditAuditTable } from 'src/schema/tables/asset-edit-audit.table.js';
 import { AssetEditTable } from 'src/schema/tables/asset-edit.table.js';
 import { AssetExifTable } from 'src/schema/tables/asset-exif.table.js';
@@ -125,6 +126,7 @@ export class ImmichDatabase {
     AssetTable,
     AuthChallengeTable,
     AssetFileTable,
+    AssetContentFingerprintTable,
     AssetExifTable,
     ClusterGroupTable,
     ClusterGroupRequestTable,
@@ -234,6 +236,7 @@ export interface DB {
   asset_face: AssetFaceTable;
   asset_face_audit: AssetFaceAuditTable;
   asset_file: AssetFileTable;
+  asset_content_fingerprint: AssetContentFingerprintTable;
   asset_metadata: AssetMetadataTable;
   asset_metadata_audit: AssetMetadataAuditTable;
   asset_job_status: AssetJobStatusTable;

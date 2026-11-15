@@ -102,6 +102,11 @@ export const AssetResponseSchema = SanitizedAssetResponseSchema.extend(
     tags: z.array(TagResponseSchema).optional(),
     people: z.array(PersonResponseSchema).optional(),
     checksum: z.string().describe('Base64 encoded SHA1 hash'),
+    checksumAlgorithm: z
+      .enum(ChecksumAlgorithm)
+      .optional()
+      .describe('Meaning of the primary checksum; sha1-path is not a file hash'),
+    contentChecksum: z.string().optional().describe('Freshly verified whole-original SHA1, Base64 encoded'),
     stack: AssetStackResponseSchema.nullish(),
     duplicateId: z.uuidv4().nullish().describe('Duplicate group ID'),
     resized: z
@@ -239,6 +244,7 @@ export function mapAsset(entity: MaybeDehydrated<MapAsset>, options: AssetMapOpt
     tags: entity.tags?.map((tag) => mapTag(tag)),
     people: auth?.sharedLink ? [] : peopleFromFaces(entity.faces),
     checksum: hexOrBufferToBase64(entity.checksum)!,
+    checksumAlgorithm: entity.checksumAlgorithm,
     stack: withStack ? mapStack(entity) : undefined,
     isOffline: entity.isOffline,
     hasMetadata: true,

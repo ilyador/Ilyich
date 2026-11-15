@@ -8,6 +8,7 @@ import {
   AssetOrderSchema,
   AssetTypeSchema,
   AssetVisibilitySchema,
+  ChecksumAlgorithm,
   MemoryTypeSchema,
   SyncEntityType,
   SyncEntityTypeSchema,
@@ -70,6 +71,15 @@ const SyncAssetV1Schema = z
     originalFileName: z.string().describe('Original file name'),
     thumbhash: z.string().nullable().describe('Thumbhash'),
     checksum: z.string().describe('Checksum'),
+    checksumAlgorithm: z
+      .enum(ChecksumAlgorithm)
+      .optional()
+      .describe('Primary checksum meaning; sha1-path is not file content'),
+    contentChecksum: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('Cached whole-original SHA1, Base64; revalidate before cleanup'),
     fileCreatedAt: isoDatetimeToDate.nullable().describe('File created at'),
     fileModifiedAt: isoDatetimeToDate.nullable().describe('File modified at'),
     createdAt: isoDatetimeToDate.nullable().describe('Uploaded to Ilyich at'),
@@ -97,6 +107,15 @@ const SyncAssetV2Schema = z
     originalFileName: z.string().describe('Original file name'),
     thumbhash: z.string().nullable().describe('Thumbhash'),
     checksum: z.string().describe('Checksum'),
+    checksumAlgorithm: z
+      .enum(ChecksumAlgorithm)
+      .optional()
+      .describe('Primary checksum meaning; sha1-path is not file content'),
+    contentChecksum: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('Cached whole-original SHA1, Base64; revalidate before cleanup'),
     fileCreatedAt: isoDatetimeToDate.nullable().describe('File created at'),
     fileModifiedAt: isoDatetimeToDate.nullable().describe('File modified at'),
     createdAt: isoDatetimeToDate.nullable().describe('Uploaded to Ilyich at'),

@@ -39,12 +39,20 @@ const AssetBulkUploadCheckResultSchema = z
     reason: AssetRejectReasonSchema.optional(),
     assetId: z.uuidv4().optional().describe('Existing asset ID if duplicate'),
     isTrashed: z.boolean().optional().describe('Whether existing asset is trashed'),
+    contentChecksum: z
+      .string()
+      .optional()
+      .describe('Verified current original file SHA1, Base64 encoded, for an external content duplicate'),
   })
   .meta({ id: 'AssetBulkUploadCheckResult' });
 
 const AssetBulkUploadCheckResponseSchema = z
   .object({
     results: z.array(AssetBulkUploadCheckResultSchema).describe('Upload check results'),
+    contentFingerprintStatus: z
+      .object({ total: z.int(), prepared: z.int(), pending: z.int() })
+      .optional()
+      .describe('Owner-scoped preparation status, returned for an empty check before staging originals'),
   })
   .meta({ id: 'AssetBulkUploadCheckResponseDto' });
 

@@ -7,6 +7,7 @@ import { mapLibrary } from 'src/dtos/library.dto.js';
 import { AssetType, CronJob, ImmichWorker, JobName, JobStatus } from 'src/enum.js';
 import { LibraryService } from 'src/services/library.service.js';
 import type { ILibraryBulkIdsJob, ILibraryFileJob } from 'src/types.js';
+import { contentSourceFingerprint } from 'src/utils/content-fingerprint.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
 import { authStub } from 'test/fixtures/auth.stub.js';
 import { systemConfigStub } from 'test/fixtures/system-config.stub.js';
@@ -33,6 +34,55 @@ describe(LibraryService.name, () => {
 
   it('should work', () => {
     expect(sut).toBeDefined();
+  });
+
+  describe('external content fingerprint jobs', () => {
+    const stat = { dev: 1, ino: 2, size: 100, mtimeMs: 123, ctimeMs: 456, isFile: () => true } as Stats;
+    const target = { id: 'asset-id', originalPath: '/archive/original.jpg' };
+    const checksum = Buffer.from('actual-file-bytes');
+
+    beforeEach(() => {
+      mocks.asset.getContentFingerprintTargets.mockResolvedValue([target]);
+      mocks.storage.stat.mockResolvedValue(stat);
+      mocks.crypto.hashFile.mockResolvedValue(checksum);
+    });
+
+    it('streams a missing hash once and reuses the unchanged persisted proof after restart/scan', async () => {
+      await sut.handleContentFingerprint({ id: target.id });
+      expect(mocks.asset.saveContentFingerprint).toHaveBeenCalledExactlyOnceWith({
+        assetId: target.id,
+        originalPath: target.originalPath,
+        checksum,
+        sourceFingerprint: contentSourceFingerprint(stat),
+      });
+      mocks.crypto.hashFile.mockClear();
+      mocks.asset.getContentFingerprints.mockResolvedValue([
+        {
+          assetId: target.id,
+          originalPath: target.originalPath,
+          checksum,
+          sourceFingerprint: contentSourceFingerprint(stat),
+          checkedAt: new Date(),
+        },
+      ]);
+      await sut.handleContentFingerprint({ id: target.id });
+      expect(mocks.crypto.hashFile).not.toHaveBeenCalled();
+    });
+
+    it('discards a digest when the original changes during streaming', async () => {
+      mocks.storage.stat.mockResolvedValueOnce(stat).mockResolvedValueOnce({ ...stat, ctimeMs: 457 } as Stats);
+      await sut.handleContentFingerprint({ id: target.id });
+      expect(mocks.crypto.hashFile).toHaveBeenCalledWith(target.originalPath);
+      expect(mocks.asset.invalidateContentFingerprint).toHaveBeenCalledWith(target.id);
+      expect(mocks.asset.saveContentFingerprint).not.toHaveBeenCalled();
+    });
+
+    it('invalidates old proof if refreshing the source fails', async () => {
+      mocks.crypto.hashFile.mockRejectedValue(new Error('EACCES'));
+      await sut.handleContentFingerprint({ id: target.id });
+      expect(mocks.asset.invalidateContentFingerprint).toHaveBeenCalledWith(target.id);
+      expect(mocks.asset.saveContentFingerprint).not.toHaveBeenCalled();
+    });
   });
 
   describe('onConfigInit', () => {
@@ -700,6 +750,8 @@ describe(LibraryService.name, () => {
         videos: 0,
         total: 10,
         usage: 1337,
+        contentFingerprintCount: 0,
+        contentFingerprintPending: 0,
       });
 
       expect(mocks.library.getStatistics).toHaveBeenCalledWith(library.id);
@@ -1001,7 +1053,7 @@ describe(LibraryService.name, () => {
 
         mocks.library.get.mockResolvedValue(library);
         mocks.library.getAll.mockResolvedValue([library]);
-        mocks.asset.getByLibraryIdAndOriginalPath.mockResolvedValue(AssetFactory.create());
+        mocks.asset.getByLibraryIdAndOriginalPath.mockResolvedValue(undefined);
         mocks.storage.watch.mockImplementation(makeMockWatcher({ items: [{ event: 'add', value: '/foo/photo.jpg' }] }));
 
         await sut.watchAll();
@@ -1017,10 +1069,11 @@ describe(LibraryService.name, () => {
 
       it('should handle a file change event', async () => {
         const library = factory.library({ importPaths: ['/foo', '/bar'] });
+        const asset = AssetFactory.create();
 
         mocks.library.get.mockResolvedValue(library);
         mocks.library.getAll.mockResolvedValue([library]);
-        mocks.asset.getByLibraryIdAndOriginalPath.mockResolvedValue(AssetFactory.create());
+        mocks.asset.getByLibraryIdAndOriginalPath.mockResolvedValue(asset);
         mocks.storage.watch.mockImplementation(
           makeMockWatcher({ items: [{ event: 'change', value: '/foo/photo.jpg' }] }),
         );
@@ -1028,12 +1081,17 @@ describe(LibraryService.name, () => {
         await sut.watchAll();
 
         expect(mocks.job.queue).toHaveBeenCalledWith({
-          name: JobName.LibrarySyncFiles,
+          name: JobName.LibrarySyncAssets,
           data: {
             libraryId: library.id,
-            paths: ['/foo/photo.jpg'],
+            assetIds: [asset.id],
+            importPaths: library.importPaths,
+            exclusionPatterns: library.exclusionPatterns,
+            progressCounter: 1,
+            totalAssets: 1,
           },
         });
+        expect(mocks.asset.invalidateContentFingerprint).toHaveBeenCalledWith(asset.id);
       });
 
       it('should handle a file unlink event', async () => {
