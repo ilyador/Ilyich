@@ -300,6 +300,81 @@ final class KnownBackupCopyTests: XCTestCase {
         await h.tearDown()
     }
 
+    func testPausedCatalogChangesRemove52DeletedCopiesWithoutStartingBackup() async throws {
+        let h = try await LibraryJobHarness()
+        let ids = (0..<58).map { "history-\($0)" }
+        var seed = TransferSeed()
+        seed.preferences = LibraryJobHarness.preferences()
+        for id in ids {
+            h.staging.add(id)
+            seed.confirmations.append((id, FakeStaging.date))
+            seed.receipts.append(.init(localID: id, modified: FakeStaging.date, originalID: "server-" + id, originalChecksum: "checksum-" + id))
+        }
+        try await h.store.seedForTest(seed)
+        try await h.engine.setPreferences(seed.preferences)
+        _ = try await h.engine.discover(LibraryDiscovery(store: h.store, staging: h.staging))
+        let initial = await h.engine.currentSnapshot
+        XCTAssertEqual(initial.confirmed, 58)
+        XCTAssertEqual(initial.selectionProgress?.backedUp, 58)
+        let rows = ids.map { match($0) }
+        let catalog = ObservedProofIdentities(rows: rows)
+        let reader = ProofReader(items: [])
+        let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: reader,
+                                            database: DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite")),
+                                            identities: catalog, server: h.server)
+        let observer = BackupConfirmationObserver(checker: checker, store: h.store, refreshed: { await h.engine.refresh() })
+        await observer.start(changes: catalog.stream)
+        await untilTransfers("The read-only startup pass checked the saved catalog.") { catalog.reads > 0 }
+        var changed = rows
+        for index in 0..<52 { changed[index].backupAvailable = false; changed[index].visible = false }
+        catalog.replace(changed)
+        await untilTransfers("A paused account adopts the server's 52 trashed-copy updates.") { await h.engine.currentSnapshot.confirmed == 6 }
+        let updated = await h.engine.currentSnapshot
+        XCTAssertEqual(updated.intent, .paused)
+        XCTAssertEqual(updated.selectionProgress?.backedUp, 6)
+        XCTAssertEqual(updated.selectionProgress?.unchecked, 52)
+        XCTAssertEqual(updated.selectionProgress?.pending, 0)
+        let savedPreferences = try await h.store.preferences()
+        XCTAssertEqual(savedPreferences?.automatic, false)
+        XCTAssertEqual(reader.readCount, 0)
+        XCTAssertTrue(h.staging.staged.isEmpty)
+        XCTAssertTrue(h.uploads.uploads.isEmpty)
+        XCTAssertEqual(h.server.checkCallCount, 0)
+        XCTAssertEqual(h.server.preparationCallCount, 0)
+        let history = try await h.store.historyPage(offset: 0, limit: 100)
+        XCTAssertEqual(history.count, 6)
+        await observer.stop()
+        await h.tearDown()
+    }
+
+    func testReadOnlyConfirmationStartupDropsKnownTrashAndOfflineFailurePreservesHistory() async throws {
+        for offline in [false, true] {
+            let h = try await LibraryJobHarness()
+            var seed = TransferSeed()
+            seed.confirmations.append(("a", FakeStaging.date))
+            seed.receipts.append(.init(localID: "a", modified: FakeStaging.date, originalID: "server-a", originalChecksum: "checksum-a"))
+            try await h.store.seedForTest(seed)
+            var trashed = match("a")
+            trashed.backupAvailable = false
+            let catalog = ObservedProofIdentities(rows: [trashed], offline: offline)
+            let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: ProofReader(items: []),
+                                                database: DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite")),
+                                                identities: catalog, server: h.server)
+            let observer = BackupConfirmationObserver(checker: checker, store: h.store, refreshed: { await h.engine.refresh() })
+            await observer.start(changes: catalog.stream)
+            await untilTransfers("The read-only account startup pass finishes.") { catalog.reads > 0 }
+            if !offline { await untilTransfers("Saved trash cannot remain a current confirmation.") { try await h.store.historyPage(offset: 0, limit: 10).isEmpty } }
+            await observer.stop()
+            let history = try await h.store.historyPage(offset: 0, limit: 10)
+            XCTAssertEqual(history.count, offline ? 1 : 0)
+            let state = try await h.store.engineState()
+            XCTAssertEqual(state?.intent, .paused)
+            XCTAssertTrue(h.staging.staged.isEmpty)
+            XCTAssertTrue(h.uploads.uploads.isEmpty)
+            await h.tearDown()
+        }
+    }
+
     private func makeEngine(_ h: LibraryJobHarness, checker: any KnownBackupCopyChecking) -> TransferEngine<TestClock> {
         let executor = LibraryJobExecutor(store: h.store, staging: h.staging, server: h.server, uploader: h.uploads,
                                          layout: h.group.layout, account: LibraryJobHarness.account, knownBackupChecker: checker)
@@ -356,4 +431,33 @@ private final class MutableProofIdentities: DeviceIndexServer {
         state.withLock { $0.reads += 1; return $0.complete ? rows : nil }
     }
     func changes() async -> AsyncStream<LibraryChange> { AsyncStream { _ in } }
+}
+
+private final class ObservedProofIdentities: DeviceIndexServer {
+    private struct State { var rows: [LocalAssetMatch]; var reads = 0; var offline: Bool }
+    private let state: Mutex<State>
+    let stream: AsyncStream<LibraryChange>
+    private let continuation: AsyncStream<LibraryChange>.Continuation
+
+    init(rows: [LocalAssetMatch], offline: Bool = false) {
+        state = Mutex(State(rows: rows, offline: offline))
+        (stream, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+    }
+    var reads: Int { state.withLock { $0.reads } }
+    func replace(_ rows: [LocalAssetMatch]) {
+        state.withLock { $0.rows = rows }
+        let account = LibraryJobHarness.account
+        var change = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1), indexRevision: 2, origin: .sync)
+        change.upserted = Dictionary(uniqueKeysWithValues: rows.map { ($0.assetID, LibraryChange.MonthMove(from: nil, to: nil)) })
+        continuation.yield(change)
+    }
+    func identities() async throws -> [LocalAssetMatch]? {
+        try state.withLock { state in
+            state.reads += 1
+            if state.offline { throw URLError(.notConnectedToInternet) }
+            return state.rows
+        }
+    }
+    func identityIndexComplete() async throws -> Bool { true }
+    func changes() async -> AsyncStream<LibraryChange> { stream }
 }

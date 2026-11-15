@@ -33,6 +33,8 @@ final class TransferRuntime: Sendable {
     private let lifecycleEvents: AsyncStream<LifecycleEvent>.Continuation
     private let lifecycleStream: AsyncStream<LifecycleEvent>
     private let reconciler: Reconciler
+    private let confirmationObserver: BackupConfirmationObserver?
+    private let confirmationChanges: (@Sendable () async -> AsyncStream<LibraryChange>)?
     private let receiptChanges: ChangeBroadcast
     private let tasks = Mutex<[Task<Void, Never>]>([])
     private let stopped = Mutex(false)
@@ -63,6 +65,7 @@ final class TransferRuntime: Sendable {
         var poster: (any TransferNotificationPosting)?
         var clock = ContinuousClock()
         var knownBackupChecker: (any KnownBackupCopyChecking)? = nil
+        var confirmationChanges: (@Sendable () async -> AsyncStream<LibraryChange>)? = nil
     }
 
     @MainActor init(_ parts: Parts) {
@@ -105,6 +108,13 @@ final class TransferRuntime: Sendable {
         notifier = TransferNotifier(store: parts.store, poster: parts.poster ?? SystemTransferNotificationPoster(), authorization: parts.authorization)
         let receiptChanges = ChangeBroadcast()
         self.receiptChanges = receiptChanges
+        confirmationChanges = parts.confirmationChanges
+        confirmationObserver = proofChecker.map { checker in
+            BackupConfirmationObserver(checker: checker, store: parts.store, permits: servicePermits, refreshed: {
+                await engine.refresh()
+                receiptChanges.send()
+            })
+        }
         let acknowledge = parts.acknowledge
         let reconciler = Reconciler { drains in
             do {
@@ -146,6 +156,10 @@ final class TransferRuntime: Sendable {
         await shares.replayConsumed()
         guard authorization.current() != nil else { throw PurchaseAccessRequired() }
         try await engine.start()
+        if let confirmationObserver, let confirmationChanges {
+            let changes = await confirmationChanges()
+            await confirmationObserver.start(changes: changes)
+        }
         guard authorization.current() != nil else { throw PurchaseAccessRequired() }
         let commits = await engine.snapshots()
         let receiptChanges = self.receiptChanges
@@ -185,6 +199,7 @@ final class TransferRuntime: Sendable {
     /// for the account's runtime to close.
     func stop() async {
         guard stopped.withLock({ state in defer { state = true }; return !state }) else { return }
+        await confirmationObserver?.stop()
         await lifecycle.stop()
         lifecycleEvents.finish()
         await engine.stop()
@@ -238,6 +253,10 @@ final class TransferRuntime: Sendable {
     func receive(_ event: LifecycleEvent) {
         if case .window(let lease) = event, stopped.withLock({ $0 }) { return lease.finish(success: true) }
         lifecycleEvents.yield(event)
+        switch event {
+        case .becameActive: Task { await confirmationObserver?.request() }
+        default: break
+        }
     }
 
     /// Reconciles now and waits for it, as a background window does first.

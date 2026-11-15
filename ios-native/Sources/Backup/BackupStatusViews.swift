@@ -42,7 +42,7 @@ struct BackupStatisticsSummary: View {
                 Text(statistics.phase == .discovering ? "Checking selected photos…" : "Selection not checked yet")
                     .font(.subheadline.weight(.medium))
                 LabeledContent("Awaiting processing", value: statistics.remaining.formatted())
-                LabeledContent("Verified on this phone", value: statistics.backedUp.formatted())
+                LabeledContent("Previously verified", value: statistics.backedUp.formatted())
                     .foregroundStyle(.secondary)
             }.monospacedDigit()
         }

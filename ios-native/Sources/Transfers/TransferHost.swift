@@ -253,25 +253,29 @@ import UIKit
             return nil
         }
         var preSync: (@Sendable () async -> Void)?
+        var confirmationChanges: (@Sendable () async -> AsyncStream<LibraryChange>)?
         if let sync = runtime.library?.sync {
             preSync = { _ = await sync.prepareForBackgroundBackup() }
+            confirmationChanges = { await sync.changes() }
         }
         let acks = self.acks
         let acknowledge: @Sendable (TransferSessionID, Int) async -> Void = { session, drain in
             await MainActor.run { acks?.committed(identifier: session.identifier, through: drain) }
         }
         let scheduler: (any WindowScheduling)? = source
+        let receiptAuthorization = runtime.authorization
         let knownBackupChecker = runtime.library.map { library in
             KnownBackupCopyChecker(account: runtime.credential.account, reader: PhotoKitIndexReader(adapter: .shared),
                                    database: PhotoKitAdapter.shared.database,
                                    identities: LibraryIndexIdentities(entities: library.entities, libraryChanges: { await library.sync.changes() }),
-                                   server: runtime.transferServer)
+                                   server: runtime.transferServer, allowsReconciliation: { receiptAuthorization.permitsServiceUse })
         }
         let parts = TransferRuntime.Parts(
             account: runtime.credential.account, store: transfers.store, authorization: runtime.authorization, server: runtime.transferServer,
             registry: registry, layout: layout, inbox: inbox, staging: PhotoKitAdapter.shared, scheduler: scheduler, time: SystemBackgroundTime(),
             appActive: UIApplication.shared.applicationState == .active, preSync: preSync, acknowledge: acknowledge,
-            knownBackupChecker: knownBackupChecker)
+            knownBackupChecker: knownBackupChecker,
+            confirmationChanges: confirmationChanges)
         let made = TransferRuntime(parts)
         runtime.attachTransfers(made) { [weak self] in self?.detach(made) }
         return made

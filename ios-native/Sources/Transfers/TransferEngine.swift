@@ -539,12 +539,13 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         let generation = discoveryGeneration
         guard let confirmations = try? await store.confirmationRevisions(for: Array(inventory.revisions.keys)),
               !stopped, generation == discoveryGeneration else { return }
-        for (id, revision) in confirmations {
-            if let selected = selectionInventory?.revisions[id] ?? nil, selected == revision {
-                selectionInventory?.confirmed.insert(id)
-                selectionInventory?.pending.remove(id)
-            }
-        }
+        let current = Set(confirmations.compactMap { id, revision in
+            (inventory.revisions[id] ?? nil) == revision ? id : nil
+        })
+        // Reconciliation may remove a server copy. Rebuild this set rather than only adding
+        // confirmations, so paused selected counts cannot retain a deleted backup forever.
+        selectionInventory?.confirmed = current
+        selectionInventory?.pending.subtract(current)
     }
 
     // MARK: Background windows

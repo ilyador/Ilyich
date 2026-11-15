@@ -383,7 +383,7 @@ extension TransferStore {
     /// Reconcile durable confirmations against a complete, successfully synced owner catalog.
     /// A missing/unavailable remote copy invalidates the old claim. A missing external content
     /// fingerprint is inconclusive, so preparation and older servers never erase valid proof.
-    func reconcileConfirmations(with identities: [LocalAssetMatch]) throws -> Int {
+    func reconcileConfirmations(with identities: [LocalAssetMatch], checkedRemoteIDs: Set<String>? = nil) throws -> Int {
         let db = try database()
         let byID = Dictionary(identities.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
         return try db.transaction {
@@ -394,6 +394,9 @@ extension TransferStore {
                 LEFT JOIN receipts r ON r.local_id=c.local_id AND r.modification_date=c.modification_date
                 """) { row in
                 guard let localID = row.text(0) else { return }
+                // An upload may commit while the catalog/exact reads await. Its new identity
+                // was not checked by this pass, so only a later pass may invalidate it.
+                if let id = row.text(1), let checkedRemoteIDs, !checkedRemoteIDs.contains(id) { return }
                 // Legacy receiptless confirmations have no remote identity to revalidate.
                 guard let id = row.text(1), let remote = byID[id], remote.backupAvailable else { invalid.append(localID); return }
                 if let expected = row.text(2), let current = remote.fileChecksum, expected != current { invalid.append(localID); return }

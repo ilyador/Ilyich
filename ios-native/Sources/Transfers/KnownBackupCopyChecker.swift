@@ -30,22 +30,28 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
     let identities: any DeviceIndexServer
     let server: any TransferServerAPI
     private let catalog = KnownBackupIdentityCatalog()
+    private let allowsReconciliation: @Sendable () -> Bool
 
     init(account: AccountID, reader: any DeviceIndexReading, database: DeviceDatabase,
-         identities: any DeviceIndexServer, server: any TransferServerAPI) {
+         identities: any DeviceIndexServer, server: any TransferServerAPI,
+         allowsReconciliation: @escaping @Sendable () -> Bool = { true }) {
         self.account = account
         self.reader = reader
         self.database = database
         self.identities = identities
         self.server = server
+        self.allowsReconciliation = allowsReconciliation
     }
 
     func reconcileConfirmations(in store: TransferStore) async throws {
+        try Task.checkCancellation()
+        guard allowsReconciliation() else { return }
         guard try await identities.identityIndexComplete(), var rows = try await identities.identities() else { return }
         let indexed = Set(rows.map(\.assetID))
         // The local sync may not yet contain an upload that just completed. Absence in that
         // catalog cannot erase its receipt; only an exact server read can establish it is gone.
-        let missing = try await store.confirmationRemoteIDs().subtracting(indexed)
+        let checkedIDs = try await store.confirmationRemoteIDs()
+        let missing = checkedIDs.subtracting(indexed)
         for id in missing.sorted() {
             do {
                 let remote = try await server.remoteAsset(id: id)
@@ -58,7 +64,9 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
             }
             // Any transport/auth failure aborts before the store changes a single confirmation.
         }
-        _ = try await store.reconcileConfirmations(with: rows)
+        try Task.checkCancellation()
+        guard allowsReconciliation() else { return }
+        _ = try await store.reconcileConfirmations(with: rows, checkedRemoteIDs: checkedIDs)
     }
 
     func check(_ localID: String, context: JobContext) async throws -> KnownBackupCopyResult {
@@ -132,5 +140,78 @@ private actor KnownBackupIdentityCatalog {
             loadedAt = Date()
         }
         return byCloud[cloudID] ?? []
+    }
+}
+
+/// Read-only account work, independent of backup run intent. One subscription coalesces
+/// catalog changes; it never discovers Photos, stages files, or runs an upload executor.
+actor BackupConfirmationObserver {
+    private let checker: any KnownBackupCopyChecking
+    private let store: TransferStore
+    private let refreshed: @Sendable () async -> Void
+    private let permits: @Sendable () -> Bool
+    private var watcher: Task<Void, Never>?
+    private var work: Task<Void, Never>?
+    private var pending = false
+    private var stopped = false
+
+    init(checker: any KnownBackupCopyChecking, store: TransferStore,
+         permits: @escaping @Sendable () -> Bool = { true }, refreshed: @escaping @Sendable () async -> Void) {
+        self.checker = checker
+        self.store = store
+        self.permits = permits
+        self.refreshed = refreshed
+    }
+
+    func start(changes: AsyncStream<LibraryChange>) {
+        guard watcher == nil, !stopped else { return }
+        request()
+        watcher = Task { [weak self] in
+            for await change in changes {
+                guard !Task.isCancelled else { return }
+                if change.syncedThrough != nil || change.routingChanged || change.reset || change.overflow
+                    || !change.upserted.isEmpty || !change.removed.isEmpty || !change.accessLost.isEmpty {
+                    await self?.request()
+                }
+            }
+        }
+    }
+
+    /// Coming forward retries a read that failed offline; condition events never resume backup.
+    func request() {
+        guard !stopped else { return }
+        pending = true
+        guard work == nil else { return }
+        work = Task { await self.serve() }
+    }
+
+    private func serve() async {
+        while pending, !stopped, !Task.isCancelled {
+            pending = false
+            do {
+                // Fold bursts of sync batches into one account-level catalog read.
+                try await Task.sleep(for: .milliseconds(200))
+                pending = false
+                guard permits(), !stopped else { break }
+                try await checker.reconcileConfirmations(in: store)
+                guard permits(), !stopped, !Task.isCancelled else { break }
+                await refreshed()
+            } catch {
+                // Preserve history when the server cannot be checked. The UI calls these
+                // previous verifications; a later sync/foreground event tries again.
+            }
+        }
+        work = nil
+    }
+
+    func stop() async {
+        stopped = true
+        pending = false
+        watcher?.cancel()
+        work?.cancel()
+        await watcher?.value
+        await work?.value
+        watcher = nil
+        work = nil
     }
 }
