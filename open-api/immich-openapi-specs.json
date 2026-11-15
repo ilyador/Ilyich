@@ -20790,6 +20790,32 @@
       },
       "AssetBulkUploadCheckResponseDto": {
         "properties": {
+          "contentFingerprintStatus": {
+            "description": "Owner-scoped preparation status, returned for an empty check before staging originals",
+            "properties": {
+              "pending": {
+                "maximum": 9007199254740991,
+                "minimum": -9007199254740991,
+                "type": "integer"
+              },
+              "prepared": {
+                "maximum": 9007199254740991,
+                "minimum": -9007199254740991,
+                "type": "integer"
+              },
+              "total": {
+                "maximum": 9007199254740991,
+                "minimum": -9007199254740991,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "total",
+              "prepared",
+              "pending"
+            ],
+            "type": "object"
+          },
           "results": {
             "description": "Upload check results",
             "items": {
@@ -20812,6 +20838,10 @@
             "description": "Existing asset ID if duplicate",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
+            "type": "string"
+          },
+          "contentChecksum": {
+            "description": "Verified current original file SHA1, Base64 encoded, for an external content duplicate",
             "type": "string"
           },
           "id": {
@@ -21727,6 +21757,18 @@
         "properties": {
           "checksum": {
             "description": "Base64 encoded SHA1 hash",
+            "type": "string"
+          },
+          "checksumAlgorithm": {
+            "description": "Meaning of the primary checksum; sha1-path is not a file hash",
+            "enum": [
+              "sha1",
+              "sha1-path"
+            ],
+            "type": "string"
+          },
+          "contentChecksum": {
+            "description": "Freshly verified whole-original SHA1, Base64 encoded",
             "type": "string"
           },
           "createdAt": {
@@ -23351,6 +23393,7 @@
           "LibrarySyncFilesQueueAll",
           "LibrarySyncFiles",
           "LibraryScanQueueAll",
+          "LibraryContentFingerprint",
           "HlsSessionCleanup",
           "MemoryCleanup",
           "MemoryGenerate",
@@ -23467,6 +23510,18 @@
       },
       "LibraryStatsResponseDto": {
         "properties": {
+          "contentFingerprintCount": {
+            "description": "External originals with prepared file-content fingerprints",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          },
+          "contentFingerprintPending": {
+            "description": "External originals awaiting file-content fingerprints",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          },
           "photos": {
             "description": "Number of photos",
             "maximum": 9007199254740991,
@@ -31765,6 +31820,19 @@
             "description": "Checksum",
             "type": "string"
           },
+          "checksumAlgorithm": {
+            "description": "Primary checksum meaning; sha1-path is not file content",
+            "enum": [
+              "sha1",
+              "sha1-path"
+            ],
+            "type": "string"
+          },
+          "contentChecksum": {
+            "description": "Cached whole-original SHA1, Base64; revalidate before cleanup",
+            "nullable": true,
+            "type": "string"
+          },
           "createdAt": {
             "description": "Uploaded to Ilyich at",
             "example": "2024-01-01T00:00:00.000Z",
@@ -31911,6 +31979,19 @@
         "properties": {
           "checksum": {
             "description": "Checksum",
+            "type": "string"
+          },
+          "checksumAlgorithm": {
+            "description": "Primary checksum meaning; sha1-path is not file content",
+            "enum": [
+              "sha1",
+              "sha1-path"
+            ],
+            "type": "string"
+          },
+          "contentChecksum": {
+            "description": "Cached whole-original SHA1, Base64; revalidate before cleanup",
+            "nullable": true,
             "type": "string"
           },
           "createdAt": {

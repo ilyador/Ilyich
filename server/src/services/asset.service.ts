@@ -107,14 +107,6 @@ export class AssetService extends BaseService {
       }
     }
 
-    if (auth.sharedLink) {
-      delete data.owner;
-    }
-
-    if (auth.sharedLink) {
-      data.people = [];
-    }
-
     return data;
   }
 

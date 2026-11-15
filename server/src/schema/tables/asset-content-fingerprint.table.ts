@@ -1,4 +1,4 @@
-import { Column, CreateDateColumn, ForeignKeyColumn, type Generated, Index, Table, Timestamp } from '@immich/sql-tools';
+import { Column, CreateDateColumn, ForeignKeyColumn, Index, Table, Timestamp, type Generated } from '@immich/sql-tools';
 import { AssetTable } from 'src/schema/tables/asset.table.js';
 
 /** Secondary file-content identity. External asset.checksum remains its stable path identity. */

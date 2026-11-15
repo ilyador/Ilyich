@@ -1123,6 +1123,8 @@ export type AssetBulkUploadCheckResult = {
     action: AssetUploadAction;
     /** Existing asset ID if duplicate */
     assetId?: string;
+    /** Verified current original file SHA1, Base64 encoded, for an external content duplicate */
+    contentChecksum?: string;
     /** Client-side identifier echoed from the request to match results to inputs */
     id: string;
     /** Whether existing asset is trashed */
@@ -1130,6 +1132,12 @@ export type AssetBulkUploadCheckResult = {
     reason?: AssetRejectReason;
 };
 export type AssetBulkUploadCheckResponseDto = {
+    /** Owner-scoped preparation status, returned for an empty check before staging originals */
+    contentFingerprintStatus?: {
+        pending: number;
+        prepared: number;
+        total: number;
+    };
     /** Upload check results */
     results: AssetBulkUploadCheckResult[];
 };
@@ -1307,6 +1315,10 @@ export type TagResponseDto = {
 export type AssetResponseDto = {
     /** Base64 encoded SHA1 hash */
     checksum: string;
+    /** Meaning of the primary checksum; sha1-path is not a file hash */
+    checksumAlgorithm?: ChecksumAlgorithm;
+    /** Freshly verified whole-original SHA1, Base64 encoded */
+    contentChecksum?: string;
     /** The UTC timestamp when the asset was originally uploaded to Ilyich. */
     createdAt: string;
     /** Duplicate group ID */
@@ -1879,6 +1891,10 @@ export type UpdateLibraryDto = {
     name?: string;
 };
 export type LibraryStatsResponseDto = {
+    /** External originals with prepared file-content fingerprints */
+    contentFingerprintCount?: number;
+    /** External originals awaiting file-content fingerprints */
+    contentFingerprintPending?: number;
     /** Number of photos */
     photos: number;
     /** Total number of assets */
@@ -3687,6 +3703,10 @@ export type SyncAssetOcrV1 = {
 export type SyncAssetV1 = {
     /** Checksum */
     checksum: string;
+    /** Primary checksum meaning; sha1-path is not file content */
+    checksumAlgorithm?: ChecksumAlgorithm;
+    /** Cached whole-original SHA1, Base64; revalidate before cleanup */
+    contentChecksum?: string | null;
     /** Uploaded to Ilyich at */
     createdAt: string | null;
     /** Deleted at */
@@ -3731,6 +3751,10 @@ export type SyncAssetV1 = {
 export type SyncAssetV2 = {
     /** Checksum */
     checksum: string;
+    /** Primary checksum meaning; sha1-path is not file content */
+    checksumAlgorithm?: ChecksumAlgorithm;
+    /** Cached whole-original SHA1, Base64; revalidate before cleanup */
+    contentChecksum?: string | null;
     /** Uploaded to Ilyich at */
     createdAt: string | null;
     /** Deleted at */
@@ -8568,6 +8592,10 @@ export enum AssetJobName {
     RegenerateThumbnail = "regenerate-thumbnail",
     TranscodeVideo = "transcode-video"
 }
+export enum ChecksumAlgorithm {
+    Sha1 = "sha1",
+    Sha1Path = "sha1-path"
+}
 export enum PersonUserRole {
     Read = "read",
     Write = "write",
@@ -8715,6 +8743,7 @@ export enum JobName {
     LibrarySyncFilesQueueAll = "LibrarySyncFilesQueueAll",
     LibrarySyncFiles = "LibrarySyncFiles",
     LibraryScanQueueAll = "LibraryScanQueueAll",
+    LibraryContentFingerprint = "LibraryContentFingerprint",
     HlsSessionCleanup = "HlsSessionCleanup",
     MemoryCleanup = "MemoryCleanup",
     MemoryGenerate = "MemoryGenerate",
