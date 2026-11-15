@@ -363,7 +363,7 @@ final class KnownBackupCopyTests: XCTestCase {
             let observer = BackupConfirmationObserver(checker: checker, store: h.store, refreshed: { await h.engine.refresh() })
             await observer.start(changes: catalog.stream)
             await untilTransfers("The read-only account startup pass finishes.") { catalog.reads > 0 }
-            if !offline { await untilTransfers("Saved trash cannot remain a current confirmation.") { try await h.store.historyPage(offset: 0, limit: 10).isEmpty } }
+            if !offline { try await untilTransfers("Saved trash cannot remain a current confirmation.") { try await h.store.historyPage(offset: 0, limit: 10).isEmpty } }
             await observer.stop()
             let history = try await h.store.historyPage(offset: 0, limit: 10)
             XCTAssertEqual(history.count, offline ? 1 : 0)
