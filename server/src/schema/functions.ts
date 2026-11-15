@@ -49,6 +49,25 @@ export const updated_at = registerFunction({
     END;`,
 });
 
+export const invalidate_asset_content_fingerprint = registerFunction({
+  name: 'invalidate_asset_content_fingerprint',
+  returnType: 'TRIGGER',
+  language: 'PLPGSQL',
+  // Created by the manual fingerprint migration, without a migration_overrides record.
+  // Keep that migration authoritative instead of replacing its function during schema sync.
+  synchronize: false,
+  body: `
+    BEGIN
+      IF NEW."originalPath" IS DISTINCT FROM OLD."originalPath"
+        OR NEW."checksumAlgorithm" IS DISTINCT FROM OLD."checksumAlgorithm"
+        OR NEW."isOffline" OR NEW."deletedAt" IS NOT NULL OR NEW."status" <> 'active' THEN
+        DELETE FROM "asset_content_fingerprint" WHERE "assetId" = NEW."id";
+      END IF;
+      RETURN NEW;
+    END;
+  `,
+});
+
 export const f_concat_ws = registerFunction({
   name: 'f_concat_ws',
   arguments: ['text', 'text[]'],

@@ -17,6 +17,7 @@ import {
   f_concat_ws,
   f_unaccent,
   immich_uuid_v7,
+  invalidate_asset_content_fingerprint,
   ll_to_earth_public,
   memory_asset_delete_audit,
   memory_delete_audit,
@@ -177,6 +178,7 @@ export class ImmichDatabase {
 
   functions = [
     immich_uuid_v7,
+    invalidate_asset_content_fingerprint,
     updated_at,
     f_concat_ws,
     f_unaccent,

@@ -1,9 +1,11 @@
-import { Kysely } from 'kysely';
+import { schemaDiff, schemaFromCode, schemaFromDatabase } from '@immich/sql-tools';
+import { Kysely, sql } from 'kysely';
 import { columns } from 'src/database.js';
 import { AssetStatus, AssetType, AssetVisibility, ChecksumAlgorithm } from 'src/enum.js';
 import { AssetRepository } from 'src/repositories/asset.repository.js';
 import { LibraryRepository } from 'src/repositories/library.repository.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import { immich_uuid_v7, invalidate_asset_content_fingerprint } from 'src/schema/functions.js';
 import { DB } from 'src/schema/index.js';
 import { BaseService } from 'src/services/base.service.js';
 import { newMediumService } from 'test/medium.factory.js';
@@ -15,6 +17,39 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await db.destroy();
+});
+
+it('registers the migrated fingerprint invalidation function without schema drift', async () => {
+  const { rows } = await sql<{ name: string }>`SELECT current_database() AS name`.execute(db);
+  const url = new URL(process.env.IMMICH_TEST_POSTGRES_URL!);
+  url.pathname = `/${rows[0].name}`;
+  const source = schemaFromCode({
+    overrides: true,
+    namingStrategy: 'default',
+    uuidFunction: (version) => (version === 7 ? `${immich_uuid_v7.name}()` : 'uuid_generate_v4()'),
+  });
+  const target = await schemaFromDatabase({ connection: { connectionType: 'url', url: url.href } });
+  const drift = schemaDiff(source, target, {
+    tables: { ignoreExtra: true },
+    constraints: { ignoreExtra: false },
+    indexes: { ignoreExtra: true },
+    triggers: { ignoreExtra: true },
+    columns: { ignoreExtra: true },
+    functions: { ignoreExtra: false },
+    parameters: { ignoreExtra: true },
+    extensions: { ignoreExtra: true },
+    ignorePrefixes: ['futo_backups_'],
+  });
+  expect(drift.items).toEqual([]);
+  const { rows: functions } = await sql<{ body: string; returnType: string }>`
+    SELECT prosrc AS body, pg_get_function_result(oid) AS "returnType"
+    FROM pg_proc WHERE oid = 'public.invalidate_asset_content_fingerprint()'::regprocedure
+  `.execute(db);
+  expect(functions).toHaveLength(1);
+  expect(functions[0].returnType).toBe('trigger');
+  expect(functions[0].body.trim()).toBe(
+    invalidate_asset_content_fingerprint.expression.split('AS $$', 2)[1].split('$$;', 1)[0].trim(),
+  );
 });
 
 it('matches secondary file bytes owner-scoped without changing external path identity, and invalidates stale/deleted sources', async () => {
