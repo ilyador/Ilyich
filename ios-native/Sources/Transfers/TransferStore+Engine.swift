@@ -370,6 +370,49 @@ extension TransferStore {
         return counts
     }
 
+    func confirmationRemoteIDs() throws -> Set<String> {
+        var ids = Set<String>()
+        try database().run("""
+            SELECT asset_id FROM confirmation_copies
+            UNION SELECT original_id FROM receipts
+            UNION SELECT motion_id FROM receipts WHERE motion_id IS NOT NULL
+            """) { row in if let id = row.text(0) { ids.insert(id) } }
+        return ids
+    }
+
+    /// Reconcile durable confirmations against a complete, successfully synced owner catalog.
+    /// A missing/unavailable remote copy invalidates the old claim. A missing external content
+    /// fingerprint is inconclusive, so preparation and older servers never erase valid proof.
+    func reconcileConfirmations(with identities: [LocalAssetMatch]) throws -> Int {
+        let db = try database()
+        let byID = Dictionary(identities.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
+        return try db.transaction {
+            var invalid: [String] = []
+            try db.run("""
+                SELECT c.local_id,coalesce(p.asset_id,r.original_id),r.original_checksum,r.motion_id,r.motion_checksum
+                FROM confirmations c LEFT JOIN confirmation_copies p ON p.local_id=c.local_id
+                LEFT JOIN receipts r ON r.local_id=c.local_id AND r.modification_date=c.modification_date
+                """) { row in
+                guard let localID = row.text(0) else { return }
+                // Legacy receiptless confirmations have no remote identity to revalidate.
+                guard let id = row.text(1), let remote = byID[id], remote.backupAvailable else { invalid.append(localID); return }
+                if let expected = row.text(2), let current = remote.fileChecksum, expected != current { invalid.append(localID); return }
+                if let motionID = row.text(3) {
+                    guard let motion = byID[motionID], motion.backupAvailable else { invalid.append(localID); return }
+                    if let expected = row.text(4), let current = motion.fileChecksum, expected != current { invalid.append(localID) }
+                }
+            }
+            guard !invalid.isEmpty else { return 0 }
+            let ids = TransferSQLite.Value.text(TransferJSON.encode(invalid))
+            for table in ["confirmations", "confirmation_copies", "receipts"] {
+                try db.run("DELETE FROM \(table) WHERE local_id IN (SELECT value FROM json_each(?))", [ids])
+            }
+            // Album destinations must wait for the newly revalidated backup too.
+            try db.run("UPDATE album_destinations SET remote_id=NULL WHERE local_id IN (SELECT value FROM json_each(?))", [ids])
+            return invalid.count
+        }
+    }
+
     /// Current confirmation revisions for a measured selection. Used after discovery adoption
     /// and external outcome recovery; progress byte reports never run this query.
     func confirmationRevisions(for localIDs: [String]) throws -> [String: AssetRevision] {

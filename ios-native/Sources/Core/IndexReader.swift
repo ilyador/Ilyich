@@ -240,7 +240,9 @@ actor IndexReader {
     func identities(after cursor: String?, limit: Int = 2_000) throws -> [LocalAssetMatch] {
         let rows = try database.query("""
         SELECT a.id,json_extract(a.payload,'$.checksum'),json_extract(m.payload,'$.value'),
-          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL)
+          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL),
+          json_extract(a.payload,'$.checksumAlgorithm'),json_extract(a.payload,'$.contentChecksum'),coalesce(json_extract(a.payload,'$.isExternal'),CASE json_type(a.payload,'$.libraryId') WHEN 'null' THEN 0 WHEN 'text' THEN 1 END),
+          (json_extract(a.payload,'$.deletedAt') IS NULL AND json_extract(a.payload,'$.visibility')!='locked' AND coalesce(json_extract(a.payload,'$.isOffline'),0)!=1)
         FROM entities a LEFT JOIN entities m ON m.kind='assetMetadata' AND json_extract(m.payload,'$.assetId')=a.id AND json_extract(m.payload,'$.key')='mobile-app'
         WHERE a.kind='asset' AND a.id>? AND json_extract(a.payload,'$.ownerId')=?
         ORDER BY a.id LIMIT ?
@@ -253,7 +255,9 @@ actor IndexReader {
     func identity(id: String) throws -> LocalAssetMatch? {
         let rows = try database.query("""
         SELECT a.id,json_extract(a.payload,'$.checksum'),json_extract(m.payload,'$.value'),
-          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL)
+          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL),
+          json_extract(a.payload,'$.checksumAlgorithm'),json_extract(a.payload,'$.contentChecksum'),coalesce(json_extract(a.payload,'$.isExternal'),CASE json_type(a.payload,'$.libraryId') WHEN 'null' THEN 0 WHEN 'text' THEN 1 END),
+          (json_extract(a.payload,'$.deletedAt') IS NULL AND json_extract(a.payload,'$.visibility')!='locked' AND coalesce(json_extract(a.payload,'$.isOffline'),0)!=1)
         FROM entities a LEFT JOIN entities m ON m.kind='assetMetadata' AND json_extract(m.payload,'$.assetId')=a.id AND json_extract(m.payload,'$.key')='mobile-app'
         WHERE a.kind='asset' AND a.id=? AND json_extract(a.payload,'$.ownerId')=? LIMIT 1
         """, [id, userID])
@@ -266,13 +270,15 @@ actor IndexReader {
         guard checksum != nil || cloudID != nil else { return [] }
         let rows = try database.query("""
         SELECT a.id,json_extract(a.payload,'$.checksum'),json_extract(m.payload,'$.value'),
-          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL)
+          (json_extract(a.payload,'$.visibility')='timeline' AND json_extract(a.payload,'$.deletedAt') IS NULL),
+          json_extract(a.payload,'$.checksumAlgorithm'),json_extract(a.payload,'$.contentChecksum'),coalesce(json_extract(a.payload,'$.isExternal'),CASE json_type(a.payload,'$.libraryId') WHEN 'null' THEN 0 WHEN 'text' THEN 1 END),
+          (json_extract(a.payload,'$.deletedAt') IS NULL AND json_extract(a.payload,'$.visibility')!='locked' AND coalesce(json_extract(a.payload,'$.isOffline'),0)!=1)
         FROM entities a LEFT JOIN entities m ON m.kind='assetMetadata' AND json_extract(m.payload,'$.assetId')=a.id AND json_extract(m.payload,'$.key')='mobile-app'
         WHERE a.kind='asset' AND json_extract(a.payload,'$.ownerId')=?
-          AND ((? IS NOT NULL AND json_extract(a.payload,'$.checksum')=?)
+          AND ((? IS NOT NULL AND (json_extract(a.payload,'$.checksum')=? OR json_extract(a.payload,'$.contentChecksum')=?))
             OR (? IS NOT NULL AND json_extract(m.payload,'$.value.iCloudId')=?))
         ORDER BY a.id
-        """, [userID, checksum, checksum, cloudID, cloudID])
+        """, [userID, checksum, checksum, checksum, cloudID, cloudID])
         return try Self.identities(rows)
     }
 
@@ -289,7 +295,8 @@ actor IndexReader {
                 guard let value = number(key), value.isFinite else { return nil }
                 return Date(timeIntervalSince1970: value)
             }
-            return LocalAssetMatch(assetID: id, checksum: checksum, cloudID: string("iCloudId"), createdAt: date("createdAt"), adjustmentTime: date("adjustmentTime"), latitude: number("latitude"), longitude: number("longitude"), visible: row[3] == "1")
+            return LocalAssetMatch(assetID: id, checksum: checksum, cloudID: string("iCloudId"), createdAt: date("createdAt"), adjustmentTime: date("adjustmentTime"), latitude: number("latitude"), longitude: number("longitude"), visible: row[3] == "1",
+                                   checksumAlgorithm: row[4], contentChecksum: row[5], isExternal: row[6].map { $0 == "1" }, backupAvailable: row[7] == "1")
         }
     }
     // MARK: Coverage

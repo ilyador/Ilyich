@@ -19,6 +19,8 @@ struct LibraryDiscovery: Sendable {
     /// Process-local access, rechecked after Photos/database awaits. No entitlement is persisted.
     var allowsDiscovery: @Sendable () -> Bool = { true }
 
+    var revalidateConfirmations: @Sendable () async throws -> Void = {}
+
     func run() async throws -> DiscoveryMerge {
         guard allowsDiscovery() else { throw PurchaseAccessRequired() }
         guard let preferences = try await store.preferences(), preferences.hasSelection else { return DiscoveryMerge() }
@@ -41,6 +43,8 @@ struct LibraryDiscovery: Sendable {
             }
         }
         try Task.checkCancellation()
+        guard allowsDiscovery() else { throw PurchaseAccessRequired() }
+        try await revalidateConfirmations()
         guard allowsDiscovery() else { throw PurchaseAccessRequired() }
         return try await store.mergeDiscovery(found, gone: gone, notifying: notifying)
     }

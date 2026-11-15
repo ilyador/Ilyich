@@ -156,6 +156,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var waitUntil: Date?
     /// A partial server identity catalog delays the library lane, never shared uploads.
     private var identityIndexRetryAt: Date?
+    private var preparingServerLibrary = false
     private var consecutiveServerErrors = 0
 
     private struct Active {
@@ -318,7 +319,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// A condition changed (network, power, temperature): every wait ends, whatever the intent.
     /// An account block stays.
     func conditionsChanged() async {
-        identityIndexRetryAt = nil
+        if !preparingServerLibrary { identityIndexRetryAt = nil }
         wait = nil
         waitUntil = nil
         consecutiveServerErrors = 0
@@ -345,6 +346,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             followUp?(.manualRun)
         }
         if intent != .paused {
+            preparingServerLibrary = false
             identityIndexRetryAt = nil
             // The user asked: lift a block whose cause has gone, and try again now.
             liftBlock()
@@ -636,7 +638,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     private func run() async {
         while !Task.isCancelled {
-            if let deadline = identityIndexRetryAt, now() >= deadline { identityIndexRetryAt = nil }
+            if let deadline = identityIndexRetryAt, now() >= deadline { identityIndexRetryAt = nil; preparingServerLibrary = false }
             if let refusal = restriction(authorization.current()) { await block(refusal) }
             if let until = waitUntil, now() >= until { wait = nil; waitUntil = nil }
             if blocker != nil || wait != nil {
@@ -792,6 +794,15 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     private func fail(_ job: LeasedJob, _ error: any Error) async {
+        if job.lane == .library, let failure = error as? ServerFailure, failure == .externalContentFingerprintsPending {
+            // One bounded account-wide hold, never one retry per selected photo. It does
+            // not change the user's pause or automatic preference; shared files may continue.
+            _ = try? await store.release(job: job.lease.job, token: job.lease.token)
+            preparingServerLibrary = true
+            identityIndexRetryAt = now().addingTimeInterval(60)
+            await releaseActive { $0.job.lane == .library }
+            return
+        }
         if error is BackupIdentityIndexNotReady {
             _ = try? await store.release(job: job.lease.job, token: job.lease.token)
             identityIndexRetryAt = now().addingTimeInterval(5)
@@ -1022,7 +1033,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                                                                                unchecked: inventory.revisions.count - inventory.confirmed.count - inventory.pending.count,
                                                                                checkedAt: $0) }
                                 }, checkingExistingBackups: (catalogWaiting && libraryJobs.isEmpty)
-                                    || (!libraryJobs.isEmpty && libraryJobs.keys.allSatisfy { checkingExisting.contains($0) }))
+                                    || (!libraryJobs.isEmpty && libraryJobs.keys.allSatisfy { checkingExisting.contains($0) }),
+                                preparingServerLibrary: preparingServerLibrary)
     }
 
     /// Sends the snapshot now, or, within the interval of the last one, the latest at its end.

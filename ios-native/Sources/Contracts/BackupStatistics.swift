@@ -57,6 +57,7 @@ struct BackupStatistics: Equatable, Sendable {
     let selectionChecked: Bool
     let selectionProgress: SelectionProgress?
     let checkingExistingBackups: Bool
+    let preparingServerLibrary: Bool
     let currentTransfer: TransferProgress?
 
     init(snapshot: TransferSnapshot) {
@@ -70,6 +71,7 @@ struct BackupStatistics: Equatable, Sendable {
         selectionChecked = snapshot.backupSelectionChecked
         selectionProgress = snapshot.selectionProgress
         checkingExistingBackups = snapshot.checkingExistingBackups
+        preparingServerLibrary = snapshot.preparingServerLibrary && snapshot.intent != .paused
         currentTransfer = phase == .running ? snapshot.backupProgress : nil
     }
 }

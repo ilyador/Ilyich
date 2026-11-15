@@ -458,7 +458,7 @@ final class DeviceIndexServiceTests: XCTestCase {
 
     private func serverAsset(_ id: String, checksum: String, visibility: String = "timeline", deleted: Bool = false, owner: String = "alice") -> EntitySyncEvent {
         SyncEvents.event("AssetV2", """
-        {"id":"\(id)","ownerId":"\(owner)","type":"IMAGE","originalFileName":"\(id).jpg","checksum":"\(checksum)","fileCreatedAt":"2026-02-01T05:00:00Z","localDateTime":"2026-02-01T05:00:00Z","createdAt":"2026-03-01T00:00:00Z","visibility":"\(visibility)","isFavorite":false,"deletedAt":\(deleted ? "\"2026-03-04T00:00:00Z\"" : "null"),"stackId":null,"isEdited":false,"isDeveloped":false,"mediaRevision":"r1"}
+        {"id":"\(id)","ownerId":"\(owner)","type":"IMAGE","originalFileName":"\(id).jpg","checksum":"\(checksum)","checksumAlgorithm":"sha1","fileCreatedAt":"2026-02-01T05:00:00Z","localDateTime":"2026-02-01T05:00:00Z","createdAt":"2026-03-01T00:00:00Z","visibility":"\(visibility)","isFavorite":false,"deletedAt":\(deleted ? "\"2026-03-04T00:00:00Z\"" : "null"),"stackId":null,"isEdited":false,"isDeveloped":false,"mediaRevision":"r1"}
         """, ack: "AssetV2|\(id)")
     }
 

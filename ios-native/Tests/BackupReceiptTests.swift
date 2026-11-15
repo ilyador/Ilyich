@@ -2,6 +2,41 @@ import XCTest
 @testable import Ilyich
 
 final class BackupReceiptTests: XCTestCase {
+    func testPathIdentityIsNeverAcceptedAsContentProof() throws {
+        func remote(_ fields: String) throws -> BackupRemoteAsset {
+            try JSONDecoder().decode(BackupRemoteAsset.self, from: Data((#"{"id":"a","ownerId":"u","checksum":"path-hash","isTrashed":false,"isExternal":true"# + fields + "}").utf8))
+        }
+        XCTAssertNil(try remote(#","checksumAlgorithm":"sha1-path""#).fileChecksum)
+        XCTAssertNil(try remote("").fileChecksum)
+        XCTAssertEqual(try remote(#","checksumAlgorithm":"sha1-path","contentChecksum":"actual-file-sha1""#).fileChecksum, "actual-file-sha1")
+        XCTAssertEqual(try remote(#","checksumAlgorithm":"sha1""#).fileChecksum, "path-hash")
+        XCTAssertNil(ContentFingerprint.checksum(primary: "c", algorithm: nil, content: nil, isExternal: nil))
+        XCTAssertEqual(ContentFingerprint.checksum(primary: "c", algorithm: nil, content: nil, isExternal: false), "c")
+    }
+
+    func testLegacyLibraryIDDistinguishesUploadedContentFromExternalPathIdentity() throws {
+        func remote(_ field: String) throws -> BackupRemoteAsset {
+            try JSONDecoder().decode(BackupRemoteAsset.self, from: Data((#"{"id":"a","ownerId":"u","checksum":"c","isTrashed":false"# + field + "}").utf8))
+        }
+        XCTAssertEqual(try remote(#","libraryId":null"#).fileChecksum, "c")
+        XCTAssertNil(try remote(#","libraryId":"external-library""#).fileChecksum)
+        XCTAssertNil(try remote("").fileChecksum)
+        XCTAssertNil(try remote(#","libraryId":null,"checksumAlgorithm":"future-algorithm""#).fileChecksum)
+    }
+
+    func testCleanupRequiresCurrentContentProofForExternalArchive() async throws {
+        let receipt = CleanupReceipt(localID: "local", revision: AssetRevision(Date()), original: .init(id: "a", checksum: "file-sha1"), motion: nil)
+        for content in [nil, "wrong", "file-sha1"] as [String?] {
+            let remote = BackupRemoteAsset(id: "a", ownerId: "u", checksum: "path-sha1", isTrashed: false, livePhotoVideoId: nil,
+                                           visibility: "archive", checksumAlgorithm: "sha1-path", contentChecksum: content, isExternal: true)
+            let verifier = RemoteCopyVerifier(ownerID: "u", fetch: { _ in remote })
+            let result = try await verifier.verify(receipt)
+            if content == "file-sha1" {
+                guard case .verified = result else { return XCTFail("Current content proof should permit cleanup verification.") }
+            } else { XCTAssertEqual(result, .excluded(.checksumMismatch)) }
+        }
+    }
+
     /// A size the server reports in a shape it shouldn't is ignored, never failing the decode.
     func testMalformedSizeDoesNotAffectVerification() throws {
         let remote = #"{"id":"asset","ownerId":"user","checksum":"sha1","isTrashed":false,"exifInfo":{"fileSizeInByte":"oops"}}"#

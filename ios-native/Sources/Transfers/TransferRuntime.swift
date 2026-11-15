@@ -97,7 +97,10 @@ final class TransferRuntime: Sendable {
         let recovery = Recovery(store: parts.store, account: parts.account, layout: parts.layout, backup: backup, share: share)
         self.recovery = recovery
         let servicePermits: @Sendable () -> Bool = { authorization.current() != nil }
-        let discovery = LibraryDiscovery(store: parts.store, staging: parts.staging, notifying: true, allowsDiscovery: servicePermits)
+        let proofChecker = parts.knownBackupChecker
+        let proofStore = parts.store
+        let discovery = LibraryDiscovery(store: parts.store, staging: parts.staging, notifying: true, allowsDiscovery: servicePermits,
+                                         revalidateConfirmations: { if let proofChecker { try await proofChecker.reconcileConfirmations(in: proofStore) } })
         self.discovery = discovery
         notifier = TransferNotifier(store: parts.store, poster: parts.poster ?? SystemTransferNotificationPoster(), authorization: parts.authorization)
         let receiptChanges = ChangeBroadcast()
@@ -436,6 +439,7 @@ struct EngineBackend: TransferControlling {
 
     /// The status line, in the words backup always used.
     static func activity(_ snapshot: TransferSnapshot, preferences: TransferPreferences?) -> String {
+        if snapshot.preparingServerLibrary { return snapshot.intent == .paused ? "Backup paused" : "Preparing server library" }
         if snapshot.checkingExistingBackups { return "Checking existing backups" }
         switch snapshot.backupPhase ?? snapshot.phase {
         case .blocked(let restriction):

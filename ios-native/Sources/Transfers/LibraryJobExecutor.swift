@@ -41,6 +41,7 @@ final class LibraryJobExecutor: JobExecuting {
     private let uploader: any PartUploading
     private let layout: AppGroupLayout
     /// The account digest, which names every task's scope.
+    private let ownerID: String
     private let scope: String
     /// The account's Backup folder, relative to the App Group.
     private let backupFolder: String
@@ -65,6 +66,7 @@ final class LibraryJobExecutor: JobExecuting {
         self.server = server
         self.uploader = uploader
         self.layout = layout
+        ownerID = account.userID
         scope = account.digest
         backupFolder = AccountStoragePaths(account).backup
         self.pipeline = pipeline
@@ -255,6 +257,7 @@ final class LibraryJobExecutor: JobExecuting {
             if sidecar != nil, !attempts.contains(where: { $0.part == part && $0.remoteStatus == "created" && $0.remoteID == assetID }) {
                 throw TransferItemFailure.sidecarDuplicate
             }
+            try await validateDuplicate(assetID, checksum: checksum, context: context)
             if part == .original, let motionID = fields["livePhotoVideoId"] { try await pair(assetID, with: motionID, context: context) }
             onSubmitted()
             return assetID
@@ -339,9 +342,21 @@ final class LibraryJobExecutor: JobExecuting {
         if receipt.status == "duplicate" {
             // Someone else's copy: the sidecar did not go with it.
             if sidecar != nil { throw TransferItemFailure.sidecarDuplicate }
+            guard let checksum = attempt.checksum else { throw APIError.invalidResponse("The upload has no content fingerprint.") }
+            try await validateDuplicate(receipt.id, checksum: checksum, context: context)
             if part == .original, let motionID = fields["livePhotoVideoId"] { try await pair(receipt.id, with: motionID, context: context) }
         }
         return receipt.id
+    }
+
+    /// A duplicate's ID alone is not file proof: external assets use a path identity checksum.
+    private func validateDuplicate(_ id: String, checksum: String, context: JobContext) async throws {
+        let remote = try await server.remoteAsset(id: id)
+        try await context.ensureOwned()
+        guard remote.id == id, !remote.isTrashed else { throw TransferItemFailure.trashedDuplicate }
+        guard remote.ownerId == ownerID, remote.fileChecksum == checksum, remote.visibility != "locked", remote.isOffline != true else {
+            throw APIError.invalidResponse("The existing server copy could not be verified by its file content.")
+        }
     }
 
     /// Pairs a still the server already held with its video, asking the server, never the offline

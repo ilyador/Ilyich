@@ -9,6 +9,11 @@ enum KnownBackupCopyResult: Sendable {
 
 protocol KnownBackupCopyChecking: Sendable {
     func check(_ localID: String, context: JobContext) async throws -> KnownBackupCopyResult
+    func reconcileConfirmations(in store: TransferStore) async throws
+}
+
+extension KnownBackupCopyChecking {
+    func reconcileConfirmations(in store: TransferStore) async throws {}
 }
 
 struct BackupIdentityIndexNotReady: LocalizedError, Sendable {
@@ -35,6 +40,27 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
         self.server = server
     }
 
+    func reconcileConfirmations(in store: TransferStore) async throws {
+        guard try await identities.identityIndexComplete(), var rows = try await identities.identities() else { return }
+        let indexed = Set(rows.map(\.assetID))
+        // The local sync may not yet contain an upload that just completed. Absence in that
+        // catalog cannot erase its receipt; only an exact server read can establish it is gone.
+        let missing = try await store.confirmationRemoteIDs().subtracting(indexed)
+        for id in missing.sorted() {
+            do {
+                let remote = try await server.remoteAsset(id: id)
+                rows.append(LocalAssetMatch(assetID: id, checksum: remote.checksum, cloudID: nil, createdAt: nil, adjustmentTime: nil,
+                                            latitude: nil, longitude: nil, visible: remote.visibility == "timeline",
+                                            checksumAlgorithm: remote.checksumAlgorithm, contentChecksum: remote.contentChecksum,
+                                            isExternal: remote.isExternal, backupAvailable: remote.id == id && eligible(remote)))
+            } catch ServerFailure.notFound {
+                // An authorized exact read confirmed the deletion.
+            }
+            // Any transport/auth failure aborts before the store changes a single confirmation.
+        }
+        _ = try await store.reconcileConfirmations(with: rows)
+    }
+
     func check(_ localID: String, context: JobContext) async throws -> KnownBackupCopyResult {
         try await context.ensureOwned()
         let access = await reader.access()
@@ -59,7 +85,7 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
                 if answer.action == "reject", answer.reason == "duplicate", answer.isTrashed != true, let id = answer.assetId {
                     let remote = try await server.remoteAsset(id: id)
                     try await context.ensureOwned()
-                    guard remote.id == id, eligible(remote), remote.checksum == checksum, await unchanged(item, access: access) else { return .unknown }
+                    guard remote.id == id, eligible(remote), remote.fileChecksum == checksum, await unchanged(item, access: access) else { return .unknown }
                     try await context.ensureOwned()
                     let receipt = TransferReceipt(localID: localID, revision: revision, original: .init(id: id, checksum: checksum),
                                                   motion: nil, confirmedAt: nil)

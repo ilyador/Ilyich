@@ -5,6 +5,14 @@ struct BackupRemoteAsset: Decodable, Sendable {
     let id: String
     let ownerId: String
     let checksum: String
+    let checksumAlgorithm: String?
+    let contentChecksum: String?
+    let isExternal: Bool?
+
+    /// Primary external checksums identify paths, never file bytes.
+    var fileChecksum: String? {
+        ContentFingerprint.checksum(primary: checksum, algorithm: checksumAlgorithm, content: contentChecksum, isExternal: isExternal)
+    }
     let isTrashed: Bool
     let livePhotoVideoId: String?
     /// A copy in the Locked Folder does not count as a backup that cleanup can rely on.
@@ -15,10 +23,14 @@ struct BackupRemoteAsset: Decodable, Sendable {
     let knownByteCount: Int64?
 
     init(id: String, ownerId: String, checksum: String, isTrashed: Bool, livePhotoVideoId: String?, visibility: String? = nil,
-         isOffline: Bool? = nil, knownByteCount: Int64? = nil) {
+         isOffline: Bool? = nil, knownByteCount: Int64? = nil, checksumAlgorithm: String? = "sha1",
+         contentChecksum: String? = nil, isExternal: Bool? = nil) {
         self.id = id
         self.ownerId = ownerId
         self.checksum = checksum
+        self.checksumAlgorithm = checksumAlgorithm
+        self.contentChecksum = contentChecksum
+        self.isExternal = isExternal
         self.isTrashed = isTrashed
         self.livePhotoVideoId = livePhotoVideoId
         self.visibility = visibility
@@ -31,12 +43,17 @@ struct BackupRemoteAsset: Decodable, Sendable {
         let fileSizeInByte: Int64?
     }
 
-    private enum CodingKeys: String, CodingKey { case id, ownerId, checksum, isTrashed, livePhotoVideoId, visibility, isOffline, exifInfo }
+    private enum CodingKeys: String, CodingKey { case id, ownerId, checksum, checksumAlgorithm, contentChecksum, isExternal, libraryId, isTrashed, livePhotoVideoId, visibility, isOffline, exifInfo }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         ownerId = try c.decode(String.self, forKey: .ownerId)
         checksum = try c.decode(String.self, forKey: .checksum)
+        checksumAlgorithm = try c.decodeIfPresent(String.self, forKey: .checksumAlgorithm)
+        contentChecksum = try c.decodeIfPresent(String.self, forKey: .contentChecksum)
+        if let explicit = try c.decodeIfPresent(Bool.self, forKey: .isExternal) { isExternal = explicit }
+        else if c.contains(.libraryId) { isExternal = !(try c.decodeNil(forKey: .libraryId)) }
+        else { isExternal = nil }
         isTrashed = try c.decode(Bool.self, forKey: .isTrashed)
         livePhotoVideoId = try c.decodeIfPresent(String.self, forKey: .livePhotoVideoId)
         visibility = try c.decodeIfPresent(String.self, forKey: .visibility)
@@ -55,5 +72,14 @@ enum BackupDeferral: LocalizedError {
         case .waitingForDevice: "Waiting for charging or for the device to cool down"
         case .waitingForWiFi: "Waiting for Wi-Fi to download the iCloud original"
         }
+    }
+}
+
+/// Algorithm-aware content evidence shared by catalog matching and strict server checks.
+enum ContentFingerprint {
+    static func checksum(primary: String, algorithm: String?, content: String?, isExternal: Bool?) -> String? {
+        if let content, !content.isEmpty { return content }
+        guard algorithm == "sha1" || (algorithm == nil && isExternal == false), !primary.isEmpty else { return nil }
+        return primary
     }
 }

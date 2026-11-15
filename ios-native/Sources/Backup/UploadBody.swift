@@ -79,6 +79,7 @@ struct UploadCheckResponse: Decodable, Sendable {
         let reason: String?
         let assetId: String?
         let isTrashed: Bool?
+        var contentChecksum: String? = nil
     }
     let results: [Result]
 }

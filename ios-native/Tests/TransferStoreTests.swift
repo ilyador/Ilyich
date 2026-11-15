@@ -25,13 +25,35 @@ import XCTest
         XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("\(account.digest).sqlite").path))
         XCTAssertEqual(try folder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true, "Kept out of iCloud backup.")
         let tables = try await store.dump().keys.sorted()
-        XCTAssertEqual(tables, ["album_destinations", "attempts", "confirmations", "engine_state", "jobs", "linked_albums", "meta",
+        XCTAssertEqual(tables, ["album_destinations", "attempts", "confirmation_copies", "confirmations", "engine_state", "jobs", "linked_albums", "meta",
                                 "notification_batches", "preferences", "receipts", "share_consumed", "stack_tasks", "stages"])
         await store.close()
         do {
             _ = try await store.meta()
             XCTFail("A closed store refuses work.")
         } catch { XCTAssertEqual(error as? TransferStoreError, .closed) }
+    }
+
+    func testSyncedDeletedCopiesLoseConfirmationWhileUnknownExternalContentKeepsIt() async throws {
+        let store = TransferStore(url: temporaryDirectory().appendingPathComponent("transfers.sqlite"))
+        var seed = TransferSeed()
+        for id in ["deleted", "missing", "external", "changed", "archive"] {
+            seed.confirmations.append((id, FakeStaging.date))
+            seed.receipts.append(.init(localID: id, modified: FakeStaging.date, originalID: "remote-" + id, originalChecksum: "file-sha1"))
+        }
+        try await store.seedForTest(seed)
+        func row(_ id: String, checksum: String = "file-sha1", algorithm: String = "sha1", available: Bool = true) -> LocalAssetMatch {
+            LocalAssetMatch(assetID: "remote-" + id, checksum: checksum, cloudID: nil, createdAt: nil, adjustmentTime: nil, latitude: nil, longitude: nil,
+                            visible: false, checksumAlgorithm: algorithm, backupAvailable: available)
+        }
+        let invalidated = try await store.reconcileConfirmations(with: [row("deleted", available: false), row("external", checksum: "path-sha1", algorithm: "sha1-path"),
+                                                                       row("changed", checksum: "different"), row("archive")])
+        XCTAssertEqual(invalidated, 3)
+        let revisions = try await store.confirmationRevisions(for: ["deleted", "missing", "external", "changed", "archive"])
+        XCTAssertEqual(Set(revisions.keys), ["external", "archive"])
+        let receipts = try await store.receipts(for: ["deleted", "missing", "external", "changed", "archive"])
+        XCTAssertEqual(Set(receipts.keys), ["external", "archive"])
+        await store.close()
     }
 
     /// BM2: every date comes back with the bits it went in with, through each table and query:

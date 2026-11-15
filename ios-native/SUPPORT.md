@@ -17,5 +17,6 @@ Ilyich connects to a compatible photo server using its address and your existing
 [Privacy policy](PRIVACY.md)
 
 - **Backup numbers:** Selected is your backup scope. Verified includes existing backups checked by this phone; it is not a new-upload counter. Not checked yet may also already exist on the server. To upload counts items checked as missing. For older backups without a reusable identity, Ilyich may need to read or download an original to compare it; identical files are skipped. The bottom status opens these details.
+- **Preparing server library:** Your Ilyich server is checking archived files so backup can recognize existing copies. This first check can take time for a large archive. Backup waits and checks again automatically; pausing stays respected. Stock Immich servers may not recognize external-library files as existing uploads.
 - **Background refresh warning:** Check iOS Settings → General → Background App Refresh and the Ilyich app setting. An app switch can look enabled while the global setting is off. Foreground backup still works.
 - **Opening phone photos:** Verified server copies use the server viewer. A server outage offers retry and an explicit phone fallback. Unmatched photos can use Apple Photos; iCloud-only resources show download, progress and cancel controls.

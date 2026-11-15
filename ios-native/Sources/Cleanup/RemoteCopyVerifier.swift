@@ -38,7 +38,7 @@ struct RemoteCopyVerifier: Sendable {
     private func check(_ asset: BackupRemoteAsset, against copy: CleanupReceipt.RemoteCopy) -> CleanupExclusion? {
         guard asset.id == copy.id else { return .notOnServer }
         guard asset.ownerId == ownerID else { return .otherOwner }
-        guard asset.checksum == copy.checksum else { return .checksumMismatch }
+        guard asset.fileChecksum == copy.checksum else { return .checksumMismatch }
         guard !asset.isTrashed else { return .inServerTrash }
         guard asset.visibility != "locked" else { return .inLockedFolder }
         guard asset.isOffline != true else { return .serverCopyOffline }
@@ -54,7 +54,7 @@ struct RemoteCopyVerifier: Sendable {
             case .notFound: return .notOnServer
             case .forbidden, .proxyRejected: return .serverRefused
             case .undecodable: return .unreadableAnswer
-            case .http, .credentialsRejected, .readOnly, .passwordChangeRequired: return .serverError
+            case .externalContentFingerprintsPending, .http, .credentialsRejected, .readOnly, .passwordChangeRequired: return .serverError
             }
         }
         if let error = error as? URLError, error.code == .cancelled, Task.isCancelled { throw CancellationError() }

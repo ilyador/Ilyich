@@ -19,6 +19,7 @@ struct BackupSettingsLabel: View {
     }
 
     private func summary(_ statistics: BackupStatistics) -> String {
+        if statistics.preparingServerLibrary { return "Preparing server library" }
         if let selection = statistics.selectionProgress {
             if selection.unchecked > 0 { return "\(selection.unchecked.formatted()) awaiting duplicate check" }
             return "\(selection.backedUp.formatted()) verified · \(selection.pending.formatted()) to upload"
@@ -44,6 +45,10 @@ struct BackupStatisticsSummary: View {
                 LabeledContent("Verified on this phone", value: statistics.backedUp.formatted())
                     .foregroundStyle(.secondary)
             }.monospacedDigit()
+        }
+        if statistics.preparingServerLibrary {
+            Text("Backup is waiting while your server checks archived files for existing copies.")
+                .font(.footnote).foregroundStyle(.secondary)
         }
     }
 
@@ -216,6 +221,7 @@ struct BackupActivityBar: View {
     private var compactTitle: String {
         if statistics.phase == .discovering { return "Checking Photos…" }
         if statistics.intent == .paused { return "Paused" }
+        if statistics.preparingServerLibrary { return "Preparing library" }
         if isChecking { return "Checking backups" }
         if statistics.phase == .running { return "Backing up" }
         return statistics.failed > 0 && statistics.queued == 0 ? "Needs retry" : "Backup waiting"
@@ -241,6 +247,7 @@ struct BackupActivityBar: View {
     private var title: String {
         if statistics.phase == .discovering { return "Checking Photos…" }
         if statistics.intent == .paused { return "Backup paused" }
+        if statistics.preparingServerLibrary { return "Preparing server library" }
         if isChecking { return "Checking existing backups" }
         if statistics.phase == .running { return "Backing up" }
         if statistics.failed > 0 && statistics.queued == 0 { return "Backup needs attention" }
@@ -269,6 +276,7 @@ struct BackupActivityBar: View {
     private var symbol: String {
         if statistics.phase == .discovering { return "photo.stack" }
         if statistics.intent == .paused { return "pause.circle" }
+        if statistics.preparingServerLibrary { return "clock.arrow.circlepath" }
         if isChecking { return "checkmark.icloud" }
         if statistics.failed > 0 && statistics.queued == 0 { return "exclamationmark.icloud" }
         return "icloud.and.arrow.up"

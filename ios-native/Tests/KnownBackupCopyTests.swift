@@ -184,6 +184,68 @@ final class KnownBackupCopyTests: XCTestCase {
         await h.tearDown()
     }
 
+    func testExternalContentDuplicateSkipsStagingAndRecordsActualFileDigest() async throws {
+        let h = try await LibraryJobHarness()
+        h.staging.add("a")
+        let database = DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite"))
+        try await database.saveFingerprints(["a": DeviceFingerprint(modified: FakeStaging.date, checksum: "file-sha1")])
+        h.server.hold(checksum: "file-sha1", as: .duplicate("external-a", trashed: false))
+        h.server.remote(BackupRemoteAsset(id: "external-a", ownerId: "owner", checksum: "path-sha1", isTrashed: false, livePhotoVideoId: nil,
+                                         visibility: "archive", checksumAlgorithm: "sha1-path", contentChecksum: "file-sha1", isExternal: true))
+        let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: ProofReader(items: [item("a")]), database: database,
+                                            identities: ProofIdentities(rows: []), server: h.server)
+        let engine = makeEngine(h, checker: checker)
+        try await engine.start()
+        _ = try await engine.discover(LibraryDiscovery(store: h.store, staging: h.staging))
+        try await engine.setIntent(.manual)
+        await untilTransfers("External content proof is reconciled.") { await engine.currentSnapshot.selectionProgress?.backedUp == 1 }
+        let receipt = try await h.receipt("a")
+        XCTAssertEqual(receipt?.original.checksum, "file-sha1")
+        XCTAssertEqual(receipt?.original.id, "external-a")
+        XCTAssertTrue(h.staging.staged.isEmpty)
+        XCTAssertTrue(h.uploads.uploads.isEmpty)
+        await engine.stop()
+        await h.tearDown()
+    }
+
+    func testExternalPreparationHoldsWholeLaneAndNeverProvesMissingOrOverridesPause() async throws {
+        let h = try await LibraryJobHarness()
+        let database = DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite"))
+        let ids = (0..<100).map { "photo-\($0)" }
+        for id in ids { h.staging.add(id) }
+        try await database.saveFingerprints(Dictionary(uniqueKeysWithValues: ids.map { ($0, DeviceFingerprint(modified: FakeStaging.date, checksum: "sum-" + $0)) }))
+        h.server.failChecks(.externalContentFingerprintsPending)
+        let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: ProofReader(items: ids.map { item($0) }), database: database,
+                                            identities: ProofIdentities(rows: []), server: h.server)
+        let engine = makeEngine(h, checker: checker)
+        try await engine.start()
+        _ = try await engine.discover(LibraryDiscovery(store: h.store, staging: h.staging))
+        try await engine.setIntent(.manual)
+        await untilTransfers("A single preparation hold stops the selected library lane.") { await engine.currentSnapshot.preparingServerLibrary }
+        await engine.conditionsChanged()
+        let waiting = await engine.currentSnapshot
+        XCTAssertEqual(waiting.intent, .manual)
+        XCTAssertEqual(waiting.selectionProgress?.pending, 0)
+        XCTAssertEqual(waiting.selectionProgress?.unchecked, 100)
+        XCTAssertEqual(h.server.checkCallCount, 1, "One server preparation response holds all 100 queued photos.")
+        XCTAssertEqual(EngineBackend.activity(waiting, preferences: nil), "Preparing server library")
+        XCTAssertTrue(h.staging.staged.isEmpty)
+        XCTAssertTrue(h.uploads.uploads.isEmpty)
+        let jobs = try await h.store.queuePage(lane: .library, after: nil, limit: 200)
+        XCTAssertEqual(jobs.count, 100)
+        XCTAssertTrue(jobs.allSatisfy { $0.state == .queued })
+        try await engine.setIntent(.paused)
+        h.clock.advance(by: .seconds(120))
+        await engine.conditionsChanged()
+        let paused = await engine.currentSnapshot
+        XCTAssertEqual(paused.intent, .paused)
+        XCTAssertEqual(paused.selectionProgress?.pending, 0)
+        XCTAssertEqual(h.server.checkCallCount, 1)
+        XCTAssertTrue(h.uploads.uploads.isEmpty)
+        await engine.stop()
+        await h.tearDown()
+    }
+
     private func makeEngine(_ h: LibraryJobHarness, checker: any KnownBackupCopyChecking) -> TransferEngine<TestClock> {
         let executor = LibraryJobExecutor(store: h.store, staging: h.staging, server: h.server, uploader: h.uploads,
                                          layout: h.group.layout, account: LibraryJobHarness.account, knownBackupChecker: checker)

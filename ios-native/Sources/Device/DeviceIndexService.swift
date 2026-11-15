@@ -45,7 +45,7 @@ extension DeviceIndexServer {
     func identities(checksum: String?, cloudID: String?) async throws -> [LocalAssetMatch] {
         guard checksum != nil || cloudID != nil else { return [] }
         return try await identities()?.filter { row in
-            (checksum != nil && row.checksum == checksum) || (cloudID != nil && row.cloudID == cloudID)
+            (checksum != nil && row.fileChecksum == checksum) || (cloudID != nil && row.cloudID == cloudID)
         } ?? []
     }
 }
@@ -197,7 +197,7 @@ actor DeviceIndexService {
             let rows = all.filter(\.visible), hidden = all.filter { !$0.visible }
             self.rows = rows
             byID = Dictionary(rows.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
-            byHash = Dictionary(rows.map { ($0.checksum, $0.assetID) }, uniquingKeysWith: { first, _ in first })
+            byHash = Dictionary(rows.compactMap { row in row.fileChecksum.map { ($0, row.assetID) } }, uniquingKeysWith: { first, _ in first })
             byCloud = Dictionary(grouping: rows.filter { $0.cloudID != nil }, by: { $0.cloudID ?? "" })
             hiddenByID = Dictionary(hidden.map { ($0.assetID, $0) }, uniquingKeysWith: { first, _ in first })
             hiddenByCloud = Dictionary(grouping: hidden.filter { $0.cloudID != nil }, by: { $0.cloudID ?? "" })
@@ -272,18 +272,18 @@ actor DeviceIndexService {
         }
         let receiptRead = await backup.receipt(for: photo.id, account: account)
         guard authorized() else { return .unavailable(message: "Your access changed. Open the photo again.") }
-        var candidates: [(id: String, checksum: String)] = []
+        var candidates: [(id: String, checksum: String, contentProof: Bool)] = []
         if let revision = current.photo.modified.map(AssetRevision.init),
            case .available(let stored) = receiptRead, let receipt = stored, receipt.revision == revision {
-            candidates.append((receipt.original.id, receipt.original.checksum))
+            candidates.append((receipt.original.id, receipt.original.checksum, true))
         }
         if items[photo.id]?.photo.modified == current.photo.modified,
            let remoteID = associations[photo.id], let identity = remotes.byID[remoteID] {
-            candidates.append((remoteID, identity.checksum))
+            candidates.append((remoteID, identity.checksum, false))
         }
         if current.unadjusted, let cloudID = current.cloudID,
            let identity = remotes.byCloud[cloudID]?.first(where: { LocalIdentityMatch.matches(current.photo, remote: $0) }) {
-            candidates.append((identity.assetID, identity.checksum))
+            candidates.append((identity.assetID, identity.checksum, false))
         }
         let fingerprint: DeviceFingerprint?
         if let known = fingerprints?[photo.id] { fingerprint = known }
@@ -296,10 +296,10 @@ actor DeviceIndexService {
             catch { return .unavailable(message: "Could not check the photo’s server identity. Try again.") }
             guard authorized() else { return .unavailable(message: "Your access changed. Open the photo again.") }
             for identity in identities where identity.visible {
-                let exactChecksum = checksum != nil && identity.checksum == checksum
+                let exactChecksum = checksum != nil && identity.fileChecksum == checksum
                 let exactCloud = cloudID != nil && identity.cloudID == cloudID && LocalIdentityMatch.matches(current.photo, remote: identity)
                 if (exactChecksum || exactCloud), !candidates.contains(where: { $0.id == identity.assetID && $0.checksum == identity.checksum }) {
-                    candidates.append((identity.assetID, identity.checksum))
+                    candidates.append((identity.assetID, identity.checksum, false))
                 }
             }
         }
@@ -331,7 +331,7 @@ actor DeviceIndexService {
             }
             guard let copy, authorized(),
                   copy.identity.assetID == candidate.id, copy.identity.visible,
-                  copy.identity.checksum == candidate.checksum,
+                  (candidate.contentProof ? copy.identity.fileChecksum == candidate.checksum : copy.identity.checksum == candidate.checksum),
                   copy.asset.id == candidate.id, !copy.asset.isTrashed, copy.asset.visibility == .timeline else { continue }
             if let authorization, copy.asset.ownerId != authorization.account.userID { continue }
             guard await sourceIsCurrent(photo, access: access), authorized() else {
@@ -555,14 +555,14 @@ actor DeviceIndexService {
             guard let item = items[id] else { continue }
             let photo = item.photo
             let receipt = receipts[id].flatMap { photo.modified.map(AssetRevision.init) == $0.revision ? $0.original : nil }
-            if let receipt, remotes.byID[receipt.id]?.checksum == receipt.checksum {
+            if let receipt, remotes.byID[receipt.id]?.fileChecksum == receipt.checksum {
                 result[id] = receipt.id
             } else if let fingerprint = known[id], fingerprint.isCurrent(for: photo.modified), let remote = remotes.byHash[fingerprint.checksum] {
                 result[id] = remote
             } else if item.unadjusted, let cloudID = item.cloudID,
                       let remote = remotes.byCloud[cloudID]?.first(where: { LocalIdentityMatch.matches(photo, remote: $0) }) {
                 result[id] = remote.assetID
-            } else if let receipt, remotes.hiddenByID[receipt.id]?.checksum == receipt.checksum {
+            } else if let receipt, remotes.hiddenByID[receipt.id]?.fileChecksum == receipt.checksum {
                 // Uploaded as a photo the timeline doesn't show: the server keeps one checksum per
                 // owner, so a fingerprint could only name that photo again.
                 continue
@@ -741,14 +741,18 @@ extension APIClient {
         guard asset.id == id, asset.ownerId == userID, !asset.isTrashed, asset.visibility == .timeline,
               let checksum = record.checksum, !checksum.isEmpty else { return nil }
         return DeviceServerCopy(identity: LocalAssetMatch(assetID: id, checksum: checksum, cloudID: nil,
-                                                          createdAt: nil, adjustmentTime: nil, latitude: nil, longitude: nil), asset: asset)
+                                                          createdAt: nil, adjustmentTime: nil, latitude: nil, longitude: nil,
+                                                          checksumAlgorithm: record.checksumAlgorithm, contentChecksum: record.contentChecksum, isExternal: record.isExternal), asset: asset)
     }
 }
 
 private struct DeviceServerCopyRecord: Decodable, Sendable {
     let asset: Asset
     let checksum: String?
-    private enum CodingKeys: String, CodingKey { case checksum, deletedAt }
+    let checksumAlgorithm: String?
+    let contentChecksum: String?
+    let isExternal: Bool?
+    private enum CodingKeys: String, CodingKey { case checksum, checksumAlgorithm, contentChecksum, isExternal, libraryId, deletedAt }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -756,5 +760,10 @@ private struct DeviceServerCopyRecord: Decodable, Sendable {
         if try values.decodeIfPresent(Date.self, forKey: .deletedAt) != nil { decoded.isTrashed = true }
         asset = decoded
         checksum = try values.decodeIfPresent(String.self, forKey: .checksum)
+        checksumAlgorithm = try values.decodeIfPresent(String.self, forKey: .checksumAlgorithm)
+        contentChecksum = try values.decodeIfPresent(String.self, forKey: .contentChecksum)
+        if let explicit = try values.decodeIfPresent(Bool.self, forKey: .isExternal) { isExternal = explicit }
+        else if values.contains(.libraryId) { isExternal = !(try values.decodeNil(forKey: .libraryId)) }
+        else { isExternal = nil }
     }
 }

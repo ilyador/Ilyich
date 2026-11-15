@@ -176,6 +176,7 @@ actor TransferStore: ReceiptQuery {
                 INSERT INTO confirmations(local_id,modification_date,confirmed_at) VALUES(?,?,?) \
                 ON CONFLICT(local_id) DO UPDATE SET modification_date=excluded.modification_date,confirmed_at=excluded.confirmed_at
                 """, [.text(completion.localID), .real(completion.revision.referenceSeconds), .date(completion.confirmedAt)])
+            try db.run("INSERT OR REPLACE INTO confirmation_copies(local_id,asset_id) VALUES(?,?)", [.text(completion.localID), .text(completion.assetID)])
             if let receipt = completion.receipt {
                 var previous: String?
                 try db.run("SELECT original_id FROM receipts WHERE local_id=?", [.text(completion.localID)]) { previous = $0.text(0) }
@@ -357,6 +358,7 @@ actor TransferStore: ReceiptQuery {
         http_status INTEGER,error_domain TEXT,error_code INTEGER)
         """,
         "CREATE INDEX IF NOT EXISTS attempts_job ON attempts(job_id)",
+        "CREATE TABLE IF NOT EXISTS confirmation_copies(local_id TEXT PRIMARY KEY,asset_id TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS confirmations(local_id TEXT PRIMARY KEY,modification_date NOT NULL,confirmed_at)",
         """
         CREATE TABLE IF NOT EXISTS receipts(local_id TEXT PRIMARY KEY,modification_date NOT NULL,original_id TEXT NOT NULL,\

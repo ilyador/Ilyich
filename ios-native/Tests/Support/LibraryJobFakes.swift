@@ -147,6 +147,8 @@ final class FakeTransferServer: TransferServerAPI {
 
     private struct State {
         var held: [String: Holding] = [:]
+        var checkFailure: ServerFailure?
+        var checkCallCount = 0
         var remoteAssets: [String: BackupRemoteAsset] = [:]
         var checks: [Check] = []
         var requests: [Request] = []
@@ -158,14 +160,18 @@ final class FakeTransferServer: TransferServerAPI {
 
     /// The server already holds a file with this checksum.
     func hold(checksum: String, as holding: Holding) { state.withLock { $0.held[checksum] = holding } }
+    func failChecks(_ error: ServerFailure?) { state.withLock { $0.checkFailure = error } }
     func remote(_ asset: BackupRemoteAsset) { state.withLock { $0.remoteAssets[asset.id] = asset } }
     func pair(_ asset: String, with motion: String) { state.withLock { $0.pairings[asset] = motion } }
+    var checkCallCount: Int { state.withLock { $0.checkCallCount } }
     var checks: [Check] { state.withLock { $0.checks } }
     var requests: [Request] { state.withLock { $0.requests } }
     var paired: [String: String] { state.withLock { Dictionary($0.paired.map { ($0.asset, $0.motion) }, uniquingKeysWith: { $1 }) } }
 
     func bulkUploadCheck(_ items: [UploadCheck.Item]) async throws -> [UploadCheckResponse.Result] {
-        try await results(for: items)
+        state.withLock { $0.checkCallCount += 1 }
+        if let failure = state.withLock({ $0.checkFailure }) { throw failure }
+        return try await results(for: items)
     }
 
     private func results(for items: [UploadCheck.Item]) async throws -> [UploadCheckResponse.Result] {
@@ -197,7 +203,13 @@ final class FakeTransferServer: TransferServerAPI {
     }
 
     func remoteAsset(id: String) async throws -> BackupRemoteAsset {
-        state.withLock { $0.remoteAssets[id] ?? BackupRemoteAsset(id: id, ownerId: "owner", checksum: "", isTrashed: false, livePhotoVideoId: $0.pairings[id]) }
+        state.withLock { state in
+            if let remote = state.remoteAssets[id] { return remote }
+            let checksum = state.held.first { _, held in
+                if case .duplicate(let remoteID, _) = held { return remoteID == id }; return false
+            }?.key ?? ""
+            return BackupRemoteAsset(id: id, ownerId: "owner", checksum: checksum, isTrashed: false, livePhotoVideoId: state.pairings[id])
+        }
     }
 
     func livePhotoVideoID(of assetID: String) async throws -> String? { state.withLock { $0.pairings[assetID] } }

@@ -3,6 +3,15 @@ import XCTest
 @testable import Ilyich
 
 @MainActor final class BackupStatisticsTests: XCTestCase {
+    func testPreparationIsVisibleWhileWaitingButNeverOverridesUserPause() {
+        var snapshot = Self.snapshot(remaining: 100, confirmed: 0)
+        snapshot.intent = .manual
+        snapshot.preparingServerLibrary = true
+        XCTAssertTrue(BackupStatistics(snapshot: snapshot).preparingServerLibrary)
+        snapshot.intent = .paused
+        XCTAssertFalse(BackupStatistics(snapshot: snapshot).preparingServerLibrary)
+    }
+
     func testDiscoveryGrowthNeverTurnsHistoricalConfirmationsIntoRunProgress() {
         var snapshot = Self.snapshot(remaining: 2, confirmed: 10_000, failed: 1)
         snapshot.phase = .discovering

@@ -19,6 +19,13 @@ final class FailureMappingTests: XCTestCase {
     private let immich = ["Content-Type": "application/json", "X-Correlation-ID": "5f0c3c35-6a1f-4b5c-9a52-0c6e9f3e2a11"]
     private let html = "<html><head><title>401 Authorization Required</title></head><body><center><h1>401 Authorization Required</h1></center><hr><center>nginx</center></body></html>"
 
+    func testExternalPreparationUsesMachineCodeAndDoesNotBlameAnItem() {
+        let body = #"{"code":"EXTERNAL_CONTENT_FINGERPRINTS_PENDING","message":"Localized preparation text"}"#
+        XCTAssertEqual(failure(503, headers: immich, body: body), .externalContentFingerprintsPending)
+        XCTAssertEqual(failure(503, body: body), .http(503, nil), "A proxy body cannot create an account preparation hold.")
+        XCTAssertEqual(TransferFailureClassifier.classify(ServerFailure.externalContentFingerprintsPending), .transient(retryAfter: .seconds(60)))
+    }
+
     func testSuccessPassesAndImmichErrorsKeepTheirMessage() {
         XCTAssertNil(failure(200, body: "{}"))
         XCTAssertNil(failure(204))

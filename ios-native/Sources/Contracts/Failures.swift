@@ -13,6 +13,8 @@ enum ServerFailure: Error, Equatable, Sendable {
     case forbidden(String?)
     case notFound
     case http(Int, String?)
+    /// The server cannot prove absence while external file fingerprints are being prepared.
+    case externalContentFingerprintsPending
     /// The answer could not be read.
     case undecodable
     /// Refused on the phone because read-only mode is on.
@@ -47,6 +49,7 @@ extension ServerFailure {
         // Immich never asks for proxy authentication.
         case 407: self = .proxyRejected(407)
         case 404: self = .notFound
+        case 503 where immich?.code == "EXTERNAL_CONTENT_FINGERPRINTS_PENDING": self = .externalContentFingerprintsPending
         default: self = .http(status, immich?.message)
         }
     }
@@ -58,11 +61,13 @@ extension ServerFailure {
 /// body to read is taken as Immich's.
 struct ImmichError: Equatable, Sendable {
     let message: String?
+    let code: String?
 
     init?(response: HTTPURLResponse, body: Data?) {
         guard response.value(forHTTPHeaderField: "X-Correlation-ID") != nil else { return nil }
-        guard let body, !body.isEmpty else { message = nil; return }
+        guard let body, !body.isEmpty else { message = nil; code = nil; return }
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
+        code = object["code"] as? String
         if let text = object["message"] as? String { message = text }
         else if let texts = object["message"] as? [String] { message = texts.joined(separator: " ") }
         else { message = nil }
@@ -77,6 +82,7 @@ extension ServerFailure: LocalizedError {
         case .proxyRejected(let status): "A proxy in front of your server refused the request (HTTP \(status)). Check the network settings for this server."
         case .forbidden: "This account cannot access that item. It may require unlocking."
         case .notFound: "This item is unavailable. Refresh and try again."
+        case .externalContentFingerprintsPending: "Preparing your server library. Backup will check again shortly."
         case .http(let status, _): "The server could not complete the request (HTTP \(status))."
         case .undecodable: "The server returned data this version of Ilyich could not read."
         case .readOnly: ReadOnlyPolicy.ReadOnlyError().errorDescription

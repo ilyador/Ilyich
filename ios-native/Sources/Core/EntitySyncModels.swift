@@ -145,6 +145,13 @@ struct LocalAssetMatch: Sendable {
     let longitude: Double?
     /// The timeline shows it: not in the trash, with timeline visibility.
     var visible = true
+    var checksumAlgorithm: String? = "sha1"
+    var contentChecksum: String? = nil
+    var isExternal: Bool? = nil
+    var backupAvailable = true
+    var fileChecksum: String? {
+        ContentFingerprint.checksum(primary: checksum, algorithm: checksumAlgorithm, content: contentChecksum, isExternal: isExternal)
+    }
 }
 
 /// The server checkpoints belong to the login session, not merely to the account.

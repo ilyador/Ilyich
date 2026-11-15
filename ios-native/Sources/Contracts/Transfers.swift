@@ -170,6 +170,7 @@ struct TransferSnapshot: Hashable, Sendable {
     /// Measured selected inventory, absent until the current selection has actually been read.
     var selectionProgress: SelectionProgress? = nil
     var checkingExistingBackups: Bool = false
+    var preparingServerLibrary: Bool = false
 }
 
 enum EnqueueResult: Hashable, Sendable {

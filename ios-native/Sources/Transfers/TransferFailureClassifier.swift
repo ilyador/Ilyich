@@ -202,6 +202,7 @@ enum TransferFailureClassifier {
         case .proxyRejected: .account(.proxyRejected)
         case .readOnly: .account(.readOnly)
         case .passwordChangeRequired: .account(.passwordChange)
+        case .externalContentFingerprintsPending: .transient(retryAfter: .seconds(60))
         case .http(let status, let message): classify(status: status, message: message, context: context)
         case .undecodable: .transient(retryAfter: nil)
         case .forbidden, .notFound: unknown(failure, context: context)
