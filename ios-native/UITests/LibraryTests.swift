@@ -60,15 +60,11 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(placed(), "The fixture's video asset \(id) must become visible while scrolling the grid.")
         return video
     }
-    @MainActor private func assertServerStatus(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        let status = app.descendants(matching: .any)["viewer.backupStatus"]
-        XCTAssertTrue(status.waitForExistence(timeout: 5), "The viewer exposes this item's backup status.", file: file, line: line)
-        XCTAssertTrue(status.label.contains("On server"), "A server asset is marked On server while playback is independent.", file: file, line: line)
-    }
-    @MainActor private func assertNotServerStatus(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        let status = app.descendants(matching: .any)["viewer.backupStatus"]
-        XCTAssertTrue(status.waitForExistence(timeout: 5), "The viewer exposes the local item's backup status.", file: file, line: line)
-        XCTAssertFalse(status.label.contains("On server"), "A local-only item is not labeled as present on the server.", file: file, line: line)
+    @MainActor private func assertNoActiveBackupProgress(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.backupStatus"].exists,
+                        "An idle or completed item has no active status label.", file: file, line: line)
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.backupProgress"].exists,
+                        "A completed or idle item has no backup-progress overlay.", file: file, line: line)
     }
     @MainActor private func waitForStripPosition(_ strip: XCUIElement, _ expected: Int,
                                                   file: StaticString = #filePath, line: UInt = #line) -> Int? {
@@ -1448,17 +1444,18 @@ final class LibraryTests: XCTestCase {
         let back = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: app.textFields["library.search"])
         XCTAssertEqual(XCTWaiter.wait(for: [back], timeout: 5), .completed, "A swipe down closes a video, as it does a photo.")
     }
-    @MainActor func testServerOnlyLibraryTileShowsItsBackupStatus() {
+    @MainActor func testCompletedServerOnlyLibraryTileHasNoProgressBadge() {
         let app = launch(extraArguments: ["--ui-testing-mutable-library"], fixturePort: "18191")
         let grid = app.collectionViews["library.grid"]
         let tile = grid.cells.element(boundBy: 1)
         XCTAssertTrue(tile.waitForExistence(timeout: 15))
-        let onServer = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "On server"), object: tile)
-        XCTAssertEqual(XCTWaiter.wait(for: [onServer], timeout: 10), .completed,
-                       "A server-only library tile exposes its backup state without a local Photos match.")
-        capture(app, "Library — server-only backup status badges")
+        XCTAssertFalse(tile.descendants(matching: .any)["library.backupProgress"].exists,
+                        "Completed server assets do not show an active progress indicator.")
+        XCTAssertFalse(tile.label.contains("On server"), "Completed server assets do not show a disk badge.")
+        XCTAssertFalse(tile.label.contains("Backed up"), "Completed server assets do not show a completion badge.")
+        capture(app, "Library — completed server item without a backup badge")
         tapPhoto(tile)
-        assertServerStatus(app)
+        assertNoActiveBackupProgress(app)
     }
     @MainActor func testViewerPagesFromServerAssetThroughLocalOnlyItemsAndBack() {
         let app = launch(extraArguments: ["--ui-testing-mixed-library"], fixturePort: "18191")
@@ -1470,19 +1467,15 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(strip.waitForExistence(timeout: 10))
         func position() -> Int? { (strip.value as? String)?.split(separator: " ").first.flatMap { Int($0) } }
         guard let remotePosition = position() else { return XCTFail("The photo strip reports its selected item.") }
-        assertServerStatus(app)
-
         app.swipeRight()
         XCTAssertEqual(waitForStripPosition(strip, remotePosition - 1), remotePosition - 1, "Paging reaches the local-only video from the server item.")
-        assertNotServerStatus(app)
         app.swipeRight()
         XCTAssertEqual(waitForStripPosition(strip, remotePosition - 2), remotePosition - 2, "Paging reaches the local-only photo next.")
-        assertNotServerStatus(app)
         app.swipeLeft()
         XCTAssertEqual(waitForStripPosition(strip, remotePosition - 1), remotePosition - 1)
         app.swipeLeft()
         XCTAssertEqual(waitForStripPosition(strip, remotePosition), remotePosition, "Paging returns to the server item through both local entries.")
-        assertServerStatus(app)
+        assertNoActiveBackupProgress(app)
     }
     @MainActor func testViewerOpenedFromLocalOnlyItemCanPageToServerAndBack() {
         let app = launch(extraArguments: ["--ui-testing-mixed-library"], fixturePort: "18191")
@@ -1494,18 +1487,15 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(strip.waitForExistence(timeout: 10))
         func position() -> Int? { (strip.value as? String)?.split(separator: " ").first.flatMap { Int($0) } }
         guard let localPosition = position() else { return XCTFail("The photo strip reports its selected item.") }
-        assertNotServerStatus(app)
         app.swipeLeft()
         XCTAssertEqual(waitForStripPosition(strip, localPosition + 1), localPosition + 1, "The local photo pages to its local-only video neighbor.")
-        assertNotServerStatus(app)
         app.swipeLeft()
         XCTAssertEqual(waitForStripPosition(strip, localPosition + 2), localPosition + 2, "Paging from the local-only item reaches the server asset.")
-        assertServerStatus(app)
+        assertNoActiveBackupProgress(app)
         app.swipeRight()
         XCTAssertEqual(waitForStripPosition(strip, localPosition + 1), localPosition + 1)
         app.swipeRight()
         XCTAssertEqual(waitForStripPosition(strip, localPosition), localPosition, "Paging returns to the directly opened local-only photo.")
-        assertNotServerStatus(app)
     }
     @MainActor func testVideoPosterStaysVisibleDuringDelayedPlayback() {
         let app = launch(extraArguments: ["--ui-testing-mutable-library"], fixturePort: "18191")
@@ -1515,7 +1505,7 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(hasRenderedPhoto(loadingPoster), "The loading poster contains the fixture image, not an empty placeholder.")
         XCTAssertTrue(app.descendants(matching: .any)["viewer.videoPreparingSurface"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Preparing video"].waitForExistence(timeout: 5))
-        assertServerStatus(app)
+        assertNoActiveBackupProgress(app)
         capture(app, "Viewer video — loading with poster")
         XCTAssertTrue(app.descendants(matching: .any)["viewer.videoReady"].waitForExistence(timeout: 15), "The delayed rendition eventually displays its first frame.")
         capture(app, "Viewer video — ready after loading")
@@ -1531,7 +1521,7 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(failedPoster.exists, "The poster stays visible after playback fails.")
         XCTAssertTrue(hasRenderedPhoto(failedPoster), "The failed preview still displays the poster image.")
         XCTAssertTrue(app.staticTexts["Video couldn’t load"].exists)
-        assertServerStatus(app)
+        assertNoActiveBackupProgress(app)
         capture(app, "Viewer video — error with poster")
         XCTAssertTrue(retry.isHittable, "Retry remains usable in the viewer.")
         try await setFixtureRetryReady(true)
@@ -1549,7 +1539,7 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(hasRenderedPhoto(poster))
         XCTAssertTrue(app.staticTexts["Video couldn’t load"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.buttons["viewer.mediaRetry"].isHittable, "Retry remains reachable with Accessibility XXXL text.")
-        assertServerStatus(app)
+        assertNoActiveBackupProgress(app)
         capture(app, "Viewer video — error at Accessibility XXXL")
     }
     /// The viewer's controls sit where Photos puts them: back, the title and the actions menu along

@@ -5,18 +5,29 @@ struct PhotoBackupPresentation: Equatable {
     let title: String
     let symbol: String
     let detail: String
+    /// Only work currently happening belongs over the photo. Saved status stays in Info.
+    let isActive: Bool
+    let progress: Double?
 
     init(status: PhotoBackupStatus?, isServerAsset: Bool) {
+        switch status?.phase {
+        case .uploading(let fraction), .preparing(let fraction):
+            isActive = true
+            progress = fraction.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil }
+        default:
+            isActive = false
+            progress = nil
+        }
         switch status?.phase {
         case .completed:
             title = "Backed up"; symbol = "checkmark.icloud"
             detail = "The backup of this version completed. Video playback may still need time to become available."
-        case .uploading(let fraction):
-            title = fraction.map { "Uploading · \($0.formatted(.percent.precision(.fractionLength(0))))" } ?? "Uploading"
+        case .uploading:
+            title = progress.map { "Uploading · \($0.formatted(.percent.precision(.fractionLength(0))))" } ?? "Uploading"
             symbol = "icloud.and.arrow.up"
             detail = "This item is being sent to your server. Any percentage is for the file currently uploading; a Live Photo can contain more than one file."
-        case .preparing(let fraction):
-            title = fraction.map { "Downloading from iCloud · \($0.formatted(.percent.precision(.fractionLength(0))))" } ?? "Preparing backup"
+        case .preparing:
+            title = progress.map { "Downloading from iCloud · \($0.formatted(.percent.precision(.fractionLength(0))))" } ?? "Preparing backup"
             symbol = "arrow.triangle.2.circlepath.icloud"
             detail = "Ilyich is preparing this item for backup. It may be reading the original from Photos or downloading it from iCloud."
         case .waiting(let message):

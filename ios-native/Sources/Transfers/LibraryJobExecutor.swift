@@ -342,7 +342,8 @@ final class LibraryJobExecutor: JobExecuting {
         try await context.advance(to: .submitted)
         onSubmitted()
 
-        let record = try await uploader.outcome(for: key) { sent, expected in Task { await context.progress(sent: sent, expected: expected) } }
+        let phase = part == .motion ? Phase.motion : Phase.original
+        let record = try await uploader.outcome(for: key) { sent, expected in Task { await context.progress(sent: sent, expected: expected, phase: phase) } }
         try await context.ensureOwned()
         return try await apply(record, attempt: attempt, part: part, sidecar: sidecar, fields: fields, stage: stage, run: run)
     }

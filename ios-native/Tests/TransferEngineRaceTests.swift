@@ -5,6 +5,49 @@ import XCTest
 
 /// The transfer engine's one loop against commands that arrive while a job runs (B2).
 final class TransferEngineRaceTests: XCTestCase {
+    func testLivePhotoNextPartPreparationDropsFinishedMotionBytesAndRejectsLateCallbacks() async throws {
+        let h = try await TransferEngineHarness()
+        let executor = LivePartProgressExecutor()
+        let engine = TransferEngine(store: h.store, executor: executor, authorization: h.authorization,
+                                    clock: h.clock, now: { TransferEngineHarness.base }, random: { 0.5 })
+        _ = try await engine.enqueue([h.photo("live")])
+        try await engine.setIntent(.automatic)
+        try await engine.start()
+        await untilTransfers("The motion file has sent all of its bytes.") { executor.motion.waiting == 1 }
+        let revision = AssetRevision(referenceSeconds: 700_000_000.25)
+        let motion = try await engine.photoBackupStatus(localID: "live", revision: revision)
+        XCTAssertEqual(motion.phase, .uploading(progress: 1))
+
+        let seen = Locked<[TransferSnapshot]>([])
+        let stream = await engine.snapshots()
+        let observer = Task { for await snapshot in stream { seen.mutate { $0.append(snapshot) } } }
+        executor.motion.open()
+        await untilTransfers("The still is preparing after the motion result, including a late motion callback.") { executor.preparing.waiting == 1 }
+        let preparing = try await engine.photoBackupStatus(localID: "live", revision: revision)
+        XCTAssertEqual(preparing.phase, .preparing(progress: nil))
+        let snapshot = await engine.currentSnapshot
+        XCTAssertNil(snapshot.fileProgress)
+        XCTAssertEqual(snapshot.backupProgress?.sentBytes, 0)
+        XCTAssertNil(snapshot.backupProgress?.expectedBytes)
+        h.clock.advance(by: .milliseconds(250))
+        await untilTransfers("The part boundary publishes so item indicators drop the old fraction.") {
+            seen.value.contains { $0.backupPhase == .running && $0.backupProgress?.sentBytes == 0 && $0.fileProgress == nil }
+        }
+
+        executor.preparing.open()
+        await untilTransfers("The still reports its own file's bytes.") { executor.still.waiting == 1 }
+        let still = try await engine.photoBackupStatus(localID: "live", revision: revision)
+        XCTAssertEqual(still.phase, .uploading(progress: 0.25))
+        let uploading = await engine.currentSnapshot
+        XCTAssertEqual(uploading.backupProgress?.sentBytes, 25)
+        XCTAssertEqual(uploading.backupProgress?.expectedBytes, 100)
+        observer.cancel()
+        executor.still.open()
+        try await untilTransfers("The Live Photo completes.") { try await h.confirmed("live") }
+        await engine.stop()
+        await h.tearDown()
+    }
+
     func testCloudPreparationProgressIsSeparateFromUploadAndLateCallbacksCannotRevivePausedWork() async throws {
         let h = try await TransferEngineHarness()
         let gate = TransferGate()
@@ -229,5 +272,27 @@ final class TransferEngineRaceTests: XCTestCase {
         reader.cancel()
         gate.open()
         await h.tearDown()
+    }
+}
+
+private struct LivePartProgressExecutor: JobExecuting {
+    let motion = TransferGate()
+    let preparing = TransferGate()
+    let still = TransferGate()
+
+    func execute(_ job: LeasedJob, context: JobContext) async throws -> JobResult {
+        try await context.advance(to: .submitting, phase: LibraryJobExecutor.Phase.motion)
+        await context.progress(sent: 100, expected: 100, phase: LibraryJobExecutor.Phase.motion)
+        await motion.wait()
+        try await context.advance(to: .staged, phase: LibraryJobExecutor.Phase.motionUploaded)
+        // URLSession's callback can already have queued a Task when the motion result arrives.
+        await context.progress(sent: 100, expected: 100, phase: LibraryJobExecutor.Phase.motion)
+        await preparing.wait()
+        try await context.advance(to: .submitting, phase: LibraryJobExecutor.Phase.original)
+        await context.progress(sent: 25, expected: 100, phase: LibraryJobExecutor.Phase.original)
+        await context.progress(sent: 100, expected: 100, phase: LibraryJobExecutor.Phase.motion)
+        await still.wait()
+        try await context.ensureOwned()
+        return FakeJobExecutor.result(for: job)
     }
 }

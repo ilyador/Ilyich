@@ -861,19 +861,21 @@ struct PhotoGrid: UIViewRepresentable {
     }
 }
 
+/// A quiet feed: only active work overlays the photo, never saved/server status.
 struct PhotoGridBackupBadge: Equatable {
     let symbol: String?
     let accessibilityText: String?
+    let progress: Double?
 
     init(hasLocalPhoto: Bool, isServerAsset: Bool, status: PhotoBackupStatus?) {
-        guard hasLocalPhoto || isServerAsset else {
-            symbol = nil
-            accessibilityText = nil
+        let presentation = PhotoBackupPresentation(status: hasLocalPhoto ? status : nil, isServerAsset: isServerAsset)
+        guard hasLocalPhoto, presentation.isActive else {
+            symbol = nil; accessibilityText = nil; progress = nil
             return
         }
-        let presentation = PhotoBackupPresentation(status: hasLocalPhoto ? status : nil, isServerAsset: isServerAsset)
         symbol = presentation.symbol
         accessibilityText = presentation.title
+        progress = presentation.progress
     }
 }
 
@@ -903,6 +905,9 @@ struct PhotoGridBackupBadge: Equatable {
     private var backupBadge: UIView?
     private var backupSymbol: UIImageView?
     private var backupSymbolName: String?
+    private var backupProgress: CAShapeLayer?
+    private var backupProgressTrack: CAShapeLayer?
+    private var backupSpinner: UIActivityIndicatorView?
     private var backupStatus: PhotoBackupStatus?
     private var backupIsServerAsset = false
     private var backupHasLocalPhoto = false
@@ -958,7 +963,14 @@ struct PhotoGridBackupBadge: Equatable {
         }
         if let backupBadge, backupBadge.superview != nil {
             backupBadge.frame = CGRect(x: bounds.minX + 4, y: bounds.maxY - 26, width: 22, height: 22)
-            backupSymbol?.frame = backupBadge.bounds.insetBy(dx: 5, dy: 5)
+            backupSymbol?.frame = backupBadge.bounds.insetBy(dx: 6, dy: 6)
+            let path = UIBezierPath(arcCenter: CGPoint(x: 11, y: 11), radius: 9,
+                                    startAngle: -.pi / 2, endAngle: .pi * 1.5, clockwise: true).cgPath
+            backupProgressTrack?.frame = backupBadge.bounds
+            backupProgress?.frame = backupBadge.bounds
+            backupProgressTrack?.path = path
+            backupProgress?.path = path
+            backupSpinner?.center = CGPoint(x: backupBadge.bounds.midX, y: backupBadge.bounds.midY)
         }
         if let chip = monthChip, chip.glass.superview != nil {
             let size = chip.label.intrinsicContentSize
@@ -1038,6 +1050,7 @@ struct PhotoGridBackupBadge: Equatable {
         let presentation = PhotoGridBackupBadge(hasLocalPhoto: hasLocalPhoto, isServerAsset: isServerAsset, status: status)
         guard let symbol = presentation.symbol else {
             backupSymbolName = nil
+            backupSpinner?.stopAnimating()
             detach(backupBadge)
             updateAccessibilityLabel()
             return
@@ -1047,7 +1060,17 @@ struct PhotoGridBackupBadge: Equatable {
             backupSymbol?.image = UIImage(systemName: symbol)
             backupSymbolName = symbol
         }
+        let fraction = presentation.progress
+        backupSymbol?.isHidden = fraction == nil
+        backupProgressTrack?.isHidden = fraction == nil
+        backupProgress?.isHidden = fraction == nil
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backupProgress?.strokeEnd = CGFloat(fraction ?? 0)
+        CATransaction.commit()
+        if fraction == nil { backupSpinner?.startAnimating() } else { backupSpinner?.stopAnimating() }
         attach(badge)
+        setNeedsLayout()
         updateAccessibilityLabel()
     }
     private func makeBackupBadge() -> UIView {
@@ -1056,6 +1079,27 @@ struct PhotoGridBackupBadge: Equatable {
         badge.layer.cornerRadius = 11
         badge.clipsToBounds = true
         badge.isUserInteractionEnabled = false
+        badge.accessibilityIdentifier = "library.backupProgress"
+        let track = CAShapeLayer()
+        track.fillColor = UIColor.clear.cgColor
+        track.strokeColor = UIColor.white.withAlphaComponent(0.25).cgColor
+        track.lineWidth = 2
+        badge.layer.addSublayer(track)
+        let progress = CAShapeLayer()
+        progress.fillColor = UIColor.clear.cgColor
+        progress.strokeColor = UIColor.white.cgColor
+        progress.lineWidth = 2
+        progress.lineCap = .round
+        progress.strokeEnd = 0
+        badge.layer.addSublayer(progress)
+        backupProgressTrack = track
+        backupProgress = progress
+        let spinner = UIActivityIndicatorView(style: .medium)
+        spinner.color = .white
+        spinner.hidesWhenStopped = true
+        spinner.transform = CGAffineTransform(scaleX: 0.65, y: 0.65)
+        badge.addSubview(spinner)
+        backupSpinner = spinner
         let image = UIImageView(frame: .zero)
         image.contentMode = .scaleAspectFit
         image.tintColor = .white

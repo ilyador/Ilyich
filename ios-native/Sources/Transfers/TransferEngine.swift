@@ -79,7 +79,7 @@ struct JobContext: Sendable {
     let lease: Lease
     fileprivate let owned: @Sendable (Lease) async -> Bool
     fileprivate let advanceTo: @Sendable (Lease, JobState, String?) async throws -> Void
-    fileprivate let report: @Sendable (Lease, Int64, Int64) async -> Void
+    fileprivate let report: @Sendable (Lease, Int64, Int64, String?) async -> Void
     fileprivate let preparation: @Sendable (Lease, Double?) async -> Void
     fileprivate let checking: @Sendable (Lease, Bool) async -> Void
     fileprivate let absent: @Sendable (Lease, AssetRevision) async -> Void
@@ -98,7 +98,7 @@ struct JobContext: Sendable {
     }
 
     /// Bytes of the current file sent so far.
-    func progress(sent: Int64, expected: Int64) async { await report(lease, sent, expected) }
+    func progress(sent: Int64, expected: Int64, phase: String? = nil) async { await report(lease, sent, expected, phase) }
     func preparationProgress(_ fraction: Double?) async { await preparation(lease, fraction) }
     func checkingExistingBackups(_ value: Bool) async { await checking(lease, value) }
     func checkedOriginalAbsent(revision: AssetRevision) async { await absent(lease, revision) }
@@ -172,6 +172,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var active: [Int64: Active] = [:]
     /// Bytes sent of each running job's current file.
     private var fileProgress: [Int64: (sent: Int64, expected: Int64)] = [:]
+    /// Reject a previous Live Photo part's callback queued before its phase finished.
+    private var fileProgressPhase: [Int64: String] = [:]
     private var preparationProgress: [Int64: Double] = [:]
     private var checkingExisting: Set<Int64> = []
     private let concurrency: Int
@@ -891,13 +893,14 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                         guard let self else { throw LeaseLost() }
                         try await self.advance(lease, to: state, phase: phase)
                     },
-                    report: { [weak self] lease, sent, expected in await self?.progress(lease, sent: sent, expected: expected) },
+                    report: { [weak self] lease, sent, expected, phase in await self?.progress(lease, sent: sent, expected: expected, phase: phase) },
                     preparation: { [weak self] lease, fraction in await self?.preparationChanged(lease, fraction: fraction) },
                     checking: { [weak self] lease, value in await self?.checkingExisting(lease, value: value) },
                     absent: { [weak self] lease, revision in await self?.checkedAbsent(lease, revision: revision) })
                 let executor = self.executor
                 active[stored.id] = Active(job: job, task: Task { try await executor.execute(job, context: context) },
                                            tokenDigest: current.tokenDigest, writeGeneration: current.writeGeneration)
+                fileProgressPhase[stored.id] = job.phase
                 return job
             }
         }
@@ -913,6 +916,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard active[id]?.job.lease == job.lease else { return }
         active[id] = nil
         fileProgress[id] = nil
+        fileProgressPhase[id] = nil
         preparationProgress[id] = nil
         checkingExisting.remove(id)
         switch result {
@@ -1026,14 +1030,20 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard try await store.advance(job: lease.job, token: lease.token, to: state, phase: phase) else { throw LeaseLost() }
         // ensureOwned after the await.
         guard owns(lease) else { throw LeaseLost() }
+        if let phase { fileProgressPhase[lease.job] = phase }
+        if state == .staging || state == .staged || state == .submitting {
+            fileProgress[lease.job] = nil
+        }
         if state == .submitted {
             submissions += 1
             resolveHandoffs(.handedToDaemon)
         }
+        await publish(refreshingCounts: false)
     }
 
-    private func progress(_ lease: Lease, sent: Int64, expected: Int64) async {
+    private func progress(_ lease: Lease, sent: Int64, expected: Int64, phase: String?) async {
         guard active[lease.job]?.job.lease == lease else { return }
+        guard phase == nil || fileProgressPhase[lease.job] == phase else { return }
         fileProgress[lease.job] = (sent, expected)
         await publish(refreshingCounts: false)
     }
@@ -1128,6 +1138,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         for running in released {
             active[running.job.lease.job] = nil
             fileProgress[running.job.lease.job] = nil
+            fileProgressPhase[running.job.lease.job] = nil
             preparationProgress[running.job.lease.job] = nil
             checkingExisting.remove(running.job.lease.job)
             running.task.cancel()

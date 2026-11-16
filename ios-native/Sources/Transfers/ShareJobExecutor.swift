@@ -299,7 +299,8 @@ final class ShareJobExecutor: JobExecuting {
         attempt.taskID = Int64(taskID)
         guard try await store.saveAttempt(attempt, session: .shareUpload, job: job.lease.job, token: job.lease.token) else { throw LeaseLost() }
         try await context.advance(to: .submitted)
-        let record = try await uploader.outcome(for: attemptKey) { sent, expected in Task { await context.progress(sent: sent, expected: expected) } }
+        let phase = part == .motion ? Phase.motion : Phase.original
+        let record = try await uploader.outcome(for: attemptKey) { sent, expected in Task { await context.progress(sent: sent, expected: expected, phase: phase) } }
         try await context.ensureOwned()
         return try await apply(record, attempt: attempt, part: part, sidecar: sidecar, fields: fields, run: run)
     }

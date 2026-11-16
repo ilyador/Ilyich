@@ -1,21 +1,71 @@
 import Foundation
 import XCTest
+import UIKit
 @testable import Ilyich
 
 final class PhotoBackupStatusTests: XCTestCase {
-    func testGridBadgeUsesSharedPresentationAndKeepsServerPresenceSeparate() {
-        let revision = AssetRevision(referenceSeconds: 700_000_000.25)
-        let completed = PhotoBackupStatus(localID: "phone", revision: revision, phase: .completed)
-        let outside = PhotoBackupStatus(localID: "old", revision: revision, phase: .outsideAutomaticBackup)
-        let notQueued = PhotoBackupStatus(localID: "unscheduled", revision: revision, phase: .notQueued)
+    func testFinishedAndInactiveItemsHaveNoOverlay() {
+        let inactive: [PhotoBackupPhase] = [.completed, .outsideAutomaticBackup, .notQueued, .unknown,
+                                           .waiting(message: nil), .paused, .needsAttention(message: "Retry needed")]
+        for phase in inactive {
+            let status = PhotoBackupStatus(localID: "phone", revision: nil, phase: phase)
+            for onServer in [false, true] {
+                let badge = PhotoGridBackupBadge(hasLocalPhoto: true, isServerAsset: onServer, status: status)
+                XCTAssertNil(badge.symbol, "Only active work belongs over an image: \(phase)")
+                XCTAssertNil(badge.accessibilityText)
+                XCTAssertFalse(PhotoBackupPresentation(status: status, isServerAsset: onServer).isActive)
+            }
+        }
+        XCTAssertNil(PhotoGridBackupBadge(hasLocalPhoto: false, isServerAsset: true, status: nil).symbol)
+        XCTAssertNil(PhotoGridBackupBadge(hasLocalPhoto: true, isServerAsset: false, status: nil).symbol)
+        // Saved backup information is still available in the Info sheet.
+        XCTAssertEqual(PhotoBackupPresentation(status: nil, isServerAsset: true).title, "On server")
+    }
 
-        XCTAssertEqual(PhotoGridBackupBadge(hasLocalPhoto: false, isServerAsset: false, status: nil).symbol, nil)
-        XCTAssertEqual(PhotoGridBackupBadge(hasLocalPhoto: true, isServerAsset: false, status: nil).symbol, "icloud")
-        XCTAssertEqual(PhotoGridBackupBadge(hasLocalPhoto: false, isServerAsset: true, status: nil).accessibilityText, "On server")
-        XCTAssertEqual(PhotoGridBackupBadge(hasLocalPhoto: true, isServerAsset: false, status: completed).accessibilityText, "Backed up")
-        XCTAssertEqual(PhotoGridBackupBadge(hasLocalPhoto: true, isServerAsset: false, status: outside).symbol, "icloud.slash")
-        XCTAssertEqual(PhotoGridBackupBadge(hasLocalPhoto: true, isServerAsset: false, status: notQueued).symbol, "icloud")
-        XCTAssertEqual(PhotoGridBackupBadge(hasLocalPhoto: true, isServerAsset: true, status: notQueued).accessibilityText, "On server")
+    func testOnlyActiveItemCarriesItsMeasuredProgress() {
+        for phase in [PhotoBackupPhase.uploading(progress: 0.42), .preparing(progress: 0.42)] {
+            let status = PhotoBackupStatus(localID: "active", revision: nil, phase: phase)
+            let presentation = PhotoBackupPresentation(status: status, isServerAsset: false)
+            let badge = PhotoGridBackupBadge(hasLocalPhoto: true, isServerAsset: false, status: status)
+            XCTAssertTrue(presentation.isActive)
+            XCTAssertEqual(presentation.progress, 0.42)
+            XCTAssertEqual(badge.progress, 0.42)
+            XCTAssertEqual(badge.accessibilityText, presentation.title)
+        }
+        let unknown = PhotoBackupPresentation(status: .init(localID: "active", revision: nil,
+            phase: .uploading(progress: nil)), isServerAsset: false)
+        XCTAssertTrue(unknown.isActive)
+        XCTAssertNil(unknown.progress, "Unknown byte counts must stay indeterminate.")
+    }
+
+    @MainActor func testThumbnailProgressIsVisibleOnlyUntilCompletionAndCellReuse() {
+        let cell = PhotoCell(frame: CGRect(x: 0, y: 0, width: 120, height: 120))
+        func overlay() -> UIView? { cell.contentView.subviews.first { $0.accessibilityIdentifier == "library.backupProgress" } }
+        func capture(_ name: String) {
+            cell.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: cell.bounds).image { cell.layer.render(in: $0.cgContext) }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = name; attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        cell.setBackupStatus(.init(localID: "active", revision: nil, phase: .uploading(progress: 0.42)),
+                             isServerAsset: false, hasLocalPhoto: true)
+        XCTAssertNotNil(overlay())
+        let title = PhotoBackupPresentation(status: .init(localID: "active", revision: nil,
+            phase: .uploading(progress: 0.42)), isServerAsset: false).title
+        XCTAssertTrue(cell.accessibilityLabel?.contains(title) == true)
+        capture("Thumbnail — uploading 42 percent")
+        cell.setBackupStatus(.init(localID: "active", revision: nil, phase: .preparing(progress: nil)),
+                             isServerAsset: false, hasLocalPhoto: true)
+        XCTAssertNotNil(overlay())
+        capture("Thumbnail — preparing without percentage")
+        cell.setBackupStatus(.init(localID: "active", revision: nil, phase: .completed),
+                             isServerAsset: true, hasLocalPhoto: true)
+        XCTAssertNil(overlay(), "Completion removes the overlay, including its spinner.")
+        cell.setBackupStatus(.init(localID: "active", revision: nil, phase: .uploading(progress: 0.2)),
+                             isServerAsset: false, hasLocalPhoto: true)
+        cell.prepareForReuse()
+        XCTAssertNil(overlay(), "An unrelated photo must never inherit the prior upload indicator.")
     }
 
     func testExactRevisionCompletionStaleRevisionAndPausedQueue() async throws {
