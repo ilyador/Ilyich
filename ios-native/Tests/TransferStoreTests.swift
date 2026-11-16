@@ -26,7 +26,7 @@ import XCTest
         XCTAssertEqual(try folder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true, "Kept out of iCloud backup.")
         let tables = try await store.dump().keys.sorted()
         XCTAssertEqual(tables, ["album_destinations", "attempts", "confirmation_copies", "confirmations", "engine_state", "jobs", "linked_albums", "meta",
-                                "notification_batches", "preferences", "receipts", "share_consumed", "source_originals", "stack_tasks", "stages"])
+                                "notification_batches", "preferences", "receipts", "share_consumed", "source_match_tasks", "source_originals", "stack_tasks", "stages"])
         await store.close()
         do {
             _ = try await store.meta()

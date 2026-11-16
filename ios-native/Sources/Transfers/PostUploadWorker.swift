@@ -138,10 +138,15 @@ actor PostUploadWorker {
             // The user asked: what backs off is tried now.
             if triggers.contains(.manualRun) || triggers.contains(.retried) { backoff = [:] }
             if triggers.contains(.manualRun) { _ = try? await store.requeueFailedFollowUps() }
+            if triggers.contains(.manualRun) || triggers.contains(.retried) {
+                try? await store.requeueSourceMatches(includeFailed: true)
+            } else if triggers.contains(.conditionsChanged) {
+                try? await store.requeueSourceMatches(includeFailed: false)
+            }
             let linked = linkedAlbumsOwed || triggers.contains(.drained) || triggers.contains(.manualRun)
             lastReport = await runPass(linkedAlbums: linked)
             if linked { linkedAlbumsOwed = lastReport.stopped }
-            scheduleRetryWake()
+            await scheduleRetryWake()
         }
         loop = nil
         let waiters = idleWaiters
@@ -161,6 +166,7 @@ actor PostUploadWorker {
             let preferences = try await store.preferences()
             requireCharging = preferences?.requireCharging ?? false
             try await addToAlbums(&report)
+            try await matchOriginals(&report, preferences: preferences ?? TransferPreferences())
             try await stack(&report)
             if linkedAlbums, preferences?.syncAlbums == true { try await syncLinkedAlbums(&report) }
         } catch let stop as PassStopped {
@@ -202,11 +208,18 @@ actor PostUploadWorker {
     }
 
     /// Asks for a pass when the earliest backoff runs out.
-    private func scheduleRetryWake() {
+    private func scheduleRetryWake() async {
         retryWake?.cancel()
         retryWake = nil
-        guard !stopped, let due = backoff.values.min() else { return }
-        let delay = max(due.timeIntervalSince(now()), 0)
+        guard !stopped, !Task.isCancelled else { return }
+        var dates = Array(backoff.values)
+        if lastReport.stoppedBy == nil, !lastReport.waitingForDevice,
+           let sourceDue = try? await store.nextSourceMatchDue() { dates.append(sourceDue) }
+        guard let due = dates.min() else { return }
+        // Bounded pages continue without an upload commit; failed/temporarily unavailable
+        // sources do not cause a busy loop through other immediately due rows.
+        let floor: TimeInterval = lastReport.originals.retrying > 0 ? 30 : 1
+        let delay = max(due.timeIntervalSince(now()), floor)
         retryWake = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
@@ -254,6 +267,83 @@ actor PostUploadWorker {
                 if outcomes.contains(where: { if case .failed = $0.outcome { true } else { false } }) { report.failedAlbums.insert(album) }
             }
         }
+    }
+
+    // MARK: Original associations
+
+    private func matchOriginals(_ report: inout PostUploadReport, preferences: TransferPreferences) async throws {
+        try await store.retireStaleSourceMatchTasks()
+        let rows = try await store.dueSourceMatchTasks(at: now())
+        let policy = StagingPolicy(allowCloud: preferences.downloadCloudOriginals, cellularPhotos: preferences.cellularPhotos,
+                                   cellularVideos: preferences.cellularVideos)
+        for task in rows {
+            try await ensureAllowed()
+            guard let started = authorization.current() else { throw PassStopped(restriction: .signedOut) }
+            let auth = authorization
+            let permits: @Sendable () -> Bool = { auth.current() == started && !started.readOnly && !started.requiresPasswordChange }
+            let matcher = SourceOriginalArchiveMatcher(account: started.epoch.account, store: store, staging: photos, server: server)
+            let outcome: SourceMatchTaskOutcome
+            do {
+                let result = try await matcher.attempt(task.localID, revision: task.revision, policy: policy,
+                                                       ensureOwned: { try await self.ensureAllowed() })
+                try await ensureAllowed()
+                switch result {
+                case .notApplicable(let reason): outcome = .notApplicable(reason.rawValue)
+                case .deferred(let reason): outcome = .deferred(reason.rawValue)
+                case .matched(let source):
+                    if try await proveCurrent(task, matcher: matcher) == false {
+                        outcome = .failed("currentCopyChanged")
+                    } else if let fingerprint = source.fingerprint {
+                        let validation = try await matcher.validateSource(task.localID, fingerprint: fingerprint, policy: policy)
+                        try await ensureAllowed()
+                        switch validation {
+                        case .current: outcome = .matched(source)
+                        case .deferred(let reason): outcome = .deferred(reason.rawValue)
+                        case .stale(let reason):
+                            outcome = reason == .revisionSuperseded ? .notApplicable(reason.rawValue) : .deferred(reason.rawValue)
+                        }
+                    } else { outcome = .deferred(SourceOriginalReason.sourceUnavailable.rawValue) }
+                }
+            } catch let stop as PassStopped { throw stop }
+            catch {
+                if error is CancellationError || Task.isCancelled { throw PassStopped(restriction: nil) }
+                switch TransferFailureClassifier.classify(error, context: .init(retryCount: task.attempts)) {
+                case .account(let restriction): throw PassStopped(restriction: restriction)
+                case .waiting: outcome = .deferred("serverUnavailable")
+                case .transient:
+                    outcome = task.attempts + 1 >= Self.attempts ? .failed(error.localizedDescription) : .deferred(error.localizedDescription)
+                case .item(let reason): outcome = .failed(reason)
+                }
+            }
+            try await ensureAllowed()
+            guard try await store.finishSourceMatchTask(task, outcome, at: now(), permits: permits) else { continue }
+            switch outcome {
+            case .matched:
+                report.originals.done += 1
+                report.originalReasons["matched", default: 0] += 1
+            case .notApplicable(let reason):
+                report.originals.done += 1
+                report.originalReasons[reason, default: 0] += 1
+            case .deferred(let reason):
+                report.originals.retrying += 1
+                report.originalReasons[reason, default: 0] += 1
+            case .failed(let reason):
+                report.originals.failed += 1
+                report.originalReasons[reason, default: 0] += 1
+            }
+        }
+    }
+
+    private func proveCurrent(_ task: SourceMatchTaskRow, matcher: SourceOriginalArchiveMatcher) async throws -> Bool {
+        let current = try await server.remoteAsset(id: task.currentID)
+        try await ensureAllowed()
+        guard matcher.eligible(current, id: task.currentID, checksum: task.currentChecksum) else { return false }
+        if let motion = task.receipt.motion {
+            let remote = try await server.remoteAsset(id: motion.id)
+            try await ensureAllowed()
+            guard matcher.eligible(remote, id: motion.id, checksum: motion.checksum), current.livePhotoVideoId == motion.id else { return false }
+        }
+        return true
     }
 
     // MARK: Stacks
@@ -392,6 +482,8 @@ struct PostUploadReport: Hashable, Sendable {
 
     var albums = Counts()
     var stacks = Counts()
+    var originals = Counts()
+    var originalReasons: [String: Int] = [:]
     /// Server albums with a destination that failed in this pass.
     var failedAlbums: Set<String> = []
     /// Linked phone albums synced, and those that failed with why, by phone album ID ("*" when the

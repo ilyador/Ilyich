@@ -49,17 +49,23 @@ struct ArchiveOriginalMatchingView: View {
         work = Task {
             defer { work = nil }
             var cursor: String?
+            var deferred = 0
             do {
                 repeat {
                     try Task.checkCancellation()
                     let page = try await backend.matchArchivedOriginals(after: cursor, limit: 25)
                     try Task.checkCancellation()
                     scanned += page.scanned; matched += page.matched; scheduled += page.scheduled
+                    deferred += page.deferred
                     if !page.hasMore { break }
                     guard let next = page.after, next != cursor else { throw APIError.invalidResponse("Original matching could not continue.") }
                     cursor = next
                 } while true
-                message = matched == 0 ? "No exact original matches found in the backups checked." : "Check complete. Backup remains paused."
+                if deferred > 0 {
+                    message = "Some originals are not available yet. Their checks are saved and will retry automatically. Backup remains paused."
+                } else {
+                    message = matched == 0 ? "No exact original matches found in the backups checked." : "Check complete. Backup remains paused."
+                }
             } catch is CancellationError {
                 message = "Checking stopped. Completed matches were kept."
             } catch {

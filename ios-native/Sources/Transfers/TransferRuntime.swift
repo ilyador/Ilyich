@@ -141,6 +141,7 @@ final class TransferRuntime: Sendable {
         let matchingServer = parts.server
         backend = EngineBackend(engine: engine, store: parts.store, discovery: discovery, preferencesChanged: {
             lifecycleEvents.yield(.preferencesChanged)
+            worker.wake(.conditionsChanged)
             // The backup albums are the device index's input too.
             receiptChanges.send()
         }, followUp: { worker.wake($0) }, matchOriginals: { after, limit in
@@ -158,10 +159,8 @@ final class TransferRuntime: Sendable {
                                       cellularVideos: settings.cellularVideos))
             try Task.checkCancellation()
             guard stillPermitted() else { throw APIError.signedOut }
-            if report.scheduled > 0 {
-                await worker.request(.committed(.library))
-                await worker.idle()
-            }
+            await worker.request(.committed(.library))
+            await worker.idle()
             return report
         })
     }
@@ -277,7 +276,9 @@ final class TransferRuntime: Sendable {
         if case .window(let lease) = event, stopped.withLock({ $0 }) { return lease.finish(success: true) }
         lifecycleEvents.yield(event)
         switch event {
-        case .becameActive: Task { await confirmationObserver?.request() }
+        case .becameActive:
+            Task { await confirmationObserver?.request() }
+            worker.wake(.conditionsChanged)
         default: break
         }
     }

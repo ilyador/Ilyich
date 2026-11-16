@@ -45,6 +45,12 @@ enum CurrentResourceChoice: Equatable, Sendable {
     case unidentified
 }
 
+enum SourceOriginalResourceChoice: Equatable, Sendable {
+    case resource(Int)
+    case notApplicable(SourceOriginalReason)
+    case deferred(SourceOriginalReason)
+}
+
 /// What staging a phone photo for backup copies, decided from its resources alone. Every rule is
 /// pure, so the backup's choices are tested without PhotoKit; PhotoKitAdapter applies them.
 enum StagingRules {
@@ -70,14 +76,44 @@ enum StagingRules {
     /// renders, so they are never candidates. RAW+JPEG and duplicate originals remain unknown.
     /// Live Photo paired videos do not affect the still's source identity.
     static func sourceOriginal(_ resources: [StagingResource], isVideo: Bool) -> Int? {
+        if case .resource(let index) = sourceOriginalSelection(resources, isVideo: isVideo) { return index }
+        return nil
+    }
+
+    /// Incomplete PhotoKit resources can become readable later. Only a complete unedited or
+    /// unsupported shape ends matching for this revision; absence alone never proves that.
+    static func sourceOriginalSelection(_ resources: [StagingResource], isVideo: Bool) -> SourceOriginalResourceChoice {
         let renderedType: PHAssetResourceType = isVideo ? .fullSizeVideo : .fullSizePhoto
-        guard resources.filter({ $0.type == renderedType }).count == 1 else { return nil }
+        let renderedCount = resources.filter { $0.type == renderedType }.count
+        guard renderedCount <= 1 else { return .notApplicable(.unsupportedResources) }
         let originals = resources.indices.filter {
             resources[$0].type == .photo || resources[$0].type == .video || resources[$0].type == .alternatePhoto
         }
+        if renderedCount == 0 {
+            if originals.isEmpty || resources.contains(where: { [.adjustmentData, .adjustmentBasePhoto, .adjustmentBaseVideo].contains($0.type) }) {
+                return .deferred(.incompleteResources)
+            }
+            guard originals.count == 1, let only = originals.first,
+                  resources[only].type == (isVideo ? .video : .photo) else { return .notApplicable(.unsupportedResources) }
+            return .notApplicable(.unedited)
+        }
+        guard !originals.isEmpty else { return .deferred(.missingOriginal) }
         guard originals.count == 1, let index = originals.first,
-              resources[index].type == (isVideo ? .video : .photo) else { return nil }
-        return index
+              resources[index].type == (isVideo ? .video : .photo) else { return .notApplicable(.unsupportedResources) }
+        return .resource(index)
+    }
+
+    /// Incomplete resources postpone cached evidence. A changed but complete source permits
+    /// a fresh guarded hash, so a lasting resource addition/reordering cannot defer forever.
+    static func validateSourceOriginal(_ fingerprint: SourceOriginalFingerprint, revision: AssetRevision?,
+                                       resources: [StagingResource], isVideo: Bool) -> SourceOriginalValidation {
+        guard let revision else { return .deferred(.revisionUnavailable) }
+        guard revision == fingerprint.revision else { return .stale(.revisionSuperseded) }
+        guard !fingerprint.checksum.isEmpty else { return .stale(.sourceUnavailable) }
+        guard let expected = fingerprint.resourceSnapshot else { return .stale(.cachedSnapshotMissing) }
+        guard sourceOriginal(resources, isVideo: isVideo) != nil else { return .deferred(.snapshotChanged) }
+        guard resources == expected else { return .stale(.snapshotChanged) }
+        return .current
     }
 
     /// The candidate whose type is the one Photos' editing input reports, if exactly one is.

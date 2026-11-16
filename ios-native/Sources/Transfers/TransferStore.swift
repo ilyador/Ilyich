@@ -34,7 +34,7 @@ import SQLite3
 /// are declared without a type: a REAL column stores -0.0 as 0, and every date must come back
 /// bit for bit (BM2).
 actor TransferStore: ReceiptQuery {
-    static let schemaVersion = 2
+    static let schemaVersion = 3
 
     /// Who the records serve: `legacy` for a database the engine hasn't claimed (a new one, or a
     /// copy B1 made of an earlier build's state.json that no import handed over), or the transfer
@@ -195,7 +195,7 @@ actor TransferStore: ReceiptQuery {
                           .optionalDate(receipt.confirmedAt ?? completion.confirmedAt)])
             }
             if let receipt = completion.receipt {
-                try Self.enqueueSourceOriginalStack(db, receipt: receipt)
+                try Self.enqueueSourceMatch(db, receipt: receipt)
             }
             try db.run("UPDATE album_destinations SET remote_id=? WHERE local_id=? AND remote_id IS NULL",
                        [.text(completion.assetID), .text(completion.localID)])
@@ -341,6 +341,7 @@ actor TransferStore: ReceiptQuery {
             for column in ["source_checksum", "current_checksum"] where !stackColumns.contains(column) {
                 try db.run("ALTER TABLE stack_tasks ADD COLUMN \(column) TEXT")
             }
+            if version < 3 { try backfillSourceMatches(db) }
             try db.run("UPDATE meta SET schema=? WHERE id=1 AND schema<?", [.integer(Int64(schemaVersion)), .integer(Int64(schemaVersion))])
             try db.run("PRAGMA user_version=\(schemaVersion)")
         }
@@ -391,6 +392,11 @@ actor TransferStore: ReceiptQuery {
         remote_id TEXT,linked_asset_id TEXT,fingerprint_json TEXT,PRIMARY KEY(local_id,modification_date))
         """,
         "CREATE INDEX IF NOT EXISTS source_originals_remote ON source_originals(remote_id)",
+        """
+        CREATE TABLE IF NOT EXISTS source_match_tasks(local_id TEXT PRIMARY KEY,modification_date NOT NULL,current_id TEXT NOT NULL,\
+        current_checksum TEXT NOT NULL,motion_id TEXT,motion_checksum TEXT,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,not_before,reason TEXT)
+        """,
+        "CREATE INDEX IF NOT EXISTS source_match_due ON source_match_tasks(state,not_before,local_id)",
         "CREATE TABLE IF NOT EXISTS linked_albums(device_album_id TEXT PRIMARY KEY,album_id TEXT NOT NULL)",
         """
         CREATE TABLE IF NOT EXISTS share_consumed(batch_id TEXT NOT NULL,attachment TEXT NOT NULL,remote_id TEXT,consumed_at NOT NULL,\

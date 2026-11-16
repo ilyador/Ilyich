@@ -1,9 +1,13 @@
 import Foundation
 import IlyichPlatform
-import Photos
 
-/// Finds archive bytes for an edited photo's untouched source. The current rendition still
-/// follows the normal upload/duplicate and receipt path, independent of this association.
+enum SourceOriginalMatchResult: Hashable, Sendable {
+    case matched(SourceOriginalAssociation)
+    case notApplicable(SourceOriginalReason)
+    case deferred(SourceOriginalReason)
+}
+
+/// Source matches are candidates for association, never proof of the current rendition.
 struct SourceOriginalArchiveMatcher: Sendable {
     let account: AccountID
     let store: TransferStore
@@ -12,29 +16,44 @@ struct SourceOriginalArchiveMatcher: Sendable {
 
     func match(_ localID: String, revision: AssetRevision, policy: StagingPolicy,
                ensureOwned: @Sendable () async throws -> Void = { try Task.checkCancellation() }) async throws -> SourceOriginalAssociation? {
+        if case .matched(let source) = try await attempt(localID, revision: revision, policy: policy, ensureOwned: ensureOwned) { return source }
+        return nil
+    }
+
+    func attempt(_ localID: String, revision: AssetRevision, policy: StagingPolicy,
+                 ensureOwned: @Sendable () async throws -> Void = { try Task.checkCancellation() }) async throws -> SourceOriginalMatchResult {
         try await ensureOwned()
         let old = try await store.sourceOriginal(for: localID, revision: revision)
         try await ensureOwned()
-        let fingerprint: SourceOriginalFingerprint
-        if let cached = old?.fingerprint, cached.revision == revision, cached.checksum == old?.checksum,
-           try await sourceIsCurrent(localID, fingerprint: cached, policy: policy) {
-            fingerprint = cached
-        } else if let computed = try await readSource(localID, revision: revision, policy: policy),
-                  computed.revision == revision, !computed.checksum.isEmpty {
-            fingerprint = computed
-        } else {
+        var fingerprint: SourceOriginalFingerprint?
+        if let cached = old?.fingerprint, cached.revision == revision, cached.checksum == old?.checksum {
+            let validation = try await validateSource(localID, fingerprint: cached, policy: policy)
             try await ensureOwned()
-            try await store.forgetSourceOriginal(localID, revision: revision)
-            return nil
+            switch validation {
+            case .current: fingerprint = cached
+            case .deferred(let reason): return .deferred(reason)
+            case .stale(.revisionSuperseded):
+                try await store.forgetSourceOriginal(localID, revision: revision)
+                return .notApplicable(.revisionSuperseded)
+            case .stale: break // Missing/obsolete cache metadata needs a new guarded source read.
+            }
         }
-        try await ensureOwned()
-        // Persist the source checksum before a lookup/upload. It has no backup semantics.
+        if fingerprint == nil {
+            let read = try await readSource(localID, revision: revision, policy: policy)
+            try await ensureOwned()
+            switch read {
+            case .fingerprint(let computed): fingerprint = computed
+            case .deferred(let reason): return .deferred(reason) // Keep any cached candidate.
+            case .notApplicable(let reason):
+                try await store.forgetSourceOriginal(localID, revision: revision)
+                return .notApplicable(reason)
+            }
+        }
+        guard let fingerprint, fingerprint.revision == revision, !fingerprint.checksum.isEmpty else { return .deferred(.sourceUnavailable) }
         try await store.saveSourceOriginal(.init(localID: localID, revision: revision, checksum: fingerprint.checksum,
-                                                 remoteID: old?.checksum == fingerprint.checksum ? old?.remoteID : nil,
-                                                 fingerprint: fingerprint))
+                                                 remoteID: old?.checksum == fingerprint.checksum ? old?.remoteID : nil, fingerprint: fingerprint))
         try await ensureOwned()
         var remoteID: String?
-        // A stored association is a candidate, freshly checked against server file bytes.
         if old?.checksum == fingerprint.checksum, let id = old?.remoteID,
            try await verifiedRemote(id, checksum: fingerprint.checksum, ensureOwned: ensureOwned) { remoteID = id }
         if remoteID == nil {
@@ -45,47 +64,40 @@ struct SourceOriginalArchiveMatcher: Sendable {
                answer.isTrashed != true, let id = answer.assetId,
                try await verifiedRemote(id, checksum: fingerprint.checksum, ensureOwned: ensureOwned) { remoteID = id }
         }
-        guard try await sourceIsCurrent(localID, fingerprint: fingerprint, policy: policy) else {
-            try await ensureOwned()
+        let validation = try await validateSource(localID, fingerprint: fingerprint, policy: policy)
+        try await ensureOwned()
+        switch validation {
+        case .deferred(let reason): return .deferred(reason)
+        case .stale(let reason):
             try await store.forgetSourceOriginal(localID, revision: revision)
-            return nil
+            return reason == .revisionSuperseded ? .notApplicable(reason) : .deferred(reason)
+        case .current: break
         }
+        let source = SourceOriginalAssociation(localID: localID, revision: revision, checksum: fingerprint.checksum,
+                                               remoteID: remoteID, fingerprint: fingerprint)
+        try await store.saveSourceOriginal(source)
         try await ensureOwned()
-        let result = SourceOriginalAssociation(localID: localID, revision: revision, checksum: fingerprint.checksum, remoteID: remoteID, fingerprint: fingerprint)
-        try await store.saveSourceOriginal(result)
-        try await ensureOwned()
-        return remoteID == nil ? nil : result
+        return remoteID == nil ? .deferred(.archiveNotFound) : .matched(source)
     }
 
-    private func readSource(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint? {
-        do { return try await staging.sourceOriginal(localID, revision: revision, policy: policy) }
-        catch where Self.sourceReadUnavailable(error) { return nil }
+    private func readSource(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalReadResult {
+        do { return try await staging.probeSourceOriginal(localID, revision: revision, policy: policy) }
+        catch {
+            guard let reason = SourceOriginalReason.deferredSourceRead(error) else { throw error }
+            return .deferred(reason)
+        }
+    }
+
+    func validateSource(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> SourceOriginalValidation {
+        do { return try await staging.validateSourceOriginal(localID, fingerprint: fingerprint, policy: policy) }
+        catch {
+            guard let reason = SourceOriginalReason.deferredSourceRead(error) else { throw error }
+            return .deferred(reason)
+        }
     }
 
     func sourceIsCurrent(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> Bool {
-        do { return try await staging.sourceOriginalIsCurrent(localID, fingerprint: fingerprint, policy: policy) }
-        catch where Self.sourceReadUnavailable(error) { return false }
-    }
-
-    /// Only optional PhotoKit source reads use this classification. Server lookup/proof,
-    /// account restrictions, lease loss and cancellation always retain their normal failures.
-    private static func sourceReadUnavailable(_ error: any Error) -> Bool {
-        if case BackupDeferral.waitingForWiFi = error { return true }
-        let details = error as NSError
-        if details.domain == PHPhotosErrorDomain {
-            guard let code = PHPhotosError.Code(rawValue: details.code) else { return false }
-            return [.identifierNotFound, .invalidResource, .missingResource, .requestNotSupportedForAsset,
-                    .networkAccessRequired, .networkError].contains(code)
-        }
-        if details.domain == NSCocoaErrorDomain {
-            return [.fileNoSuchFile, .fileReadNoSuchFile, .fileReadCorruptFile].contains(CocoaError.Code(rawValue: details.code))
-        }
-        if details.domain == NSURLErrorDomain {
-            return [.timedOut, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .networkConnectionLost,
-                    .notConnectedToInternet, .resourceUnavailable, .dataNotAllowed, .fileDoesNotExist]
-                .contains(URLError.Code(rawValue: details.code))
-        }
-        return false
+        try await validateSource(localID, fingerprint: fingerprint, policy: policy) == .current
     }
 
     private func verifiedRemote(_ id: String, checksum: String,
@@ -112,6 +124,7 @@ struct SourceOriginalReconciliationReport: Hashable, Sendable {
     let scheduled: Int
     let after: String?
     let hasMore: Bool
+    var deferred = 0
 }
 
 /// Explicit, bounded linking for edits already backed up. It never invokes discovery, an
@@ -140,10 +153,18 @@ struct SourceOriginalArchiveReconciler: Sendable {
         let matcher = SourceOriginalArchiveMatcher(account: account, store: store, staging: staging, server: server)
         var matched = 0
         var scheduled = 0
+        var deferred = 0
         for receipt in receipts {
             try ensurePermitted()
-            guard let source = try await matcher.match(receipt.localID, revision: receipt.revision, policy: policy,
-                                                       ensureOwned: { try ensurePermitted() }) else { continue }
+            try await store.requestSourceMatch(receipt, permits: permits)
+            let attempted = try await matcher.attempt(receipt.localID, revision: receipt.revision, policy: policy,
+                                                     ensureOwned: { try ensurePermitted() })
+            let source: SourceOriginalAssociation
+            switch attempted {
+            case .matched(let value): source = value
+            case .deferred: deferred += 1; continue
+            case .notApplicable: continue
+            }
             // An original match cannot stand in for proof of the confirmed current rendition.
             let current = try await server.remoteAsset(id: receipt.original.id)
             try ensurePermitted()
@@ -156,16 +177,16 @@ struct SourceOriginalArchiveReconciler: Sendable {
             guard let fingerprint = source.fingerprint,
                   try await matcher.sourceIsCurrent(receipt.localID, fingerprint: fingerprint, policy: policy) else {
                 try ensurePermitted()
-                try await store.forgetSourceOriginal(receipt.localID, revision: receipt.revision)
+                deferred += 1
                 continue
             }
             try ensurePermitted()
             matched += 1
-            if try await store.enqueueSourceOriginalStack(ifCurrent: receipt, permits: permits, retryFailed: true) { scheduled += 1 }
+            if try await store.enqueueSourceOriginalStack(ifCurrent: receipt, expectedSource: source, permits: permits, retryFailed: true) { scheduled += 1 }
             try ensurePermitted()
         }
         return .init(scanned: receipts.count, matched: matched, scheduled: scheduled, after: receipts.last?.localID ?? localID,
-                     hasMore: receipts.count == size)
+                     hasMore: receipts.count == size, deferred: deferred)
     }
 
     private func ensurePermitted() throws {

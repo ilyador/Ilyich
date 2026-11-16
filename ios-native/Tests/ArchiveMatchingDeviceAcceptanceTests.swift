@@ -1,6 +1,7 @@
 import Foundation
 import IlyichPlatform
 import Photos
+import UIKit
 import XCTest
 @testable import Ilyich
 
@@ -8,6 +9,97 @@ import XCTest
 /// this test never constructs an upload engine or changes Photos. Run with
 /// TEST_RUNNER_ILYICH_ARCHIVE_MATCH_ACCEPTANCE=1 after checking the saved account and pause state.
 @MainActor final class ArchiveMatchingDeviceAcceptanceTests: XCTestCase {
+    /// Exercises only the automatic post-upload worker. Existing receipts seed the durable
+    /// matching queue; this must not require the manual reconciliation action or an uploader.
+    func testRetryArchivedOriginalLinksWithoutUploading() async throws {
+        guard ProcessInfo.processInfo.environment["ILYICH_ARCHIVE_MATCH_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Live archive matching was not requested.")
+        }
+        #if targetEnvironment(simulator)
+        throw XCTSkip("Archive matching acceptance requires the owner's real Photos library.")
+        #else
+        executionTimeAllowance = 600
+        let credential = try XCTUnwrap(KeychainCredentialStore().load())
+        guard credential.requiresPasswordChange != true,
+              !ReadOnlyPolicy.isEnabled(server: credential.server, userID: credential.userID),
+              PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else {
+            throw XCTSkip("Existing writable account and full Photos access are required; no prompts are requested.")
+        }
+        guard TransferHost.shared.current == nil else {
+            throw APIError.invalidResponse("Stop the live upload engine before archive matching acceptance.")
+        }
+        let store = TransferStore(url: TransferStore.url(for: credential.account))
+        addTeardownBlock { await store.close() }
+        let before = try await store.contents()
+        guard before.engine?.intent == .paused, before.preferences?.automatic == false else {
+            throw XCTSkip("Backup must already be paused and automatic backup off.")
+        }
+        guard before.receipts.count <= 100 else { throw XCTSkip("This live acceptance check is limited to 100 saved receipts.") }
+        let idleTimerWasDisabled = UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = true
+        addTeardownBlock { await MainActor.run { UIApplication.shared.isIdleTimerDisabled = idleTimerWasDisabled } }
+        let initialTasks = try await store.sourceMatchTasks()
+        let authorization = AuthorizationState(account: credential.account, token: credential.token, readOnly: false,
+                                               requiresPasswordChange: false, mirror: nil)
+        let api = try APIClient(baseURL: credential.server, accessToken: credential.token, userID: credential.userID,
+                                authorization: authorization)
+        addTeardownBlock { await api.shutdown() }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ArchiveRetry-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let system = SystemPhotoKit()
+        let journal = DeviceDatabase(url: folder.appendingPathComponent("device.sqlite"))
+        let photos = PhotoKitAdapter(library: system, assets: system, journal: journal, staging: system)
+        await photos.start()
+        addTeardownBlock {
+            system.stopObserving()
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let worker = PostUploadWorker(store: store, server: APITransferServer(client: api), photos: photos,
+                                      authorization: authorization)
+        addTeardownBlock { await worker.stop() }
+        // Use the same startup wake as the app. The worker owns its retry timer and batching.
+        await worker.request(.started)
+        let deadline = Date().addingTimeInterval(240)
+        while true {
+            await worker.idle()
+            let tasks = try await store.sourceMatchTasks()
+            if !tasks.contains(where: { $0.state == "pending" }) || Date() >= deadline { break }
+            try await Task.sleep(for: .seconds(1))
+        }
+        await worker.stop()
+        let after = try await store.contents()
+        XCTAssertEqual(after.engine, before.engine)
+        XCTAssertEqual(after.preferences, before.preferences)
+        XCTAssertEqual(after.jobs, before.jobs)
+        XCTAssertEqual(after.attempts, before.attempts)
+        XCTAssertEqual(after.stages, before.stages)
+        XCTAssertEqual(after.confirmations, before.confirmations)
+        XCTAssertEqual(after.receipts, before.receipts)
+        XCTAssertNil(TransferHost.shared.current)
+        let tasks = try await store.sourceMatchTasks()
+        let stacks = try await store.stackTasks()
+        var links: [[String: String]] = []
+        for receipt in after.receipts.compactMap(\.receipt) {
+            if let source = try await store.sourceOriginal(for: receipt.localID, revision: receipt.revision),
+               let remoteID = source.remoteID {
+                links.append(["currentID": receipt.original.id, "sourceID": remoteID, "sourceChecksum": source.checksum])
+            }
+        }
+        let result: [String: Any] = [
+            "initialSourceTasks": initialTasks.count, "confirmations": after.confirmations.count,
+            "remainingSourceTasks": tasks.map { ["currentID": $0.currentID, "state": $0.state,
+                "attempts": $0.attempts, "reason": $0.reason as Any? ?? NSNull()] as [String: Any] },
+            "sourceLinks": links, "unfinishedProofStacks": stacks.filter { $0.sourceChecksum != nil }.count,
+            "newUploadAttempts": 0,
+        ]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),
+                                       uniformTypeIdentifier: "public.json")
+        attachment.name = "Automatic archive matching result"; attachment.lifetime = .keepAlways; add(attachment)
+        let pendingCount = tasks.filter { $0.state == "pending" }.count
+        print("AUTOMATIC ARCHIVE MATCH: \(initialTasks.count) initial tasks, \(links.count) source links, \(pendingCount) pending, 0 new upload attempts")
+        #endif
+    }
+
     /// Reads only saved receipt/cache rows and PhotoKit resource metadata. It never requests
     /// resource bytes, constructs an engine/API client, or changes confirmations or Photos.
     func testInspectSavedBackupSourceMetadataWithoutHashing() async throws {

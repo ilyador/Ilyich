@@ -169,7 +169,9 @@ final class SourceOriginalArchiveTests: XCTestCase {
         let receipt = try await h.receipt("edit")
         XCTAssertEqual(receipt?.original.checksum, "edit-bytes", "Only current rendition bytes belong in a cleanup receipt.")
         let tasks = try await h.store.stackTasks()
-        XCTAssertEqual(Set(tasks.map(\.previousAssetID)), ["archive", "prior-edit"])
+        XCTAssertEqual(Set(tasks.map(\.previousAssetID)), ["prior-edit"])
+        let originalWork = try await h.store.sourceMatchTasks()
+        XCTAssertEqual(originalWork.first?.state, "pending", "Source association requires a fresh post-upload proof pass.")
         XCTAssertTrue(tasks.allSatisfy { $0.assetID == "current-edit" })
         XCTAssertEqual(tasks.first { $0.previousAssetID == "prior-edit" }?.sourceChecksum, "prior-bytes")
         XCTAssertTrue(tasks.allSatisfy { $0.currentChecksum == "edit-bytes" })
@@ -197,14 +199,15 @@ final class SourceOriginalArchiveTests: XCTestCase {
         XCTAssertNotEqual(receipt?.original.id, "archive")
         XCTAssertNotEqual(receipt?.original.checksum, "source-bytes")
         let tasks = try await h.store.stackTasks()
-        XCTAssertEqual(tasks.count, 1)
-        XCTAssertEqual(tasks.first?.assetID, receipt?.original.id)
-        XCTAssertEqual(tasks.first?.previousAssetID, "archive")
+        XCTAssertTrue(tasks.isEmpty, "Completion cannot queue a retained source candidate without fresh proof.")
+        let originalWork = try await h.store.sourceMatchTasks()
+        XCTAssertEqual(originalWork.first?.currentID, receipt?.original.id)
+        XCTAssertEqual(originalWork.first?.state, "pending")
         XCTAssertEqual(h.uploads.uploads.count, 1)
         await h.tearDown()
     }
 
-    func testUnavailableOptionalSourceDoesNotBlockCurrentEditBackupOrKeepAnOldAssociation() async throws {
+    func testUnavailableOptionalSourceDoesNotBlockCurrentEditBackupAndRetainsCachedCandidate() async throws {
         for code in [PHPhotosError.Code.networkAccessRequired, .missingResource] {
             let h = try await LibraryJobHarness()
             h.staging.add("edit", .init(modified: FakeStaging.date))
@@ -213,7 +216,7 @@ final class SourceOriginalArchiveTests: XCTestCase {
             try await h.run("edit")
             try await untilTransfers("A local current rendition can back up while its optional original is unavailable.") { try await h.receipt("edit") != nil }
             let source = try await h.store.sourceOriginal(for: "edit", revision: revision)
-            XCTAssertNil(source)
+            XCTAssertEqual(source?.checksum, "old-source", "Unavailable source reads retain evidence as an unverified candidate.")
             let tasks = try await h.store.stackTasks()
             XCTAssertTrue(tasks.isEmpty)
             XCTAssertEqual(h.uploads.uploads.count, 1)

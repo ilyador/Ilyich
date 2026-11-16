@@ -31,6 +31,11 @@ final class FakeStaging: PhotoLibraryStaging {
         var staged: [Staged] = []
         var sourceReads = 0
         var sourceFailures: [String: @Sendable () -> any Error] = [:]
+        var sourceDeferrals: [String: SourceOriginalReason] = [:]
+        var sourceValidations: [String: [SourceOriginalValidation]] = [:]
+        var sourceProbeResults: [String: [SourceOriginalReadResult]] = [:]
+        var sourceProbes = 0
+        var sourcePolicies: [StagingPolicy] = []
 
         /// Discovery waits here after its first batch.
         var discoveryGate: TransferGate?
@@ -58,6 +63,10 @@ final class FakeStaging: PhotoLibraryStaging {
     /// The next staging of the photo throws.
     func fail(_ id: String, _ error: @escaping @Sendable () -> any Error) { state.withLock { $0.failures[id, default: []].append(error) } }
     func failSource(_ id: String, _ error: @escaping @Sendable () -> any Error) { state.withLock { $0.sourceFailures[id] = error } }
+    func deferSource(_ id: String, reason: SourceOriginalReason?) { state.withLock { $0.sourceDeferrals[id] = reason } }
+    func clearSourceFailure(_ id: String) { state.withLock { $0.sourceFailures[id] = nil } }
+    func validateSource(_ id: String, as results: [SourceOriginalValidation]) { state.withLock { $0.sourceValidations[id] = results } }
+    func probeSource(_ id: String, as results: [SourceOriginalReadResult]) { state.withLock { $0.sourceProbeResults[id] = results } }
     /// Staging of the photo waits at the gate.
     func hold(_ id: String, at gate: TransferGate) { state.withLock { $0.gates[id] = gate } }
     func holdDiscovery(at gate: TransferGate) { state.withLock { $0.discoveryGate = gate } }
@@ -123,6 +132,34 @@ final class FakeStaging: PhotoLibraryStaging {
     }
 
     var sourceReads: Int { state.withLock { $0.sourceReads } }
+    var sourceProbes: Int { state.withLock { $0.sourceProbes } }
+    var sourcePolicies: [StagingPolicy] { state.withLock { $0.sourcePolicies } }
+
+    func probeSourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalReadResult {
+        try Task.checkCancellation()
+        let early: SourceOriginalReadResult? = state.withLock { state in
+            state.sourceProbes += 1
+            state.sourcePolicies.append(policy)
+            if state.sourceProbeResults[localID]?.isEmpty == false { return state.sourceProbeResults[localID]!.removeFirst() }
+            if let reason = state.sourceDeferrals[localID] { return .deferred(reason) }
+            guard state.access == .authorized || state.access == .limited else { return .deferred(.photosAccess) }
+            if let photo = state.photos[localID], AssetRevision(photo.modified) != revision { return .notApplicable(.revisionSuperseded) }
+            return nil
+        }
+        if let early { return early }
+        if let fingerprint = try await sourceOriginal(localID, revision: revision, policy: policy) { return .fingerprint(fingerprint) }
+        return .notApplicable(.unedited)
+    }
+
+    func validateSourceOriginal(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> SourceOriginalValidation {
+        try Task.checkCancellation()
+        if let scripted = state.withLock({ state -> SourceOriginalValidation? in
+            if let reason = state.sourceDeferrals[localID] { return .deferred(reason) }
+            guard state.sourceValidations[localID]?.isEmpty == false else { return nil }
+            return state.sourceValidations[localID]!.removeFirst()
+        }) { return scripted }
+        return try await sourceOriginalIsCurrent(localID, fingerprint: fingerprint, policy: policy) ? .current : .stale(.revisionSuperseded)
+    }
 
     func sourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint? {
         try Task.checkCancellation()
@@ -179,6 +216,7 @@ final class FakeTransferServer: TransferServerAPI {
         var preparationCallCount = 0
         var preparationStatus: UploadCheckResponse.ContentFingerprintStatus?
         var remoteAssets: [String: BackupRemoteAsset] = [:]
+        var remoteReads: [String] = []
         var checks: [Check] = []
         var requests: [Request] = []
         var pairings: [String: String] = [:]
@@ -200,6 +238,7 @@ final class FakeTransferServer: TransferServerAPI {
     var checkCallCount: Int { state.withLock { $0.checkCallCount } }
     var checks: [Check] { state.withLock { $0.checks } }
     var requests: [Request] { state.withLock { $0.requests } }
+    var remoteReads: [String] { state.withLock { $0.remoteReads } }
     var paired: [String: String] { state.withLock { Dictionary($0.paired.map { ($0.asset, $0.motion) }, uniquingKeysWith: { $1 }) } }
 
     func bulkUploadCheck(_ items: [UploadCheck.Item]) async throws -> [UploadCheckResponse.Result] {
@@ -238,6 +277,7 @@ final class FakeTransferServer: TransferServerAPI {
 
     func remoteAsset(id: String) async throws -> BackupRemoteAsset {
         state.withLock { state in
+            state.remoteReads.append(id)
             if let remote = state.remoteAssets[id] { return remote }
             let checksum = state.held.first { _, held in
                 if case .duplicate(let remoteID, _) = held { return remoteID == id }; return false

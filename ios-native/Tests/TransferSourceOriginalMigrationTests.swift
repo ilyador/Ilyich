@@ -55,6 +55,10 @@ final class TransferSourceOriginalMigrationTests: XCTestCase {
         let dump = try await store.dump()
         XCTAssertNotNil(dump["confirmation_copies"])
         XCTAssertNotNil(dump["source_originals"])
+        let associationWork = try await store.sourceMatchTasks()
+        XCTAssertEqual(associationWork.count, 1)
+        XCTAssertEqual(associationWork.first?.currentID, "current")
+        XCTAssertEqual(associationWork.first?.reason, "migration")
         XCTAssertEqual(dump["preferences"], [[.integer(1), .text(preferenceJSON)]])
         await store.close()
         let reopened = TransferStore(url: url)
@@ -70,6 +74,46 @@ final class TransferSourceOriginalMigrationTests: XCTestCase {
         XCTAssertEqual(after.receipts, state.receipts)
         XCTAssertEqual(after.confirmations, state.confirmations)
         XCTAssertEqual(after.engine, state.engine)
+        await reopened.close()
+    }
+
+    func testVersionTwoBackfillsOnlyExactCurrentReceiptsAndKeepsCachedSources() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("TransferV2-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("transfers.sqlite")
+        let old = TransferStore(url: url)
+        var seed = TransferSeed()
+        seed.preferences.downloadCloudOriginals = true
+        seed.confirmations = [("current", FakeStaging.date), ("stale", FakeStaging.date.addingTimeInterval(1))]
+        for id in ["current", "stale", "unconfirmed"] {
+            seed.receipts.append(.init(localID: id, modified: FakeStaging.date, originalID: "remote-" + id, originalChecksum: "bytes-" + id))
+        }
+        try await old.seedForTest(seed)
+        let cached = SourceOriginalAssociation(localID: "current", revision: .init(FakeStaging.date), checksum: "source", remoteID: "archive",
+                                               fingerprint: .init(revision: .init(FakeStaging.date), checksum: "source"))
+        try await old.saveSourceOriginal(cached)
+        let before = try await old.contents()
+        await old.close()
+        // Restore the previous shipped schema shape in this fixture; the production migration
+        // adds tables and rows only, with no destructive changes to the user's database.
+        let fixture = try TransferSQLite(url: url)
+        try fixture.run("DROP TABLE source_match_tasks")
+        try fixture.run("UPDATE meta SET schema=2")
+        try fixture.run("PRAGMA user_version=2")
+        fixture.close()
+        let migrated = TransferStore(url: url)
+        let after = try await migrated.contents()
+        XCTAssertEqual(after, before)
+        let tasks = try await migrated.sourceMatchTasks()
+        XCTAssertEqual(tasks.map(\.localID), ["current"])
+        XCTAssertEqual(tasks.first?.reason, "migration")
+        let retained = try await migrated.sourceOriginal(for: "current", revision: .init(FakeStaging.date))
+        XCTAssertEqual(retained, cached)
+        let dump = try await migrated.dump()
+        await migrated.close()
+        let reopened = TransferStore(url: url)
+        let replay = try await reopened.dump()
+        XCTAssertEqual(replay, dump)
         await reopened.close()
     }
 }

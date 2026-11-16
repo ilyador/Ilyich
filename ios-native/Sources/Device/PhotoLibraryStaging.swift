@@ -57,6 +57,61 @@ struct SourceOriginalFingerprint: Hashable, Sendable, Codable {
     }
 }
 
+/// Persistable reasons for ending or postponing a source-only lookup. None are backup proof.
+enum SourceOriginalReason: String, Hashable, Sendable, Codable {
+    case unedited, unsupportedResources, revisionSuperseded, revisionUnavailable
+    case photosAccess, assetUnavailable, missingOriginal, incompleteResources
+    case snapshotChanged, libraryChanged, cloudRequired, waitingForWiFi, networkUnavailable
+    case sourceUnavailable, cachedSnapshotMissing, archiveNotFound
+
+    /// Only errors from optional resource reads belong here. Account, server, lease and
+    /// cancellation errors retain their normal throwing behavior.
+    static func deferredSourceRead(_ error: any Error) -> Self? {
+        if error is CancellationError || Task.isCancelled { return nil }
+        if case BackupDeferral.waitingForWiFi = error { return .waitingForWiFi }
+        if case PhotoResourceExport.Deferral.waitingForWiFi = error { return .waitingForWiFi }
+        let details = error as NSError
+        switch details.domain {
+        case PHPhotosErrorDomain:
+            switch PHPhotosError.Code(rawValue: details.code) {
+            case .accessUserDenied, .accessRestricted: return .photosAccess
+            case .identifierNotFound: return .assetUnavailable
+            case .invalidResource, .missingResource: return .missingOriginal
+            case .networkAccessRequired: return .cloudRequired
+            case .networkError: return .networkUnavailable
+            case .requestNotSupportedForAsset: return .sourceUnavailable
+            default: return nil
+            }
+        case NSCocoaErrorDomain:
+            switch CocoaError.Code(rawValue: details.code) {
+            case .fileNoSuchFile, .fileReadNoSuchFile: return .missingOriginal
+            case .fileReadCorruptFile: return .sourceUnavailable
+            default: return nil
+            }
+        case NSURLErrorDomain:
+            switch URLError.Code(rawValue: details.code) {
+            case .timedOut, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .networkConnectionLost,
+                 .notConnectedToInternet, .resourceUnavailable, .dataNotAllowed: return .networkUnavailable
+            case .fileDoesNotExist: return .missingOriginal
+            default: return nil
+            }
+        default: return nil
+        }
+    }
+}
+
+enum SourceOriginalReadResult: Hashable, Sendable {
+    case fingerprint(SourceOriginalFingerprint)
+    case notApplicable(SourceOriginalReason)
+    case deferred(SourceOriginalReason)
+}
+
+enum SourceOriginalValidation: Hashable, Sendable {
+    case current
+    case stale(SourceOriginalReason)
+    case deferred(SourceOriginalReason)
+}
+
 /// What backup asks of the Photos library (architecture section 2). PhotoKitAdapter implements it,
 /// on its own queue.
 protocol PhotoLibraryStaging: Sendable {
@@ -78,6 +133,10 @@ protocol PhotoLibraryStaging: Sendable {
     /// Revalidates source evidence after other asynchronous work, without downloading it again
     /// when the adapter can establish that its source snapshot is still current.
     func sourceOriginalIsCurrent(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> Bool
+    /// Distinguishes an inapplicable source from a temporarily unavailable one, so completed
+    /// uploads can leave durable source-matching work for later.
+    func probeSourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalReadResult
+    func validateSourceOriginal(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> SourceOriginalValidation
 }
 
 extension PhotoLibraryStaging {
@@ -85,6 +144,33 @@ extension PhotoLibraryStaging {
     func sourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint? { nil }
     func sourceOriginalIsCurrent(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> Bool {
         try await sourceOriginal(localID, revision: fingerprint.revision, policy: policy) == fingerprint
+    }
+    func probeSourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalReadResult {
+        try Task.checkCancellation()
+        do {
+            let result = try await sourceOriginal(localID, revision: revision, policy: policy)
+            try Task.checkCancellation()
+            guard let fingerprint = result else {
+                // Legacy nil does not explain whether the source is absent or temporarily unreadable.
+                return .deferred(.sourceUnavailable)
+            }
+            guard fingerprint.revision == revision, !fingerprint.checksum.isEmpty else { return .deferred(.sourceUnavailable) }
+            return .fingerprint(fingerprint)
+        } catch {
+            if let reason = SourceOriginalReason.deferredSourceRead(error) { return .deferred(reason) }
+            throw error
+        }
+    }
+    func validateSourceOriginal(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> SourceOriginalValidation {
+        try Task.checkCancellation()
+        do {
+            let current = try await sourceOriginalIsCurrent(localID, fingerprint: fingerprint, policy: policy)
+            try Task.checkCancellation()
+            return current ? .current : .deferred(.sourceUnavailable)
+        } catch {
+            if let reason = SourceOriginalReason.deferredSourceRead(error) { return .deferred(reason) }
+            throw error
+        }
     }
 }
 
@@ -223,47 +309,74 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
 
     // MARK: - Staging
 
+    /// Compatibility for callers that cannot yet distinguish postponed source reads.
+    func sourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint? {
+        if case .fingerprint(let fingerprint) = try await probeSourceOriginal(localID, revision: revision, policy: policy) { return fingerprint }
+        return nil
+    }
+
     /// Only an explicit original alongside a rendered edit can identify an archived source.
     /// The stream is hashed in bounded memory and no original file enters the upload directory.
-    func sourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint? {
+    func probeSourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalReadResult {
         try Task.checkCancellation()
         let access = refreshAccess()
         let generation = albumGeneration.withLock { $0 }
-        guard Self.canRead(access.status), let asset = Self.asset(localID),
-              asset.modificationDate.map(AssetRevision.init) == revision else { return nil }
+        guard Self.canRead(access.status) else { return .deferred(.photosAccess) }
+        guard let asset = Self.asset(localID) else { return .deferred(.assetUnavailable) }
+        guard let modified = asset.modificationDate else { return .deferred(.revisionUnavailable) }
+        guard AssetRevision(modified) == revision else { return .notApplicable(.revisionSuperseded) }
         let resources = PHAssetResource.assetResources(for: asset)
         let snapshot = resources.map(Self.describe)
         let isVideo = asset.mediaType == .video
-        guard let index = StagingRules.sourceOriginal(snapshot, isVideo: isVideo) else { return nil }
+        let selection = StagingRules.sourceOriginalSelection(snapshot, isVideo: isVideo)
+        guard refreshAccess() == access, Self.canRead(authorization) else { return .deferred(.photosAccess) }
+        guard albumGeneration.withLock({ $0 }) == generation else { return .deferred(.libraryChanged) }
+        let index: Int
+        switch selection {
+        case .resource(let chosen): index = chosen
+        case .notApplicable(let reason): return .notApplicable(reason)
+        case .deferred(let reason): return .deferred(reason)
+        }
         let checksum: String
         do {
             checksum = try await PhotoResourceExport.checksum(resources[index], allowCloud: policy.allowCloud,
                                                               allowCellular: isVideo ? policy.cellularVideos : policy.cellularPhotos)
-        } catch PhotoResourceExport.Deferral.waitingForWiFi { throw BackupDeferral.waitingForWiFi }
+        } catch {
+            if let reason = SourceOriginalReason.deferredSourceRead(error) { return .deferred(reason) }
+            throw error
+        }
         try Task.checkCancellation()
         // Refetch instead of trusting PHAsset's immutable snapshot. Access changes, edits,
         // deletion, limited-library changes or a changed resource set invalidate this evidence.
-        guard refreshAccess() == access, Self.canRead(authorization),
-              let current = Self.asset(localID), current.mediaType == asset.mediaType,
-              current.modificationDate.map(AssetRevision.init) == revision,
-              PHAssetResource.assetResources(for: current).map(Self.describe) == snapshot,
-              albumGeneration.withLock({ $0 }) == generation else { return nil }
-        return SourceOriginalFingerprint(revision: revision, checksum: checksum, resourceSnapshot: snapshot)
+        guard refreshAccess() == access, Self.canRead(authorization) else { return .deferred(.photosAccess) }
+        guard let current = Self.asset(localID) else { return .deferred(.assetUnavailable) }
+        guard let currentModified = current.modificationDate else { return .deferred(.revisionUnavailable) }
+        guard AssetRevision(currentModified) == revision else { return .notApplicable(.revisionSuperseded) }
+        guard current.mediaType == asset.mediaType,
+              PHAssetResource.assetResources(for: current).map(Self.describe) == snapshot else { return .deferred(.snapshotChanged) }
+        guard albumGeneration.withLock({ $0 }) == generation else { return .deferred(.libraryChanged) }
+        return .fingerprint(SourceOriginalFingerprint(revision: revision, checksum: checksum, resourceSnapshot: snapshot))
     }
 
     /// PHAsset revisions fence content changes, and the resource signature also fences a
     /// changed source selection. The caller separately fences its account and access epoch.
     func sourceOriginalIsCurrent(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> Bool {
+        try await validateSourceOriginal(localID, fingerprint: fingerprint, policy: policy) == .current
+    }
+
+    func validateSourceOriginal(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> SourceOriginalValidation {
         try Task.checkCancellation()
         let access = refreshAccess()
         let generation = albumGeneration.withLock { $0 }
-        guard Self.canRead(access.status), let expected = fingerprint.resourceSnapshot,
-              let asset = Self.asset(localID),
-              asset.modificationDate.map(AssetRevision.init) == fingerprint.revision else { return false }
+        guard Self.canRead(access.status) else { return .deferred(.photosAccess) }
+        guard let asset = Self.asset(localID) else { return .deferred(.assetUnavailable) }
         let current = PHAssetResource.assetResources(for: asset).map(Self.describe)
-        guard current == expected, StagingRules.sourceOriginal(current, isVideo: asset.mediaType == .video) != nil else { return false }
+        let validation = StagingRules.validateSourceOriginal(fingerprint, revision: asset.modificationDate.map(AssetRevision.init),
+                                                             resources: current, isVideo: asset.mediaType == .video)
         try Task.checkCancellation()
-        return refreshAccess() == access && Self.canRead(authorization) && albumGeneration.withLock({ $0 }) == generation
+        guard refreshAccess() == access, Self.canRead(authorization) else { return .deferred(.photosAccess) }
+        guard albumGeneration.withLock({ $0 }) == generation else { return .deferred(.libraryChanged) }
+        return validation
     }
 
     func stage(_ localID: String, into directory: URL, stageID: String = UUID().uuidString, policy: StagingPolicy,

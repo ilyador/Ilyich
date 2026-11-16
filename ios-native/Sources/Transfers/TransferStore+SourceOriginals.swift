@@ -52,6 +52,7 @@ extension TransferStore {
     /// Exact receipt CAS: a concurrent completion/deletion cannot attach a match to another edit.
     @discardableResult
     func enqueueSourceOriginalStack(ifCurrent receipt: TransferReceipt,
+                                    expectedSource: SourceOriginalAssociation? = nil,
                                     permits: @Sendable () -> Bool = { true }, retryFailed: Bool = false) throws -> Bool {
         let db = try database()
         return try db.transaction {
@@ -60,10 +61,26 @@ extension TransferStore {
             var current = false
             try db.run("""
                 SELECT 1 FROM receipts r JOIN confirmations c ON c.local_id=r.local_id AND c.modification_date=r.modification_date \
-                WHERE r.local_id=? AND r.modification_date=? AND r.original_id=? AND r.original_checksum=? AND r.local_deleted_at IS NULL
-                """, [.text(receipt.localID), .real(receipt.revision.referenceSeconds), .text(receipt.original.id), .text(receipt.original.checksum)]) { _ in current = true }
+                WHERE r.local_id=? AND r.modification_date=? AND r.original_id=? AND r.original_checksum=? \
+                AND r.motion_id IS ? AND r.motion_checksum IS ? AND r.local_deleted_at IS NULL
+                """, [.text(receipt.localID), .real(receipt.revision.referenceSeconds), .text(receipt.original.id), .text(receipt.original.checksum),
+                       .optionalText(receipt.motion?.id), .optionalText(receipt.motion?.checksum)]) { _ in current = true }
             guard current else { return false }
-            return try Self.enqueueSourceOriginalStack(db, receipt: receipt, retryFailed: retryFailed)
+            if let expectedSource {
+                let cached = try sourceOriginal(for: receipt.localID, revision: receipt.revision)
+                guard expectedSource.localID == receipt.localID, expectedSource.revision == receipt.revision,
+                      expectedSource.remoteID != nil, cached?.checksum == expectedSource.checksum,
+                      cached?.remoteID == expectedSource.remoteID, cached?.fingerprint == expectedSource.fingerprint else { return false }
+            }
+            let scheduled = try Self.enqueueSourceOriginalStack(db, receipt: receipt, retryFailed: retryFailed)
+            if retryFailed {
+                try db.run("""
+                    UPDATE source_match_tasks SET state='done',not_before=NULL,reason='explicitMatch' \
+                    WHERE local_id=? AND modification_date=? AND current_id=? AND current_checksum=? AND motion_id IS ? AND motion_checksum IS ?
+                    """, [.text(receipt.localID), .real(receipt.revision.referenceSeconds), .text(receipt.original.id), .text(receipt.original.checksum),
+                           .optionalText(receipt.motion?.id), .optionalText(receipt.motion?.checksum)])
+            }
+            return scheduled
         }
     }
 
