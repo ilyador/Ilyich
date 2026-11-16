@@ -201,6 +201,47 @@ import XCTest
         XCTAssertEqual(EngineBackend.presented(snapshot, preferences: preferences).activity, "Photo library backed up")
     }
 
+    func testSupersededDiscoveryReturnsNilWhileCallerCancellationStillThrows() async throws {
+        let h = try await TransferEngineHarness()
+        try await h.engine.start()
+        var preferences = TransferPreferences()
+        preferences.scope = .entireLibrary
+        try await h.engine.setPreferences(preferences)
+        let first = FakeStaging()
+        first.add("old-selection-photo")
+        let oldGate = TransferGate()
+        first.holdDiscovery(at: oldGate)
+        let oldScan = Task { try await h.engine.discover(LibraryDiscovery(store: h.store, staging: first)) }
+        await untilTransfers("The superseded discovery reaches its metadata gate.") { first.discoveryWaits }
+        preferences.scope = .selectedAlbums
+        preferences.includedAlbums = ["another-album"]
+        try await h.engine.setPreferences(preferences)
+        oldGate.open()
+        let superseded = try await oldScan.value
+        XCTAssertNil(superseded)
+        let after = try await h.store.contents()
+        XCTAssertTrue(after.jobs.isEmpty, "A cancelled old selection must not leave upload jobs behind.")
+        let stale = await h.engine.currentSnapshot
+        XCTAssertFalse(stale.backupSelectionChecked)
+        XCTAssertNil(stale.lastMessage)
+
+        preferences.scope = .entireLibrary
+        try await h.engine.setPreferences(preferences)
+        let second = FakeStaging()
+        second.add("current-selection-photo")
+        let cancellationGate = TransferGate()
+        second.holdDiscovery(at: cancellationGate)
+        let cancelled = Task { try await h.engine.discover(LibraryDiscovery(store: h.store, staging: second)) }
+        await untilTransfers("The caller's cancellable discovery reaches its metadata gate.") { second.discoveryWaits }
+        cancelled.cancel()
+        cancellationGate.open()
+        do {
+            _ = try await cancelled.value
+            XCTFail("Cancellation of the requesting task must still propagate.")
+        } catch is CancellationError {}
+        await h.tearDown()
+    }
+
     private func statistics(_ store: TransferStore) async throws -> BackupStatistics {
         let counts = try await store.counts()
         return BackupStatistics(snapshot: EngineBackend.presented(

@@ -178,6 +178,8 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var discovering = 0
     /// Only the latest discovery may report an error. A stopped or cancelled pass is silent.
     private var discoveryGeneration: UInt64 = 0
+    private var newPhotosActivation: UUID?
+    private var futureConfirmed = 0
     private var discoveryMessage: String?
     private var backupSelectionChecked = false
     private var selectionInventory: SelectionInventory?
@@ -186,11 +188,13 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         let scope: PhotoSelectionScope
         let included: Set<String>
         let excluded: Set<String>
+        let newPhotosOnly: Bool
 
         init(_ preferences: TransferPreferences) {
             scope = preferences.scope
             included = preferences.includedAlbums
             excluded = preferences.excludedAlbums
+            newPhotosOnly = preferences.newPhotosOnly
         }
     }
     /// Manual runs still setting up: the run doesn't end meanwhile.
@@ -338,6 +342,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// `requeueingFailures` is off, as when automatic backup is switched off during a run and the
     /// run only carries on.
     func setIntent(_ intent: RunIntent, requeueingFailures: Bool) async throws {
+        guard newPhotosActivation == nil else { throw NewPhotosBackupError.changingPolicy }
         self.intent = intent
         if intent == .manual, requeueingFailures {
             // A manual run retries every failed photo once, and the albums and stacks that failed
@@ -359,6 +364,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     }
 
     func enqueue(_ requests: [TransferRequest]) async throws -> EnqueueResult {
+        guard newPhotosActivation == nil || requests.allSatisfy({ $0.source.lane == .share }) else { throw NewPhotosBackupError.changingPolicy }
         // A read-only block that outlived read-only mode (a refusal handled after it went off)
         // doesn't refuse the user's own uploads.
         if blocker == .readOnly, restriction(authorization.current()) == nil {
@@ -389,7 +395,81 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         await changed()
     }
 
+    /// Captures identifiers only while paused, then removes pre-existing library work and
+    /// commits the immutable baseline together with the new automatic policy. No executor runs.
+    func enableNewPhotosBackup(staging: any PhotoLibraryStaging,
+                              cancelAttempts: @Sendable ([AttemptID]) async throws -> Void,
+                              policyChangeBegan: @Sendable () -> Void = {}) async throws {
+        try Task.checkCancellation()
+        guard !stopped, newPhotosActivation == nil else { throw NewPhotosBackupError.changingPolicy }
+        let token = UUID()
+        newPhotosActivation = token
+        discoveryGeneration &+= 1
+        cancelGeneration += 1
+        do {
+            guard let started = authorization.current(), restriction(started) == nil else { throw PurchaseAccessRequired() }
+            let saved = try await store.preferences() ?? TransferPreferences()
+            let savedIntent = try await store.engineState()?.intent ?? .paused
+            let existing = try await store.newPhotosBaselineIDs()
+            if saved.newPhotosOnly, saved.automatic, savedIntent == .automatic, existing != nil,
+               try await store.newPhotosPolicyChanging() == false {
+                preferences = saved
+                intent = .automatic
+                newPhotosActivation = nil
+                await changed()
+                return
+            }
+            guard (intent == .paused && savedIntent == .paused && !saved.automatic)
+                    || (saved.newPhotosOnly && existing != nil) else {
+                throw BackupError.message("Pause backup before choosing new photos only.")
+            }
+            let access = await newPhotosBaselineAccess(staging)
+            guard access.status == .authorized else { throw BackupError.message("Full Photos access is required to exclude every existing photo.") }
+            let auth = authorization
+            let permits: @Sendable () -> Bool = { auth.current() == started && staging.authorization == .authorized }
+            let startedAt = now()
+            try await store.beginNewPhotosPolicyChange(token, permits: permits)
+            policyChangeBegan()
+            var baseline = existing ?? Set<String>()
+            if existing == nil {
+                for try await batch in staging.candidates(scope: .entireLibrary, included: [], excluded: []) {
+                    try Task.checkCancellation()
+                    guard !stopped, newPhotosActivation == token, permits(), await newPhotosBaselineAccess(staging) == access else { throw CancellationError() }
+                    baseline.formUnion(batch.map(\.id))
+                }
+            }
+            try Task.checkCancellation()
+            guard !stopped, newPhotosActivation == token, permits(), await newPhotosBaselineAccess(staging) == access else { throw CancellationError() }
+            let old = try await store.newPhotosCutoverJobs(existing == nil ? nil : baseline)
+            try await cancel(old.sources)
+            try await cancelAttempts(old.attempts)
+            try Task.checkCancellation()
+            guard !stopped, newPhotosActivation == token, permits(), await newPhotosBaselineAccess(staging) == access else { throw CancellationError() }
+            let updated = try await store.commitNewPhotosBackupBaseline(existing == nil ? baseline : nil, startedAt: startedAt,
+                                                                        expectedPreferences: saved, permits: permits)
+            preferences = updated
+            preferencesRevision &+= 1
+            intent = .automatic
+            blocker = nil
+            wait = nil
+            waitUntil = nil
+            identityIndexRetryAt = nil
+            preparingServerLibrary = false
+            backupSelectionChecked = true
+            selectionInventory = SelectionInventory(revisions: [:], confirmed: [])
+            selectionCheckedAt = now()
+            newPhotosActivation = nil
+            await changed()
+        } catch {
+            try? await store.endNewPhotosPolicyChange(token)
+            newPhotosActivation = nil
+            await changed()
+            throw error
+        }
+    }
+
     func setPreferences(_ preferences: TransferPreferences) async throws {
+        guard newPhotosActivation == nil else { throw NewPhotosBackupError.changingPolicy }
         try await store.savePreferences(preferences)
         if self.preferences.map(BackupSelection.init) != BackupSelection(preferences) {
             backupSelectionChecked = false
@@ -455,7 +535,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     /// discovering meanwhile. Nil, with nothing read, while an account block or the session's
     /// authorization refuses transfers, as enqueue refuses.
     func discover(_ discovery: LibraryDiscovery) async throws -> DiscoveryMerge? {
-        if stopped || Task.isCancelled || blocker != nil || restriction(authorization.current()) != nil { return nil }
+        if stopped || Task.isCancelled || newPhotosActivation != nil || blocker != nil || restriction(authorization.current()) != nil { return nil }
         discoveryGeneration &+= 1
         let generation = discoveryGeneration
         let selection = preferences.map(BackupSelection.init)
@@ -476,6 +556,9 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                 lastMessage = discoveryMessage
             }
             await changed()
+            // A changed selection invalidates its old scan without turning a normal settings
+            // change into a failed command. Genuine cancellation of this caller still throws.
+            if error is CancellationError, generation != discoveryGeneration, !Task.isCancelled { return nil }
             throw error
         }
         discovering -= 1
@@ -703,6 +786,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard let snapshot = authorization.current() else { return nil }
         let lanes: [TransferLane] = intent == .paused ? [.share] : [.share, .library]
         for lane in lanes {
+            if lane == .library, newPhotosActivation != nil { continue }
             if lane == .library, let deadline = identityIndexRetryAt, now() < deadline { continue }
             let token = UUID()
             let generation = cancelGeneration
@@ -849,7 +933,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private func owns(_ lease: Lease) -> Bool {
         guard let active = active[lease.job], active.job.lease == lease, blocker == nil, !stopped else { return false }
         guard let current = authorization.current(), restriction(current) == nil else { return false }
-        if active.job.lane == .library, intent == .paused { return false }
+        if active.job.lane == .library, intent == .paused || newPhotosActivation != nil { return false }
         return current.tokenDigest == active.tokenDigest && current.writeGeneration == active.writeGeneration
     }
 
@@ -1005,6 +1089,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
 
     private func refreshCounts() async {
         if let fresh = try? await store.counts() { counts = fresh }
+        if preferences?.newPhotosOnly == true { futureConfirmed = (try? await store.newPhotosConfirmedCount()) ?? 0 }
     }
 
     private func snapshot() -> TransferSnapshot {
@@ -1024,7 +1109,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
             expectedBytes: expectedKnown ? libraryReports.reduce(0) { $0 + $1.expected } : nil)
         let progress: (sent: Int64, expected: Int64)? = fileProgress.isEmpty ? nil
             : fileProgress.values.reduce((sent: Int64(0), expected: Int64(0))) { ($0.sent + $1.sent, $0.expected + max($1.expected, 0)) }
-        return TransferSnapshot(intent: intent, phase: phase, remaining: counts.remaining, confirmed: counts.confirmed, failed: counts.failed,
+        return TransferSnapshot(intent: intent, phase: phase, remaining: counts.remaining, confirmed: preferences?.newPhotosOnly == true ? futureConfirmed : counts.confirmed, failed: counts.failed,
                                 fileProgress: progress.flatMap { $0.expected > 0 ? min(Double($0.sent) / Double($0.expected), 1) : nil },
                                 bytesSent: progress?.sent ?? 0, bytesExpected: max(progress?.expected ?? 0, 0), bytesPerSecond: nil,
                                 lastMessage: lastMessage, backupPhase: backupPhase, backupProgress: backupProgress,

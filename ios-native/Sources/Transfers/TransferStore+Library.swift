@@ -133,10 +133,15 @@ extension TransferStore {
     ///
     /// With `notifying`, the photos queued count in a backup notification batch, as each of
     /// today's runs posts one: the batch still open, or a new one.
-    func mergeDiscovery(_ found: [DeviceCandidate], gone: [String], origin: JobOrigin = .discovery,
-                        notifying: Bool = false) throws -> DiscoveryMerge {
+    func mergeDiscovery(_ incoming: [DeviceCandidate], gone: [String], origin: JobOrigin = .discovery,
+                        notifying: Bool = false, expectedNewPhotosOnly: Bool? = nil) throws -> DiscoveryMerge {
         let db = try database()
         let merge = try db.transaction {
+            guard try newPhotosPolicyChanging() == false else { throw NewPhotosBackupError.changingPolicy }
+            let newOnly = try preferences()?.newPhotosOnly == true
+            if let expectedNewPhotosOnly, newOnly != expectedNewPhotosOnly { throw CancellationError() }
+            let found: [DeviceCandidate]
+            if newOnly { found = try filterNewPhotosCandidates(incoming) } else { found = incoming }
             try db.run("CREATE TEMP TABLE IF NOT EXISTS discovered(local_id TEXT PRIMARY KEY,modification_date)")
             try db.run("DELETE FROM temp.discovered")
             for (index, candidate) in found.enumerated() {

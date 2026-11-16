@@ -4,6 +4,29 @@ import XCTest
 @testable import Ilyich
 
 final class KnownBackupCopyTests: XCTestCase {
+    func testNewPhotosOnlyNeverRevalidatesPastConfirmationsEvenWithoutABaseline() async throws {
+        let h = try await LibraryJobHarness()
+        var seed = TransferSeed()
+        seed.preferences.newPhotosOnly = true
+        seed.confirmations = [("past", FakeStaging.date)]
+        seed.receipts = [.init(localID: "past", modified: FakeStaging.date, originalID: "old-copy", originalChecksum: "old-bytes")]
+        try await h.store.seedForTest(seed)
+        let before = try await h.store.contents()
+        let reader = ProofReader(items: [])
+        let identities = MutableProofIdentities(rows: [], complete: true)
+        let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: reader,
+            database: DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite")), identities: identities, server: h.server)
+        try await checker.reconcileConfirmations(in: h.store)
+        let after = try await h.store.contents()
+        XCTAssertEqual(after.confirmations, before.confirmations)
+        XCTAssertEqual(after.receipts, before.receipts)
+        XCTAssertEqual(reader.readCount, 0)
+        XCTAssertEqual(identities.fullReads, 0)
+        XCTAssertTrue(h.server.remoteReads.isEmpty)
+        XCTAssertEqual(h.server.checkCallCount, 0)
+        await h.tearDown()
+    }
+
     func testCloudIdentityReconciliationNeverStagesOrUploadsAndPreservesPauseUntilExplicitResume() async throws {
         var preferences = TransferPreferences()
         preferences.scope = .entireLibrary

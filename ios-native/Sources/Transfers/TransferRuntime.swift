@@ -84,8 +84,10 @@ final class TransferRuntime: Sendable {
             guard let snapshot = authorization.current() else { return false }
             return !snapshot.readOnly && !snapshot.requiresPasswordChange
         }
+        let policyGate = BackupPreparationPolicyGate()
+        let backupPermits: @Sendable () -> Bool = { permits() && policyGate.permits }
         let library = LibraryJobExecutor(store: parts.store, staging: parts.staging, server: parts.server,
-                                         uploader: TransportPartUploader(transport: backup, outcomes: outcomes, allowsSubmission: permits), layout: parts.layout,
+                                         uploader: TransportPartUploader(transport: backup, outcomes: outcomes, allowsSubmission: backupPermits), layout: parts.layout,
                                          account: parts.account, conditionsPermit: parts.conditionsPermit, knownBackupChecker: parts.knownBackupChecker)
         let shares = ShareJobExecutor(store: parts.store, inbox: parts.inbox, server: parts.server,
                                       uploader: TransportPartUploader(transport: share, outcomes: outcomes, allowsSubmission: permits), layout: parts.layout, account: parts.account)
@@ -109,12 +111,13 @@ final class TransferRuntime: Sendable {
         let receiptChanges = ChangeBroadcast()
         self.receiptChanges = receiptChanges
         confirmationChanges = parts.confirmationChanges
-        confirmationObserver = proofChecker.map { checker in
+        let confirmationObserver = proofChecker.map { checker in
             BackupConfirmationObserver(checker: checker, store: parts.store, permits: servicePermits, refreshed: {
                 await engine.refresh()
                 receiptChanges.send()
             })
         }
+        self.confirmationObserver = confirmationObserver
         let acknowledge = parts.acknowledge
         let reconciler = Reconciler { drains in
             do {
@@ -148,6 +151,9 @@ final class TransferRuntime: Sendable {
             guard await engine.runIntent == .paused else { throw BackupError.message("Pause backup before linking existing edits.") }
             guard permits(), let started = authorization.current() else { throw APIError.signedOut }
             let stillPermitted: @Sendable () -> Bool = { permits() && authorization.current() == started }
+            guard try await proofStore.preferences()?.newPhotosOnly != true else {
+                throw BackupError.message("Past backup checks are off while backing up new photos only.")
+            }
             let sourceMatcher = SourceOriginalArchiveReconciler(account: matchingAccount, store: proofStore,
                 staging: matchingStaging, server: matchingServer, permits: stillPermitted)
             if let proofChecker { try await proofChecker.reconcileConfirmations(in: proofStore) }
@@ -162,6 +168,37 @@ final class TransferRuntime: Sendable {
             await worker.request(.committed(.library))
             await worker.idle()
             return report
+        }, enableNewPhotos: {
+            guard permits() else { throw PurchaseAccessRequired() }
+            policyGate.setPermitted(false)
+            await reconciler.suspendForNewPhotosPolicyChange()
+            await worker.suspendForNewPhotosPolicyChange()
+            await confirmationObserver?.suspendForNewPhotosPolicyChange()
+            do {
+                try await engine.enableNewPhotosBackup(staging: matchingStaging, cancelAttempts: { attempts in
+                    let expected = Set(attempts)
+                    let inventory = await backup.inventory()
+                    let references = try await proofStore.stagingReferences()
+                    let tasks = inventory.tasks(scope: matchingAccount.digest).filter { task in
+                        guard let attempt = task.attempt else { return false }
+                        return expected.contains(attempt) || !references.attempts.contains(attempt.rawValue)
+                    }.map(\.taskID)
+                    await backup.cancel(tasks: tasks)
+                }, policyChangeBegan: { receiptChanges.send() })
+                policyGate.setPermitted(true)
+                await worker.resumeAfterNewPhotosPolicyChange()
+                await confirmationObserver?.resumeAfterNewPhotosPolicyChange()
+                await reconciler.resumeAfterNewPhotosPolicyChange()
+                lifecycleEvents.yield(.preferencesChanged)
+                receiptChanges.send()
+            } catch {
+                policyGate.setPermitted(true)
+                await worker.resumeAfterNewPhotosPolicyChange()
+                await confirmationObserver?.resumeAfterNewPhotosPolicyChange()
+                await reconciler.resumeAfterNewPhotosPolicyChange()
+                receiptChanges.send()
+                throw error
+            }
         })
     }
 
@@ -306,6 +343,7 @@ private actor Reconciler {
     private var queued: Task<Void, Never>?
     private var drains: [TransferSessionID: Int] = [:]
     private var stopped = false
+    private var policySuspended = false
 
     init(pass: @escaping @Sendable ([(TransferSessionID, Int)]) async -> Void) { self.pass = pass }
 
@@ -316,6 +354,7 @@ private actor Reconciler {
     @discardableResult
     func request(drain: (TransferSessionID, Int)?) -> Task<Void, Never> {
         if let (session, number) = drain { drains[session] = max(drains[session] ?? 0, number) }
+        if policySuspended { return Task {} }
         if let queued { return queued }
         guard !stopped else { return Task {} }
         let previous = tail
@@ -330,10 +369,20 @@ private actor Reconciler {
 
     private func begin() async {
         queued = nil
-        guard !stopped, !Task.isCancelled else { return }
+        guard !stopped, !policySuspended, !Task.isCancelled else { return }
         let due = drains.map { ($0.key, $0.value) }
         drains = [:]
         await pass(due)
+    }
+
+    func suspendForNewPhotosPolicyChange() async {
+        policySuspended = true
+        await tail?.value
+    }
+
+    func resumeAfterNewPhotosPolicyChange() {
+        policySuspended = false
+        _ = request(drain: nil)
     }
 
     func stop() async {
@@ -406,6 +455,12 @@ struct EngineBackend: TransferControlling {
     var matchOriginals: @Sendable (String?, Int) async throws -> SourceOriginalReconciliationReport = { _, _ in
         throw BackupError.message("Original matching is unavailable for this account.")
     }
+
+    var enableNewPhotos: @Sendable () async throws -> Void = {
+        throw BackupError.message("New-photos backup is unavailable for this account.")
+    }
+
+    func enableNewPhotosBackup() async throws { try await enableNewPhotos() }
 
     func matchArchivedOriginals(after localID: String?, limit: Int) async throws -> SourceOriginalReconciliationReport {
         try await matchOriginals(localID, limit)
@@ -520,6 +575,7 @@ struct EngineBackend: TransferControlling {
                 if selected.unchecked > 0 { return snapshot.intent == .paused ? "Ready to check existing backups" : "Waiting to check existing backups" }
                 return snapshot.intent == .paused ? "Ready to back up" : "Waiting to back up selected photos"
             }
+            if preferences?.newPhotosOnly == true { return "Waiting for new photos" }
             return preferences?.scope == .entireLibrary ? "Photo library backed up" : "Selected photos backed up"
         }
     }
@@ -567,8 +623,14 @@ struct TransferReceiptSource: ReceiptRepository, DeviceIndexBackupSource {
     func inputs(account: String) async -> DeviceIndexBackupInputs? {
         guard let receipts = try? await store.cleanupReceipts() else { return nil }
         let preferences = try? await store.preferences()
+        guard (try? await store.newPhotosPolicyChanging()) == false else { return nil }
+        var fingerprintExcludedIDs = Set<String>()
+        if preferences?.newPhotosOnly == true {
+            guard let baseline = try? await store.newPhotosBaselineIDs() else { return nil }
+            fingerprintExcludedIDs = baseline
+        }
         return DeviceIndexBackupInputs(scope: preferences?.scope ?? .selectedAlbums, included: preferences?.includedAlbums ?? [], excluded: preferences?.excludedAlbums ?? [],
-                                       receipts: receipts.filter { !$0.value.locallyDeleted })
+                                       receipts: receipts.filter { !$0.value.locallyDeleted }, fingerprintExcludedIDs: fingerprintExcludedIDs)
     }
 
     func changes() async -> AsyncStream<Void> { broadcast.stream() }
@@ -606,4 +668,12 @@ final class ChangeBroadcast: Sendable {
         }
         for subscriber in subscribers { subscriber.finish() }
     }
+}
+
+/// Gates only library submissions during metadata-only policy activation; share uploads retain
+/// their own authorization and continue. Existing daemon tasks are cancelled by attempt ID.
+private final class BackupPreparationPolicyGate: Sendable {
+    private let value = Mutex(true)
+    var permits: Bool { value.withLock { $0 } }
+    func setPermitted(_ permitted: Bool) { value.withLock { $0 = permitted } }
 }

@@ -34,7 +34,7 @@ import SQLite3
 /// are declared without a type: a REAL column stores -0.0 as 0, and every date must come back
 /// bit for bit (BM2).
 actor TransferStore: ReceiptQuery {
-    static let schemaVersion = 3
+    static let schemaVersion = 4
 
     /// Who the records serve: `legacy` for a database the engine hasn't claimed (a new one, or a
     /// copy B1 made of an earlier build's state.json that no import handed over), or the transfer
@@ -397,6 +397,9 @@ actor TransferStore: ReceiptQuery {
         current_checksum TEXT NOT NULL,motion_id TEXT,motion_checksum TEXT,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,not_before,reason TEXT)
         """,
         "CREATE INDEX IF NOT EXISTS source_match_due ON source_match_tasks(state,not_before,local_id)",
+        "CREATE TABLE IF NOT EXISTS new_photos_baseline(local_id TEXT PRIMARY KEY)",
+        "CREATE TABLE IF NOT EXISTS new_photos_baseline_state(id INTEGER PRIMARY KEY CHECK(id=1),started_at NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS new_photos_activation(id INTEGER PRIMARY KEY CHECK(id=1),token TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS linked_albums(device_album_id TEXT PRIMARY KEY,album_id TEXT NOT NULL)",
         """
         CREATE TABLE IF NOT EXISTS share_consumed(batch_id TEXT NOT NULL,attachment TEXT NOT NULL,remote_id TEXT,consumed_at NOT NULL,\
@@ -472,6 +475,8 @@ struct TransferPreferences: Codable, Equatable, Sendable {
     /// Seconds automatic backup waits after a change, from 0 to an hour.
     var triggerDelay = 30
     var syncAlbums = false
+    var newPhotosOnly = false
+    var newPhotosBaselineStartedAt: Date? = nil
 
     /// An entire library remains a selection even when it has no albums.
     var hasSelection: Bool { scope == .entireLibrary || !includedAlbums.isEmpty }
@@ -481,7 +486,7 @@ struct TransferPreferences: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case includedAlbums, excludedAlbums, cellularPhotos, cellularVideos, downloadCloudOriginals
-        case automatic, requireCharging, triggerDelay, syncAlbums, scope
+        case automatic, requireCharging, triggerDelay, syncAlbums, scope, newPhotosOnly, newPhotosBaselineStartedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -497,6 +502,8 @@ struct TransferPreferences: Codable, Equatable, Sendable {
         requireCharging = try c.decode(Bool.self, forKey: .requireCharging)
         triggerDelay = try c.decode(Int.self, forKey: .triggerDelay)
         syncAlbums = try c.decode(Bool.self, forKey: .syncAlbums)
+        newPhotosOnly = try c.decodeIfPresent(Bool.self, forKey: .newPhotosOnly) ?? false
+        newPhotosBaselineStartedAt = try c.decodeIfPresent(Date.self, forKey: .newPhotosBaselineStartedAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -511,6 +518,8 @@ struct TransferPreferences: Codable, Equatable, Sendable {
         try c.encode(requireCharging, forKey: .requireCharging)
         try c.encode(triggerDelay, forKey: .triggerDelay)
         try c.encode(syncAlbums, forKey: .syncAlbums)
+        try c.encode(newPhotosOnly, forKey: .newPhotosOnly)
+        try c.encodeIfPresent(newPhotosBaselineStartedAt, forKey: .newPhotosBaselineStartedAt)
     }
 }
 

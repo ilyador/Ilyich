@@ -9,7 +9,9 @@ struct BackupSettingsLabel: View {
         Label {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Backup")
-                Text(summary(statistics))
+                Text(backup.newPhotosStartingPoint.map {
+                    "New photos since \($0.formatted(date: .abbreviated, time: .shortened))"
+                } ?? summary(statistics))
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             }
         } icon: {
@@ -32,10 +34,27 @@ struct BackupSettingsLabel: View {
 /// Account history and unfinished work are separate counts, not a fabricated run percentage.
 struct BackupStatisticsSummary: View {
     let statistics: BackupStatistics
+    var newPhotosBaselineStartedAt: Date? = nil
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        if let selection = statistics.selectionProgress {
+        if let newPhotosBaselineStartedAt {
+            VStack(alignment: .leading, spacing: 6) {
+                LabeledContent("New photos from", value: newPhotosBaselineStartedAt.formatted(date: .abbreviated, time: .shortened))
+                if let selection = statistics.selectionProgress {
+                    LabeledContent("New items to process", value: selection.remaining.formatted())
+                        .monospacedDigit()
+                    if selection.backedUp > 0 {
+                        LabeledContent("New items verified", value: selection.backedUp.formatted())
+                            .foregroundStyle(.secondary).monospacedDigit()
+                    }
+                } else {
+                    LabeledContent("Items to process", value: statistics.remaining.formatted()).monospacedDigit()
+                }
+                Text("Earlier photos, videos, and later edits stay outside this backup.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        } else if let selection = statistics.selectionProgress {
             selectedCounts(selection)
         } else {
             VStack(alignment: .leading, spacing: 10) {
@@ -152,7 +171,9 @@ struct BackupActivityIndicator: View {
     var body: some View {
         let statistics = backup.statistics
         if statistics.remaining > 0 || statistics.phase == .running || statistics.phase == .discovering {
-            BackupActivityBar(statistics: statistics, openBackup: openBackup)
+            BackupActivityBar(statistics: statistics,
+                              newPhotosBaselineStartedAt: backup.newPhotosStartingPoint,
+                              openBackup: openBackup)
                 .padding(.bottom, 8)
         }
     }
@@ -160,6 +181,7 @@ struct BackupActivityIndicator: View {
 
 struct BackupActivityBar: View {
     let statistics: BackupStatistics
+    var newPhotosBaselineStartedAt: Date? = nil
     let openBackup: () -> Void
     @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -175,7 +197,7 @@ struct BackupActivityBar: View {
                             Image(systemName: "chevron.right").font(.caption.weight(.semibold)).accessibilityHidden(true)
                         }
                         if statistics.phase == .discovering {
-                            Text("Finding photos and videos…").font(.caption)
+                            Text(newPhotosBaselineStartedAt == nil ? "Finding photos and videos…" : "Finding new photos and videos…").font(.caption)
                         } else {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(visibleCountLabel).font(.caption)
@@ -255,6 +277,9 @@ struct BackupActivityBar: View {
     }
 
     private var detail: String {
+        if newPhotosBaselineStartedAt != nil, statistics.selectionProgress == nil {
+            return "\(statistics.remaining.formatted()) new items to process"
+        }
         if statistics.phase == .discovering {
             return "\(statistics.backedUp.formatted()) previously verified"
         }

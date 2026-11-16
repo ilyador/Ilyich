@@ -76,7 +76,7 @@ extension TransferStore {
 
     /// Stack tasks waiting to run, oldest first.
     func pendingStackTasks(limit: Int = 500) throws -> [StackTaskRow] {
-        try stackTasks(where: "state='pending'", limit: limit)
+        try stackTasks(where: "state='pending' AND \(try automaticFollowUpSQL())", limit: limit)
     }
 
     /// Every stack task, for tests and diagnostics.

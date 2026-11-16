@@ -70,9 +70,11 @@ final class BackupReceiptTests: XCTestCase {
         XCTAssertFalse(preferences.automatic)
         XCTAssertFalse(preferences.cellularPhotos)
         XCTAssertFalse(preferences.cellularVideos)
+        XCTAssertFalse(preferences.newPhotosOnly)
+        XCTAssertNil(preferences.newPhotosBaselineStartedAt)
         XCTAssertEqual(preferences.triggerDelay, 30)
         XCTAssertEqual(TransferJSON.encode(preferences),
-                       #"{"automatic":false,"cellularPhotos":false,"cellularVideos":false,"downloadCloudOriginals":false,"excludedAlbums":[],"includedAlbums":[],"requireCharging":false,"scope":"selectedAlbums","syncAlbums":false,"triggerDelay":30}"#)
+                       #"{"automatic":false,"cellularPhotos":false,"cellularVideos":false,"downloadCloudOriginals":false,"excludedAlbums":[],"includedAlbums":[],"newPhotosOnly":false,"requireCharging":false,"scope":"selectedAlbums","syncAlbums":false,"triggerDelay":30}"#)
         let restored = try JSONDecoder().decode(TransferPreferences.self, from: Data(TransferJSON.encode(preferences).utf8))
         XCTAssertEqual(preferences, restored)
     }
@@ -81,6 +83,8 @@ final class BackupReceiptTests: XCTestCase {
         let legacy = #"{"automatic":false,"cellularPhotos":true,"cellularVideos":false,"downloadCloudOriginals":true,"excludedAlbums":["private"],"includedAlbums":["trips"],"requireCharging":true,"syncAlbums":true,"triggerDelay":60}"#
         let preferences = try JSONDecoder().decode(TransferPreferences.self, from: Data(legacy.utf8))
         XCTAssertEqual(preferences.scope, .selectedAlbums)
+        XCTAssertFalse(preferences.newPhotosOnly, "An older preference record cannot silently enable a future-only policy.")
+        XCTAssertNil(preferences.newPhotosBaselineStartedAt)
         XCTAssertEqual(preferences.includedAlbums, ["trips"])
         XCTAssertEqual(preferences.excludedAlbums, ["private"])
         XCTAssertTrue(preferences.hasSelection)

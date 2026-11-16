@@ -95,6 +95,42 @@ final class DeviceIndexServiceTests: XCTestCase {
         await relaunched.shutdown()
     }
 
+    func testFutureOnlyStartingPointExcludesOldOriginalsFromTimelineHashing() async throws {
+        let photos = FakeIndexReader()
+        photos.add(item("a-existing", offset: 0), in: album)
+        photos.add(item("b-new", offset: 1), in: album)
+        photos.checksums = ["a-existing": "old-hash", "b-new": "new-hash"]
+        let database = DeviceDatabase(url: temporaryDirectory().appendingPathComponent("device.sqlite"))
+        let backup = FakeBackupSource(DeviceIndexBackupInputs(scope: .entireLibrary,
+                                                              fingerprintExcludedIDs: ["a-existing"]))
+        let server = FakeIndexServer(rows: [match("server-old", checksum: "old-hash"), match("server-new", checksum: "new-hash")])
+        let service = makeService(photos: photos, server: server, backup: backup, database: database)
+        let snapshots = listen(await service.snapshots())
+        try await until("The newly added photo was not matched.") {
+            snapshots.last?.associations["b-new"] == "server-new"
+        }
+        XCTAssertEqual(photos.hashed, ["b-new"])
+
+        // Editing an excluded photo does not turn it into a newly added photo.
+        photos.add(item("a-existing", offset: 10, favorite: true), in: album)
+        photos.emit(changed: ["a-existing"])
+        try await until("The metadata edit was not observed.") {
+            snapshots.last?.items["a-existing"]?.photo.isFavorite == true
+        }
+        await service.shutdown()
+        XCTAssertEqual(photos.hashed, ["b-new"])
+        let hashes = try await database.fingerprints()
+        XCTAssertNil(hashes["a-existing"])
+
+        let again = makeService(photos: photos, server: server, backup: backup, database: database)
+        let restored = listen(await again.snapshots())
+        try await until("The saved new-photo match was not restored.") {
+            restored.last?.associations["b-new"] == "server-new"
+        }
+        await again.shutdown()
+        XCTAssertEqual(photos.hashed, ["b-new"], "Restart retains the baseline and reuses the new photo's saved hash.")
+    }
+
     func testPhoneCopyOfTrashedServerAssetStaysVisibleAsLocal() async throws {
         let entities = try LibraryIndex(scope: "server|alice", userID: "alice", directory: temporaryDirectory())
         _ = try await entities.prepare(sessionFingerprint: "session")

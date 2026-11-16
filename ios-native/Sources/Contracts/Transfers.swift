@@ -222,6 +222,7 @@ struct TransferHistoryItem: Hashable, Sendable {
 /// engine's loop; they never run transfers themselves.
 protocol TransferControlling: Sendable {
     func setIntent(_ intent: RunIntent) async throws
+    func enableNewPhotosBackup() async throws
     func enqueue(_ requests: [TransferRequest]) async throws -> EnqueueResult
     func cancel(_ sources: [TransferSource]) async throws
     func setPreferences(_ preferences: TransferPreferences) async throws
@@ -242,6 +243,9 @@ protocol TransferControlling: Sendable {
 }
 
 extension TransferControlling {
+    func enableNewPhotosBackup() async throws {
+        throw BackupError.message("New-photos backup is unavailable for this account.")
+    }
     func matchArchivedOriginals(after localID: String?, limit: Int) async throws -> SourceOriginalReconciliationReport {
         throw BackupError.message("Original matching is unavailable for this account.")
     }

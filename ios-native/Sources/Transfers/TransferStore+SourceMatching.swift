@@ -68,7 +68,7 @@ extension TransferStore {
     func dueSourceMatchTasks(at date: Date, limit: Int = 25) throws -> [SourceMatchTaskRow] {
         var result: [SourceMatchTaskRow] = []
         try database().run("""
-            SELECT \(Self.sourceMatchColumns) FROM source_match_tasks WHERE state='pending' AND (not_before IS NULL OR not_before<=?) \
+            SELECT \(Self.sourceMatchColumns) FROM source_match_tasks WHERE state='pending' AND (not_before IS NULL OR not_before<=?) AND \(try automaticFollowUpSQL()) \
             ORDER BY coalesce(not_before,0),local_id LIMIT ?
             """, [.date(date), .integer(Int64(min(max(limit, 1), 25)))]) { result.append(Self.sourceMatchRow($0)) }
         return result
@@ -76,7 +76,7 @@ extension TransferStore {
 
     func nextSourceMatchDue() throws -> Date? {
         var date: Date?
-        try database().run("SELECT min(coalesce(not_before,0)) FROM source_match_tasks WHERE state='pending'") { date = $0.date(0) }
+        try database().run("SELECT min(coalesce(not_before,0)) FROM source_match_tasks WHERE state='pending' AND \(try automaticFollowUpSQL())") { date = $0.date(0) }
         return date
     }
 

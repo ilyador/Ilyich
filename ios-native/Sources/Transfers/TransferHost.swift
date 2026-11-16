@@ -484,6 +484,7 @@ import UIKit
     // MARK: TransferControlling
 
     func setIntent(_ intent: RunIntent) async throws { try await target().setIntent(intent) }
+    func enableNewPhotosBackup() async throws { try await target().enableNewPhotosBackup() }
     func enqueue(_ requests: [TransferRequest]) async throws -> EnqueueResult { try await target().enqueue(requests) }
     func cancel(_ sources: [TransferSource]) async throws { try await target().cancel(sources) }
     func retry(_ sources: [TransferSource]?) async throws { try await target().retry(sources) }

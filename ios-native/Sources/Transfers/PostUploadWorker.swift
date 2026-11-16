@@ -54,6 +54,8 @@ actor PostUploadWorker {
     private var loop: Task<Void, Never>?
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var stopped = false
+    /// A policy transition quiesces old work before the metadata baseline is committed.
+    private var policySuspended = false
     /// The token the worker started under: a pass stops once the session changes.
     private var tokenDigest: String?
     private let now: @Sendable () -> Date
@@ -123,16 +125,30 @@ actor PostUploadWorker {
         await loop?.value
     }
 
+    func suspendForNewPhotosPolicyChange() async {
+        policySuspended = true
+        retryWake?.cancel()
+        retryWake = nil
+        loop?.cancel()
+        await loop?.value
+    }
+
+    func resumeAfterNewPhotosPolicyChange() {
+        guard !stopped else { return }
+        policySuspended = false
+        request(.conditionsChanged)
+    }
+
     /// Asks for a pass and returns once it is asked: `idle()` then waits for it.
     func request(_ trigger: FollowUpTrigger) {
         guard !stopped else { return }
         pending.insert(trigger)
-        guard loop == nil else { return }
+        guard !policySuspended, loop == nil else { return }
         loop = Task { await self.serve() }
     }
 
     private func serve() async {
-        while !pending.isEmpty, !stopped, !Task.isCancelled {
+        while !pending.isEmpty, !stopped, !policySuspended, !Task.isCancelled {
             let triggers = pending
             pending = []
             // The user asked: what backs off is tried now.
@@ -211,7 +227,7 @@ actor PostUploadWorker {
     private func scheduleRetryWake() async {
         retryWake?.cancel()
         retryWake = nil
-        guard !stopped, !Task.isCancelled else { return }
+        guard !stopped, !policySuspended, !Task.isCancelled else { return }
         var dates = Array(backoff.values)
         if lastReport.stoppedBy == nil, !lastReport.waitingForDevice,
            let sourceDue = try? await store.nextSourceMatchDue() { dates.append(sourceDue) }
@@ -228,7 +244,15 @@ actor PostUploadWorker {
     }
 
     private func checkCancellation() throws {
-        if Task.isCancelled || stopped { throw PassStopped(restriction: nil) }
+        if Task.isCancelled || stopped || policySuspended { throw PassStopped(restriction: nil) }
+    }
+
+    private struct ExcludedFollowUp: Error {}
+
+    private func ensureEligible(_ localID: String) async throws {
+        try await ensureAllowed()
+        guard try await store.isExcludedFromNewPhotosBackup(localID) == false else { throw ExcludedFollowUp() }
+        try checkCancellation()
     }
 
     // MARK: Albums
@@ -240,7 +264,8 @@ actor PostUploadWorker {
                 let page = try await store.runnableAlbumDestinations(album: album, after: after, limit: Self.batchSize)
                 guard let last = page.last else { break }
                 after = last.localID
-                let rows = page.filter { backoff[.album(album, localID: $0.localID)] == nil }
+                let eligible = try await store.automaticFollowUpLocalIDs(page.map(\.localID))
+                let rows = page.filter { eligible.contains($0.localID) && backoff[.album(album, localID: $0.localID)] == nil }
                 guard !rows.isEmpty else { continue }
                 try await ensureAllowed()
                 let ids = Array(Set(rows.compactMap(\.remoteID))).sorted()
@@ -277,6 +302,7 @@ actor PostUploadWorker {
         let policy = StagingPolicy(allowCloud: preferences.downloadCloudOriginals, cellularPhotos: preferences.cellularPhotos,
                                    cellularVideos: preferences.cellularVideos)
         for task in rows {
+            if try await store.isExcludedFromNewPhotosBackup(task.localID) { continue }
             try await ensureAllowed()
             guard let started = authorization.current() else { throw PassStopped(restriction: .signedOut) }
             let auth = authorization
@@ -285,8 +311,8 @@ actor PostUploadWorker {
             let outcome: SourceMatchTaskOutcome
             do {
                 let result = try await matcher.attempt(task.localID, revision: task.revision, policy: policy,
-                                                       ensureOwned: { try await self.ensureAllowed() })
-                try await ensureAllowed()
+                                                       ensureOwned: { try await self.ensureEligible(task.localID) })
+                try await ensureEligible(task.localID)
                 switch result {
                 case .notApplicable(let reason): outcome = .notApplicable(reason.rawValue)
                 case .deferred(let reason): outcome = .deferred(reason.rawValue)
@@ -295,7 +321,7 @@ actor PostUploadWorker {
                         outcome = .failed("currentCopyChanged")
                     } else if let fingerprint = source.fingerprint {
                         let validation = try await matcher.validateSource(task.localID, fingerprint: fingerprint, policy: policy)
-                        try await ensureAllowed()
+                        try await ensureEligible(task.localID)
                         switch validation {
                         case .current: outcome = .matched(source)
                         case .deferred(let reason): outcome = .deferred(reason.rawValue)
@@ -304,7 +330,8 @@ actor PostUploadWorker {
                         }
                     } else { outcome = .deferred(SourceOriginalReason.sourceUnavailable.rawValue) }
                 }
-            } catch let stop as PassStopped { throw stop }
+            } catch is ExcludedFollowUp { continue }
+            catch let stop as PassStopped { throw stop }
             catch {
                 if error is CancellationError || Task.isCancelled { throw PassStopped(restriction: nil) }
                 switch TransferFailureClassifier.classify(error, context: .init(retryCount: task.attempts)) {
@@ -315,6 +342,7 @@ actor PostUploadWorker {
                 case .item(let reason): outcome = .failed(reason)
                 }
             }
+            if try await store.isExcludedFromNewPhotosBackup(task.localID) { continue }
             try await ensureAllowed()
             guard try await store.finishSourceMatchTask(task, outcome, at: now(), permits: permits) else { continue }
             switch outcome {
@@ -336,11 +364,11 @@ actor PostUploadWorker {
 
     private func proveCurrent(_ task: SourceMatchTaskRow, matcher: SourceOriginalArchiveMatcher) async throws -> Bool {
         let current = try await server.remoteAsset(id: task.currentID)
-        try await ensureAllowed()
+        try await ensureEligible(task.localID)
         guard matcher.eligible(current, id: task.currentID, checksum: task.currentChecksum) else { return false }
         if let motion = task.receipt.motion {
             let remote = try await server.remoteAsset(id: motion.id)
-            try await ensureAllowed()
+            try await ensureEligible(task.localID)
             guard matcher.eligible(remote, id: motion.id, checksum: motion.checksum), current.livePhotoVideoId == motion.id else { return false }
         }
         return true
@@ -350,6 +378,7 @@ actor PostUploadWorker {
 
     private func stack(_ report: inout PostUploadReport) async throws {
         for task in try await store.pendingStackTasks() where backoff[.stack(task.id)] == nil {
+            if try await store.isExcludedFromNewPhotosBackup(task.localID) { continue }
             try await ensureAllowed()
             let outcome: FollowUpOutcome
             do {
@@ -357,7 +386,7 @@ actor PostUploadWorker {
                     guard let ownerID = authorization.current()?.epoch.account.userID else { throw APIError.signedOut }
                     for (id, checksum) in [(task.previousAssetID, sourceChecksum), (task.assetID, currentChecksum)] {
                         let remote = try await server.remoteAsset(id: id)
-                        try await ensureAllowed()
+                        try await ensureEligible(task.localID)
                         guard remote.id == id, remote.ownerId == ownerID, !remote.isTrashed, remote.isOffline != true,
                               remote.visibility != "locked", remote.visibility != "hidden", remote.fileChecksum == checksum else {
                             throw ServerFailure.http(400, "The original or edited copy changed. Their groups were left unchanged.")
@@ -367,9 +396,12 @@ actor PostUploadWorker {
                 var expected: [String: String] = [:]
                 if let source = task.sourceChecksum { expected[task.previousAssetID] = source }
                 if let current = task.currentChecksum { expected[task.assetID] = current }
+                try await ensureEligible(task.localID)
                 try await server.createStack([task.assetID, task.previousAssetID], expectedChecksums: expected)
-                try await ensureAllowed()
+                try await ensureEligible(task.localID)
                 outcome = .done
+            } catch is ExcludedFollowUp {
+                continue
             } catch {
                 outcome = try decide(error, attempts: task.attempts, message: Self.stackMessage)
             }
@@ -387,28 +419,33 @@ actor PostUploadWorker {
     private func syncLinkedAlbums(_ report: inout PostUploadReport) async throws {
         guard let preferences = try await store.preferences() else { return }
         try await ensureAllowed()
-        var remote: [Album]
-        do { remote = try await server.ownedAlbums() } catch {
-            // Nothing can be matched without the server's albums; the next run tries again.
-            if case .stop(let restriction) = classify(error, attempts: 0) { throw PassStopped(restriction: restriction) }
-            report.linkedFailures["*"] = Self.linkedMessage
-            return
-        }
+        // Metadata membership can exclude every old photo without inspecting the server's
+        // albums. Load that catalog only after a future photo actually needs copying.
+        var remote: [Album]?
         var linked = try await store.linkedAlbums()
         let included = await photos.albums().filter { preferences.includedAlbums.contains($0.id) && !preferences.excludedAlbums.contains($0.id) }
         for local in included.sorted(by: { $0.id < $1.id }) {
             try checkCancellation()
             let members = await photos.albumMembers(local.id, excluded: preferences.excludedAlbums, scope: preferences.scope)
-            let assetIDs = Set(try await store.receipts(for: members).values.map(\.original.id)).sorted()
+            let eligible = try await store.automaticFollowUpLocalIDs(members)
+            let assetIDs = Set(try await store.receipts(for: Array(eligible)).values.map(\.original.id)).sorted()
             guard !assetIDs.isEmpty else { continue }
             try await ensureAllowed()
+            if remote == nil {
+                do { remote = try await server.ownedAlbums() } catch {
+                    // Nothing can be matched without the server's albums; a later pass retries.
+                    if case .stop(let restriction) = classify(error, attempts: 0) { throw PassStopped(restriction: restriction) }
+                    report.linkedFailures["*"] = Self.linkedMessage
+                    return
+                }
+            }
             do {
                 let album: Album
-                if let existing = remote.first(where: { $0.id == linked[local.id] }) ?? remote.first(where: { $0.albumName == local.title }) {
+                if let existing = remote?.first(where: { $0.id == linked[local.id] }) ?? remote?.first(where: { $0.albumName == local.title }) {
                     album = existing
                 } else {
                     album = try await server.createAlbum(name: local.title)
-                    remote.append(album)
+                    remote?.append(album)
                 }
                 if linked[local.id] != album.id {
                     try await store.linkAlbum(device: local.id, to: album.id)

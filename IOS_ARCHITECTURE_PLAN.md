@@ -1,6 +1,6 @@
 # Native iOS Architecture Rebuild Plan
 
-Status: proposed; implementation has not started.
+Status: roadmap. Durable transfer/recovery foundations are implemented. New-photos-only backup is the current priority; the bulk verification redesign below is deferred.
 
 ## Goal
 
@@ -13,7 +13,7 @@ Preserve the capabilities in [PRODUCT.md](ios-native/PRODUCT.md), the visual beh
 | Component | Responsibility |
 | --- | --- |
 | Account runtime | Session-scoped dependencies, authorization and lifecycle |
-| Transfer engine and database | Durable backup/share jobs, attempts, receipts and recovery |
+| Verification and transfer services | Durable checks, resource fingerprints, uploads, receipts and recovery |
 | PhotoKit adapter | Native reads and mutations with correct executor boundaries |
 | Library repository | Query semantics, local/server routing and typed changes |
 | Thumbnail service | Local thumbnail coverage, decoded cache and viewport scheduling |
@@ -29,17 +29,29 @@ Views render state and submit commands. Services receive explicit dependencies a
 
 Define shared query, mutation, authorization and lifecycle contracts first. Capture the reported failures in regression tests. Preserve existing search continuation, verification, cancellation and scroll-restoration behavior, along with the backup formats needed for migration.
 
-### 2. Replace backup orchestration
+### 2. Separate verification from uploading
 
-Replace `BackupCoordinator` with one durable transfer state machine outside the main actor. Reserve operations before suspension and validate their ownership when results return. Replace whole-history JSON rewrites with incremental SQLite persistence.
+**Current requirement: back up new photos only.** Save the existing Photos identifiers as an account-scoped starting point, without reading originals or checking past backups. Cancel the old library queue while preserving receipts and media. Automatically back up later additions, including imports with old capture dates; keep the starting point across restarts and re-enabling. Existing items and their later edits remain excluded. Show progress only for new items and keep historical receipts available separately.
 
-Separate successful file backup from album updates and notifications. Temporary failures retry automatically; environmental restrictions wait; account restrictions and item failures remain explicit. Approved share uploads use the same engine. Remove duplicated execution loops and independently writable running/error flags.
+The following work is deferred until bulk verification is needed:
 
-### 3. Rebuild background transfer recovery
+The existing SQLite transfer engine and background transport remain the foundation. The current check path acquires the upload staging slot before checking known copies; one slow iCloud resource can block unrelated checks. It also discards PhotoKit preparation progress. A 16 November read-only phone snapshot found 407 confirmations, 18,104 queued items, one preparing item and one submitted upload, with no recorded error. This establishes slow progress, not the precise cause of the reported pause at 388.
 
-Make `BackgroundUploads` a transport adapter and `BackupLifecycle` a source of lifecycle events. Reconcile operating-system tasks, durable attempts, results and staged files after interruption.
+Replace that sequence with independently scheduled stages:
 
-Preserve existing session identifiers and import legacy state idempotently. Keep active resources recoverable, acknowledge results after durable commit, and run one execution engine during cutover.
+- **Inventory and fast matching:** checkpoint the selected Photos inventory and apply subsequent changes incrementally. Batch saved checksum and trusted identity lookups against the server index without taking a file-preparation slot. Offer checking without uploading; unknown items remain unknown.
+- **Resource verification:** use one account/revision/resource-scoped checksum store across browsing, backup and recovery. Reuse receipts and valid hashes; hash bytes while exporting once. Keep current edits, original sources and Live Photo motion distinct. Persist each result immediately.
+- **Preparation and upload:** only proven missing required resources enter the upload queue. Give local reads and iCloud downloads separate bounded capacity. A no-progress deadline defers a stalled resource so other work continues. Preserve prepared files across interruption within a storage budget.
+- **Optional follow-up:** original-version grouping, album work and notifications run independently. Remove source-original downloading from the current-file upload path; retain the durable grouping worker and its fresh proof checks.
+- **Progress:** persist the inventory and completed checks across launches. Show checked, already backed up, needs upload and waiting counts, plus the current iCloud/hash/upload phase and progress. Revalidate changed or missing copies; do not discard valid matches just to rebuild the display.
+
+Replace minute-by-minute full identity reloads with indexed lookups and incremental updates, including archive fingerprint changes. Batch fresh server proof reads. Avoid rescanning the whole selected set after no-op transfer events. Filename/date similarity may narrow candidates, but cannot create verified backup or cleanup proof.
+
+### 3. Make background execution explicit
+
+Keep the single background URLSession for prepared file uploads, submitting bounded batches instead of depending on a wake for each next file. Use iOS 26+ continued processing for a user-started initial check/backup, with system-visible progress and cancellation. Automatic maintenance uses scheduled processing windows. Inventory, hashing and iCloud preparation must checkpoint and yield when their execution window expires.
+
+An OS-owned upload may continue while the app is suspended; arbitrary PhotoKit work does not inherit that guarantee. iOS can also stop continued processing. Resume only incomplete work, preserve existing session identifiers, and reconcile attempts before accepting completion. Migrate current receipts, preferences and pending jobs without a second engine or forced uploads. Apple's guidance: [background transfers](https://developer.apple.com/documentation/foundation/downloading-files-in-the-background) and [continued processing](https://developer.apple.com/documentation/backgroundtasks/bgcontinuedprocessingtask).
 
 ### 4. Centralize PhotoKit and cleanup operations
 
@@ -91,6 +103,8 @@ Completion requires:
 
 - Regression, concurrency and interruption-recovery coverage.
 - Migration tests with existing receipts and active transfers.
+- Backup throughput tests: one stalled iCloud item cannot block a batch of cached checks; unchanged resources are not rehashed after restart; interrupted inventory resumes from its checkpoint; optional source matching cannot delay upload handoff. Measure the real library's cold and warm passes, API calls, bytes downloaded and time without progress.
+- Check-only mode makes zero upload attempts. Resource changes, Live Photos, missing server files, offline state and account changes retain strict proof requirements.
 - Equivalent local/server query results and correct scoped cache invalidation.
 - UI coverage for navigation, pagination, mutations and deep links.
 - Release-build measurements on the target iPhone: real-thumbnail latency, frame hitches, bounded memory and responsive interaction during background work.

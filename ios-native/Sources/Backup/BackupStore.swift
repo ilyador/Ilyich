@@ -37,6 +37,8 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     private(set) var albums: [DeviceAlbum] = []
     /// A command the backend couldn't carry out. The engine's own errors arrive in the snapshot.
     private(set) var commandError: String?
+    /// Prevents another scope change while the backend records the new-only cutoff.
+    private(set) var isSettingUpNewPhotos = false
 
     var isRunning: Bool {
         let phase = snapshot.backupPhase ?? snapshot.phase
@@ -48,6 +50,7 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     var confirmed: Int { snapshot.confirmed }
     /// The same account-scoped numbers for Settings and the compact backup indicator.
     var statistics: BackupStatistics { BackupStatistics(snapshot: snapshot) }
+    var newPhotosStartingPoint: Date? { preferences.newPhotosOnly ? preferences.newPhotosBaselineStartedAt : nil }
 
     @ObservationIgnored let backend: any TransferControlling
     @ObservationIgnored private let photos: BackupPhotoAccess
@@ -89,6 +92,25 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
 
     func retryFailures() async {
         await perform { try await $0.retry(nil) }
+    }
+
+    /// Establishes the new-photo cutoff atomically in the backend. Preferences are adopted only
+    /// after the backend has committed its baseline, so the UI never advertises an uncommitted run.
+    func enableNewPhotosBackup() async {
+        guard !isSettingUpNewPhotos else { return }
+        isSettingUpNewPhotos = true
+        defer { isSettingUpNewPhotos = false }
+        await flushPreferences()
+        do {
+            try await backend.enableNewPhotosBackup()
+            if let stored = try await backend.preferences() {
+                adopted = stored
+                if preferences != stored { preferences = stored }
+            }
+            commandError = nil
+        } catch {
+            commandError = error.localizedDescription
+        }
     }
 
     /// Adds phone photos to backup, for `albumID` when given. The outcome is this call's own: an

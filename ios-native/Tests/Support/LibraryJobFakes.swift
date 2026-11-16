@@ -7,7 +7,7 @@ import XCTest
 
 /// Photos as backup staging and discovery see it: photos in albums, each staged as files whose
 /// bytes follow its ID and date, so an edited photo has another checksum.
-final class FakeStaging: PhotoLibraryStaging {
+final class FakeStaging: PhotoLibraryStaging, NewPhotosBaselineAccessReading {
     struct Photo: Sendable {
         var modified: Date
         var isVideo = false
@@ -24,6 +24,7 @@ final class FakeStaging: PhotoLibraryStaging {
 
     private struct State {
         var access: PHAuthorizationStatus = .authorized
+        var accessGeneration: UInt64 = 1
         var photos: [String: Photo] = [:]
         var albums: [String: [String]] = [:]
         var failures: [String: [@Sendable () -> any Error]] = [:]
@@ -59,7 +60,9 @@ final class FakeStaging: PhotoLibraryStaging {
             for album in state.albums.keys { state.albums[album]?.removeAll { $0 == id } }
         }
     }
-    func setAccess(_ status: PHAuthorizationStatus) { state.withLock { $0.access = status } }
+    func setAccess(_ status: PHAuthorizationStatus) { state.withLock { if $0.access != status { $0.accessGeneration &+= 1 }; $0.access = status } }
+    func newPhotosBaselineAccess() async -> DeviceAccess { state.withLock { DeviceAccess(status: $0.access, generation: $0.accessGeneration) } }
+    func clearDiscoveryHold() { state.withLock { $0.discoveryGate = nil } }
     /// The next staging of the photo throws.
     func fail(_ id: String, _ error: @escaping @Sendable () -> any Error) { state.withLock { $0.failures[id, default: []].append(error) } }
     func failSource(_ id: String, _ error: @escaping @Sendable () -> any Error) { state.withLock { $0.sourceFailures[id] = error } }

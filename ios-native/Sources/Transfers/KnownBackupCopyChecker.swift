@@ -46,6 +46,7 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
     func reconcileConfirmations(in store: TransferStore) async throws {
         try Task.checkCancellation()
         guard allowsReconciliation() else { return }
+        guard try await store.pastBackupVerificationAllowed() else { return }
         let checkedIDs = try await store.confirmationRemoteIDs()
         guard try await identities.identityIndexComplete(), var rows = try await identities.identities(ids: checkedIDs) else { return }
         let indexed = Set(rows.map(\.assetID))
@@ -53,6 +54,7 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
         // catalog cannot erase its receipt; only an exact server read can establish it is gone.
         let missing = checkedIDs.subtracting(indexed)
         for id in missing.sorted() {
+            guard try await store.pastBackupVerificationAllowed() else { return }
             do {
                 let remote = try await server.remoteAsset(id: id)
                 rows.append(LocalAssetMatch(assetID: id, checksum: remote.checksum, cloudID: nil, createdAt: nil, adjustmentTime: nil,
@@ -66,6 +68,7 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
         }
         try Task.checkCancellation()
         guard allowsReconciliation() else { return }
+        guard try await store.pastBackupVerificationAllowed() else { return }
         _ = try await store.reconcileConfirmations(with: rows, checkedRemoteIDs: checkedIDs)
     }
 
@@ -154,6 +157,7 @@ actor BackupConfirmationObserver {
     private var work: Task<Void, Never>?
     private var pending = false
     private var stopped = false
+    private var policySuspended = false
 
     init(checker: any KnownBackupCopyChecking, store: TransferStore,
          permits: @escaping @Sendable () -> Bool = { true }, refreshed: @escaping @Sendable () async -> Void) {
@@ -175,7 +179,8 @@ actor BackupConfirmationObserver {
     }
 
     private func receive(_ change: LibraryChange) async {
-        guard !stopped else { return }
+        guard !stopped, !policySuspended else { return }
+        guard (try? await store.pastBackupVerificationAllowed()) == true else { return }
         if change.routingChanged || change.reset || change.overflow || (change.syncedThrough != nil && change.isEmpty) {
             request()
             return
@@ -189,18 +194,19 @@ actor BackupConfirmationObserver {
     func request() {
         guard !stopped else { return }
         pending = true
-        guard work == nil else { return }
+        guard !policySuspended, work == nil else { return }
         work = Task { await self.serve() }
     }
 
     private func serve() async {
-        while pending, !stopped, !Task.isCancelled {
+        while pending, !stopped, !policySuspended, !Task.isCancelled {
             pending = false
             do {
                 // Fold bursts of sync batches into one account-level catalog read.
                 try await Task.sleep(for: .milliseconds(200))
                 pending = false
-                guard permits(), !stopped else { break }
+                guard permits(), !stopped, !policySuspended else { break }
+                guard try await store.pastBackupVerificationAllowed() else { break }
                 try await checker.reconcileConfirmations(in: store)
                 guard permits(), !stopped, !Task.isCancelled else { break }
                 await refreshed()
@@ -221,5 +227,17 @@ actor BackupConfirmationObserver {
         await work?.value
         watcher = nil
         work = nil
+    }
+
+    func suspendForNewPhotosPolicyChange() async {
+        policySuspended = true
+        work?.cancel()
+        await work?.value
+    }
+
+    func resumeAfterNewPhotosPolicyChange() {
+        guard !stopped else { return }
+        policySuspended = false
+        request()
     }
 }

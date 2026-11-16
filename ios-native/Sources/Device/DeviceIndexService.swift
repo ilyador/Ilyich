@@ -61,6 +61,9 @@ struct DeviceIndexBackupInputs: Equatable, Sendable {
     var excluded: Set<String> = []
     /// The account's receipts by local ID.
     var receipts: [String: CleanupReceipt] = [:]
+    /// Existing Photos excluded by a saved future-only starting point. Cached associations
+    /// remain useful, but background timeline matching must not read these originals.
+    var fingerprintExcludedIDs: Set<String> = []
 }
 
 /// Backup's preferences and receipts for the device index: the transfers database's
@@ -573,7 +576,7 @@ actor DeviceIndexService {
             } else if item.unadjusted, let cloudID = item.cloudID,
                       remotes.hiddenByCloud[cloudID]?.contains(where: { LocalIdentityMatch.matches(photo, remote: $0) }) == true {
                 continue
-            } else {
+            } else if inputs?.fingerprintExcludedIDs.contains(id) != true {
                 unhashed.append(id)
             }
         }
@@ -612,7 +615,8 @@ actor DeviceIndexService {
     private func hashNext() async -> Bool {
         while cursor < queue.count {
             let id = queue[cursor]
-            guard let item = items[id], associations[id] == nil else { cursor += 1; continue }
+            guard let item = items[id], associations[id] == nil,
+                  inputs?.fingerprintExcludedIDs.contains(id) != true else { cursor += 1; continue }
             let modified = item.photo.modified
             if fingerprints?[id]?.isCurrent(for: modified) == true { cursor += 1; continue }
             if let failure = failed[id], failure == modified { cursor += 1; continue }

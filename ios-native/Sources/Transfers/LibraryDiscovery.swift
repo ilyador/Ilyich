@@ -27,10 +27,18 @@ struct LibraryDiscovery: Sendable {
         guard allowsDiscovery() else { throw PurchaseAccessRequired() }
         let access = staging.authorization
         guard access == .authorized || access == .limited else { throw PHPhotosError(.accessUserDenied) }
+        guard try await store.newPhotosPolicyChanging() == false else { throw NewPhotosBackupError.changingPolicy }
+        if preferences.newPhotosOnly {
+            guard access == .authorized else { throw PHPhotosError(.accessUserDenied) }
+            guard try await store.newPhotosBaselineStartedAt() != nil else { throw NewPhotosBackupError.missingBaseline }
+        }
         var found: [DeviceCandidate] = []
         for try await batch in staging.candidates(scope: preferences.scope, included: preferences.includedAlbums, excluded: preferences.excludedAlbums) {
             guard allowsDiscovery() else { throw PurchaseAccessRequired() }
-            found += batch
+            guard try await store.newPhotosPolicyChanging() == false, try await store.preferences() == preferences,
+                  !preferences.newPhotosOnly || staging.authorization == .authorized else { throw CancellationError() }
+            if preferences.newPhotosOnly { found += try await store.filterNewPhotosCandidates(batch) }
+            else { found += batch }
         }
         try Task.checkCancellation()
         guard allowsDiscovery() else { throw PurchaseAccessRequired() }
@@ -44,8 +52,9 @@ struct LibraryDiscovery: Sendable {
         }
         try Task.checkCancellation()
         guard allowsDiscovery() else { throw PurchaseAccessRequired() }
-        try await revalidateConfirmations()
+        guard try await store.newPhotosPolicyChanging() == false, try await store.preferences() == preferences else { throw CancellationError() }
+        if !preferences.newPhotosOnly { try await revalidateConfirmations() }
         guard allowsDiscovery() else { throw PurchaseAccessRequired() }
-        return try await store.mergeDiscovery(found, gone: gone, notifying: notifying)
+        return try await store.mergeDiscovery(found, gone: gone, notifying: notifying, expectedNewPhotosOnly: preferences.newPhotosOnly)
     }
 }

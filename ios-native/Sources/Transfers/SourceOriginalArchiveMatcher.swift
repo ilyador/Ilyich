@@ -147,6 +147,9 @@ struct SourceOriginalArchiveReconciler: Sendable {
 
     func reconcile(after localID: String? = nil, limit: Int = 25, policy: StagingPolicy) async throws -> SourceOriginalReconciliationReport {
         try ensurePermitted()
+        guard try await store.pastBackupVerificationAllowed() else {
+            throw BackupError.message("Past backup checks are off while backing up new photos only.")
+        }
         let size = min(max(limit, 1), 100)
         let receipts = try await store.confirmedReceiptsForSourceMatching(after: localID, limit: size)
         try ensurePermitted()

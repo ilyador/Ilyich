@@ -109,6 +109,36 @@ import XCTest
         backend.finish()
     }
 
+    func testNewPhotosChoiceAppearsOnlyAfterSuccessfulActivationAndFlushesEditsFirst() async throws {
+        let backend = FakeTransferBackend()
+        backend.storedPreferences = TransferPreferences()
+        backend.send(Self.snapshot())
+        let store = BackupStore(backend: backend, photos: .unavailable, debounce: .seconds(10))
+        try await until("The store did not read preferences.") { backend.calls.contains("preferences") }
+        backend.newPhotosError = BackupError.message("Full Photos access is required.")
+        await store.enableNewPhotosBackup()
+        XCTAssertFalse(store.preferences.newPhotosOnly)
+        XCTAssertNil(store.newPhotosStartingPoint)
+        XCTAssertFalse(store.isSettingUpNewPhotos)
+        XCTAssertEqual(store.error, "Full Photos access is required.")
+
+        backend.newPhotosError = nil
+        backend.calls = []
+        store.preferences.cellularVideos = false
+        store.preferences.triggerDelay = 60
+        store.preferencesChanged()
+        await store.enableNewPhotosBackup()
+        XCTAssertEqual(Array(backend.calls.prefix(2)), ["setPreferences", "enableNewPhotos"])
+        XCTAssertTrue(store.preferences.newPhotosOnly)
+        XCTAssertTrue(store.preferences.automatic)
+        XCTAssertEqual(store.preferences.scope, .entireLibrary)
+        XCTAssertEqual(store.preferences.triggerDelay, 60)
+        XCTAssertNotNil(store.newPhotosStartingPoint)
+        XCTAssertFalse(store.isSettingUpNewPhotos)
+        XCTAssertNil(store.error)
+        backend.finish()
+    }
+
     // MARK: Support
 
     private static func snapshot(lastMessage: String? = nil) -> TransferSnapshot {
@@ -138,6 +168,7 @@ import XCTest
     var written: [TransferPreferences] = []
     var enqueueAnswer: Result<EnqueueResult, any Error> = .success(.queued(0))
     var storedPreferences: TransferPreferences?
+    var newPhotosError: (any Error)?
     var counts: [String: AlbumUploadCount] = [:]
     private let stream: AsyncStream<TransferSnapshot>
     private let continuation: AsyncStream<TransferSnapshot>.Continuation
@@ -154,6 +185,16 @@ import XCTest
         return try enqueueAnswer.get()
     }
     func cancel(_ sources: [TransferSource]) async throws { calls.append("cancel") }
+    func enableNewPhotosBackup() async throws {
+        calls.append("enableNewPhotos")
+        if let newPhotosError { throw newPhotosError }
+        var preferences = storedPreferences ?? TransferPreferences()
+        preferences.newPhotosOnly = true
+        preferences.newPhotosBaselineStartedAt = Date(timeIntervalSinceReferenceDate: 100)
+        preferences.scope = .entireLibrary
+        preferences.automatic = true
+        storedPreferences = preferences
+    }
     func setPreferences(_ preferences: TransferPreferences) async throws {
         calls.append("setPreferences")
         written.append(preferences)

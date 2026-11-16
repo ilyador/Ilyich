@@ -65,6 +65,7 @@ extension TransferStore {
     }
 
     func savePreferences(_ preferences: TransferPreferences) throws {
+        if preferences.newPhotosOnly, try newPhotosBaselineStartedAt() == nil { throw NewPhotosBackupError.missingBaseline }
         try database().run("INSERT INTO preferences(id,json) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json",
                            [.text(TransferJSON.encode(preferences))])
     }
@@ -86,6 +87,8 @@ extension TransferStore {
             var queued = 0, backedUp = 0
             var seqs: [TransferLane: Int64] = [:]
             for request in requests {
+                if request.source.lane == .library, request.origin == .discovery || request.origin == .legacy,
+                   try isExcludedFromNewPhotosBackup(request.source.key) { continue }
                 let album = request.album.flatMap { UUID(uuidString: $0) == nil ? nil : $0 }
                 if case .photo(let id) = request.source, let revision = request.revision {
                     var confirmed = false
@@ -184,9 +187,17 @@ extension TransferStore {
     func reserve(lane: TransferLane, now: Date, token: UUID, epoch: UInt64) throws -> StoredJob? {
         let db = try database()
         return try db.transaction {
+            var futureFilter = "1"
+            if lane == .library {
+                if try newPhotosPolicyChanging() { return nil }
+                if try preferences()?.newPhotosOnly == true {
+                    guard try newPhotosBaselineStartedAt() != nil else { throw NewPhotosBackupError.missingBaseline }
+                    futureFilter = "(origin NOT IN ('discovery','legacy') OR source_key NOT IN (SELECT local_id FROM new_photos_baseline))"
+                }
+            }
             var job: StoredJob?
             try db.run("""
-                SELECT \(Self.jobColumns) FROM jobs WHERE lane=? AND lease_token IS NULL AND \
+                SELECT \(Self.jobColumns) FROM jobs WHERE lane=? AND lease_token IS NULL AND \(futureFilter) AND \
                 (state IN ('queued','staging','staged','submitting','finalizing') OR (state='retryScheduled' AND (not_before IS NULL OR not_before<=?))) \
                 ORDER BY seq,id LIMIT 1
                 """, [.text(lane.rawValue), .date(now)]) { job = Self.storedJob($0) }
