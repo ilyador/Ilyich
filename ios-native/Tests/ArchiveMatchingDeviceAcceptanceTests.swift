@@ -8,6 +8,78 @@ import XCTest
 /// this test never constructs an upload engine or changes Photos. Run with
 /// TEST_RUNNER_ILYICH_ARCHIVE_MATCH_ACCEPTANCE=1 after checking the saved account and pause state.
 @MainActor final class ArchiveMatchingDeviceAcceptanceTests: XCTestCase {
+    /// Reads only saved receipt/cache rows and PhotoKit resource metadata. It never requests
+    /// resource bytes, constructs an engine/API client, or changes confirmations or Photos.
+    func testInspectSavedBackupSourceMetadataWithoutHashing() async throws {
+        guard ProcessInfo.processInfo.environment["ILYICH_ARCHIVE_MATCH_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Live archive matching diagnostics were not requested.")
+        }
+        #if targetEnvironment(simulator)
+        throw XCTSkip("Source metadata diagnostics require the owner's real Photos library.")
+        #else
+        executionTimeAllowance = 60
+        let credential = try XCTUnwrap(KeychainCredentialStore().load())
+        guard credential.requiresPasswordChange != true,
+              !ReadOnlyPolicy.isEnabled(server: credential.server, userID: credential.userID) else {
+            throw XCTSkip("The saved account does not permit archive matching diagnostics.")
+        }
+        guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else {
+            throw XCTSkip("Photos full access must already be granted; this test does not request it.")
+        }
+        guard TransferHost.shared.current == nil else {
+            throw APIError.invalidResponse("Stop the live upload engine before source metadata diagnostics.")
+        }
+        let store = TransferStore(url: TransferStore.url(for: credential.account))
+        addTeardownBlock { await store.close() }
+        let before = try await store.contents()
+        guard before.engine?.intent == .paused, before.preferences?.automatic == false else {
+            throw XCTSkip("Backup must already be paused and automatic backup off.")
+        }
+        guard before.receipts.count <= 100, before.confirmations.count <= 100 else {
+            throw XCTSkip("Source metadata diagnostics are limited to 100 saved backups.")
+        }
+        let receipts = try await store.confirmedReceiptsForSourceMatching(after: nil, limit: 100)
+        var result: [[String: Any]] = []
+        for receipt in receipts {
+            try Task.checkCancellation()
+            let cached = try await store.sourceOriginal(for: receipt.localID, revision: receipt.revision)
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [receipt.localID], options: SystemPhotoKit.readableMediaOptions()).firstObject
+            let resources = asset.map { PHAssetResource.assetResources(for: $0) } ?? []
+            let described = resources.map {
+                StagingResource(type: $0.type, contentType: $0.contentType.identifier, filename: $0.originalFilename)
+            }
+            let currentRevision = asset?.modificationDate.map(AssetRevision.init)
+            let sourceIndex = asset.flatMap { StagingRules.sourceOriginal(described, isVideo: $0.mediaType == .video) }
+            let reason: String
+            if asset == nil { reason = "asset-unavailable" }
+            else if currentRevision != receipt.revision { reason = "receipt-revision-mismatch" }
+            else if sourceIndex == nil { reason = "no-unique-original-with-rendered-edit" }
+            else { reason = "source-selection-eligible" }
+            result.append([
+                "remoteOriginalID": receipt.original.id,
+                "assetExists": asset != nil,
+                "isVideo": asset?.mediaType == .video,
+                "receiptRevisionBits": String(receipt.revision.referenceSeconds.bitPattern, radix: 16),
+                "currentRevisionBits": currentRevision.map { String($0.referenceSeconds.bitPattern, radix: 16) } as Any? ?? NSNull(),
+                "revisionMatches": currentRevision == receipt.revision,
+                "resources": described.map { ["type": String(describing: $0.type), "rawType": $0.type.rawValue,
+                                                "filename": $0.filename, "uti": $0.contentType] as [String: Any] },
+                "sourceOriginalIndex": sourceIndex as Any? ?? NSNull(),
+                "cachedSourceChecksum": cached?.checksum as Any? ?? NSNull(),
+                "cachedSourceRemoteID": cached?.remoteID as Any? ?? NSNull(),
+                "reason": reason,
+            ])
+            print("ARCHIVE SOURCE METADATA: \(receipt.original.id) reason=\(reason) types=\(described.map { $0.type.rawValue })")
+        }
+        let after = try await store.contents()
+        XCTAssertEqual(after, before)
+        XCTAssertNil(TransferHost.shared.current)
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),
+                                       uniformTypeIdentifier: "public.json")
+        attachment.name = "Archive source metadata diagnostics"; attachment.lifetime = .keepAlways; add(attachment)
+        #endif
+    }
+
     func testMatchSavedBackupsWithoutUploading() async throws {
         guard ProcessInfo.processInfo.environment["ILYICH_ARCHIVE_MATCH_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Live archive matching was not requested.")
