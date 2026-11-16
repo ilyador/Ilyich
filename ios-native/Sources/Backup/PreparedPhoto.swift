@@ -10,6 +10,7 @@ struct PreparedPhoto: Sendable {
     let sidecar: UploadFile?
     let fields: [String: String]
     let isVideo: Bool
+    var originalChecksum: String? = nil
     var livePhotoID: String?
     var motionChecksum: String?
     var stageID = UUID().uuidString

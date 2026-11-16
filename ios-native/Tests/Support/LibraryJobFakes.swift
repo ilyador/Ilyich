@@ -15,6 +15,7 @@ final class FakeStaging: PhotoLibraryStaging, NewPhotosBaselineAccessReading {
         var sidecar = false
         var bytes = 64
         var sourceChecksum: String? = nil
+        var exportChecksums = false
     }
 
     struct Staged: Sendable {
@@ -130,8 +131,13 @@ final class FakeStaging: PhotoLibraryStaging, NewPhotosBaselineAccessReading {
         let sidecar = photo.sidecar ? try file("sidecar", filename: localID + ".xmp", type: "application/rdf+xml") : nil
         var fields = StagingRules.fields(created: photo.modified, modified: photo.modified, isFavorite: false, duration: photo.isVideo ? 3 : 0)
         fields["metadata"] = #"[{"key":"mobile-app","value":{"iCloudId":"cloud-\#(localID)"}}]"#
-        return PreparedPhoto(localID: localID, modificationDate: photo.modified, original: original, motion: motion, sidecar: sidecar,
-                             fields: fields, isVideo: photo.isVideo, stageID: stageID)
+        var prepared = PreparedPhoto(localID: localID, modificationDate: photo.modified, original: original, motion: motion, sidecar: sidecar,
+                                     fields: fields, isVideo: photo.isVideo, stageID: stageID)
+        if photo.exportChecksums {
+            prepared.originalChecksum = try UploadBody.checksum(original.url)
+            prepared.motionChecksum = try motion.map { try UploadBody.checksum($0.url) }
+        }
+        return prepared
     }
 
     var sourceReads: Int { state.withLock { $0.sourceReads } }

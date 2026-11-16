@@ -404,12 +404,65 @@ final class KnownBackupCopyTests: XCTestCase {
         }
     }
 
-    private func makeEngine(_ h: LibraryJobHarness, checker: any KnownBackupCopyChecking) -> TransferEngine<TestClock> {
+    func testParallelKnownChecksShareCatalogLoadWhenOneWaitingJobIsCancelled() async throws {
+        let h = try await LibraryJobHarness()
+        let gate = TransferGate()
+        let catalog = MutableProofIdentities(rows: [match("a"), match("b")], complete: true, gate: gate)
+        let reader = ProofReader(items: [item("a"), item("b")])
+        h.server.remote(remote("a"))
+        h.server.remote(remote("b"))
+        let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: reader,
+                                            database: DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite")),
+                                            identities: catalog, server: h.server)
+        let engine = makeEngine(h, checker: checker, concurrency: 2)
+        _ = try await engine.enqueue(["a", "b"].map { .init(source: .photo(.init(rawValue: $0)), origin: .selection) })
+        try await engine.setIntent(.manual)
+        try await engine.start()
+        await untilTransfers("Both known-copy checks reach the shared catalog load.") { reader.readCount >= 2 && gate.waiting > 0 }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(catalog.fullReads, 1)
+        try await engine.cancel([.photo(.init(rawValue: "a"))])
+        gate.open()
+        try await untilTransfers("The remaining job still receives and verifies the shared catalog result.") {
+            try await h.store.historyPage(offset: 0, limit: 10).count == 1
+        }
+        let history = try await h.store.historyPage(offset: 0, limit: 10)
+        XCTAssertEqual(history.map(\.localID.rawValue), ["b"])
+        XCTAssertEqual(catalog.fullReads, 1, "Cancelling one waiter must not duplicate or cancel the shared account catalog load.")
+        XCTAssertTrue(h.staging.staged.isEmpty)
+        XCTAssertTrue(h.uploads.uploads.isEmpty)
+        await engine.stop()
+        await h.tearDown()
+    }
+
+    func testStoppingACatalogWaiterDoesNotWaitForTheSharedReadToFinish() async throws {
+        let h = try await LibraryJobHarness()
+        let gate = TransferGate()
+        let catalog = MutableProofIdentities(rows: [match("a")], complete: true, gate: gate)
+        let checker = KnownBackupCopyChecker(account: LibraryJobHarness.account, reader: ProofReader(items: [item("a")]),
+                                            database: DeviceDatabase(url: h.folder.appendingPathComponent("device.sqlite")),
+                                            identities: catalog, server: h.server)
+        let engine = makeEngine(h, checker: checker)
+        _ = try await engine.enqueue([.init(source: .photo(.init(rawValue: "a")), origin: .selection)])
+        try await engine.setIntent(.manual)
+        try await engine.start()
+        await untilTransfers("The catalog read is still held.") { gate.waiting == 1 }
+        let stopped = Locked(false)
+        let ending = Task { await engine.stop(); stopped.mutate { $0 = true } }
+        await untilTransfers("Stopping the engine promptly releases a cancelled catalog waiter.") { stopped.value }
+        XCTAssertTrue(h.server.remoteReads.isEmpty)
+        XCTAssertTrue(h.staging.staged.isEmpty)
+        gate.open()
+        await ending.value
+        await h.tearDown()
+    }
+
+    private func makeEngine(_ h: LibraryJobHarness, checker: any KnownBackupCopyChecking, concurrency: Int = 1) -> TransferEngine<TestClock> {
         let executor = LibraryJobExecutor(store: h.store, staging: h.staging, server: h.server, uploader: h.uploads,
                                          layout: h.group.layout, account: LibraryJobHarness.account, knownBackupChecker: checker)
         let clock = h.clock
         return TransferEngine(store: h.store, executor: LaneJobExecutor(library: executor, share: FakeJobExecutor()),
-                              authorization: h.authorization, clock: clock,
+                              authorization: h.authorization, clock: clock, concurrency: concurrency,
                               now: { TransferEngineHarness.base.addingTimeInterval(TimeInterval(clock.now.offset.components.seconds)) })
     }
 
@@ -448,8 +501,11 @@ private struct ProofIdentities: DeviceIndexServer {
 
 private final class MutableProofIdentities: DeviceIndexServer {
     private let rows: [LocalAssetMatch]
+    private let gate: TransferGate?
     private let state: Mutex<(complete: Bool, reads: Int)>
-    init(rows: [LocalAssetMatch], complete: Bool) { self.rows = rows; state = Mutex((complete, 0)) }
+    init(rows: [LocalAssetMatch], complete: Bool, gate: TransferGate? = nil) {
+        self.rows = rows; self.gate = gate; state = Mutex((complete, 0))
+    }
     var complete: Bool {
         get { state.withLock { $0.complete } }
         set { state.withLock { $0.complete = newValue } }
@@ -457,7 +513,9 @@ private final class MutableProofIdentities: DeviceIndexServer {
     var fullReads: Int { state.withLock { $0.reads } }
     func identityIndexComplete() async throws -> Bool { complete }
     func identities() async throws -> [LocalAssetMatch]? {
-        state.withLock { $0.reads += 1; return $0.complete ? rows : nil }
+        let result = state.withLock { $0.reads += 1; return $0.complete ? rows : nil }
+        if let gate { await gate.wait() }
+        return result
     }
     func changes() async -> AsyncStream<LibraryChange> { AsyncStream { _ in } }
 }

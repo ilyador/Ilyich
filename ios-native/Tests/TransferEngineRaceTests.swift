@@ -5,6 +5,30 @@ import XCTest
 
 /// The transfer engine's one loop against commands that arrive while a job runs (B2).
 final class TransferEngineRaceTests: XCTestCase {
+    func testCloudPreparationProgressIsSeparateFromUploadAndLateCallbacksCannotRevivePausedWork() async throws {
+        let h = try await TransferEngineHarness()
+        let gate = TransferGate()
+        h.executor.script("cloud", .prepare(fraction: 0.42, gate))
+        _ = try await h.engine.enqueue([h.photo("cloud")])
+        try await h.engine.setIntent(.automatic)
+        try await h.engine.start()
+        await untilTransfers("PhotoKit reports a download.") { gate.waiting == 1 }
+        let downloading = await h.engine.currentSnapshot
+        XCTAssertEqual(downloading.backupPreparationFraction, 0.42)
+        XCTAssertEqual(downloading.backupProgress?.sentBytes, 0)
+        XCTAssertEqual(downloading.confirmed, 0)
+
+        try await h.engine.setIntent(.paused)
+        let paused = await h.engine.currentSnapshot
+        XCTAssertNil(paused.backupPreparationFraction)
+        gate.open()
+        await h.engine.stop()
+        let stopped = await h.engine.currentSnapshot
+        XCTAssertNil(stopped.backupPreparationFraction)
+        XCTAssertEqual(stopped.confirmed, 0)
+        await h.tearDown()
+    }
+
     func testASecondStartNeverClearsRunningOrResetsTheActiveStage() async throws {
         let h = try await TransferEngineHarness()
         let gate = TransferGate()

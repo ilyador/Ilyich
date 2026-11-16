@@ -59,6 +59,7 @@ struct BackupStatistics: Equatable, Sendable {
     let checkingExistingBackups: Bool
     let preparingServerLibrary: Bool
     let currentTransfer: TransferProgress?
+    let preparationFraction: Double?
 
     init(snapshot: TransferSnapshot) {
         backedUp = max(snapshot.confirmed, 0)
@@ -73,5 +74,8 @@ struct BackupStatistics: Equatable, Sendable {
         checkingExistingBackups = snapshot.checkingExistingBackups
         preparingServerLibrary = snapshot.preparingServerLibrary && snapshot.intent != .paused
         currentTransfer = phase == .running ? snapshot.backupProgress : nil
+        preparationFraction = phase == .running ? snapshot.backupPreparationFraction.flatMap {
+            $0.isFinite ? min(max($0, 0), 1) : nil
+        } : nil
     }
 }

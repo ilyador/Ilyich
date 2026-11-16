@@ -1,6 +1,6 @@
 # Native iOS Architecture Rebuild Plan
 
-Status: roadmap. Durable transfer/recovery foundations are implemented. New-photos-only backup is the current priority; the bulk verification redesign below is deferred.
+Status: roadmap. Durable transfer/recovery foundations and new-photos-only backup are implemented. The current optimization pass addresses resource preparation and progress; the bulk verification redesign below is deferred. See [iCloud backup findings](IOS_ICLOUD_BACKUP_OPTIMIZATION.md).
 
 ## Goal
 
@@ -31,11 +31,11 @@ Define shared query, mutation, authorization and lifecycle contracts first. Capt
 
 ### 2. Separate verification from uploading
 
-**Current requirement: back up new photos only.** Save the existing Photos identifiers as an account-scoped starting point, without reading originals or checking past backups. Cancel the old library queue while preserving receipts and media. Automatically back up later additions, including imports with old capture dates; keep the starting point across restarts and re-enabling. Existing items and their later edits remain excluded. Show progress only for new items and keep historical receipts available separately.
+**Implemented: back up new photos only.** Save the existing Photos identifiers as an account-scoped starting point, without reading originals or checking past backups. Cancel the old library queue while preserving receipts and media. Automatically back up later additions, including imports with old capture dates; keep the starting point across restarts and re-enabling. Existing items and their later edits remain excluded. Show progress only for new items and keep historical receipts available separately.
 
 The following work is deferred until bulk verification is needed:
 
-The existing SQLite transfer engine and background transport remain the foundation. The current check path acquires the upload staging slot before checking known copies; one slow iCloud resource can block unrelated checks. It also discards PhotoKit preparation progress. A 16 November read-only phone snapshot found 407 confirmations, 18,104 queued items, one preparing item and one submitted upload, with no recorded error. This establishes slow progress, not the precise cause of the reported pause at 388.
+The existing SQLite transfer engine and background transport remain the foundation. The earlier check path acquired a staging slot before checking known copies and discarded PhotoKit preparation progress. The current optimization pass moves saved-copy checks ahead of staging, hashes during export, exposes download progress, defers stalled resources and keeps optional original matching in its durable follow-up worker. A 16 November read-only phone snapshot found 407 confirmations, 18,104 queued items, one preparing item and one submitted upload, with no recorded error; it established slow progress, not the precise cause of the reported pause at 388.
 
 Replace that sequence with independently scheduled stages:
 

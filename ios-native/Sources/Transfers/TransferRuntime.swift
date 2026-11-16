@@ -558,6 +558,7 @@ struct EngineBackend: TransferControlling {
         case .discovering:
             return "Finding new photos"
         case .running:
+            if snapshot.backupPreparationFraction != nil { return "Downloading from iCloud" }
             if snapshot.backupPhase != nil, (snapshot.backupProgress?.expectedBytes ?? 0) <= 0 { return "Preparing photos" }
             return "Uploading"
         case .idle:

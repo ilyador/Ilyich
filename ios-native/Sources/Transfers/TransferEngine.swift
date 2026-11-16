@@ -80,6 +80,7 @@ struct JobContext: Sendable {
     fileprivate let owned: @Sendable (Lease) async -> Bool
     fileprivate let advanceTo: @Sendable (Lease, JobState, String?) async throws -> Void
     fileprivate let report: @Sendable (Lease, Int64, Int64) async -> Void
+    fileprivate let preparation: @Sendable (Lease, Double?) async -> Void
     fileprivate let checking: @Sendable (Lease, Bool) async -> Void
     fileprivate let absent: @Sendable (Lease, AssetRevision) async -> Void
 
@@ -98,6 +99,7 @@ struct JobContext: Sendable {
 
     /// Bytes of the current file sent so far.
     func progress(sent: Int64, expected: Int64) async { await report(lease, sent, expected) }
+    func preparationProgress(_ fraction: Double?) async { await preparation(lease, fraction) }
     func checkingExistingBackups(_ value: Bool) async { await checking(lease, value) }
     func checkedOriginalAbsent(revision: AssetRevision) async { await absent(lease, revision) }
 }
@@ -170,6 +172,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
     private var active: [Int64: Active] = [:]
     /// Bytes sent of each running job's current file.
     private var fileProgress: [Int64: (sent: Int64, expected: Int64)] = [:]
+    private var preparationProgress: [Int64: Double] = [:]
     private var checkingExisting: Set<Int64> = []
     private let concurrency: Int
     /// Each running job's wait for its result and commit, by lease token.
@@ -810,6 +813,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                         try await self.advance(lease, to: state, phase: phase)
                     },
                     report: { [weak self] lease, sent, expected in await self?.progress(lease, sent: sent, expected: expected) },
+                    preparation: { [weak self] lease, fraction in await self?.preparationChanged(lease, fraction: fraction) },
                     checking: { [weak self] lease, value in await self?.checkingExisting(lease, value: value) },
                     absent: { [weak self] lease, revision in await self?.checkedAbsent(lease, revision: revision) })
                 let executor = self.executor
@@ -830,6 +834,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         guard active[id]?.job.lease == job.lease else { return }
         active[id] = nil
         fileProgress[id] = nil
+        preparationProgress[id] = nil
         checkingExisting.remove(id)
         switch result {
         case .success(let outcome):
@@ -954,6 +959,12 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         await publish(refreshingCounts: false)
     }
 
+    private func preparationChanged(_ lease: Lease, fraction: Double?) async {
+        guard owns(lease) else { return }
+        preparationProgress[lease.job] = fraction.flatMap { $0.isFinite ? min(max($0, 0), 1) : nil }
+        await publish(refreshingCounts: false)
+    }
+
     private func checkingExisting(_ lease: Lease, value: Bool) async {
         guard owns(lease) else { return }
         if value { checkingExisting.insert(lease.job) } else { checkingExisting.remove(lease.job) }
@@ -1038,6 +1049,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         for running in released {
             active[running.job.lease.job] = nil
             fileProgress[running.job.lease.job] = nil
+            preparationProgress[running.job.lease.job] = nil
             checkingExisting.remove(running.job.lease.job)
             running.task.cancel()
         }
@@ -1113,6 +1125,7 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
                                 fileProgress: progress.flatMap { $0.expected > 0 ? min(Double($0.sent) / Double($0.expected), 1) : nil },
                                 bytesSent: progress?.sent ?? 0, bytesExpected: max(progress?.expected ?? 0, 0), bytesPerSecond: nil,
                                 lastMessage: lastMessage, backupPhase: backupPhase, backupProgress: backupProgress,
+                                backupPreparationFraction: libraryJobs.keys.compactMap { preparationProgress[$0] }.min(),
                                 preferencesRevision: preferencesRevision, backupSelectionChecked: backupSelectionChecked,
                                 selectionProgress: selectionInventory.flatMap { inventory in
                                     selectionCheckedAt.map { SelectionProgress(total: inventory.revisions.count, backedUp: inventory.confirmed.count,

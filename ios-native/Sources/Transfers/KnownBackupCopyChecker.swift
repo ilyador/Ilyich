@@ -1,5 +1,6 @@
 import Foundation
 import IlyichPlatform
+import Synchronization
 
 enum KnownBackupCopyResult: Sendable {
     case backedUp(JobResult)
@@ -132,17 +133,80 @@ struct KnownBackupCopyChecker: KnownBackupCopyChecking {
 /// One metadata snapshot per runtime/minute, not a JSON table scan for every selected photo.
 /// Current server reads still validate a candidate before it can confirm anything.
 private actor KnownBackupIdentityCatalog {
+    private typealias LoadResult = (rows: [LocalAssetMatch], loadedAt: Date)
     private var loadedAt: Date?
     private var byCloud: [String: [LocalAssetMatch]] = [:]
+    private var loading: (id: UUID, task: Task<LoadResult, any Error>)?
 
     func candidates(cloudID: String, source: any DeviceIndexServer) async throws -> [LocalAssetMatch] {
         guard try await source.identityIndexComplete() else { throw BackupIdentityIndexNotReady() }
+        try Task.checkCancellation()
         if loadedAt == nil || Date().timeIntervalSince(loadedAt!) > 60 {
-            guard let rows = try await source.identities() else { throw BackupIdentityIndexNotReady() }
-            byCloud = Dictionary(grouping: rows.filter { $0.cloudID != nil }, by: { $0.cloudID! })
-            loadedAt = Date()
+            let load: (id: UUID, task: Task<LoadResult, any Error>)
+            if let loading { load = loading }
+            else {
+                load = (UUID(), Task {
+                    try Task.checkCancellation()
+                    guard let rows = try await source.identities() else { throw BackupIdentityIndexNotReady() }
+                    try Task.checkCancellation()
+                    return (rows, Date())
+                })
+                loading = load
+            }
+            let result: LoadResult
+            do { result = try await KnownBackupCatalogWaiter<LoadResult>().value(of: load.task) }
+            catch {
+                if !Task.isCancelled, loading?.id == load.id { loading = nil }
+                throw error
+            }
+            // One cancelled waiter cannot cancel a catalog still needed by another job.
+            // A later active waiter publishes it, only within the same short cache interval.
+            try Task.checkCancellation()
+            if Date().timeIntervalSince(result.loadedAt) > 60 {
+                if loading?.id == load.id { loading = nil }
+                return try await candidates(cloudID: cloudID, source: source)
+            }
+            if loading?.id == load.id {
+                byCloud = Dictionary(grouping: result.rows.filter { $0.cloudID != nil }, by: { $0.cloudID! })
+                loadedAt = result.loadedAt
+                loading = nil
+            }
         }
         return byCloud[cloudID] ?? []
+    }
+}
+
+/// Lets an individual job stop waiting promptly without cancelling a shared metadata read.
+/// Exactly one of completion or cancellation resumes the continuation.
+private final class KnownBackupCatalogWaiter<Value: Sendable>: Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<Value, any Error>?
+        var result: Result<Value, any Error>?
+    }
+    private let state = Mutex(State())
+
+    func value(of task: Task<Value, any Error>) async throws -> Value {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let result = state.withLock { state -> Result<Value, any Error>? in
+                    if let result = state.result { return result }
+                    state.continuation = continuation
+                    return nil
+                }
+                if let result { continuation.resume(with: result) }
+                else { Task { self.finish(await task.result) } }
+            }
+        } onCancel: { self.finish(.failure(CancellationError())) }
+    }
+
+    private func finish(_ result: Result<Value, any Error>) {
+        let continuation = state.withLock { state -> CheckedContinuation<Value, any Error>? in
+            guard state.result == nil else { return nil }
+            state.result = result
+            defer { state.continuation = nil }
+            return state.continuation
+        }
+        continuation?.resume(with: result)
     }
 }
 

@@ -124,6 +124,28 @@ struct BackupStatisticsSummary: View {
     }
 }
 
+/// PhotoKit reports the current resource's download, not the whole library or server upload.
+struct BackupPreparationDetail: View {
+    let fraction: Double
+    @AppStorage(AppearanceAccent.storageKey) private var accentName = AppearanceAccent.design.rawValue
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("Downloading from iCloud").font(.caption.weight(.medium))
+                Spacer(minLength: 8)
+                Text(fraction.formatted(.percent.precision(.fractionLength(0))))
+                    .font(.caption).monospacedDigit()
+            }
+            ProgressView(value: fraction)
+                .tint((AppearanceAccent(rawValue: accentName) ?? .design).selectionTint)
+                .accessibilityLabel("Current iCloud download")
+                .accessibilityValue(fraction.formatted(.percent.precision(.fractionLength(0))))
+        }
+        .accessibilityIdentifier("backup.iCloudDownload")
+    }
+}
+
 /// These bytes belong to active upload parts. They reset as photos (or Live Photo parts) finish.
 struct BackupTransferDetail: View {
     let progress: TransferProgress
@@ -220,7 +242,9 @@ struct BackupActivityBar: View {
                         .foregroundStyle(.secondary).accessibilityHidden(true)
                   }
                 }
-                if let selection = statistics.selectionProgress, let fraction = selection.fraction,
+                if let fraction = statistics.preparationFraction {
+                    BackupPreparationDetail(fraction: fraction)
+                } else if let selection = statistics.selectionProgress, let fraction = selection.fraction,
                    selection.remaining > 0 || statistics.remaining == 0 {
                     ProgressView(value: fraction)
                         .tint((AppearanceAccent(rawValue: accentName) ?? .design).selectionTint)
@@ -243,6 +267,7 @@ struct BackupActivityBar: View {
     private var compactTitle: String {
         if statistics.phase == .discovering { return "Checking Photos…" }
         if statistics.intent == .paused { return "Paused" }
+        if statistics.preparationFraction != nil { return "Downloading from iCloud" }
         if statistics.preparingServerLibrary { return "Preparing library" }
         if isChecking { return "Checking backups" }
         if statistics.phase == .running { return "Backing up" }
@@ -269,6 +294,7 @@ struct BackupActivityBar: View {
     private var title: String {
         if statistics.phase == .discovering { return "Checking Photos…" }
         if statistics.intent == .paused { return "Backup paused" }
+        if statistics.preparationFraction != nil { return "Downloading from iCloud" }
         if statistics.preparingServerLibrary { return "Preparing server library" }
         if isChecking { return "Checking existing backups" }
         if statistics.phase == .running { return "Backing up" }

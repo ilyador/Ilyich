@@ -104,6 +104,8 @@ final class FakeJobExecutor: JobExecuting {
         case holdThenReturn(TransferGate)
         /// Reports progress `count` times, waits at the gate, then succeeds.
         case report(count: Int, TransferGate)
+        /// A PhotoKit progress callback held across a pause, followed by a late callback.
+        case prepare(fraction: Double, TransferGate)
         /// Waits at `staging`, hands the part to the transport (submitted), then waits at `answer`
         /// for the transport's answer and succeeds.
         case handOff(staging: TransferGate, answer: TransferGate)
@@ -158,6 +160,12 @@ final class FakeJobExecutor: JobExecuting {
             for sent in 1...count { await context.progress(sent: Int64(sent) * 100, expected: Int64(count) * 100) }
             await gate.wait()
             try await context.ensureOwned()
+        case .prepare(let fraction, let gate):
+            await context.preparationProgress(fraction)
+            await gate.wait()
+            await context.preparationProgress(0.9)
+            try await context.ensureOwned()
+            await context.preparationProgress(nil)
         case .handOff(let staging, let answer):
             await staging.wait()
             try await context.advance(to: .submitting, phase: "original")

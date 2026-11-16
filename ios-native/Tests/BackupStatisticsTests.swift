@@ -3,6 +3,21 @@ import XCTest
 @testable import Ilyich
 
 @MainActor final class BackupStatisticsTests: XCTestCase {
+    func testCloudDownloadProgressDoesNotBecomeUploadBytesAndOnlyShowsDuringActiveBackup() {
+        var snapshot = Self.snapshot(remaining: 1, confirmed: 0)
+        snapshot.phase = .running
+        snapshot.backupPreparationFraction = 0.42
+        let preparing = BackupStatistics(snapshot: snapshot)
+        XCTAssertEqual(preparing.preparationFraction, 0.42)
+        XCTAssertNil(preparing.currentTransfer)
+        XCTAssertEqual(preparing.backedUp, 0)
+        snapshot.backupPreparationFraction = .nan
+        XCTAssertNil(BackupStatistics(snapshot: snapshot).preparationFraction)
+        snapshot.backupPreparationFraction = 0.42
+        snapshot.backupPhase = .idle
+        XCTAssertNil(BackupStatistics(snapshot: snapshot).preparationFraction)
+    }
+
     func testPreparationIsVisibleWhileWaitingButNeverOverridesUserPause() {
         var snapshot = Self.snapshot(remaining: 100, confirmed: 0)
         snapshot.intent = .manual

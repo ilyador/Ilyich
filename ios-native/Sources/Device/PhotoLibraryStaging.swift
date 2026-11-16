@@ -397,17 +397,23 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
         try StagingRules.requireMotion(isLive: asset.mediaSubtypes.contains(.photoLive), motion: StagingRules.motion(described))
         let sidecar = StagingRules.sidecar(described).map { resources[$0] }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = try await Self.export(original, directory: directory, name: "original", allowCloud: policy.allowCloud,
-                                         allowCellular: originalCellular, progress: progress)
+        let originalExport = try await Self.export(original, directory: directory, name: "original", allowCloud: policy.allowCloud,
+                                                   allowCellular: originalCellular, computeChecksum: true,
+                                                   noProgressTimeout: .seconds(180), progress: progress)
         var video: UploadFile?
+        var videoChecksum: String?
         if let motion {
-            video = try await Self.export(motion, directory: directory, name: "motion", allowCloud: policy.allowCloud,
-                                          allowCellular: policy.cellularVideos, progress: progress)
+            let motionExport = try await Self.export(motion, directory: directory, name: "motion", allowCloud: policy.allowCloud,
+                                                     allowCellular: policy.cellularVideos, computeChecksum: true,
+                                                     noProgressTimeout: .seconds(180), progress: progress)
+            video = motionExport.file
+            videoChecksum = motionExport.checksum
         }
         var xmp: UploadFile?
         if let sidecar {
             xmp = try await Self.export(sidecar, directory: directory, name: "sidecar", allowCloud: policy.allowCloud,
-                                        allowCellular: policy.cellularPhotos, progress: progress)
+                                        allowCellular: policy.cellularPhotos, computeChecksum: false,
+                                        noProgressTimeout: .seconds(180), progress: progress).file
         }
         let created = asset.creationDate ?? Date()
         let modified = asset.modificationDate ?? created
@@ -418,8 +424,9 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
             }
             fields["metadata"] = try StagingRules.mobileAppMetadata(cloudID: cloudID, created: created, location: asset.location?.coordinate)
         }
-        return PreparedPhoto(localID: localID, modificationDate: modified, original: file, motion: video, sidecar: xmp,
-                             fields: fields, isVideo: isVideo, stageID: stageID)
+        return PreparedPhoto(localID: localID, modificationDate: modified, original: originalExport.file, motion: video, sidecar: xmp,
+                             fields: fields, isVideo: isVideo, originalChecksum: originalExport.checksum,
+                             motionChecksum: videoChecksum, stageID: stageID)
     }
 
     /// The SHA-1 of the asset's current full-size file, streamed, never downloaded from iCloud.
@@ -460,27 +467,32 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
     }
 
     private static func export(_ resource: PHAssetResource, directory: URL, name: String, allowCloud: Bool, allowCellular: Bool,
+                               computeChecksum: Bool, noProgressTimeout: Duration?,
                                progress: @escaping @Sendable (Double) -> Void,
-                               isolation: isolated (any Actor)? = #isolation) async throws -> UploadFile {
+                               isolation: isolated (any Actor)? = #isolation) async throws -> (file: UploadFile, checksum: String?) {
         let destination = directory.appendingPathComponent(name)
         if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = false
         options.progressHandler = progress
-        do { try await PhotoResourceExport(destination: destination).write(resource, options: options) }
+        let localExport = PhotoResourceExport(destination: destination, computeChecksum: computeChecksum, noProgressTimeout: noProgressTimeout)
+        var completedExport = localExport
+        do { try await localExport.write(resource, options: options) }
         catch {
             let details = error as NSError
             guard allowCloud, details.domain == PHPhotosErrorDomain,
                   details.code == PHPhotosError.networkAccessRequired.rawValue else { throw error }
             try Task.checkCancellation()
             options.isNetworkAccessAllowed = true
-            do { try await PhotoResourceExport(destination: destination).write(resource, options: options, allowCellular: allowCellular) }
+            let cloudExport = PhotoResourceExport(destination: destination, computeChecksum: computeChecksum, noProgressTimeout: noProgressTimeout)
+            do { try await cloudExport.write(resource, options: options, allowCellular: allowCellular) }
             catch PhotoResourceExport.Deferral.waitingForWiFi { throw BackupDeferral.waitingForWiFi }
+            completedExport = cloudExport
         }
         try Task.checkCancellation()
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: destination.path)
-        return UploadFile(url: destination, filename: resource.originalFilename,
-                          contentType: resource.contentType.preferredMIMEType ?? "application/octet-stream")
+        return (UploadFile(url: destination, filename: resource.originalFilename,
+                           contentType: resource.contentType.preferredMIMEType ?? "application/octet-stream"), completedExport.checksum)
     }
 
     private static func asset(_ localID: String) -> PHAsset? {

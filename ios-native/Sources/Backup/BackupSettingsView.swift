@@ -192,6 +192,9 @@ private struct BackupStatusSection: View {
         if backup.statistics.failed > 0 {
             LabeledContent("Uploads needing retry", value: backup.statistics.failed.formatted())
         }
+        if let fraction = backup.statistics.preparationFraction {
+            BackupPreparationDetail(fraction: fraction)
+        }
         if let progress = backup.statistics.currentTransfer, progress.expectedBytes != nil || progress.sentBytes > 0 {
             BackupTransferDetail(progress: progress)
         }

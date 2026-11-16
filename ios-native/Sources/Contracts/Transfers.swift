@@ -161,6 +161,8 @@ struct TransferSnapshot: Hashable, Sendable {
     var backupPhase: TransferPhase? = nil
     /// Current parts of active photo uploads only. This is never a whole-queue byte total.
     var backupProgress: TransferProgress? = nil
+    /// PhotoKit's current resource download, distinct from bytes uploaded to the server.
+    var backupPreparationFraction: Double? = nil
     /// Changes when saved preferences change, even if the queue and phase stay the same. This
     /// lets the backend refresh its activity and the screens adopt preferences without polling.
     var preferencesRevision: UInt64 = 0

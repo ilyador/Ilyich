@@ -52,7 +52,6 @@ final class LibraryJobExecutor: JobExecuting {
     private let conditionsPermit: @Sendable (_ requireCharging: Bool) async -> Bool
     private let preparation = BackupPreparationGate()
     private let knownBackupChecker: (any KnownBackupCopyChecking)?
-    private let sourceOriginalMatcher: SourceOriginalArchiveMatcher
     /// Stage folders of jobs that returned a result, removed once the engine commits it.
     private let finishedFolders = Mutex<[Int64: String]>([:])
 
@@ -64,7 +63,6 @@ final class LibraryJobExecutor: JobExecuting {
         self.store = store
         self.conditionsPermit = conditionsPermit
         self.knownBackupChecker = knownBackupChecker
-        sourceOriginalMatcher = SourceOriginalArchiveMatcher(account: account, store: store, staging: staging, server: server)
         self.staging = staging
         self.server = server
         self.uploader = uploader
@@ -88,17 +86,11 @@ final class LibraryJobExecutor: JobExecuting {
         guard await conditionsPermit(preferences.requireCharging) else { throw TransferDeferral.deviceConditions }
         try await context.ensureOwned()
 
-        let stagingTurn = try await pipeline.acquireStaging()
-        var holdsStagingTurn = true
-        defer { if holdsStagingTurn { pipeline.release(stagingTurn) } }
+        // Metadata/checksum proof never needs a staging slot. A slow cloud export must not
+        // stop another job from confirming an already known server copy.
+        let existing = try await store.libraryStage(job: job.lease.job)
         try await context.ensureOwned()
-
-        var stage: LibraryStage
-        if let existing = try await store.libraryStage(job: job.lease.job) {
-            try await context.ensureOwned()
-            stage = existing
-        } else {
-            try await context.ensureOwned()
+        if existing == nil {
             var exactOriginalCheckAccepted = false
             if let knownBackupChecker {
                 await context.checkingExistingBackups(true)
@@ -117,14 +109,20 @@ final class LibraryJobExecutor: JobExecuting {
                 try await preparation.ensureReady(server: server)
                 try await context.ensureOwned()
             }
-            stage = try await stagePhoto(id.rawValue, job: job, context: context, preferences: preferences)
         }
-        pipeline.record(bytes: bytes(of: stage), for: stagingTurn)
-        let sourcePolicy = StagingPolicy(allowCloud: preferences.downloadCloudOriginals, cellularPhotos: preferences.cellularPhotos,
-                                         cellularVideos: preferences.cellularVideos)
-        _ = try await sourceOriginalMatcher.match(id.rawValue, revision: stage.revision, policy: sourcePolicy,
-                                                                      ensureOwned: { try await context.ensureOwned() })
+
+        let stagingTurn = try await pipeline.acquireStaging()
+        var holdsStagingTurn = true
+        defer { if holdsStagingTurn { pipeline.release(stagingTurn) } }
         try await context.ensureOwned()
+        guard await conditionsPermit(preferences.requireCharging) else { throw TransferDeferral.deviceConditions }
+        try await context.ensureOwned()
+        var stage: LibraryStage
+        if let existing { stage = existing }
+        else { stage = try await stagePhoto(id.rawValue, job: job, context: context, preferences: preferences) }
+        pipeline.record(bytes: bytes(of: stage), for: stagingTurn)
+        // Original/edit association has its own durable post-upload task. It cannot delay
+        // getting the current rendition's body into the background session.
         let run = Run(job: job, context: context, localID: id.rawValue, preferences: preferences)
 
         // A Live Photo's video first, hidden and without the mobile-app metadata.
@@ -184,11 +182,29 @@ final class LibraryJobExecutor: JobExecuting {
                                    cellularVideos: preferences.cellularVideos)
         var recorded = false
         do {
-            let prepared = try await staging.stage(localID, into: directory, stageID: UUID().uuidString, policy: policy) { _ in }
+            let (progress, continuation) = AsyncStream<Double>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            let progressTask = Task {
+                for await value in progress { await context.preparationProgress(value) }
+            }
+            let prepared: PreparedPhoto
+            do {
+                prepared = try await staging.stage(localID, into: directory, stageID: UUID().uuidString, policy: policy) {
+                    continuation.yield($0)
+                }
+            } catch {
+                continuation.finish()
+                await progressTask.value
+                await context.preparationProgress(nil)
+                throw error
+            }
+            continuation.finish()
+            await progressTask.value
+            await context.preparationProgress(nil)
             try await context.ensureOwned()
             let stage = LibraryStage(stageID: prepared.stageID, folder: folder, revision: AssetRevision(prepared.modificationDate),
                                      original: staged(prepared.original), motion: prepared.motion.map(staged), sidecar: prepared.sidecar.map(staged),
-                                     fields: prepared.fields, isVideo: prepared.isVideo)
+                                     fields: prepared.fields, isVideo: prepared.isVideo,
+                                     motionChecksum: prepared.motionChecksum, originalChecksum: prepared.originalChecksum)
             guard try await store.saveStage(stage, job: job.lease.job, token: job.lease.token) else { throw LeaseLost() }
             recorded = true
             try await context.advance(to: .staged, phase: Phase.staged)

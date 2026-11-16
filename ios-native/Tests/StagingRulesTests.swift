@@ -1,6 +1,7 @@
 import CoreLocation
+import CryptoKit
 import Foundation
-import IlyichShareInbox
+@_spi(Testing) import IlyichShareInbox
 import Photos
 import XCTest
 @testable import Ilyich
@@ -281,8 +282,9 @@ final class StagingRulesTests: XCTestCase {
             return 42
         }, cancel: { id in seen.mutate { $0.cancelled.append(id) } })
 
+        let resourceExport = PhotoResourceExport(destination: destination, computeChecksum: true)
         let export = Task.detached {
-            try await PhotoResourceExport(destination: destination).write(request, networkAccess: false)
+            try await resourceExport.write(request, networkAccess: false)
         }
         do {
             try await export.value
@@ -294,6 +296,7 @@ final class StagingRulesTests: XCTestCase {
         XCTAssertFalse(result.startedOnMain)
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path), "The partial file is deleted.")
         XCTAssertEqual(result.cancelled, [42], "The request is cancelled once PhotoKit names it, and only once.")
+        XCTAssertNil(resourceExport.checksum, "Cancelled bytes never publish a checksum.")
     }
 
     /// A completed export keeps its file; a failed one deletes it.
@@ -311,14 +314,94 @@ final class StagingRulesTests: XCTestCase {
             }, cancel: { _ in XCTFail("Nothing to cancel.") })
         }
         let good = folder.appendingPathComponent("good")
-        try await PhotoResourceExport(destination: good).write(request(failing: false), networkAccess: false)
+        let goodExport = PhotoResourceExport(destination: good, computeChecksum: true)
+        try await goodExport.write(request(failing: false), networkAccess: false)
         XCTAssertEqual(try String(contentsOf: good, encoding: .utf8), "hello world")
+        let expected = Data(Insecure.SHA1.hash(data: Data("hello world".utf8))).base64EncodedString()
+        XCTAssertEqual(goodExport.checksum, expected, "The digest covers all chunks in order.")
 
         let bad = folder.appendingPathComponent("bad")
+        let badExport = PhotoResourceExport(destination: bad, computeChecksum: true)
         do {
-            try await PhotoResourceExport(destination: bad).write(request(failing: true), networkAccess: false)
+            try await badExport.write(request(failing: true), networkAccess: false)
             XCTFail("The export finished.")
         } catch let error as CocoaError { XCTAssertEqual(error.code, .fileReadUnknown) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: bad.path))
+        XCTAssertNil(badExport.checksum, "A failed partial file has no checksum.")
+
+        // A retry uses a new writer/hasher. The partial first attempt cannot contaminate it.
+        let retry = folder.appendingPathComponent("retry")
+        let retryExport = PhotoResourceExport(destination: retry, computeChecksum: true)
+        try await retryExport.write(request(failing: false), networkAccess: false)
+        XCTAssertEqual(retryExport.checksum, expected)
+        XCTAssertEqual(try String(contentsOf: retry, encoding: .utf8), "hello world")
     }
+
+    func testDefaultFileExportDoesNotComputeUnusedChecksum() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("IlyichStaging-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        let destination = folder.appendingPathComponent("shared")
+        let export = PhotoResourceExport(destination: destination)
+        let request = ResourceDataRequest(start: { received, completed in
+            DispatchQueue.global().async { received(Data("shared bytes".utf8)); completed(nil) }
+            return 8
+        }, cancel: { _ in XCTFail("Nothing to cancel.") })
+        try await export.write(request, networkAccess: false)
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "shared bytes")
+        XCTAssertNil(export.checksum)
+    }
+
+    func testAdvancingPhotoProgressAndBytesResetInactivityDeadline() {
+        let clock = ContinuousClock()
+        let start = clock.now
+        var state = PhotoExportActivityWatchdog(timeout: .seconds(180), startedAt: start)
+
+        state.reportProgress(0, at: start.advanced(by: .seconds(120)))
+        XCTAssertEqual(state.remaining(at: start.advanced(by: .seconds(179))), .seconds(1),
+                       "A zero or repeated value isn't advancing work.")
+
+        state.reportProgress(0.25, at: start.advanced(by: .seconds(179)))
+        XCTAssertFalse(state.isStalled(at: start.advanced(by: .seconds(358))))
+        state.reportProgress(0.25, at: start.advanced(by: .seconds(300)))
+        XCTAssertTrue(state.isStalled(at: start.advanced(by: .seconds(359))),
+                      "Repeated progress doesn't keep a stalled transfer alive.")
+
+        state.receivedBytes(at: start.advanced(by: .seconds(359)))
+        XCTAssertFalse(state.isStalled(at: start.advanced(by: .seconds(538))))
+        XCTAssertTrue(state.isStalled(at: start.advanced(by: .seconds(539))))
+    }
+
+    func testStallCancelsRequestAndRemovesPartialFile() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("PhotoExportWatchdog-" + UUID().uuidString,
+                                                                                 isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let destination = folder.appendingPathComponent("partial")
+        let state = ExportCancellationState()
+        let request = ResourceDataRequest(start: { received, _ in
+            received(Data("partial".utf8))
+            return 29
+        }, cancel: { id in state.record(id) })
+        let export = PhotoResourceExport(destination: destination, computeChecksum: true, noProgressTimeout: .milliseconds(60))
+
+        do {
+            try await export.write(request, networkAccess: false)
+            XCTFail("The inactive request should time out.")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .timedOut)
+        }
+
+        XCTAssertEqual(state.cancelledIDs, [29])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertNil(export.checksum)
+    }
+}
+
+private final class ExportCancellationState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: [PHAssetResourceDataRequestID] = []
+
+    func record(_ id: PHAssetResourceDataRequestID) { lock.withLock { ids.append(id) } }
+    var cancelledIDs: [PHAssetResourceDataRequestID] { lock.withLock { ids } }
 }
