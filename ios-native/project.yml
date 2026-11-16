@@ -6,9 +6,11 @@ options:
   createIntermediateGroups: true
 configs:
   Debug: debug
+  Owner: debug
   Release: release
 configFiles:
   Debug: Config/Base.xcconfig
+  Owner: Config/Base.xcconfig
   Release: Config/Base.xcconfig
 settings:
   base:
@@ -35,6 +37,9 @@ targets:
         product: IlyichShareInbox
       - target: ShareExtension
     preBuildScripts:
+      - name: Check purchase build configuration
+        script: '"$SRCROOT/scripts/check-build-access.sh"'
+        basedOnDependencyAnalysis: false
       # One upload engine at a time: fails the build if a second background session could appear.
       - name: Check single upload engine
         script: '"$SRCROOT/scripts/check-single-engine.sh"'
@@ -49,6 +54,9 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Config/Ilyich.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_PREVIEWS: YES
+      configs:
+        Owner:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) DEBUG ILYICH_OWNER_BUILD
   ShareExtension:
     type: app-extension
     platform: iOS
@@ -101,6 +109,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.ilyador.ilyich.uitests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
+  # Owner installs have a named configuration; never depend on a remembered command-line flag.
+  IlyichOwner:
+    build:
+      targets:
+        Ilyich: all
+    run:
+      config: Owner
+    archive:
+      config: Release
   Ilyich:
     build:
       targets:
