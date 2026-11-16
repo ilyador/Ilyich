@@ -523,6 +523,20 @@ import UIKit
         return stream
     }
 
+    func photoBackupStatus(localID: String, revision: AssetRevision?) async throws -> PhotoBackupStatus {
+        try await reader?.photoBackupStatus(localID: localID, revision: revision)
+            ?? PhotoBackupStatus(localID: localID, revision: revision, phase: .unknown)
+    }
+
+    func photoBackupStatuses(for requests: [PhotoBackupStatusRequest]) async throws -> [String: PhotoBackupStatus] {
+        if let reader { return try await reader.photoBackupStatuses(for: requests) }
+        var statuses: [String: PhotoBackupStatus] = [:]
+        for request in requests {
+            statuses[request.localID] = PhotoBackupStatus(localID: request.localID, revision: request.revision, phase: .unknown)
+        }
+        return statuses
+    }
+
     // MARK: Routing
 
     /// Where a command goes, once the account's backup is prepared.

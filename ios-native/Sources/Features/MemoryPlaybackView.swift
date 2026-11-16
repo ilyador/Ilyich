@@ -33,7 +33,8 @@ struct MemoryPlaybackView: View {
                 MemoryProgress(count: memory.assets.count, selected: cursor.asset).frame(height: 4).padding(.horizontal, 22).padding(.vertical, 12)
                 ZStack {
                     if asset.isVideo {
-                        AuthenticatedVideo(api: api, assetID: asset.id, active: scenePhase == .active).id(asset.id)
+                        AuthenticatedVideo(api: api, assetID: asset.id, active: scenePhase == .active,
+                                           sourceAsset: asset, pipeline: pipeline).id(asset.id)
                     } else {
                         SlideshowStill(pipeline: pipeline, asset: asset, look: "contain", onReady: { readyAssetID = asset.id }, onFailure: { readyAssetID = nil })
                             .id(asset.id + asset.cacheRevision)

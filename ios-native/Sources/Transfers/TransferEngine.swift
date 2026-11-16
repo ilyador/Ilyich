@@ -534,6 +534,85 @@ actor TransferEngine<C: Clock>: TransferControlling where C.Duration == Duration
         return stream
     }
 
+    /// Reads one item's persisted transfer state and overlays only that job's in-memory progress.
+    /// This does not wake discovery, run a checker, or touch PhotoKit/server APIs.
+    func photoBackupStatus(localID: String, revision: AssetRevision?) async throws -> PhotoBackupStatus {
+        let statuses = try await photoBackupStatuses(for: [PhotoBackupStatusRequest(localID: localID, revision: revision)])
+        return statuses[localID] ?? PhotoBackupStatus(localID: localID, revision: revision, phase: .unknown)
+    }
+
+    /// Reads only requested rows and combines them with the matching active jobs' real progress.
+    func photoBackupStatuses(for requests: [PhotoBackupStatusRequest]) async throws -> [String: PhotoBackupStatus] {
+        guard !requests.isEmpty else { return [:] }
+        let localIDs = Array(Set(requests.map(\.localID)))
+        let revisions = try await store.confirmationRevisions(for: localIDs)
+        let jobs = try await store.jobs(lane: .library, sourceKeys: localIDs)
+        let stages = try await store.libraryStages(jobs: jobs.values.map(\.id))
+        let changingPolicy = try await store.newPhotosPolicyChanging()
+        let baselineExcluded = try await store.excludedFromNewPhotosBackup(localIDs)
+        var statuses: [String: PhotoBackupStatus] = [:]
+
+        for request in requests {
+            let localID = request.localID
+            let revision = request.revision
+            let phase: PhotoBackupPhase
+            if let revision, revisions[localID] == revision {
+                phase = .completed
+            } else if revision == nil {
+                phase = .unknown
+            } else if let job = jobs[localID] {
+                if let stage = stages[job.id], stage.revision != revision {
+                    phase = .unknown
+                } else if job.state == .failed {
+                    phase = .needsAttention(message: job.errorMessage)
+                } else if active[job.id] != nil {
+                    let progress = fileProgress[job.id].flatMap { report -> Double? in
+                        guard report.expected > 0 else { return nil }
+                        return min(max(Double(report.sent) / Double(report.expected), 0), 1)
+                    }
+                    if let progress {
+                        phase = .uploading(progress: progress)
+                    } else if job.state == .submitted || job.state == .submitting {
+                        phase = .uploading(progress: nil)
+                    } else {
+                        phase = .preparing(progress: preparationProgress[job.id])
+                    }
+                } else if job.state == .submitted {
+                    // The background URLSession may own the task after the engine has released
+                    // its lease (or before the app has rebound it after launch).
+                    phase = .uploading(progress: nil)
+                } else if intent == .paused {
+                    phase = .paused
+                } else if job.state == .waiting {
+                    phase = .waiting(message: job.errorMessage)
+                } else if let blocker {
+                    phase = .needsAttention(message: blocker.backupMessage)
+                } else if let wait {
+                    phase = .waiting(message: Self.photoStatusMessage(for: wait))
+                } else {
+                    phase = .waiting(message: nil)
+                }
+            } else if changingPolicy {
+                phase = .unknown
+            } else if baselineExcluded.contains(localID) {
+                phase = .outsideAutomaticBackup
+            } else {
+                phase = .notQueued
+            }
+            statuses[localID] = PhotoBackupStatus(localID: localID, revision: revision, phase: phase)
+        }
+        return statuses
+    }
+
+    private static func photoStatusMessage(for reason: WaitReason) -> String {
+        switch reason {
+        case .deviceConditions: "Waiting for device conditions"
+        case .unmeteredNetwork: "Waiting for an unmetered network"
+        case .connectivity: "Waiting for a network connection"
+        case .serverBackoff: "Waiting for the server"
+        }
+    }
+
     /// Runs a discovery pass and wakes the loop for the jobs it queued; the snapshot says
     /// discovering meanwhile. Nil, with nothing read, while an account block or the session's
     /// authorization refuses transfers, as enqueue refuses.

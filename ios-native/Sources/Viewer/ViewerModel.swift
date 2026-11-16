@@ -65,9 +65,10 @@ enum ViewerConfirmation: Hashable {
     let window: AssetWindowProvider
     /// Share, Download original and Save to Photos.
     let exports: ExportTracker
-    /// The photos the viewer pages through: the source's window around the photo on screen,
-    /// which always holds that photo, less the photos deleted here.
-    private(set) var assets: [Asset]
+    /// The mixed local and remote entries the viewer pages through.
+    private(set) var entries: [LibraryEntry]
+    /// Remote-only compatibility view for existing slideshow and action callers.
+    var assets: [Asset] { entries.compactMap { entry in entry.remote.map(record) } }
     /// The photo on screen.
     private(set) var selectedID: String
     /// Fresher records than the window's, by photo: what the server said when the photo was shown,
@@ -134,24 +135,41 @@ enum ViewerConfirmation: Hashable {
         self.matchedLocalPhotos = matchedLocalPhotos
         self.navigator = navigator
         self.settleDelay = settleDelay
-        let id = route.asset.id
-        assets = AssetWindow.merged(shown: [route.asset], offered: window.window(around: id), selected: id)
-        selectedID = id
-        replacements = [id: route.asset]
-        pagePosition = ScrollPosition(id: id, anchor: .leading)
+        let id = route.entry.id
+        let initial: LibraryEntry
+        if let asset = route.entry.remote {
+            initial = .remote(asset, local: route.entry.local ?? matchedLocalPhotos[asset.id])
+        } else { initial = route.entry }
+        let offered = window.entries(around: id)
+        entries = AssetWindow.merged(shown: [initial], offered: offered, selected: id)
+        let resolvedID = AssetWindow.resolvedID(shown: [initial], offered: offered, selected: id)
+        selectedID = resolvedID
+        if let asset = route.entry.remote { replacements = [asset.id: asset] } else { replacements = [:] }
+        pagePosition = ScrollPosition(id: resolvedID, anchor: .leading)
         exports = ExportTracker(api: api)
     }
 
     // MARK: What the viewer reads
 
     /// Where the photo on screen is among the photos.
-    var index: Int { assets.firstIndex { $0.id == selectedID } ?? 0 }
-    /// The photo on screen, as freshly as the viewer has it.
-    var current: Asset { replacements[selectedID] ?? assets.first { $0.id == selectedID } ?? route.asset }
+    var index: Int { entries.firstIndex { $0.id == selectedID } ?? 0 }
+    /// The library item on screen.
+    var currentEntry: LibraryEntry { entryRecord(entries.first { $0.id == selectedID } ?? route.entry) }
+    func entryRecord(_ entry: LibraryEntry) -> LibraryEntry {
+        switch entry {
+        case .local: return entry
+        case .remote(let asset, let photo):
+            let local = photo.flatMap { removedLocalCopies.contains($0.id) ? nil : $0 }
+                ?? matchedLocalPhotos[asset.id].flatMap { removedLocalCopies.contains($0.id) ? nil : $0 }
+            return .remote(record(asset), local: local)
+        }
+    }
+    /// The real server record on screen, if this entry has one.
+    var current: Asset? { currentEntry.remote.map(record) }
     /// A photo as freshly as the viewer has it.
     func record(_ asset: Asset) -> Asset { replacements[asset.id] ?? asset }
     /// Every photo the viewer pages through, as freshly as it has them.
-    var records: [Asset] { assets.map(record) }
+    var records: [Asset] { assets }
     /// The photo on screen once the strip lets go of it: only the photo a scrub stops on is read
     /// again, cast and has its neighbors loaded.
     var settledID: String? { stripScrubbing ? nil : selectedID }
@@ -159,16 +177,20 @@ enum ViewerConfirmation: Hashable {
     var busy: Bool { working || exports.isRunning }
     /// What the photo on screen offers. Every button and menu item renders from it.
     var capabilities: AssetCapabilities {
-        AssetCapabilityPolicy.evaluate(current, context: CapabilityContext(api: api, features: features, album: route.albumContext))
+        guard let current else { return AssetCapabilities() }
+        return AssetCapabilityPolicy.evaluate(current, context: CapabilityContext(api: api, features: features, album: route.albumContext))
     }
     /// Exploring a place raises the library's Earth, which only the library's own viewer can do.
     var exploresOnTheEarth: Bool { navigator != nil }
     /// The photo's copy on this phone, until it is removed here.
-    func localCopy(of asset: Asset) -> LocalPhoto? { removedLocalCopies.contains(asset.id) ? nil : matchedLocalPhotos[asset.id] }
+    func localCopy(of asset: Asset) -> LocalPhoto? {
+        if let local = entries.first(where: { $0.remote?.id == asset.id })?.local ?? matchedLocalPhotos[asset.id],
+           !removedLocalCopies.contains(local.id) { return local }
+        return nil
+    }
     /// Where the photo on screen was taken, when its details say so.
     var locationFocus: PlaceFocus? {
-        let asset = current
-        guard let latitude = asset.exifInfo?.latitude, let longitude = asset.exifInfo?.longitude,
+        guard let asset = current, let latitude = asset.exifInfo?.latitude, let longitude = asset.exifInfo?.longitude,
               latitude.isFinite, longitude.isFinite, (-90...90).contains(latitude), (-180...180).contains(longitude) else { return nil }
         return .init(latitude: latitude, longitude: longitude, assetID: asset.id)
     }
@@ -210,7 +232,7 @@ enum ViewerConfirmation: Hashable {
 
     /// The source's window around the photo on screen. The next change to anything it was read
     /// from tells the model, once; each telling watches again.
-    private func watchedWindow() -> [Asset] {
+    private func watchedWindow() -> [LibraryEntry] {
         let window = window, id = selectedID, neighbors = neighborIDs
         return withObservationTracking { Self.offered(by: window, around: id, neighbors: neighbors) } onChange: { [weak self] in
             Task { @MainActor in self?.sourceChanged() }
@@ -220,11 +242,11 @@ enum ViewerConfirmation: Hashable {
     /// The window `window` offers around the photo `id`. Where the source no longer holds that
     /// photo, as when it was deleted elsewhere or archived here, the window around a photo beside
     /// it says where it was.
-    private static func offered(by window: AssetWindowProvider, around id: String, neighbors: [String]) -> [Asset] {
-        let offered = window.window(around: id)
+    private static func offered(by window: AssetWindowProvider, around id: String, neighbors: [String]) -> [LibraryEntry] {
+        let offered = window.entries(around: id)
         guard offered.isEmpty else { return offered }
         for neighbor in neighbors {
-            let around = window.window(around: neighbor)
+            let around = window.entries(around: neighbor)
             if !around.isEmpty { return around }
         }
         return []
@@ -232,8 +254,8 @@ enum ViewerConfirmation: Hashable {
 
     /// The photos either side of the one on screen, the one before first.
     private var neighborIDs: [String] {
-        guard let index = assets.firstIndex(where: { $0.id == selectedID }) else { return [] }
-        return [index - 1, index + 1].filter(assets.indices.contains).map { assets[$0].id }
+        guard let index = entries.firstIndex(where: { $0.id == selectedID }) else { return [] }
+        return [index - 1, index + 1].filter(entries.indices.contains).map { entries[$0].id }
     }
 
     private var isMoving: Bool { pagerMoving || stripScrubbing || closing }
@@ -262,22 +284,26 @@ enum ViewerConfirmation: Hashable {
 
     /// Shows the source's window with the photo on screen kept in it (AssetWindow.merged), less
     /// the photos deleted here.
-    private func show(_ offered: [Asset]) {
-        let offered = deleted.isEmpty ? offered : offered.filter { !deleted.contains($0.id) }
-        place(AssetWindow.merged(shown: assets, offered: offered, selected: selectedID), selected: selectedID)
+    private func show(_ offered: [LibraryEntry]) {
+        let offered = offered.filter { entry in
+            if let asset = entry.remote, deleted.contains(asset.id) { return false }
+            return entry.remote != nil || entry.local.map { !removedLocalCopies.contains($0.id) } == true
+        }
+        let resolved = AssetWindow.resolvedID(shown: entries, offered: offered, selected: selectedID)
+        place(AssetWindow.merged(shown: entries, offered: offered, selected: selectedID), selected: resolved)
     }
 
     /// Takes the photos deleted here out of the pages. The photo after the one on screen, or else
     /// the one before, comes on screen in its place, as in Photos and the phone's own viewer (P3);
     /// the viewer closes when no photo is left. Says whether it stays.
     private func dropDeleted() -> Bool {
-        guard !deleted.isEmpty, assets.contains(where: { deleted.contains($0.id) }) else { return true }
-        let remaining = assets.filter { !deleted.contains($0.id) }
+        guard !deleted.isEmpty, entries.contains(where: { $0.remote.map { deleted.contains($0.id) } == true }) else { return true }
+        let remaining = entries.filter { $0.remote.map { !deleted.contains($0.id) } ?? true }
         guard !remaining.isEmpty else { close(); return false }
         var selected = selectedID
-        if deleted.contains(selected), let index = assets.firstIndex(where: { $0.id == selected }) {
-            let after = assets[index...].first { !deleted.contains($0.id) }
-            let before = assets[..<index].last { !deleted.contains($0.id) }
+        if deleted.contains(selected), let index = entries.firstIndex(where: { $0.id == selected }) {
+            let after = entries[index...].first { $0.remote.map { !deleted.contains($0.id) } ?? true }
+            let before = entries[..<index].last { $0.remote.map { !deleted.contains($0.id) } ?? true }
             selected = (after ?? before ?? remaining[0]).id
         }
         place(remaining, selected: selected)
@@ -287,12 +313,12 @@ enum ViewerConfirmation: Hashable {
     /// Puts `next` up as the photos paged through, `selected` on screen. The pages move with the
     /// photos in the same change, so the photo on screen stays put, and the strip is laid out
     /// afresh when the photo on screen lands at another place among them.
-    private func place(_ next: [Asset], selected: String) {
+    private func place(_ next: [LibraryEntry], selected: String) {
         let reselects = selected != selectedID
-        guard reselects || next != assets else { return }
-        let moved = reselects || next.count != assets.count || zip(next, assets).contains { $0.id != $1.id }
-        let shifted = next.firstIndex { $0.id == selected } != assets.firstIndex { $0.id == selectedID }
-        assets = next
+        guard reselects || next != entries else { return }
+        let moved = reselects || next.count != entries.count || zip(next, entries).contains { $0.id != $1.id }
+        let shifted = next.firstIndex { $0.id == selected } != entries.firstIndex { $0.id == selectedID }
+        entries = next
         if reselects { selectedID = selected }
         if moved { pagePosition.scrollTo(id: selected, anchor: .leading) }
         if shifted { windowShifts += 1 }
@@ -301,7 +327,7 @@ enum ViewerConfirmation: Hashable {
     /// A change the account made, here or on any screen: the photos it changed show their new
     /// records at once, in one write however many it names.
     private func apply(_ result: MutationResult) {
-        let changed = result.records(updating: { id in replacements[id] ?? assets.first { $0.id == id } })
+        let changed = result.records(updating: { id in replacements[id] ?? entries.compactMap(\.remote).first { $0.id == id } })
         if !changed.isEmpty { replacements.merge(changed) { _, new in new } }
     }
 
@@ -333,14 +359,14 @@ enum ViewerConfirmation: Hashable {
     /// A swipe moved the photo on screen to `id`. Once the photos rest the window is read again
     /// around it.
     func select(_ id: String) {
-        guard id != selectedID, assets.contains(where: { $0.id == id }) else { return }
+        guard id != selectedID, entries.contains(where: { $0.id == id }) else { return }
         selectedID = id
         if !isMoving { settle() }
     }
 
     /// The strip picked a photo: the pages jump straight to it, as in Photos.
     func jump(to id: String) {
-        guard id != selectedID, assets.contains(where: { $0.id == id }) else { return }
+        guard id != selectedID, entries.contains(where: { $0.id == id }) else { return }
         selectedID = id
         pagePosition.scrollTo(id: id, anchor: .leading)
         if !isMoving { settle() }
@@ -361,8 +387,20 @@ enum ViewerConfirmation: Hashable {
     /// caches, which a relock doesn't empty (N5).
     var readAsset: @Sendable (String) async throws -> Asset {
         let api = api
-        if window.isPrivate { return { try await api.serverAsset(id: $0) } }
-        return { try await api.asset(id: $0) }
+        guard let entry = entries.first(where: { $0.id == selectedID }), let asset = entry.remote else {
+            return { _ in throw APIError.invalidResponse("This local item has no server asset record.") }
+        }
+        let expectedID = asset.id
+        if window.isPrivate {
+            return { id in
+                guard id == expectedID else { throw APIError.invalidResponse("This local item has no server asset record.") }
+                return try await api.serverAsset(id: id)
+            }
+        }
+        return { id in
+            guard id == expectedID else { throw APIError.invalidResponse("This local item has no server asset record.") }
+            return try await api.asset(id: id)
+        }
     }
 
     /// Reads the photo on screen from the server again: on showing it, and after each change the
@@ -370,9 +408,8 @@ enum ViewerConfirmation: Hashable {
     /// and the viewer closes; any other record shows here, and reaches the source only when it
     /// changes what the source shows of the photo.
     func refreshCurrentAsset() async {
-        guard settledID != nil else { return }
+        guard settledID != nil, let previous = current else { return }
         let id = selectedID, revision = refreshRevision
-        let previous = current
         let accessMustBeConfirmed = accessRefreshRevision >= 0 && accessRefreshRevision <= revision
         do {
             if revision > 0 { try await Task.sleep(for: .milliseconds(250)) }
@@ -410,7 +447,7 @@ enum ViewerConfirmation: Hashable {
 
     /// A fresher record of a photo the viewer shows, read from the server by its details.
     func take(_ asset: Asset) {
-        take(asset, over: replacements[asset.id] ?? assets.first { $0.id == asset.id })
+        take(asset, over: replacements[asset.id] ?? entries.compactMap(\.remote).first { $0.id == asset.id })
     }
 
     /// The record shows here at once. The source hears of it only when it changes what the source
@@ -428,15 +465,14 @@ enum ViewerConfirmation: Hashable {
     // MARK: Changes to the photo
 
     func toggleFavorite() {
-        guard capabilities.offers(.favorite) else { return }
-        let asset = current
+        guard let asset = current, capabilities.offers(.favorite) else { return }
         run { _ = try await self.mutate(.favorite([asset.id], !asset.isFavorite), on: asset) }
     }
 
     func changeVisibility(_ visibility: AssetVisibility) {
-        let locking = visibility == .locked || current.visibility == .locked
+        guard let asset = current else { return }
+        let locking = visibility == .locked || asset.visibility == .locked
         guard capabilities.offers(locking ? .lock : .archive) else { return }
-        let asset = current
         run {
             _ = try await self.mutate(.visibility([asset.id], visibility), on: asset)
             // A locked photo leaves the library, its media gone with it.
@@ -445,16 +481,14 @@ enum ViewerConfirmation: Hashable {
     }
 
     func setAlbumCover() {
-        guard let album = route.albumContext, capabilities.offers(.albumCover) else { return }
-        let asset = current
+        guard let album = route.albumContext, let asset = current, capabilities.offers(.albumCover) else { return }
         run { _ = try await self.mutate(.setAlbumCover(album: album, asset: asset.id), on: asset) }
     }
 
     /// Asks before deleting the photo on screen: to Trash, or for good when the server, asked
     /// again now, keeps no Trash. The question is asked only if the photo is still on screen.
     func requestDeletion() {
-        guard capabilities.offers(.trash) || capabilities.offers(.deletePermanently) else { return }
-        let asset = current
+        guard let asset = current, capabilities.offers(.trash) || capabilities.offers(.deletePermanently) else { return }
         run {
             let latest = try await self.api.serverFeatures()
             guard asset.id == self.selectedID else { return }
@@ -480,8 +514,7 @@ enum ViewerConfirmation: Hashable {
     }
 
     func restore() {
-        guard capabilities.offers(.restore) else { return }
-        let asset = current
+        guard let asset = current, capabilities.offers(.restore) else { return }
         run {
             _ = try await self.mutate(.restore([asset.id]), on: asset)
             self.close()
@@ -493,26 +526,53 @@ enum ViewerConfirmation: Hashable {
     /// failure is shown. The editor then opens only on the photo still on screen with nothing
     /// opened over it, so a tap never opens it later on its own.
     func openEditor() {
+        guard current != nil else { return }
         if capabilities.offers(.edit) { cover = .editor; return }
         guard capabilities[.edit].awaitsDetails else { return }
         let id = selectedID
         run {
             let asset = try await self.readAsset(id)
-            guard self.selectedID == id, self.showDetails(asset, over: self.current) else { return }
+            guard self.selectedID == id, let previous = self.current, self.showDetails(asset, over: previous) else { return }
             if self.capabilities.offers(.edit), self.sheet == nil, self.cover == nil { self.cover = .editor }
         }
     }
 
     /// The phone's copy of a photo was removed from Photos.
-    func localCopyRemoved(for id: String) { removedLocalCopies.insert(id) }
+    func localCopyRemoved(for id: String) {
+        let localID = entries.first(where: { $0.remote?.id == id })?.local?.id ?? matchedLocalPhotos[id]?.id ?? id
+        localPhotosRemoved([localID])
+    }
+
+    /// Removes phone copies from this viewer. A remote page remains but loses its local match;
+    /// a local-only page leaves and selects the next entry, then the previous one.
+    func localPhotosRemoved(_ ids: [String]) {
+        let removed = Set(ids)
+        guard !removed.isEmpty else { return }
+        removedLocalCopies.formUnion(removed)
+        let old = entries
+        let next = old.compactMap { entry -> LibraryEntry? in
+            switch entry {
+            case .local(let photo): return removed.contains(photo.id) ? nil : entry
+            case .remote(let asset, let photo): return .remote(asset, local: photo.flatMap { removed.contains($0.id) ? nil : $0 })
+            }
+        }
+        guard next != old else { return }
+        if !next.contains(where: { $0.id == selectedID }) {
+            guard let oldIndex = old.firstIndex(where: { $0.id == selectedID }), !next.isEmpty else { close(); return }
+            let after = old[(oldIndex + 1)...].first { candidate in next.contains { $0.id == candidate.id } }
+            let before = old[..<oldIndex].last { candidate in next.contains { $0.id == candidate.id } }
+            selectedID = (after ?? before ?? next[0]).id
+        }
+        place(next, selected: selectedID)
+        if !isMoving { settle() }
+    }
 
     // MARK: Exports
 
     /// Shares the photo on screen: its original or, with its edits, the version shown. The share
     /// sheet opens only if the photo is still the one on screen.
     func share(original: Bool) {
-        guard !busy else { return }
-        let asset = current
+        guard !busy, let asset = current else { return }
         exports.start(.share([asset], original: original)) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
@@ -524,7 +584,7 @@ enum ViewerConfirmation: Hashable {
     }
 
     func saveToPhotos() {
-        guard !busy, capabilities.offers(.saveToPhotos) else { return }
+        guard !busy, let current, capabilities.offers(.saveToPhotos) else { return }
         exports.start(.saveToPhotos([current], original: false)) { [weak self] outcome in
             if case .failed(let failure, _) = outcome { self?.error = failure.localizedDescription }
         }
@@ -542,7 +602,7 @@ enum ViewerConfirmation: Hashable {
     /// The photo in the whole library: the viewer closes, every filter and search goes, and the
     /// feed lands on the photo's date, as Show in timeline does from a memory.
     func showInFeed() {
-        guard let navigator else { return }
+        guard let navigator, let current else { return }
         navigator.send(.showInTimeline(current))
     }
 

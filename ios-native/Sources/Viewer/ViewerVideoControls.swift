@@ -116,24 +116,94 @@ import UIKit
 /// The video itself, drawn by an AVPlayerLayer with no controls of its own.
 struct PlayerSurface: UIViewRepresentable {
     let player: AVPlayer
+    var onReadyForDisplay: ((Bool) -> Void)? = nil
+    var onFailure: ((Error) -> Void)? = nil
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> PlayerLayerView {
         let view = PlayerLayerView()
         view.playerLayer.videoGravity = .resizeAspect
-        view.playerLayer.player = player
+        context.coordinator.bind(view.playerLayer, player: player, ready: onReadyForDisplay, failure: onFailure)
         return view
     }
 
     func updateUIView(_ view: PlayerLayerView, context: Context) {
-        if view.playerLayer.player !== player { view.playerLayer.player = player }
+        context.coordinator.bind(view.playerLayer, player: player, ready: onReadyForDisplay, failure: onFailure)
     }
 
-    static func dismantleUIView(_ view: PlayerLayerView, coordinator: ()) { view.playerLayer.player = nil }
+    static func dismantleUIView(_ view: PlayerLayerView, coordinator: Coordinator) {
+        coordinator.close(); view.playerLayer.player = nil
+    }
+
+    @MainActor final class Coordinator {
+        private weak var player: AVPlayer?
+        private var generation = UUID()
+        private var readiness: NSKeyValueObservation?
+        private var itemStatus: NSKeyValueObservation?
+        private var ready: ((Bool) -> Void)?
+        private var failure: ((Error) -> Void)?
+
+        func bind(_ layer: AVPlayerLayer, player: AVPlayer, ready: ((Bool) -> Void)?, failure: ((Error) -> Void)?) {
+            self.ready = ready; self.failure = failure
+            guard self.player !== player else { return }
+            closeObservations()
+            self.player = player
+            layer.player = player
+            let token = generation
+            readiness = layer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+                let value = layer.isReadyForDisplay
+                Task { @MainActor [weak self] in
+                    guard let self, self.generation == token else { return }
+                    self.ready?(value)
+                }
+            }
+            if let item = player.currentItem {
+                itemStatus = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+                    guard item.status == .failed else { return }
+                    let error = item.error ?? APIError.invalidResponse("This video could not be played.")
+                    Task { @MainActor [weak self] in
+                        guard let self, self.generation == token else { return }
+                        self.failure?(error)
+                    }
+                }
+            }
+        }
+
+        private func closeObservations() {
+            generation = UUID(); readiness = nil; itemStatus = nil; player = nil
+        }
+
+        func close() { closeObservations(); ready = nil; failure = nil }
+    }
 }
 
 final class PlayerLayerView: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
+
+/// Only time spent actively waiting in the foreground earns an error. Ready, background and
+/// paged-away states cancel the timer; a replacement/retry gets a fresh request identity.
+@MainActor struct VideoFirstFrameDeadline: ViewModifier {
+    let request: String
+    let waiting: Bool
+    var timeout: Duration = .seconds(30)
+    let onTimeout: () -> Void
+    private struct Key: Hashable { let request: String; let waiting: Bool }
+
+    func body(content: Content) -> some View {
+        content.task(id: Key(request: request, waiting: waiting)) {
+            guard waiting, await Self.elapsed(after: timeout) else { return }
+            onTimeout()
+        }
+    }
+
+    static func elapsed(after duration: Duration,
+                        sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) async -> Bool {
+        do { try await sleep(duration); return !Task.isCancelled }
+        catch { return false }
+    }
 }
 
 /// The Photos video pill: play or pause, a bar to drag through the video, and mute. It shows and

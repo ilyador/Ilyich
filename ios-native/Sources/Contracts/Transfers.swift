@@ -220,6 +220,38 @@ struct TransferHistoryItem: Hashable, Sendable {
     let confirmedAt: Date?
 }
 
+/// The phone backup state of one PhotoKit item at the revision currently shown in the viewer.
+/// This describes transfer progress only; whether a server copy can currently be played is a
+/// separate media-source question.
+struct PhotoBackupStatus: Hashable, Sendable {
+    let localID: String
+    let revision: AssetRevision?
+    let phase: PhotoBackupPhase
+}
+
+struct PhotoBackupStatusRequest: Hashable, Sendable {
+    let localID: String
+    let revision: AssetRevision?
+}
+
+enum PhotoBackupPhase: Hashable, Sendable {
+    /// The transfer engine has a confirmation for this exact revision.
+    case completed
+    /// A matching library job is sending bytes. Progress is nil until a per-job byte report exists.
+    case uploading(progress: Double?)
+    /// The job is active but preparing/checking the item. Preparation progress is PhotoKit progress.
+    case preparing(progress: Double?)
+    case waiting(message: String?)
+    case paused
+    /// Excluded by the saved new-photos-only baseline, unless a later explicit job overrides it.
+    case outsideAutomaticBackup
+    case needsAttention(message: String?)
+    /// No current confirmation or transfer job is recorded for this item.
+    case notQueued
+    /// The viewer does not have a revision that can be compared with transfer proof.
+    case unknown
+}
+
 /// The commands and reads the backup and share screens use (B8). Commands write rows and wake the
 /// engine's loop; they never run transfers themselves.
 protocol TransferControlling: Sendable {
@@ -235,6 +267,11 @@ protocol TransferControlling: Sendable {
     func retry(_ sources: [TransferSource]?) async throws
     /// The engine's state now, then its changes at most four times a second.
     func snapshots() async -> AsyncStream<TransferSnapshot>
+    /// A read-only point query for the item already being shown. Never scans Photos or resolves a
+    /// server media source. Completion means a confirmation exists for this exact revision.
+    func photoBackupStatus(localID: String, revision: AssetRevision?) async throws -> PhotoBackupStatus
+    /// Bounded batch form for a visible viewer/feed page. Only the requested local IDs are read.
+    func photoBackupStatuses(for requests: [PhotoBackupStatusRequest]) async throws -> [String: PhotoBackupStatus]
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem]
     func historyPage(offset: Int, limit: Int) async throws -> [TransferHistoryItem]
     func failures(limit: Int) async throws -> [TransferQueueItem]
@@ -245,6 +282,16 @@ protocol TransferControlling: Sendable {
 }
 
 extension TransferControlling {
+    func photoBackupStatus(localID: String, revision: AssetRevision?) async throws -> PhotoBackupStatus {
+        PhotoBackupStatus(localID: localID, revision: revision, phase: .unknown)
+    }
+    func photoBackupStatuses(for requests: [PhotoBackupStatusRequest]) async throws -> [String: PhotoBackupStatus] {
+        var result: [String: PhotoBackupStatus] = [:]
+        for request in requests {
+            result[request.localID] = try await photoBackupStatus(localID: request.localID, revision: request.revision)
+        }
+        return result
+    }
     func enableNewPhotosBackup() async throws {
         throw BackupError.message("New-photos backup is unavailable for this account.")
     }

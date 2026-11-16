@@ -26,6 +26,28 @@ extension TransferStore {
         return stage
     }
 
+    /// Stages for only the requested library jobs, keyed by job ID.
+    func libraryStages(jobs jobIDs: [Int64]) throws -> [Int64: LibraryStage] {
+        guard !jobIDs.isEmpty else { return [:] }
+        var stages: [Int64: LibraryStage] = [:]
+        try database().run("""
+            SELECT job_id,stage_id,folder,modification_date,original_json,motion_json,sidecar_json,fields_json,is_video,
+            motion_remote_id,motion_checksum,original_checksum,suspended FROM stages \
+            WHERE job_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) ORDER BY rowid DESC
+            """, [.text(TransferJSON.encode(jobIDs))]) { row in
+            guard let jobID = row.integer(0), stages[jobID] == nil,
+                  let stageID = row.text(1), let folder = row.text(2), let modified = row.real(3),
+                  let original = row.text(4).flatMap({ TransferJSON.decode(StagedFile.self, $0) }) else { return }
+            stages[jobID] = LibraryStage(stageID: stageID, folder: folder, revision: AssetRevision(referenceSeconds: modified),
+                original: original, motion: row.text(5).flatMap { TransferJSON.decode(StagedFile.self, $0) },
+                sidecar: row.text(6).flatMap { TransferJSON.decode(StagedFile.self, $0) },
+                fields: row.text(7).flatMap { TransferJSON.decode([String: String].self, $0) } ?? [:],
+                isVideo: row.integer(8) == 1, motionRemoteID: row.text(9), motionChecksum: row.text(10),
+                originalChecksum: row.text(11), suspended: row.integer(12) == 1)
+        }
+        return stages
+    }
+
     /// Records the files staged for a leased job. Returns false when the lease is gone.
     func saveStage(_ stage: LibraryStage, job: Int64, token: UUID) throws -> Bool {
         let db = try database()

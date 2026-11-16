@@ -19,6 +19,8 @@ struct AccountEnvironment: Sendable {
     var syncsLibrary = true
     /// The phone's photos join the library, and backup runs.
     var usesDevicePhotos = true
+    /// Synthetic identifiers for simulator paging tests; never enables the real Photos index.
+    var fixtureLocalPhotos: [LocalPhoto] = []
     /// The session is checked with the server when it opens and whenever the app comes forward.
     var validatesSession = true
     /// Each launch starts at the default grid density and shelf order.
@@ -89,6 +91,16 @@ struct AccountEnvironment: Sendable {
         environment.networkConfiguration = NetworkConfiguration()
         environment.syncsLibrary = false
         environment.usesDevicePhotos = false
+        if arguments.contains("--ui-testing-mixed-library") {
+            // Wall-clock dates match the fixture feed independently of the simulator's zone.
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = .current
+            let date = calendar.date(from: DateComponents(year: 2026, month: 12, day: 1, hour: 12))!
+            environment.fixtureLocalPhotos = [
+                LocalPhoto(id: "ui-fixture-pending-photo", date: date.addingTimeInterval(120), width: 1200, height: 800),
+                LocalPhoto(id: "ui-fixture-pending-video", date: date.addingTimeInterval(60), video: true, duration: 5, width: 1200, height: 800),
+            ]
+        }
         environment.keepsTransfers = false
         environment.resolvesPlaces = false
         environment.resetsInterfaceState = true

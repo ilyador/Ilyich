@@ -13,6 +13,15 @@ enum LibraryEntry: Hashable, Identifiable, Sendable {
     var local: LocalPhoto? {
         switch self { case .remote(_, let photo): photo; case .local(let photo): photo }
     }
+    /// The media's display ratio when its dimensions are known.
+    var aspectRatio: Double {
+        if let asset = remote {
+            if let width = asset.width, let height = asset.height, width > 0, height > 0 { return asset.aspectRatio }
+            if let ratio = asset.timelineRatio, ratio.isFinite, ratio > 0 { return ratio }
+        }
+        guard let photo = local, photo.width > 0, photo.height > 0 else { return 1 }
+        return Double(photo.width) / Double(photo.height)
+    }
     var date: Date {
         switch self {
         case .remote(let asset, _): asset.localDateTime ?? asset.fileCreatedAt ?? .distantPast

@@ -153,9 +153,17 @@ struct PhotoGrid: UIViewRepresentable {
             }
         }
         coordinator.revision = store.revision; coordinator.selection = store.selected; coordinator.selecting = store.isSelecting
+        if reset || coordinator.backupStoreIdentity != ObjectIdentifier(store) {
+            coordinator.resetBackupStatuses()
+            coordinator.backupStoreIdentity = ObjectIdentifier(store)
+            coordinator.scheduleBackupStatusesAfterContentChange()
+        }
         // The rows changed under the grid without a scroll (a month became ready, new rows, a
         // reset, a new density): the photos ahead of and behind the screen are read again.
-        if needsReload || revisionChanged || groupingChanged || columnsChanged { coordinator.viewport.contentChanged() }
+        if needsReload || revisionChanged || groupingChanged || columnsChanged {
+            coordinator.viewport.contentChanged()
+            coordinator.scheduleBackupStatusesAfterContentChange()
+        }
         if let request = store.scrollRequest, request.id != coordinator.lastScrollRequest,
            let index = store.restoredIndex(for: request.position) {
             coordinator.lastScrollRequest = request.id
@@ -163,6 +171,12 @@ struct PhotoGrid: UIViewRepresentable {
             view.scrollToItem(at: IndexPath(item: index.item, section: index.section), at: .top, animated: false)
             coordinator.publishPositionAfterLayout(requestID: request.id, resetID: resetID)
         }
+    }
+
+    static func dismantleUIView(_ view: UICollectionView, coordinator: Coordinator) {
+        coordinator.shutdownBackupStatusUpdates()
+        view.delegate = nil
+        view.dataSource = nil
     }
 
     @MainActor final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate, UIGestureRecognizerDelegate {
@@ -182,6 +196,13 @@ struct PhotoGrid: UIViewRepresentable {
         var selecting = false
         var showsDayHeaders = false
         var lastScrollRequest: UUID?
+        fileprivate var backupStoreIdentity: ObjectIdentifier?
+        private var backupRequests: [String: PhotoBackupStatusRequest] = [:]
+        private var backupStatuses: [String: PhotoBackupStatus] = [:]
+        private var backupStatusTask: Task<Void, Never>?
+        private var backupStatusSettleTask: Task<Void, Never>?
+        private var backupStatusGeneration: UInt64 = 0
+        private var backupViewportSettled = false
         /// Binds photos to cells and sends the grid's thumbnail demand.
         var binder: ThumbnailBinder { didSet { binder.needsDemand = { [weak self] in self?.viewport.setNeedsDemand() } } }
         /// How the grid moves and what it is about to show. It sends the demand at most once per
@@ -218,6 +239,7 @@ struct PhotoGrid: UIViewRepresentable {
                 }
                 store.changeSelection(adding: entries(change.select), removing: entries(change.deselect))
             }
+            backupStoreIdentity = ObjectIdentifier(parent.store)
         }
 
         /// The grid's demand, once per frame: the cells on screen that lack their thumbnail, then
@@ -250,9 +272,14 @@ struct PhotoGrid: UIViewRepresentable {
         }
         func configure(_ cell: PhotoCell, at index: IndexPath) {
             let entry = parent.store.entry(section: index.section, item: index.item)
+            let backupStatus = entry?.local.flatMap { photo -> PhotoBackupStatus? in
+                guard let status = backupStatuses[photo.id], status.revision == photo.modified.map(AssetRevision.init) else { return nil }
+                return status
+            }
             let changed = cell.configure(entry: entry, binder: binder,
                            selected: entry.map { parent.store.selected.contains($0.id) } ?? false,
                            selecting: parent.store.isSelecting,
+                           backupStatus: backupStatus,
                            month: index.item == 0 && sections.indices.contains(index.section)
                                 && !(dayGroups.indices.contains(index.section) && dayGroups[index.section].contains(where: { $0.startItem == 0 }))
                                 ? monthBadge(for: sections[index.section].id) : nil)
@@ -439,6 +466,9 @@ struct PhotoGrid: UIViewRepresentable {
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             // A feed being replaced is no longer the store's: where it scrolls to isn't the feed's place.
             if !parent.store.isReplacingFeed { publishVisiblePosition() }
+            backupViewportSettled = false
+            if viewport.phase != .idle && (backupStatusTask != nil || !backupRequests.isEmpty) { resetBackupStatuses() }
+            scheduleBackupStatusRefresh()
             viewport.didScroll()
         }
         func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
@@ -476,6 +506,7 @@ struct PhotoGrid: UIViewRepresentable {
                       !self.parent.store.isReplacingFeed else { return }
                 collection.layoutIfNeeded()
                 self.publishVisiblePosition()
+                self.scheduleBackupStatusRefresh()
             }
         }
         func firstVisiblePhoto() -> IndexPath? { visiblePhotos().min() }
@@ -495,15 +526,125 @@ struct PhotoGrid: UIViewRepresentable {
         }
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             parent.store.cancelPendingNavigation()
+            resetBackupStatuses()
             viewport.willBeginDragging()
         }
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
             viewport.didEndDragging(decelerate: decelerate)
+            scheduleBackupStatusRefresh()
         }
         func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
             viewport.didEndDecelerating()
+            scheduleBackupStatusRefresh()
         }
-        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { viewport.didEndScrollingAnimation() }
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+            viewport.didEndScrollingAnimation()
+            scheduleBackupStatusRefresh()
+        }
+
+        /// Waits for a settled viewport before asking for statuses. While scrolling, a single
+        /// sleeper checks the motion phase; no per-frame query or per-cell task is started.
+        private func scheduleBackupStatusRefresh() {
+            guard backupStatusSettleTask == nil else { return }
+            backupStatusSettleTask = Task { @MainActor [weak self] in
+                var priorOffset = self?.collection?.contentOffset.y
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    guard !Task.isCancelled else { break }
+                    guard let coordinator = self else { return }
+                    let offset = coordinator.collection?.contentOffset.y
+                    let still: Bool
+                    if let offset, let priorOffset { still = abs(offset - priorOffset) < 0.5 }
+                    else { still = true }
+                    priorOffset = offset
+                    if still && coordinator.viewport.phase == .idle {
+                        coordinator.refreshVisibleBackupStatuses()
+                        coordinator.backupStatusSettleTask = nil
+                        return
+                    }
+                }
+                self?.backupStatusSettleTask = nil
+            }
+        }
+
+        func scheduleBackupStatusesAfterContentChange() { scheduleBackupStatusRefresh() }
+
+        private func refreshVisibleBackupStatuses() {
+            guard let collection, !parent.store.isReplacingFeed else { resetBackupStatuses(); return }
+            backupViewportSettled = true
+            collection.layoutIfNeeded()
+            var requests: [String: PhotoBackupStatusRequest] = [:]
+            for index in visiblePhotos() {
+                guard let photo = parent.store.entry(section: index.section, item: index.item)?.local else { continue }
+                requests[photo.id] = PhotoBackupStatusRequest(localID: photo.id, revision: photo.modified.map(AssetRevision.init))
+            }
+            guard requests != backupRequests else { return }
+            backupStatusTask?.cancel()
+            backupStatusTask = nil
+            backupStatusGeneration &+= 1
+            let generation = backupStatusGeneration
+            backupRequests = requests
+            backupStatuses = [:]
+            applyBackupStatusesToVisibleCells()
+            guard !requests.isEmpty else { return }
+
+            let backend = BackupStore.shared.backend
+            let batch = requests.values.sorted { $0.localID < $1.localID }
+            backupStatusTask = Task { @MainActor [weak self] in
+                let snapshots = await backend.snapshots()
+                for await _ in snapshots {
+                    guard !Task.isCancelled else { return }
+                    guard self != nil else { return }
+                    guard self?.backupStatusGeneration == generation, self?.backupViewportSettled == true,
+                          self?.viewport.phase == .idle else { continue }
+                    let statuses = try? await backend.photoBackupStatuses(for: batch)
+                    guard !Task.isCancelled, let coordinator = self,
+                          generation == coordinator.backupStatusGeneration,
+                          coordinator.backupViewportSettled, coordinator.viewport.phase == .idle else { return }
+                    coordinator.backupStatuses = statuses ?? [:]
+                    coordinator.applyBackupStatusesToVisibleCells()
+                }
+            }
+        }
+
+        func resetBackupStatuses() {
+            backupViewportSettled = false
+            backupStatusGeneration &+= 1
+            backupStatusTask?.cancel()
+            backupStatusTask = nil
+            backupRequests = [:]
+            backupStatuses = [:]
+            applyBackupStatusesToVisibleCells()
+        }
+
+        func shutdownBackupStatusUpdates() {
+            backupStatusGeneration &+= 1
+            backupStatusTask?.cancel()
+            backupStatusTask = nil
+            backupStatusSettleTask?.cancel()
+            backupStatusSettleTask = nil
+            backupRequests = [:]
+            backupStatuses = [:]
+            backupViewportSettled = false
+        }
+
+        private func applyBackupStatusesToVisibleCells() {
+            guard let collection else { return }
+            for cell in collection.visibleCells.compactMap({ $0 as? PhotoCell }) {
+                guard let index = collection.indexPath(for: cell),
+                      let entry = parent.store.entry(section: index.section, item: index.item) else {
+                    cell.setBackupStatus(nil, isServerAsset: false, hasLocalPhoto: false)
+                    continue
+                }
+                let photo = entry.local
+                let status = photo.flatMap { candidate -> PhotoBackupStatus? in
+                    guard let value = backupStatuses[candidate.id], value.revision == candidate.modified.map(AssetRevision.init) else { return nil }
+                    return value
+                }
+                cell.setBackupStatus(status, isServerAsset: entry.remote != nil, hasLocalPhoto: photo != nil)
+            }
+        }
+
         @objc func refresh(_ sender: UIRefreshControl) {
             Task { await parent.store.refreshAfterMutation(); sender.endRefreshing() }
         }
@@ -720,6 +861,22 @@ struct PhotoGrid: UIViewRepresentable {
     }
 }
 
+struct PhotoGridBackupBadge: Equatable {
+    let symbol: String?
+    let accessibilityText: String?
+
+    init(hasLocalPhoto: Bool, isServerAsset: Bool, status: PhotoBackupStatus?) {
+        guard hasLocalPhoto || isServerAsset else {
+            symbol = nil
+            accessibilityText = nil
+            return
+        }
+        let presentation = PhotoBackupPresentation(status: hasLocalPhoto ? status : nil, isServerAsset: isServerAsset)
+        symbol = presentation.symbol
+        accessibilityText = presentation.title
+    }
+}
+
 @MainActor final class PhotoCell: UICollectionViewCell {
     /// A server photo's sketch and thumbnail draw straight into this view's layer: an image view
     /// does a good deal of work for every new image, and a scrub brings a cell several a second. A
@@ -742,6 +899,14 @@ struct PhotoGrid: UIViewRepresentable {
     /// it reuses it, and the glass chip alone is several, so hidden overlays in every cell cost a
     /// scrub more than its photos did.
     private var badge: UILabel?
+    /// A tiny, lazy transfer marker, separate from the video's duration at bottom right.
+    private var backupBadge: UIView?
+    private var backupSymbol: UIImageView?
+    private var backupSymbolName: String?
+    private var backupStatus: PhotoBackupStatus?
+    private var backupIsServerAsset = false
+    private var backupHasLocalPhoto = false
+    private var itemAccessibilityLabel = "Photo"
     /// The first photo of a month carries the month as a small glass chip, as in the design. The
     /// glass is dark and tinted, so the white label stays legible over a white photo too.
     private var monthChip: (glass: UIVisualEffectView, label: UILabel)?
@@ -791,6 +956,10 @@ struct PhotoGrid: UIViewRepresentable {
             let size = badge.intrinsicContentSize
             badge.frame = CGRect(x: bounds.maxX - 4 - size.width, y: bounds.maxY - 4 - size.height, width: size.width, height: size.height)
         }
+        if let backupBadge, backupBadge.superview != nil {
+            backupBadge.frame = CGRect(x: bounds.minX + 4, y: bounds.maxY - 26, width: 22, height: 22)
+            backupSymbol?.frame = backupBadge.bounds.insetBy(dx: 5, dy: 5)
+        }
         if let chip = monthChip, chip.glass.superview != nil {
             let size = chip.label.intrinsicContentSize
             let width = max(0, min(size.width + 15, bounds.width - 10))
@@ -805,8 +974,11 @@ struct PhotoGrid: UIViewRepresentable {
         // The next bind always sets the image, so it is not cleared here as well; a cross-dissolve
         // still running is dropped, so the next photo shows at once.
         super.prepareForReuse(); photo.layer.removeAllAnimations()
+        accessibilityIdentifier = nil
         binding = nil; showsThumbnail = false
         displayProbe.reset()
+        setBackupStatus(nil, isServerAsset: false, hasLocalPhoto: false)
+        setItemAccessibilityLabel("Photo")
         setPinTarget(nil)
     }
     deinit { if let pin { pin.pipeline.unpinThumbnail(pin.assetID) } }
@@ -831,7 +1003,7 @@ struct PhotoGrid: UIViewRepresentable {
     /// Puts a view into the cell, under any that stack above it: image, length, month, check.
     private func attach(_ view: UIView) {
         guard view.superview !== contentView else { return }
-        let order: [UIView?] = [image, badge, monthChip?.glass, check]
+        let order: [UIView?] = [image, badge, monthChip?.glass, check, backupBadge]
         if let above = order.drop(while: { $0 !== view }).dropFirst().compactMap({ $0 }).first(where: { $0.superview === contentView }) {
             contentView.insertSubview(view, belowSubview: above)
         } else {
@@ -858,6 +1030,48 @@ struct PhotoGrid: UIViewRepresentable {
         label.layer.shadowColor = UIColor.black.cgColor; label.layer.shadowOpacity = 0.8; label.layer.shadowRadius = 3; label.layer.shadowOffset = CGSize(width: 0, height: 1)
         badge = label
         return label
+    }
+    func setBackupStatus(_ status: PhotoBackupStatus?, isServerAsset: Bool, hasLocalPhoto: Bool) {
+        backupStatus = status
+        backupIsServerAsset = isServerAsset
+        backupHasLocalPhoto = hasLocalPhoto
+        let presentation = PhotoGridBackupBadge(hasLocalPhoto: hasLocalPhoto, isServerAsset: isServerAsset, status: status)
+        guard let symbol = presentation.symbol else {
+            backupSymbolName = nil
+            detach(backupBadge)
+            updateAccessibilityLabel()
+            return
+        }
+        let badge = backupBadge ?? makeBackupBadge()
+        if backupSymbolName != symbol {
+            backupSymbol?.image = UIImage(systemName: symbol)
+            backupSymbolName = symbol
+        }
+        attach(badge)
+        updateAccessibilityLabel()
+    }
+    private func makeBackupBadge() -> UIView {
+        let badge = UIView(frame: .zero)
+        badge.backgroundColor = UIColor.black.withAlphaComponent(0.78)
+        badge.layer.cornerRadius = 11
+        badge.clipsToBounds = true
+        badge.isUserInteractionEnabled = false
+        let image = UIImageView(frame: .zero)
+        image.contentMode = .scaleAspectFit
+        image.tintColor = .white
+        badge.addSubview(image)
+        backupSymbol = image
+        backupBadge = badge
+        return badge
+    }
+    private func updateAccessibilityLabel() {
+        let statusText = PhotoGridBackupBadge(hasLocalPhoto: backupHasLocalPhoto, isServerAsset: backupIsServerAsset,
+                                              status: backupStatus).accessibilityText
+        accessibilityLabel = [itemAccessibilityLabel, statusText].compactMap { $0 }.joined(separator: ", ")
+    }
+    private func setItemAccessibilityLabel(_ label: String) {
+        itemAccessibilityLabel = label
+        updateAccessibilityLabel()
     }
     private func showMonth(_ text: String?) {
         guard let text else { detach(monthChip?.glass); return }
@@ -921,7 +1135,7 @@ struct PhotoGrid: UIViewRepresentable {
     /// The photo could not be loaded; a phone photo Photos holds only in iCloud says so.
     func showUnavailable(name: String, inCloud: Bool = false) {
         show(UIImage(systemName: inCloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark"), thumbnail: false, tint: .secondaryLabel)
-        accessibilityLabel = "Preview unavailable, \(name)"
+        setItemAccessibilityLabel("Preview unavailable, \(name)")
     }
     /// A status symbol in the given tint, in the image view.
     private func show(_ next: UIImage?, thumbnail: Bool, tint: UIColor? = nil) {
@@ -940,7 +1154,10 @@ struct PhotoGrid: UIViewRepresentable {
     }
     /// Shows `entry`. Returns whether the grid's thumbnail demand changed.
     @discardableResult
-    func configure(entry: LibraryEntry?, binder: ThumbnailBinder, selected: Bool, selecting: Bool, month: String?) -> Bool {
+    func configure(entry: LibraryEntry?, binder: ThumbnailBinder, selected: Bool, selecting: Bool,
+                   backupStatus: PhotoBackupStatus? = nil, month: String?) -> Bool {
+        accessibilityIdentifier = entry.map { "library.photo." + $0.id }
+        setBackupStatus(backupStatus, isServerAsset: entry?.remote != nil, hasLocalPhoto: entry?.local != nil)
         showCheck(selected: selected, selecting: selecting)
         showMonth(month)
         let traits: UIAccessibilityTraits = selected ? [.button, .selected] : [.button]
@@ -949,12 +1166,12 @@ struct PhotoGrid: UIViewRepresentable {
             // Photos renders phone photos through the thumbnail service, like server photos (T6).
             let key = ThumbnailBinder.Ahead.deviceKey(photo)
             setPinTarget((binder.pipeline, key.assetID))
-            if binding?.stage != .failed { accessibilityLabel = photo.title + ", on this phone" }
+            if binding?.stage != .failed { setItemAccessibilityLabel(photo.title + ", on this phone") }
             showBadge(photo.video ? Self.duration(Int(photo.duration * 1000)) : photo.live ? "LIVE" : nil)
             let pixels = max(128, Int(bounds.width * traitCollection.displayScale))
             let before = binding
             let needs = binder.bind(self, toDevice: photo, shortSide: pixels)
-            if binding?.stage == .failed { accessibilityLabel = "Preview unavailable, \(photo.title)" }
+            if binding?.stage == .failed { setItemAccessibilityLabel("Preview unavailable, \(photo.title)") }
             return needs || before?.key != binding?.key || before?.shortSide != binding?.shortSide
         }
         let asset = entry?.remote
@@ -964,15 +1181,15 @@ struct PhotoGrid: UIViewRepresentable {
             binder.unbind(self); showBadge(nil)
             draw(nil, thumbnail: false, crossfade: false)
             displayProbe.awaitMonth()
-            accessibilityLabel = "Loading photo"
+            setItemAccessibilityLabel("Loading photo")
             return wasBound
         }
-        if binding?.stage != .failed { accessibilityLabel = asset.displayName + (asset.isVideo ? ", video" : "") }
+        if binding?.stage != .failed { setItemAccessibilityLabel(asset.displayName + (asset.isVideo ? ", video" : "")) }
         showBadge(asset.isVideo ? Self.duration(asset.duration ?? 0) : asset.livePhotoVideoId != nil ? "LIVE" : nil)
         let pixels = max(128, Int(bounds.width * traitCollection.displayScale))
         let before = binding
         let needs = binder.bind(self, to: asset, shortSide: pixels)
-        if binding?.stage == .failed { accessibilityLabel = "Preview unavailable, \(asset.displayName)" }
+        if binding?.stage == .failed { setItemAccessibilityLabel("Preview unavailable, \(asset.displayName)") }
         return needs || before?.key != binding?.key || before?.shortSide != binding?.shortSide
     }
     private static func duration(_ milliseconds: Int) -> String {

@@ -361,6 +361,18 @@ extension TransferStore {
         return job
     }
 
+    /// The requested jobs only, keyed by source. Used for bounded per-item status queries.
+    func jobs(lane: TransferLane, sourceKeys: [String]) throws -> [String: StoredJob] {
+        guard !sourceKeys.isEmpty else { return [:] }
+        var jobs: [String: StoredJob] = [:]
+        try database().run("SELECT \(Self.jobColumns) FROM jobs WHERE lane=? AND source_key IN (SELECT value FROM json_each(?))",
+                           [.text(lane.rawValue), .text(TransferJSON.encode(sourceKeys))]) { row in
+            guard let job = Self.storedJob(row) else { return }
+            jobs[job.source.key] = job
+        }
+        return jobs
+    }
+
     /// Whether a job's part is with the transport, waiting for its answer: the background session
     /// carries it on whether or not the app runs.
     func hasSubmittedJobs() throws -> Bool {

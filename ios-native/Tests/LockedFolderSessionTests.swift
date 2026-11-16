@@ -584,7 +584,7 @@ import XCTest
         model.openEditor()
         try await until("The editor's read did not finish.") { !model.busy }
         XCTAssertNil(model.cover, "The editor didn't open.")
-        XCTAssertEqual(model.current.visibility, .locked, "The photo keeps the folder's private path.")
+        XCTAssertEqual(model.current?.visibility, .locked, "The photo keeps the folder's private path.")
         XCTAssertEqual(list.assets.map(\.id), ["p"], "And stays in the folder.")
     }
 

@@ -31,7 +31,7 @@ import XCTest
 
         gate.open()
         try await until("The photo did not open.") { navigator.viewerRoute != nil }
-        XCTAssertEqual(navigator.viewerRoute?.asset, photo)
+        XCTAssertEqual(navigator.viewerRoute?.entry.remote, photo)
         XCTAssertNil(navigator.viewerRoute?.albumContext)
         XCTAssertEqual(navigator.layers.count, 1, "Only the viewer is presented.")
         XCTAssertFalse(navigator.isFollowingLink)
@@ -54,7 +54,7 @@ import XCTest
         navigator.layerDidDismiss(level: 1)
         XCTAssertNil(navigator.viewerRoute)
         navigator.layerDidDismiss(level: 0)
-        XCTAssertEqual(navigator.viewerRoute?.asset, photo, "The photo opens once everything over the library has gone.")
+        XCTAssertEqual(navigator.viewerRoute?.entry.remote, photo, "The photo opens once everything over the library has gone.")
         XCTAssertEqual(navigator.layers.count, 1)
     }
 
@@ -68,12 +68,12 @@ import XCTest
         try await until("The first link was not looked up.") { await lookup.requests.contains("asset/" + self.photo.id) }
         model.follow(.asset(other.id), albums: [], people: [])
         try await until("The newer link did not open its photo.") { navigator.viewerRoute != nil }
-        XCTAssertEqual(navigator.viewerRoute?.asset, other)
+        XCTAssertEqual(navigator.viewerRoute?.entry.remote, other)
 
         gate.open()
         try await until("The older lookup did not finish.") { await lookup.finished.contains("asset/" + self.photo.id) }
         for _ in 0..<20 { await Task.yield() }
-        XCTAssertEqual(navigator.viewerRoute?.asset, other, "The older link, overtaken, opens nothing.")
+        XCTAssertEqual(navigator.viewerRoute?.entry.remote, other, "The older link, overtaken, opens nothing.")
         XCTAssertEqual(navigator.layers.count, 1)
         XCTAssertNil(navigator.deferred)
         XCTAssertFalse(navigator.isFollowingLink)
@@ -120,7 +120,7 @@ import XCTest
 
         navigator.earthPresentationChanged(false)
         XCTAssertFalse(navigator.earthPresentationClosing)
-        XCTAssertEqual(navigator.viewerRoute?.asset, photo, "The photo opens once the Earth's sheet has gone.")
+        XCTAssertEqual(navigator.viewerRoute?.entry.remote, photo, "The photo opens once the Earth's sheet has gone.")
         XCTAssertTrue(navigator.overlay.earth, "The Earth itself stays.")
     }
 

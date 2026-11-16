@@ -87,7 +87,7 @@ struct LibraryView: View {
         // The feeds' month places are kept in the index and fenced by the account's access epoch (F5).
         let places = MonthPlacesService(source: repository, store: session.entities, authorization: session.runtime?.authorization)
         places.follow(session.placeNaming)
-        let store = LibraryFeedStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos,
+        let store = LibraryFeedStore(source: repository, includesDevicePhotos: session.environment.usesDevicePhotos || !session.environment.fixtureLocalPhotos.isEmpty,
                                      choices: SearchChoicesStorage(scope: api.cacheScope), places: places)
         if let places = session.places { store.readPlaces = { text in await places.read(text) } }
         _store = State(initialValue: store)
@@ -122,7 +122,7 @@ struct LibraryView: View {
                           bottomInset: geometry.safeAreaInsets.bottom + 90 + backupIndicatorHeight + (showsSearchChoices ? Self.choicesRowHeight : 0),
                           onDensityChange: { columns = $0 }, onOpenLocal: { photo in
                     // While typing, a tap on the grid only puts the keyboard away.
-                    if searchFocused { searchFocused = false } else { navigator.present(.phoneViewer(photo)) }
+                    if searchFocused { searchFocused = false } else { navigator.present(.viewer(ViewerRoute(photo: photo, source: .feed, albumContext: nil))) }
                 }, viewport: viewport) { asset in
                     if searchFocused { searchFocused = false }
                     else { navigator.present(.viewer(ViewerRoute(asset: asset, source: .feed, albumContext: nil))) }
@@ -299,6 +299,9 @@ struct LibraryView: View {
         // The account's device index places the phone's photos; it follows Photos, backup and
         // the offline library itself, and works only while the app is in front.
         .task(id: session.runtime?.id) {
+            if !session.environment.fixtureLocalPhotos.isEmpty {
+                store.updateDeviceTimeline(MergedTimeline(photos: session.environment.fixtureLocalPhotos))
+            }
             guard let index = session.deviceIndex else { return }
             for await snapshot in await index.snapshots() { store.updateDeviceTimeline(snapshot.timeline) }
         }
@@ -341,7 +344,7 @@ struct LibraryView: View {
     /// in the album it was opened from or else the album the feed shows; exploring a photo's place
     /// is an intent, which closes the viewer and then raises the Earth turned to it (N3).
     private func assetViewer(_ opened: ViewerRoute, transition: ViewerTransitionState, close: @escaping () -> Void) -> some View {
-        let route = ViewerRoute(asset: opened.asset, source: opened.source,
+        let route = ViewerRoute(entry: opened.entry, source: opened.source,
                                 albumContext: opened.albumContext ?? filteredAlbumID)
         return AssetViewer(api: api, pipeline: pipeline, route: route, window: .feed(store), matchedLocalPhotos: store.matchingDevicePhotos,
                            navigator: navigator, transition: transition, onClose: close)
@@ -957,7 +960,8 @@ struct LibraryView: View {
             // The album reaches the shelves from the account's collections.
             AnyView(NavigationStack { AlbumEditor(api: api, pipeline: pipeline, album: nil) })
         case .phoneViewer(let photo):
-            AnyView(LocalPhotoViewer(photo: photo, photos: store.availableLocalPhotos(around: photo)))
+            AnyView(AssetViewer(api: api, pipeline: pipeline, route: ViewerRoute(photo: photo, source: .feed, albumContext: filteredAlbumID),
+                                window: .feed(store), matchedLocalPhotos: store.matchingDevicePhotos, navigator: navigator))
         case .memoryPlayer(let playback):
             AnyView(MemoryPlaybackView(api: api, pipeline: pipeline, memories: playback.memories, initialID: playback.initialID) { intent in
                 navigator.send(intent)

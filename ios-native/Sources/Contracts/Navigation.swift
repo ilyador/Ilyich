@@ -102,14 +102,28 @@ enum AssetSourceID: Hashable, Sendable {
 /// A viewer to present: the photo it opens on, and where the photos it pages through come from.
 /// The library's viewer and every viewer opened from another screen is presented by one (N3).
 struct ViewerRoute: Hashable, Sendable, Identifiable {
-    /// The photo the viewer opens on.
-    let asset: Asset
+    /// The library item the viewer opens on. Local identifiers stay local.
+    let entry: LibraryEntry
     let source: AssetSourceID
     /// The album the photo was opened from, for its activity and cover actions.
     let albumContext: String?
 
-    var initialAssetID: String { asset.id }
-    var id: String { asset.id }
+    init(entry: LibraryEntry, source: AssetSourceID, albumContext: String? = nil) {
+        self.entry = entry
+        self.source = source
+        self.albumContext = albumContext
+    }
+
+    init(asset: Asset, source: AssetSourceID, albumContext: String? = nil) {
+        self.init(entry: .remote(asset), source: source, albumContext: albumContext)
+    }
+
+    init(photo: LocalPhoto, source: AssetSourceID, albumContext: String? = nil) {
+        self.init(entry: .local(photo), source: source, albumContext: albumContext)
+    }
+
+    var initialAssetID: String { entry.id }
+    var id: String { entry.id }
 }
 
 /// Each settings screen, or the root list. The other raw values are SettingsDestination's.

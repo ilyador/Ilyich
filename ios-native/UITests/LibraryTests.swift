@@ -4,14 +4,25 @@ import UIKit
 final class LibraryTests: XCTestCase {
     /// The fixture's Maya, as her filter pill is named (N6).
     private static let mayaPill = "library.pill.person-00000000-0000-4000-8000-000000000002"
+    private static let fixtureVideoIDs = [
+        "83ef6be6-5099-58e6-9639-f215456d770b", // The ordinary clip.
+        "9ffcde1d-9cac-5f1e-b85f-fa62c9c91bfa", // Delayed playback.
+        "367cb92e-534a-5cb7-bd9f-81212a95ed15", // Fail until Retry is released.
+    ]
+    private static let mixedFeedRemoteID = "06f9a3b5-b4a5-5d35-8968-d26ba82d10d1"
+    private static let mixedFeedLocalPhotoID = "ui-fixture-pending-photo"
+    private static let mixedFeedLocalVideoID = "ui-fixture-pending-video"
     /// Lifting the finger closes the shelves; most tests keep them out so they can tap rows.
-    @MainActor private func launch(appearance: String = "light", extraArguments: [String] = [], shelvesStayOpen: Bool = true) -> XCUIApplication {
+    @MainActor private func launch(appearance: String = "light", extraArguments: [String] = [], shelvesStayOpen: Bool = true,
+                                   fixturePort: String? = nil) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--ui-testing", "--ui-testing-library", "-appearance", appearance]
             + (shelvesStayOpen ? ["--ui-testing-shelves-stay-open"] : []) + extraArguments
         // A run can try a fixture change on a server of its own (TEST_RUNNER_ILYICH_FIXTURE_PORT).
-        if let port = ProcessInfo.processInfo.environment["ILYICH_FIXTURE_PORT"] { app.launchArguments += ["--ui-testing-fixture-port", port] }
+        if let port = fixturePort ?? ProcessInfo.processInfo.environment["ILYICH_FIXTURE_PORT"] {
+            app.launchArguments += ["--ui-testing-fixture-port", port]
+        }
         app.launch()
         XCTAssertTrue(app.collectionViews["library.grid"].waitForExistence(timeout: 15))
         return app
@@ -35,6 +46,43 @@ final class LibraryTests: XCTestCase {
     /// near their lower edge.
     @MainActor private func tapPhoto(_ cell: XCUIElement) {
         cell.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
+    }
+    @MainActor private func placeVideo(_ app: XCUIApplication, id: String) -> XCUIElement {
+        let grid = app.collectionViews["library.grid"]
+        let video = grid.cells["library.photo.\(id)"]
+        let height = app.frame.height
+        func placed() -> Bool { video.exists && video.frame.midY > height * 0.25 && video.frame.midY < height * 0.7 }
+        for _ in 0..<12 where !placed() {
+            let down = video.exists && video.frame.midY <= height * 0.25
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.4 : 0.65))
+            from.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.6 : 0.4)))
+        }
+        XCTAssertTrue(placed(), "The fixture's video asset \(id) must become visible while scrolling the grid.")
+        return video
+    }
+    @MainActor private func assertServerStatus(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let status = app.descendants(matching: .any)["viewer.backupStatus"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5), "The viewer exposes this item's backup status.", file: file, line: line)
+        XCTAssertTrue(status.label.contains("On server"), "A server asset is marked On server while playback is independent.", file: file, line: line)
+    }
+    @MainActor private func assertNotServerStatus(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let status = app.descendants(matching: .any)["viewer.backupStatus"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5), "The viewer exposes the local item's backup status.", file: file, line: line)
+        XCTAssertFalse(status.label.contains("On server"), "A local-only item is not labeled as present on the server.", file: file, line: line)
+    }
+    @MainActor private func waitForStripPosition(_ strip: XCUIElement, _ expected: Int,
+                                                  file: StaticString = #filePath, line: UInt = #line) -> Int? {
+        let position = { (strip.value as? String)?.split(separator: " ").first.flatMap { Int($0) } }
+        let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in position() == expected }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 5), .completed, "The viewer strip advances to item \(expected).", file: file, line: line)
+        return position()
+    }
+    @MainActor private func setFixtureRetryReady(_ ready: Bool) async throws {
+        let endpoint = ready ? "retry-ready" : "retry-fail"
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:18191/test/viewer-video/\(endpoint)")!)
+        request.httpMethod = "POST"
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, "The dedicated fixture accepts the requested retry state.")
     }
     /// Selection starts with a long press on a photo, which selects it.
     @MainActor private func pressPhoto(_ cell: XCUIElement) {
@@ -1351,12 +1399,12 @@ final class LibraryTests: XCTestCase {
         XCTAssertLessThan(globe.frame.height, screen.height * 0.45)
     }
     @MainActor func testVideosCloseWithASwipeDownLikePhotos() {
-        let app = launch()
+        let app = launch(fixturePort: "18191")
         let grid = app.collectionViews["library.grid"]
         XCTAssertTrue(grid.cells.firstMatch.waitForExistence(timeout: 15))
         // The fixture's photos were all taken at one time, so they are in ID order and the clip
         // is further down the newest month.
-        let video = grid.cells.matching(NSPredicate(format: "label ENDSWITH %@", ", video")).firstMatch
+        let video = grid.cells["library.photo.\(Self.fixtureVideoIDs[0])"]
         let height = app.frame.height
         func placed() -> Bool { video.exists && video.frame.midY > height * 0.25 && video.frame.midY < height * 0.7 }
         for _ in 0..<12 where !placed() {
@@ -1399,6 +1447,110 @@ final class LibraryTests: XCTestCase {
         // The viewer's own buttons can hide over a video, so check the library is back instead.
         let back = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: app.textFields["library.search"])
         XCTAssertEqual(XCTWaiter.wait(for: [back], timeout: 5), .completed, "A swipe down closes a video, as it does a photo.")
+    }
+    @MainActor func testServerOnlyLibraryTileShowsItsBackupStatus() {
+        let app = launch(extraArguments: ["--ui-testing-mutable-library"], fixturePort: "18191")
+        let grid = app.collectionViews["library.grid"]
+        let tile = grid.cells.element(boundBy: 1)
+        XCTAssertTrue(tile.waitForExistence(timeout: 15))
+        let onServer = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "On server"), object: tile)
+        XCTAssertEqual(XCTWaiter.wait(for: [onServer], timeout: 10), .completed,
+                       "A server-only library tile exposes its backup state without a local Photos match.")
+        capture(app, "Library — server-only backup status badges")
+        tapPhoto(tile)
+        assertServerStatus(app)
+    }
+    @MainActor func testViewerPagesFromServerAssetThroughLocalOnlyItemsAndBack() {
+        let app = launch(extraArguments: ["--ui-testing-mixed-library"], fixturePort: "18191")
+        let grid = app.collectionViews["library.grid"]
+        let remote = grid.cells["library.photo.\(Self.mixedFeedRemoteID)"]
+        XCTAssertTrue(remote.waitForExistence(timeout: 15), "The merged feed exposes a server item after the two local-only fixture entries.")
+        tapPhoto(remote)
+        let strip = app.descendants(matching: .any)["viewer.strip"]
+        XCTAssertTrue(strip.waitForExistence(timeout: 10))
+        func position() -> Int? { (strip.value as? String)?.split(separator: " ").first.flatMap { Int($0) } }
+        guard let remotePosition = position() else { return XCTFail("The photo strip reports its selected item.") }
+        assertServerStatus(app)
+
+        app.swipeRight()
+        XCTAssertEqual(waitForStripPosition(strip, remotePosition - 1), remotePosition - 1, "Paging reaches the local-only video from the server item.")
+        assertNotServerStatus(app)
+        app.swipeRight()
+        XCTAssertEqual(waitForStripPosition(strip, remotePosition - 2), remotePosition - 2, "Paging reaches the local-only photo next.")
+        assertNotServerStatus(app)
+        app.swipeLeft()
+        XCTAssertEqual(waitForStripPosition(strip, remotePosition - 1), remotePosition - 1)
+        app.swipeLeft()
+        XCTAssertEqual(waitForStripPosition(strip, remotePosition), remotePosition, "Paging returns to the server item through both local entries.")
+        assertServerStatus(app)
+    }
+    @MainActor func testViewerOpenedFromLocalOnlyItemCanPageToServerAndBack() {
+        let app = launch(extraArguments: ["--ui-testing-mixed-library"], fixturePort: "18191")
+        let grid = app.collectionViews["library.grid"]
+        let local = grid.cells["library.photo.local:\(Self.mixedFeedLocalPhotoID)"]
+        XCTAssertTrue(local.waitForExistence(timeout: 15), "The grid exposes a local-only fixture photo.")
+        tapPhoto(local)
+        let strip = app.descendants(matching: .any)["viewer.strip"]
+        XCTAssertTrue(strip.waitForExistence(timeout: 10))
+        func position() -> Int? { (strip.value as? String)?.split(separator: " ").first.flatMap { Int($0) } }
+        guard let localPosition = position() else { return XCTFail("The photo strip reports its selected item.") }
+        assertNotServerStatus(app)
+        app.swipeLeft()
+        XCTAssertEqual(waitForStripPosition(strip, localPosition + 1), localPosition + 1, "The local photo pages to its local-only video neighbor.")
+        assertNotServerStatus(app)
+        app.swipeLeft()
+        XCTAssertEqual(waitForStripPosition(strip, localPosition + 2), localPosition + 2, "Paging from the local-only item reaches the server asset.")
+        assertServerStatus(app)
+        app.swipeRight()
+        XCTAssertEqual(waitForStripPosition(strip, localPosition + 1), localPosition + 1)
+        app.swipeRight()
+        XCTAssertEqual(waitForStripPosition(strip, localPosition), localPosition, "Paging returns to the directly opened local-only photo.")
+        assertNotServerStatus(app)
+    }
+    @MainActor func testVideoPosterStaysVisibleDuringDelayedPlayback() {
+        let app = launch(extraArguments: ["--ui-testing-mutable-library"], fixturePort: "18191")
+        tapPhoto(placeVideo(app, id: Self.fixtureVideoIDs[1]))
+        let loadingPoster = app.images["viewer.videoPoster"]
+        XCTAssertTrue(loadingPoster.waitForExistence(timeout: 5), "The cached thumbnail remains visible while playback prepares.")
+        XCTAssertTrue(hasRenderedPhoto(loadingPoster), "The loading poster contains the fixture image, not an empty placeholder.")
+        XCTAssertTrue(app.descendants(matching: .any)["viewer.videoPreparingSurface"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Preparing video"].waitForExistence(timeout: 5))
+        assertServerStatus(app)
+        capture(app, "Viewer video — loading with poster")
+        XCTAssertTrue(app.descendants(matching: .any)["viewer.videoReady"].waitForExistence(timeout: 15), "The delayed rendition eventually displays its first frame.")
+        capture(app, "Viewer video — ready after loading")
+    }
+
+    @MainActor func testVideoFailureKeepsPosterAndRetryCanRecover() async throws {
+        let app = launch(extraArguments: ["--ui-testing-mutable-library"], fixturePort: "18191")
+        try await setFixtureRetryReady(false)
+        tapPhoto(placeVideo(app, id: Self.fixtureVideoIDs[2]))
+        let retry = app.buttons["viewer.mediaRetry"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 15), "A playback failure offers retry.")
+        let failedPoster = app.images["viewer.videoPoster"]
+        XCTAssertTrue(failedPoster.exists, "The poster stays visible after playback fails.")
+        XCTAssertTrue(hasRenderedPhoto(failedPoster), "The failed preview still displays the poster image.")
+        XCTAssertTrue(app.staticTexts["Video couldn’t load"].exists)
+        assertServerStatus(app)
+        capture(app, "Viewer video — error with poster")
+        XCTAssertTrue(retry.isHittable, "Retry remains usable in the viewer.")
+        try await setFixtureRetryReady(true)
+        retry.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["viewer.videoReady"].waitForExistence(timeout: 15), "Retry loads the same clip and reaches a displayed frame.")
+        capture(app, "Viewer video — ready after retry")
+    }
+    @MainActor func testVideoPreparingNoticeAtAccessibilityTextSize() async throws {
+        let app = launch(extraArguments: ["--ui-testing-mutable-library", "-UIPreferredContentSizeCategoryName",
+                                        "UICTContentSizeCategoryAccessibilityXXXL"], fixturePort: "18191")
+        try await setFixtureRetryReady(false)
+        tapPhoto(placeVideo(app, id: Self.fixtureVideoIDs[2]))
+        let poster = app.images["viewer.videoPoster"]
+        XCTAssertTrue(poster.waitForExistence(timeout: 5))
+        XCTAssertTrue(hasRenderedPhoto(poster))
+        XCTAssertTrue(app.staticTexts["Video couldn’t load"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["viewer.mediaRetry"].isHittable, "Retry remains reachable with Accessibility XXXL text.")
+        assertServerStatus(app)
+        capture(app, "Viewer video — error at Accessibility XXXL")
     }
     /// The viewer's controls sit where Photos puts them: back, the title and the actions menu along
     /// the top; Share, one group of Favorite, Info and Edit, and Delete along the bottom. A tap on

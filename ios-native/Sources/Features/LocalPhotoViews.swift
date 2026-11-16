@@ -101,8 +101,6 @@ struct LocalPhotoViewer: View {
     @State private var actionPhotos: [LocalPhoto] = []
     @State private var motion = false
     @State private var reload = 0
-    @State private var sourceRetry = 0
-    @State private var source = LocalPhotoSourceSelection()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.mediaSources) private var mediaSources
 
@@ -114,63 +112,30 @@ struct LocalPhotoViewer: View {
 
     private var selectedIndex: Int { photos.firstIndex { $0.id == selectedID } ?? 0 }
     private var photo: LocalPhoto { photos[selectedIndex] }
-    private var sourceRequestID: LocalPhotoSourceRequestID {
-        LocalPhotoSourceRequestID(photoID: photo.id, resolverID: mediaSources.map { ObjectIdentifier($0) }, retry: sourceRetry)
-    }
-
     var body: some View {
-        resolvedContent
-        // Only the viewer turns with the phone; the rest of the app stays upright.
-        .onAppear { OrientationLock.viewerAppeared() }
-        .onDisappear { OrientationLock.viewerDisappeared() }
-        .task(id: sourceRequestID) { await source.resolve(photo, using: mediaSources) }
-        .onDisappear { source.cancel() }
-        .onChange(of: selectedID) { motion = false }
-    }
-
-    @ViewBuilder private var resolvedContent: some View {
-        switch source.resolution {
-        case .server(let asset):
-            if let mediaSources {
-                AssetViewer(api: mediaSources.api, pipeline: mediaSources.pipeline,
-                            route: ViewerRoute(asset: asset, source: .single, albumContext: nil),
-                            window: .single(asset), matchedLocalPhotos: [asset.id: photo], onClose: { dismiss() })
-            } else { unavailableSource("Photo sources are no longer available.", retryable: true) }
-        case .device(let localPhoto):
-            deviceViewer(localPhoto)
-        case .serverUnavailable(_, _, let message):
-            unavailableSource("The backed-up copy is unavailable.\n\(message)", retryable: true) {
-                source.viewOnPhone()
-            }
-        case .unavailable(let message):
-            unavailableSource(message, retryable: true)
-        case nil:
-            sourceLoadingView
-        }
-    }
-
-    private func deviceViewer(_ current: LocalPhoto) -> some View {
         NavigationStack {
             TabView(selection: $selectedID) {
                 ForEach(Array(photos.enumerated()), id: \.element.id) { index, page in
                     Group {
-                        // Only the current photo and its neighbors hold full-size media.
                         if abs(index - selectedIndex) <= 1 {
-                            LocalPhotoPage(photo: page.id == current.id ? current : page,
-                                           active: page.id == selectedID, motion: motion && page.id == selectedID,
-                                           reload: reload, onDismiss: { dismiss() })
+                            ViewerLocalPage(photo: page, active: page.id == selectedID,
+                                            motion: motion && page.id == selectedID, reload: reload,
+                                            pipeline: mediaSources?.pipeline, onDismiss: { dismiss() })
                         } else { Color.black }
                     }.tag(page.id)
                 }
             }.tabViewStyle(.page(indexDisplayMode: .never))
             .background(Color.black.ignoresSafeArea())
-            .navigationTitle(current.title).navigationBarTitleDisplayMode(.inline)
+            .overlay(alignment: .topLeading) {
+                ViewerBackupStatus(photo: photo).id(photo.id).padding(.horizontal, 16).padding(.top, 8)
+            }
+            .navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Photo actions", systemImage: "ellipsis") { actionPhotos = [current]; showActions = true }
+                    Button("Photo actions", systemImage: "ellipsis") { actionPhotos = [photo]; showActions = true }
                 }
-                if current.live { ToolbarItem(placement: .topBarTrailing) { Toggle("Live Photo", isOn: $motion).toggleStyle(.button) } }
+                if photo.live { ToolbarItem(placement: .topBarTrailing) { Toggle("Live Photo", isOn: $motion).toggleStyle(.button) } }
             }
         }
         .sheet(isPresented: $showActions) {
@@ -182,38 +147,9 @@ struct LocalPhotoViewer: View {
             }
         }
         .preferredColorScheme(.dark)
-    }
-
-    private func unavailableSource(_ message: String, retryable: Bool, viewOnPhone: (() -> Void)? = nil) -> some View {
-        NavigationStack {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                VStack(spacing: 18) {
-                    if source.isResolving { ProgressView().tint(.white) }
-                    else { Image(systemName: "photo.badge.exclamationmark").font(.largeTitle) }
-                    Text(message).multilineTextAlignment(.center)
-                    if retryable {
-                        Button("Retry") { sourceRetry += 1 }
-                    }
-                    if let viewOnPhone { Button("View on this phone", action: viewOnPhone) }
-                }.padding(28).foregroundStyle(.white)
-            }
-            .navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
-        }
-        .preferredColorScheme(.dark)
-    }
-
-    private var sourceLoadingView: some View {
-        NavigationStack {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                ProgressView().tint(.white).accessibilityLabel("Opening photo")
-            }
-            .navigationTitle(photo.title).navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
-        }
-        .preferredColorScheme(.dark)
+        .onAppear { OrientationLock.viewerAppeared() }
+        .onDisappear { OrientationLock.viewerDisappeared() }
+        .onChange(of: selectedID) { motion = false }
     }
 
     /// Takes removed photos out of the pages. The photo after the current one, or else the one
@@ -235,7 +171,8 @@ struct LocalPhotoViewer: View {
 }
 
 private struct LocalPhotoSourceRequestID: Hashable {
-    let photoID: String
+    let photo: LocalPhoto
+    let active: Bool
     let resolverID: ObjectIdentifier?
     let retry: Int
 }
@@ -251,7 +188,8 @@ extension MediaSourceResolver: LocalPhotoSourceResolving {}
     private(set) var isResolving = false
     @ObservationIgnored private var generation = 0
 
-    func resolve(_ photo: LocalPhoto, using resolver: (any LocalPhotoSourceResolving)?) async {
+    func resolve(_ photo: LocalPhoto, using resolver: (any LocalPhotoSourceResolving)?, active: Bool = true) async {
+        guard active else { cancel(); return }
         generation += 1
         let request = generation
         resolution = nil
@@ -278,50 +216,203 @@ extension MediaSourceResolver: LocalPhotoSourceResolving {}
     }
 }
 
-private struct LocalPhotoPage: View {
+/// Resolves one page without replacing the pager, toolbar or navigation around it.
+struct ViewerLocalPage: View {
+    let photo: LocalPhoto
+    let active: Bool
+    var motion = false
+    var reload = 0
+    var pipeline: MediaPipeline? = nil
+    var sharedPlayback: VideoPlaybackState? = nil
+    var showsPlaybackControls = true
+    let onDismiss: () -> Void
+    var onTap: (Double) -> Void = { _ in }
+    var onSwipeUp: () -> Void = {}
+    @Environment(\.mediaSources) private var mediaSources
+    @State private var source = LocalPhotoSourceSelection()
+    @State private var sourceRetry = 0
+    @State private var ownedPlayback = VideoPlaybackState()
+
+    private var sourceRequestID: LocalPhotoSourceRequestID {
+        LocalPhotoSourceRequestID(photo: photo, active: active, resolverID: mediaSources.map { ObjectIdentifier($0) }, retry: sourceRetry + reload)
+    }
+    private var playback: VideoPlaybackState { sharedPlayback ?? ownedPlayback }
+    private var mediaPipeline: MediaPipeline? { pipeline ?? mediaSources?.pipeline }
+
+    var body: some View {
+        ZStack {
+            Color.black
+            page
+        }
+        .task(id: sourceRequestID) {
+            await source.resolve(photo, using: mediaSources, active: active)
+        }
+        .onDisappear { source.cancel() }
+    }
+
+    @ViewBuilder private var page: some View {
+        switch source.resolution {
+        case .server(let asset):
+            if let mediaSources {
+                if asset.isVideo {
+                    AuthenticatedVideo(api: mediaSources.api, assetID: asset.id, active: active,
+                                       sourceAsset: asset, matchedLocalPhoto: photo, playback: playback, pipeline: mediaPipeline)
+                        .overlay(alignment: .bottom) {
+                            if showsPlaybackControls {
+                                ViewerVideoControls(playback: playback, visible: active)
+                                    .frame(maxWidth: 520).padding(.horizontal, 24).padding(.bottom, 16)
+                            }
+                        }
+                        .gesture(ViewerTap { onTap(0.5) })
+                        .gesture(ViewerSwipe(direction: .up, action: onSwipeUp))
+                        .gesture(ViewerSwipe(direction: .down, action: onDismiss))
+                } else if motion, let videoID = asset.livePhotoVideoId {
+                    AuthenticatedVideo(api: mediaSources.api, assetID: videoID, active: active,
+                                       sourceAsset: asset, matchedLocalPhoto: photo, isLivePhotoMotion: true, pipeline: mediaPipeline)
+                } else if let mediaPipeline {
+                    ViewerPhoto(pipeline: mediaPipeline, asset: asset, active: active, onTap: onTap,
+                                onDismiss: onDismiss, matchedLocalPhoto: photo, onSwipeUp: onSwipeUp, settled: active)
+                }
+            } else { unavailable("Photo sources are no longer available.") }
+        case .device(let current):
+            LocalPhotoPage(photo: current, active: active, motion: motion, reload: reload,
+                           pipeline: mediaPipeline, sharedPlayback: playback, showsPlaybackControls: showsPlaybackControls,
+                           onDismiss: onDismiss, onTap: onTap, onSwipeUp: onSwipeUp)
+        case .serverUnavailable(_, _, let message):
+            unavailable("The backed-up copy is unavailable.\n\(message)", viewOnPhone: { source.viewOnPhone() })
+        case .unavailable(let message): unavailable(message)
+        case nil:
+            ViewerLocalPoster(photo: photo, pipeline: mediaPipeline)
+            if active { ViewerMediaNotice(title: "Opening photo", isLoading: true) }
+        }
+    }
+
+    private func unavailable(_ message: String, viewOnPhone: (() -> Void)? = nil) -> some View {
+        ZStack {
+            ViewerLocalPoster(photo: photo, pipeline: mediaPipeline)
+            if active {
+                VStack(spacing: 18) {
+                    ViewerMediaNotice(title: "Photo unavailable", message: message,
+                                      isLoading: source.isResolving, retry: { sourceRetry += 1 })
+                    if let viewOnPhone {
+                        Button("View on this phone", action: viewOnPhone).buttonStyle(.glass).frame(minHeight: 44)
+                    }
+                }.foregroundStyle(.white)
+            }
+        }
+    }
+}
+
+struct LocalPhotoPage: View {
     let photo: LocalPhoto
     let active: Bool
     let motion: Bool
     let reload: Int
+    let pipeline: MediaPipeline?
+    var sharedPlayback: VideoPlaybackState? = nil
+    var showsPlaybackControls = true
     let onDismiss: () -> Void
+    var onTap: (Double) -> Void = { _ in }
+    var onSwipeUp: () -> Void = {}
     @Environment(\.scenePhase) private var scenePhase
     @State private var media = LocalPhotoMedia()
     @State private var network = false
     @State private var retry = 0
+    @State private var videoReady = false
+    @State private var videoFailure: String?
+    @State private var ownedPlayback = VideoPlaybackState()
     @AppStorage("imageLoadOriginal") private var fullResolution = false
+    @AppStorage("viewerAutoPlayVideo") private var autoPlay = true
+    @AppStorage("viewerMuteVideo") private var muted = false
+    @AppStorage("viewerLoopVideo") private var loop = true
+    private var playback: VideoPlaybackState { sharedPlayback ?? ownedPlayback }
+    private var videoDeadlineRequest: String {
+        "\(photo.id)|\(retry)|\(reload)|\(network)|\(media.player.map { String(describing: ObjectIdentifier($0)) } ?? "none")"
+    }
     var body: some View {
+        let deadlineRequest = videoDeadlineRequest
         ZStack {
             Color.black.ignoresSafeArea()
-            if let player = media.player { VideoPlayer(player: player) }
-            else if let live = media.livePhoto { LocalLivePhoto(livePhoto: live, active: active && scenePhase == .active) }
-            else if let image = media.image { ZoomablePhoto(image: image, resetZoom: !active, onTap: { _ in }, onDismiss: onDismiss, onZoom: { }) }
-            else if media.loading {
-                VStack(spacing: 14) {
-                    if let progress = media.progress { ProgressView(value: progress).frame(maxWidth: 220) }
-                    else { ProgressView().tint(.white) }
-                    if network { Button("Cancel download") { media.cancelDownload() } }
-                }
+            ViewerLocalPoster(photo: photo, pipeline: pipeline)
+            if let player = media.player {
+                PlayerSurface(player: player, onReadyForDisplay: { videoReady = $0 }, onFailure: { failure in
+                    videoReady = false; videoFailure = failure.localizedDescription; player.pause()
+                })
+                .opacity(videoReady && videoFailure == nil ? 1 : 0)
+                .contentShape(.rect)
+                .gesture(ViewerTap { onTap(0.5) })
+                .gesture(ViewerSwipe(direction: .up, action: onSwipeUp))
+                .gesture(ViewerSwipe(direction: .down, action: onDismiss))
             }
-            else {
-                VStack(spacing: 18) {
-                    Image(systemName: media.cloud ? "icloud.and.arrow.down" : "photo.badge.exclamationmark").font(.largeTitle)
-                    Text(media.cloud ? (media.failure ?? "This item is stored in iCloud.") : (media.failure ?? "This item is unavailable."))
-                        .multilineTextAlignment(.center)
-                    if !network { Button("Download from iCloud") { network = true } }
-                    else { Button("Retry") { retry += 1 } }
-                }.padding(28).foregroundStyle(.white)
+            else if let live = media.livePhoto { LocalLivePhoto(livePhoto: live, active: active && scenePhase == .active) }
+            else if let image = media.image { ZoomablePhoto(image: image, resetZoom: !active, onTap: onTap, onDismiss: onDismiss, onZoom: { }, onSwipeUp: onSwipeUp) }
+
+            if let videoFailure {
+                ViewerMediaNotice(title: "Video couldn’t play", message: videoFailure, retry: { retry += 1 })
+            } else if media.loading || (media.player != nil && !videoReady) {
+                VStack(spacing: 12) {
+                    ViewerMediaNotice(title: network ? "Downloading from iCloud" : (photo.video ? "Preparing video" : "Loading photo"),
+                                      isLoading: true, progress: media.progress)
+                    if network { Button("Cancel download") { media.cancelDownload() }.buttonStyle(.glass).frame(minHeight: 44) }
+                }.allowsHitTesting(network)
+            }
+            else if media.player == nil && media.livePhoto == nil && media.image == nil {
+                VStack(spacing: 12) {
+                    ViewerMediaNotice(title: media.cloud ? "Original is in iCloud" : "This item couldn’t load",
+                                      message: media.cloud ? "The preview is available. Download the original to open it." : media.failure,
+                                      retry: media.cloud && !network ? nil : { retry += 1 })
+                    if media.cloud && !network {
+                        Button("Download from iCloud") { network = true }.buttonStyle(.glass).frame(minHeight: 44)
+                    }
+                }.foregroundStyle(.white)
             }
         }
-        .task(id: "\(photo.id)|\(network)|\(motion)|\(retry)|\(reload)|\(fullResolution)") {
-            if active && photo.video { VideoAudio.prepare(foreground: true) }
+        .overlay(alignment: .bottom) {
+            if photo.video, showsPlaybackControls {
+                ViewerVideoControls(playback: playback, visible: active && videoReady && videoFailure == nil)
+                    .frame(maxWidth: 520).padding(.horizontal, 24).padding(.bottom, 16)
+            }
+        }
+        .modifier(VideoFirstFrameDeadline(request: deadlineRequest,
+                                          waiting: active && scenePhase == .active && media.player != nil && !videoReady && videoFailure == nil,
+                                          onTimeout: {
+            guard deadlineRequest == videoDeadlineRequest, active, scenePhase == .active,
+                  !videoReady, videoFailure == nil else { return }
+            media.player?.pause()
+            videoFailure = "This video is taking too long to open. Your preview is kept; try again."
+        }))
+        .task(id: "\(photo.id)|\(String(describing: photo.modified))|\(active)|\(network)|\(motion)|\(retry)|\(reload)|\(fullResolution)") {
+            guard active else { media.cancel(); return }
+            videoReady = false; videoFailure = nil
+            if active && photo.video { VideoAudio.prepare(foreground: !muted) }
             media.load(photo, network: network, motion: motion, maximumResolution: fullResolution)
         }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { media.player?.pause() } }
+        .onChange(of: media.player) { _, player in
+            videoReady = false
+            playback.show(active ? player : nil, for: photo.id)
+            player?.isMuted = muted
+            if active && scenePhase == .active && autoPlay { player?.play() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { media.player?.pause() }
+            else if active && autoPlay { media.player?.play() }
+        }
+        .onChange(of: muted) { _, value in
+            media.player?.isMuted = value
+            if active && photo.video { VideoAudio.prepare(foreground: !value) }
+        }
         .onChange(of: active) { _, value in
             if !value { media.player?.pause() }
-            if photo.video { if value { VideoAudio.prepare(foreground: true) } else { VideoAudio.finish() } }
+            playback.show(value ? media.player : nil, for: photo.id)
+            if value && scenePhase == .active && autoPlay { media.player?.play() }
+            if photo.video { if value { VideoAudio.prepare(foreground: !muted) } else { VideoAudio.finish() } }
         }
-        .onDisappear { media.cancel(); if active && photo.video { VideoAudio.finish() } }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            guard active, scenePhase == .active, loop, let item = notification.object as? AVPlayerItem,
+                  let player = media.player, item === player.currentItem else { return }
+            player.seek(to: .zero); player.play()
+        }
+        .onDisappear { playback.release(photo.id); media.cancel(); if active && photo.video { VideoAudio.finish() } }
     }
 }
 

@@ -52,7 +52,8 @@ struct SlideshowView: View {
             Color.black.ignoresSafeArea()
             if let asset = current {
                 if asset.isVideo {
-                    AuthenticatedVideo(api: api, assetID: asset.id, active: playing && !settings && scenePhase == .active, onEnded: { if playing { advance() } })
+                    AuthenticatedVideo(api: api, assetID: asset.id, active: playing && !settings && scenePhase == .active,
+                                       onEnded: { if playing { advance() } }, sourceAsset: asset, pipeline: pipeline)
                         .id(asset.id + slideGeneration.uuidString).ignoresSafeArea()
                 } else {
                     SlideshowStill(pipeline: pipeline, asset: asset, look: look, onReady: { ready = true }, onFailure: { pause() })

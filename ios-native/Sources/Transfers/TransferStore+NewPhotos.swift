@@ -64,6 +64,13 @@ extension TransferStore {
         try !automaticFollowUpLocalIDs([localID]).contains(localID)
     }
 
+    /// Baseline IDs among a bounded request. No baseline-wide read is performed.
+    func excludedFromNewPhotosBackup(_ localIDs: [String]) throws -> Set<String> {
+        guard !localIDs.isEmpty else { return [] }
+        let included = try automaticFollowUpLocalIDs(localIDs)
+        return Set(localIDs).subtracting(included)
+    }
+
     func filterNewPhotosCandidates(_ candidates: [DeviceCandidate]) throws -> [DeviceCandidate] {
         let allowed = try automaticFollowUpLocalIDs(candidates.map(\.id))
         return candidates.filter { allowed.contains($0.id) }

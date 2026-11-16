@@ -37,6 +37,9 @@ struct AssetInfoView: View {
     var body: some View {
         let can = capabilities
         Form {
+            Section("Backup") {
+                ViewerBackupStatus(asset: asset, photo: viewer.localCopy(of: asset), detailed: true)
+            }
             Section {
                 if let date = asset.localDateTime ?? asset.fileCreatedAt {
                     LabeledContent("Taken", value: date.formatted(Date.FormatStyle(date: .long, time: .shortened, timeZone: TimeZone(secondsFromGMT: 0)!)))

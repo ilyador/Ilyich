@@ -154,12 +154,25 @@ private extension DisplayedFeed {
     /// The server photos of a photo's month and the months beside it, for swiping in the viewer;
     /// the results, when showing them. Empty when the feed doesn't show the photo.
     func displayedAssets(around id: String) -> [Asset] {
-        if let results = shownResults { return results }
+        displayedEntries(around: id).compactMap(\.remote)
+    }
+
+    /// The mixed local and remote entries the grid currently displays around `id`.
+    func displayedEntries(around id: String) -> [LibraryEntry] {
+        if let results = shownResults { return results.map { .remote($0, local: shownMatch($0.id)) } }
         let months = shownSections.map(\.month)
+        let localID = id.hasPrefix("local:") ? String(id.dropFirst("local:".count)) : nil
+        func entries(_ month: MonthKey?) -> [LibraryEntry] {
+            guard let month else { return [] }
+            if let projection = shownProjection(of: month) { return projection.entries }
+            return (shownRows(of: month) ?? []).map { .remote($0, local: shownMatch($0.id)) }
+        }
         guard let index = months.firstIndex(where: { month in
-            month.flatMap { shownRows(of: $0) }?.contains(where: { $0.id == id }) == true
-        }) else { return [] }
-        return months[max(0, index - 1)...min(months.count - 1, index + 1)].flatMap { month in month.flatMap { shownRows(of: $0) } ?? [] }
+            entries(month).contains { entry in
+                entry.id == id || localID.map { entry.local?.id == $0 } == true
+            }
+        }), !months.isEmpty else { return [] }
+        return months[max(0, index - 1)...min(months.count - 1, index + 1)].flatMap(entries)
     }
 }
 
@@ -410,6 +423,13 @@ extension FrozenFeed: DisplayedFeed {
     func availableAssets(around id: String) -> [Asset] {
         if let frozenFeed { return frozenFeed.displayedAssets(around: id) }
         return displayedAssets(around: id)
+    }
+
+    /// The mixed local and remote entries in the viewer's window, in the exact order shown by
+    /// this feed. It reads only the visible search results or the selected month and its neighbors.
+    func availableEntries(around id: String) -> [LibraryEntry] {
+        if let frozenFeed { return frozenFeed.displayedEntries(around: id) }
+        return displayedEntries(around: id)
     }
 
     /// Everything on this phone in the photo's month and the months beside it, in the order the grid

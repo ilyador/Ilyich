@@ -50,22 +50,19 @@ struct ViewerPhoto: View {
         GeometryReader { geometry in
             ZStack {
                 if let image = displayedImage { ZoomablePhoto(image: image, resetZoom: !active, onTap: onTap, onDismiss: onDismiss, onZoom: { zoomed = true }, onSwipeUp: onSwipeUp) }
-                else if usingLocalCopy && localMedia.loading { ProgressView().tint(.white) }
-                else if let failure {
-                    ContentUnavailableView { Label("Photo couldn’t load", systemImage: "photo.badge.exclamationmark") }
-                    description: { Text(failure) }
-                    actions: { Button("Retry") { reload += 1 } }
-                } else if let placeholder {
+                else if let placeholder {
                     Image(uiImage: placeholder).resizable().scaledToFit()
                         .overlay {
                             // Only a preview that keeps the thumbnail up for a while earns a spinner.
-                            if slowPreview { ProgressView().tint(.white).padding(12).background(.black.opacity(0.4), in: .circle) }
+                            if slowPreview && failure == nil { ProgressView().tint(.white).padding(12).background(.black.opacity(0.4), in: .circle) }
                         }
                         .contentShape(.rect).onTapGesture { onTap(0.5) }
+                } else if let failure {
+                    ViewerMediaNotice(title: "Photo couldn’t load", message: failure, retry: { reload += 1 })
                 } else { ProgressView().tint(.white) }
             }.frame(width: geometry.size.width, height: geometry.size.height)
                 .overlay(alignment: .bottom) {
-                    if active, displayedImage != nil {
+                    if active, displayedImage != nil || placeholder != nil {
                         if let message = animationFailure ?? failure, !(usingLocalCopy && localMedia.image != nil) {
                             HStack(spacing: 12) {
                                 Text(message).font(.caption).lineLimit(2)

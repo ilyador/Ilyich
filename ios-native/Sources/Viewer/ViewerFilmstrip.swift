@@ -12,7 +12,7 @@ import UIKit
 /// the others aside; mid-swipe the width passes from one thumbnail to the next as the middle moves.
 struct ViewerFilmstrip: View {
     let pipeline: MediaPipeline
-    let assets: [Asset]
+    let entries: [LibraryEntry]
     let replacements: [String: Asset]
     let selectedID: String
     /// The strip moved the selection, by a swipe or a tap on a thumbnail.
@@ -26,22 +26,22 @@ struct ViewerFilmstrip: View {
     @State private var scrubbing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(pipeline: MediaPipeline, assets: [Asset], replacements: [String: Asset], selectedID: String,
+    init(pipeline: MediaPipeline, entries: [LibraryEntry], replacements: [String: Asset], selectedID: String,
          onSelect: @escaping (String) -> Void, onScrubbingChange: @escaping (Bool) -> Void) {
-        self.pipeline = pipeline; self.assets = assets; self.replacements = replacements; self.selectedID = selectedID
+        self.pipeline = pipeline; self.entries = entries; self.replacements = replacements; self.selectedID = selectedID
         self.onSelect = onSelect; self.onScrubbingChange = onScrubbingChange
         _position = State(initialValue: ScrollPosition(id: selectedID, anchor: .center))
     }
 
-    private var selectedIndex: Int { assets.firstIndex { $0.id == selectedID } ?? 0 }
+    private var selectedIndex: Int { entries.firstIndex { $0.id == selectedID } ?? 0 }
 
     var body: some View {
-        let shapes = FilmstripGeometry.Shapes(assets.map { (replacements[$0.id] ?? $0).aspectRatio })
+        let shapes = FilmstripGeometry.Shapes(entries.map { replacements[$0.id]?.aspectRatio ?? $0.aspectRatio })
         GeometryReader { proxy in
             ScrollView(.horizontal) {
                 LazyHStack(spacing: FilmstripGeometry.spacing) {
-                    ForEach(Array(assets.enumerated()), id: \.element.id) { index, summary in
-                        FilmstripCell(pipeline: pipeline, asset: replacements[summary.id] ?? summary, index: index, shapes: shapes, settled: !scrubbing)
+                    ForEach(Array(entries.enumerated()), id: \.element.id) { index, summary in
+                        FilmstripCell(pipeline: pipeline, entry: replaced(summary), index: index, shapes: shapes, settled: !scrubbing)
                     }
                 }
                 .scrollTargetLayout()
@@ -58,8 +58,8 @@ struct ViewerFilmstrip: View {
                 Int(((geometry.contentOffset.x + geometry.contentInsets.leading) / FilmstripGeometry.pitch).rounded())
             } action: { _, index in
                 // Only the finger moves the selection; the strip following the photos does not.
-                guard scrubbing, assets.indices.contains(index), assets[index].id != selectedID else { return }
-                onSelect(assets[index].id)
+                guard scrubbing, entries.indices.contains(index), entries[index].id != selectedID else { return }
+                onSelect(entries[index].id)
             }
             .onScrollPhaseChange { _, phase in
                 let now = phase == .interacting || phase == .decelerating
@@ -84,26 +84,31 @@ struct ViewerFilmstrip: View {
             Color.clear
                 .accessibilityElement()
                 .accessibilityLabel("Photo strip")
-                .accessibilityValue("\(selectedIndex + 1) of \(assets.count)")
+                .accessibilityValue("\(selectedIndex + 1) of \(entries.count)")
                 .accessibilityIdentifier("viewer.strip")
                 .accessibilityAdjustableAction { direction in
                     let next = selectedIndex + (direction == .increment ? 1 : -1)
-                    if assets.indices.contains(next) { onSelect(assets[next].id) }
+                    if entries.indices.contains(next) { onSelect(entries[next].id) }
                 }
         }
         .onDisappear { if scrubbing { scrubbing = false; onScrubbingChange(false) } }
     }
 
+    private func replaced(_ entry: LibraryEntry) -> LibraryEntry {
+        guard case .remote(let asset, let local) = entry, let replacement = replacements[asset.id] else { return entry }
+        return .remote(replacement, local: local)
+    }
+
     /// The thumbnail drawn under a tap `x` points from the middle, as the strip rests on the
     /// current photo.
     private func tap(at x: CGFloat, shapes: FilmstripGeometry.Shapes) {
-        guard !assets.isEmpty else { return }
+        guard !entries.isEmpty else { return }
         let middle = CGFloat(selectedIndex)
-        let nearby = max(0, selectedIndex - 20)...min(assets.count - 1, selectedIndex + 20)
+        let nearby = max(0, selectedIndex - 20)...min(entries.count - 1, selectedIndex + 20)
         guard let index = nearby.min(by: {
             abs(FilmstripGeometry.drawnCenter($0, middle: middle, shapes) - x) < abs(FilmstripGeometry.drawnCenter($1, middle: middle, shapes) - x)
-        }), assets[index].id != selectedID else { return }
-        onSelect(assets[index].id)
+        }), entries[index].id != selectedID else { return }
+        onSelect(entries[index].id)
     }
 }
 
@@ -168,7 +173,7 @@ enum FilmstripGeometry {
 /// middle is. Both happen while drawing, so scrolling never lays the strip out again.
 private struct FilmstripCell: View {
     let pipeline: MediaPipeline
-    let asset: Asset
+    let entry: LibraryEntry
     let index: Int
     let shapes: FilmstripGeometry.Shapes
     let settled: Bool
@@ -178,19 +183,36 @@ private struct FilmstripCell: View {
     /// The grid's usual thumbnail size, so the strip mostly finds what the grid already decoded.
     private static let pixels = 300
 
-    init(pipeline: MediaPipeline, asset: Asset, index: Int, shapes: FilmstripGeometry.Shapes, settled: Bool) {
-        self.pipeline = pipeline; self.asset = asset; self.index = index; self.shapes = shapes; self.settled = settled
-        let memory = Self.memory(pipeline, asset)
+    init(pipeline: MediaPipeline, entry: LibraryEntry, index: Int, shapes: FilmstripGeometry.Shapes, settled: Bool) {
+        self.pipeline = pipeline; self.entry = entry; self.index = index; self.shapes = shapes; self.settled = settled
+        let memory = Self.memory(pipeline, entry)
         _image = State(initialValue: memory)
-        _imageKey = State(initialValue: memory == nil ? nil : Self.key(asset))
+        _imageKey = State(initialValue: memory == nil ? nil : Self.key(entry))
     }
 
-    private static func key(_ asset: Asset) -> String { asset.id + "|" + asset.cacheRevision }
+    private static func thumbnailKey(_ entry: LibraryEntry) -> ThumbnailKey {
+        switch entry {
+        case .remote(let asset, _): .server(assetID: asset.id, revision: asset.cacheRevision)
+        case .local(let photo): .device(DeviceAssetID(rawValue: photo.id), modified: photo.modified.map(AssetRevision.init))
+        }
+    }
+
+    private static func key(_ entry: LibraryEntry) -> String {
+        let key = thumbnailKey(entry)
+        return key.assetID + "|" + key.revision
+    }
 
     /// Memory only: an exact match first, then the newest thumbnail of this photo at any size.
-    private static func memory(_ pipeline: MediaPipeline, _ asset: Asset) -> UIImage? {
-        (pipeline.cachedImage(for: asset, size: .thumbnail, pixelSize: pixels)
-            ?? pipeline.latestImage(assetID: asset.id, size: .thumbnail, revision: asset.cacheRevision))?.uiImage
+    private static func memory(_ pipeline: MediaPipeline, _ entry: LibraryEntry) -> UIImage? {
+        switch entry {
+        case .remote(let asset, _):
+            return (pipeline.cachedImage(for: asset, size: .thumbnail, pixelSize: pixels)
+                ?? pipeline.latestImage(assetID: asset.id, size: .thumbnail, revision: asset.cacheRevision))?.uiImage
+        case .local:
+            let key = thumbnailKey(entry)
+            return pipeline.cachedThumbnail(assetID: key.assetID, revision: key.revision, shortSide: pixels)?.uiImage
+                ?? pipeline.latestImage(assetID: key.assetID, size: .thumbnail, revision: key.revision)?.uiImage
+        }
     }
 
     var body: some View {
@@ -210,23 +232,39 @@ private struct FilmstripCell: View {
                 let middle = FilmstripGeometry.middle(seenFrom: index, proxy) ?? CGFloat(index)
                 return content.offset(x: FilmstripGeometry.offset(index, middle: middle, shapes))
             }
-            .task(id: Self.key(asset) + (settled ? "|settled" : "")) { await load() }
+            .task(id: Self.key(entry) + (settled ? "|settled" : "")) { await load() }
     }
 
     @ViewBuilder private var thumbnail: some View {
-        if let image { Image(uiImage: image).resizable().scaledToFill() } else { Color(white: 0.16) }
+        if imageKey == Self.key(entry), let image { Image(uiImage: image).resizable().scaledToFill() } else { Color(white: 0.16) }
     }
 
     private func load() async {
-        let key = Self.key(asset)
+        let key = Self.key(entry)
         guard imageKey != key else { return }
-        if let memory = Self.memory(pipeline, asset) { image = memory; imageKey = key; return }
-        if let stored = await pipeline.storedThumbnail(for: asset, pixelSize: Self.pixels) {
-            guard !Task.isCancelled else { return }
-            image = stored.uiImage; imageKey = key; return
+        image = nil; imageKey = nil
+        if let memory = Self.memory(pipeline, entry) { image = memory; imageKey = key; return }
+        switch entry {
+        case .remote(let asset, _):
+            if let stored = await pipeline.storedThumbnail(for: asset, pixelSize: Self.pixels) {
+                guard !Task.isCancelled else { return }
+                image = stored.uiImage; imageKey = key; return
+            }
+            guard settled, !Task.isCancelled else { return }
+            guard let fetched = try? await pipeline.image(for: asset, size: .thumbnail, pixelSize: Self.pixels), !Task.isCancelled else { return }
+            image = fetched.uiImage; imageKey = key
+        case .local(let photo):
+            let thumbnail = Self.thumbnailKey(entry)
+            if let stored = try? await pipeline.scheduler.image(assetID: thumbnail.assetID, revision: thumbnail.revision,
+                    shortSide: Self.pixels, network: false, token: pipeline.mediaToken()), !Task.isCancelled {
+                image = stored.uiImage; imageKey = key; return
+            }
+            guard settled, !Task.isCancelled else { return }
+            // A local thumbnail is never a server ID or an original/iCloud request.
+            for await event in PhotoKitAdapter.shared.media(photo.id, .thumbnail(pixels: CGFloat(Self.pixels))) {
+                guard !Task.isCancelled else { return }
+                if case .image(let value, _) = event { image = value; imageKey = key }
+            }
         }
-        guard settled, !Task.isCancelled else { return }
-        guard let fetched = try? await pipeline.image(for: asset, size: .thumbnail, pixelSize: Self.pixels), !Task.isCancelled else { return }
-        image = fetched.uiImage; imageKey = key
     }
 }

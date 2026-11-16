@@ -52,6 +52,17 @@ enum BackupEnqueueOutcome: Equatable, Sendable {
     var statistics: BackupStatistics { BackupStatistics(snapshot: snapshot) }
     var newPhotosStartingPoint: Date? { preferences.newPhotosOnly ? preferences.newPhotosBaselineStartedAt : nil }
 
+    /// Read-only transfer status for one viewer item. This does not inspect Photos or resolve a
+    /// server copy; the viewer keeps playback readiness on its existing media-source path.
+    func photoBackupStatus(localID: String, revision: AssetRevision?) async -> PhotoBackupStatus? {
+        try? await backend.photoBackupStatus(localID: localID, revision: revision)
+    }
+
+    /// Batch status for visible viewer/feed items; one bounded backend read per refresh.
+    func photoBackupStatuses(for requests: [PhotoBackupStatusRequest]) async -> [String: PhotoBackupStatus]? {
+        try? await backend.photoBackupStatuses(for: requests)
+    }
+
     @ObservationIgnored let backend: any TransferControlling
     @ObservationIgnored private let photos: BackupPhotoAccess
     @ObservationIgnored private let debounce: Duration

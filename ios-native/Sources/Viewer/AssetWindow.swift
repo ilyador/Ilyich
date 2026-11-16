@@ -78,6 +78,16 @@ import Foundation
         }
     }
 
+    /// The source's mixed viewer entries. Local Photos identifiers are returned as local records
+    /// and are never turned into server asset identifiers.
+    func entries(around id: String) -> [LibraryEntry] {
+        switch self {
+        case .feed(let store), .similar(let store): store.availableEntries(around: id)
+        case .collection(let list), .stack(let list), .locked(let list): list.assets.map { .remote($0) }
+        case .single(let asset): asset.id == id ? [.remote(asset)] : []
+        }
+    }
+
     /// A fresher record of a photo, read from the server, that changes what the source shows of
     /// it (`Asset.changesListing(from:)`).
     func publish(_ asset: Asset) {
@@ -105,6 +115,94 @@ import Foundation
 
 /// How a viewer's photos follow their source (REBUILD_ROADMAP.md N3). Pure.
 enum AssetWindow {
+    /// Reconciles mixed entries while preserving the selected page. If a local entry becomes
+    /// associated with a server asset, the association replaces it only when that page is selected.
+    static func merged(shown: [LibraryEntry], offered: [LibraryEntry], selected: String) -> [LibraryEntry] {
+        let uniqueOffered = distinct(offered)
+        if let promoted = uniqueOffered.first(where: { sameItem($0, id: selected) }),
+           let shownSelected = shown.first(where: { $0.id == selected }),
+           shownSelected.id != promoted.id {
+            // The caller only invokes this reconciliation after the pager rests.
+            return uniqueOffered
+        }
+        if uniqueOffered.contains(where: { $0.id == selected }) { return uniqueOffered }
+        guard let index = shown.firstIndex(where: { $0.id == selected }) else { return uniqueOffered.isEmpty ? shown : uniqueOffered }
+        let positions = positions(of: uniqueOffered)
+        if let before = shown[..<index].last(where: { matchingIndex($0, positions: positions) != nil }),
+           let at = matchingIndex(before, positions: positions) {
+            var merged = uniqueOffered
+            merged.insert(shown[index], at: at + 1)
+            return merged
+        }
+        if let after = shown[(index + 1)...].first(where: { matchingIndex($0, positions: positions) != nil }),
+           let at = matchingIndex(after, positions: positions) {
+            var merged = uniqueOffered
+            merged.insert(shown[index], at: at)
+            return merged
+        }
+        return shown
+    }
+
+    static func resolvedID(shown: [LibraryEntry], offered: [LibraryEntry], selected: String) -> String {
+        distinct(offered).first(where: { sameItem($0, id: selected) })?.id ?? selected
+    }
+
+    private static func positions(of entries: [LibraryEntry]) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for (index, entry) in entries.enumerated() {
+            result["entry:" + entry.id] = index
+            if let local = entry.local { result["local:" + local.id] = index }
+        }
+        return result
+    }
+
+    private static func matchingIndex(_ entry: LibraryEntry, positions: [String: Int]) -> Int? {
+        positions["entry:" + entry.id] ?? entry.local.flatMap { positions["local:" + $0.id] }
+    }
+
+    private static func sameItem(_ entry: LibraryEntry, id: String) -> Bool {
+        entry.id == id || (id.hasPrefix("local:") && entry.local?.id == String(id.dropFirst("local:".count)))
+    }
+
+    private static func sameItem(_ lhs: LibraryEntry, as rhs: LibraryEntry) -> Bool {
+        lhs.id == rhs.id || (lhs.local != nil && lhs.local?.id == rhs.local?.id)
+    }
+
+    private static func distinct(_ entries: [LibraryEntry]) -> [LibraryEntry] {
+        var result: [LibraryEntry] = []
+        var remotes: [String: (asset: Asset, local: LocalPhoto?)] = [:]
+        var localToRemote: [String: String] = [:]
+        for entry in entries {
+            guard case .remote(let asset, let local) = entry else { continue }
+            if let previous = remotes[asset.id] {
+                if previous.local == nil, let local { remotes[asset.id] = (asset, local) }
+            } else {
+                remotes[asset.id] = (asset, local)
+            }
+            if let local, localToRemote[local.id] == nil { localToRemote[local.id] = asset.id }
+        }
+
+        var seenRemoteIDs = Set<String>()
+        var seenLocalIDs = Set<String>()
+        for entry in entries {
+            switch entry {
+            case .remote(let asset, _):
+                guard seenRemoteIDs.insert(asset.id).inserted, let canonical = remotes[asset.id] else { continue }
+                if let local = canonical.local, !seenLocalIDs.insert(local.id).inserted { continue }
+                result.append(.remote(canonical.asset, local: canonical.local))
+            case .local(let photo):
+                guard seenLocalIDs.insert(photo.id).inserted else { continue }
+                if let remoteID = localToRemote[photo.id], let canonical = remotes[remoteID] {
+                    guard seenRemoteIDs.insert(remoteID).inserted else { continue }
+                    result.append(.remote(canonical.asset, local: canonical.local))
+                } else {
+                    result.append(.local(photo))
+                }
+            }
+        }
+        return result
+    }
+
     /// The photos to page through once the source offers `offered` while `shown` is on screen,
     /// `selected` among them. Where the source holds the photo on screen, its window. Where it no
     /// longer does (a photo archived from this viewer, or deleted elsewhere and yet to be read

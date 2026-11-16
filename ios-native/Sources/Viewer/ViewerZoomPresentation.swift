@@ -62,10 +62,10 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
         private var presentedID: String?
 
         func present(_ route: ViewerRoute, from anchor: UIViewController) {
-            let state = ViewerTransitionState(currentID: route.asset.id)
+            let state = ViewerTransitionState(currentID: route.id)
             let host = ViewerHostingController(rootView: AnyView(EmptyView()))
-            self.state = state; self.host = host; presentedID = route.asset.id
-            state.aspectRatio = CGFloat(route.asset.aspectRatio)
+            self.state = state; self.host = host; presentedID = route.id
+            state.aspectRatio = CGFloat(route.entry.aspectRatio)
             host.rootView = root(route)
             // Over the library, which stays in the window: as a drag begins it is already there,
             // at its full size, behind the photo (ViewerZoomTransition). The viewer still decides
@@ -141,7 +141,7 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
         /// needs, as the library behind it updates.
         func refresh(_ route: ViewerRoute) {
             guard let host, let state, !host.isBeingDismissed else { return }
-            if route.asset.id != presentedID { presentedID = route.asset.id; state.currentID = route.asset.id }
+            if route.id != presentedID { presentedID = route.id; state.currentID = route.id }
             host.rootView = root(route)
         }
 
@@ -169,7 +169,7 @@ struct ViewerZoomPresenter: UIViewControllerRepresentable {
                                       mutations: parent.mutations, bus: parent.bus, collections: parent.collections,
                                       settings: parent.settings, places: parent.places, naming: parent.naming,
                                       mediaSources: parent.mediaSources, scenePhase: parent.scenePhase)
-                .id(route.asset.id))
+                .id(route.id))
         }
     }
 }

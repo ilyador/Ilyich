@@ -115,6 +115,28 @@ def memories():
     return result
 
 VIDEO_ID = asset(5)['id']
+# Extra video states are available only from a dedicated process started with
+# --viewer-video-scenarios. Their poster route stays ordinary and immediate.
+VIEWER_VIDEO_ASSETS = {
+    str(uuid.uuid5(uuid.NAMESPACE_URL, 'ilyich-ui-viewer-video-loading')): {
+        'id': str(uuid.uuid5(uuid.NAMESPACE_URL, 'ilyich-ui-viewer-video-loading')),
+        'originalFileName': 'Test video loading.mp4',
+    },
+    str(uuid.uuid5(uuid.NAMESPACE_URL, 'ilyich-ui-viewer-video-retry')): {
+        'id': str(uuid.uuid5(uuid.NAMESPACE_URL, 'ilyich-ui-viewer-video-retry')),
+        'originalFileName': 'Test video retry.mp4',
+    },
+}
+for _scenario in VIEWER_VIDEO_ASSETS.values():
+    _scenario.update({'ownerId': OWNER, 'type': 'VIDEO', 'fileCreatedAt': '2026-12-01T12:00:00Z',
+                      'localDateTime': '2026-12-01T12:00:00Z', 'width': 600, 'height': 400,
+                      'isFavorite': False, 'isTrashed': False, 'isEdited': False, 'isDeveloped': False,
+                      'visibility': 'timeline', 'mediaRevision': 'fixture-video-scenario-1',
+                      'duration': 5000, 'exifInfo': {'fileSizeInByte': 100000}, 'people': []})
+VIEWER_LOADING_ID = next(identifier for identifier, value in VIEWER_VIDEO_ASSETS.items()
+                         if value['originalFileName'] == 'Test video loading.mp4')
+VIEWER_RETRY_ID = next(identifier for identifier, value in VIEWER_VIDEO_ASSETS.items()
+                       if value['originalFileName'] == 'Test video retry.mp4')
 # Sign-in UI tests: any password signs in, and an email starting with "expired" gets a session the
 # server then says has expired.
 SESSION_TOKEN = 'ui-test-session'
@@ -269,10 +291,36 @@ def timeline_matches(library, value, q):
     album = q.get('albumId', [None])[0]
     return album is None or in_album(library, album, value['id'])
 
-def mutable_bucket_assets(library, date, q, developed):
+def mutable_bucket_assets(library, date, q, developed, viewer_video_scenarios=False):
     indexes = [i for i in range(100) if not developed or i % 7 == 0]
     values = (stated(library, asset(i, date)) for i in indexes)
-    return [value for value in values if value is not None and timeline_matches(library, value, q)]
+    result = [value for value in values if value is not None and timeline_matches(library, value, q)]
+    if viewer_video_scenarios and date == '2026-12-01' and not developed:
+        position = next((index + 1 for index, value in enumerate(result) if value['type'] == 'VIDEO'), min(6, len(result)))
+        result[position:position] = VIEWER_VIDEO_ASSETS.values()
+    return result
+
+def with_viewer_video_scenarios(value, date):
+    if date != '2026-12-01' or not value.get('isImage') or not any(not image for image in value['isImage']):
+        return value
+    position = next(index + 1 for index, image in enumerate(value['isImage']) if not image)
+    scenario_fields = {
+        'id': [asset['id'] for asset in VIEWER_VIDEO_ASSETS.values()],
+        'ownerId': [asset['ownerId'] for asset in VIEWER_VIDEO_ASSETS.values()],
+        'isFavorite': [False] * len(VIEWER_VIDEO_ASSETS), 'isTrashed': [False] * len(VIEWER_VIDEO_ASSETS),
+        'visibility': ['timeline'] * len(VIEWER_VIDEO_ASSETS),
+        'fileCreatedAt': [asset['fileCreatedAt'] for asset in VIEWER_VIDEO_ASSETS.values()],
+        'duration': [5000] * len(VIEWER_VIDEO_ASSETS),
+        'mediaRevision': ['fixture-video-scenario-1'] * len(VIEWER_VIDEO_ASSETS),
+        'ratio': [1.5] * len(VIEWER_VIDEO_ASSETS), 'isImage': [False] * len(VIEWER_VIDEO_ASSETS),
+        'createdAt': [date + 'T12:00:00Z'] * len(VIEWER_VIDEO_ASSETS),
+        'localOffsetHours': [0] * len(VIEWER_VIDEO_ASSETS),
+        'thumbhash': ['HIcNXIyGh4d/eHh5eIWHcEf3dQ=='] * len(VIEWER_VIDEO_ASSETS),
+        'livePhotoVideoId': [None] * len(VIEWER_VIDEO_ASSETS),
+    }
+    for key, items in scenario_fields.items():
+        value[key][position:position] = items
+    return value
 
 def mutable_buckets(library, q, developed):
     # Months the session changed nothing in count as the shared fixture's, when their photos match.
@@ -286,8 +334,8 @@ def mutable_buckets(library, q, developed):
         if count: result.append({'timeBucket': b['timeBucket'], 'count': count})
     return result
 
-def mutable_bucket(library, date, q, developed):
-    assets = mutable_bucket_assets(library, date, q, developed)
+def mutable_bucket(library, date, q, developed, viewer_video_scenarios=False):
+    assets = mutable_bucket_assets(library, date, q, developed, viewer_video_scenarios)
     n = len(assets)
     return {key: [a.get(key) for a in assets] for key in ['id','ownerId','isFavorite','isTrashed','visibility','fileCreatedAt','duration','mediaRevision']} | {
         'ratio': [1.5]*n, 'isImage': [a['type'] != 'VIDEO' for a in assets], 'createdAt':[date+'T12:00:00Z']*n,
@@ -381,8 +429,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data=test_image(path);self.send_response(200);self.send_header('Content-Type','image/png');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','max-age=3600');self.end_headers();self.wfile.write(data);return
         developed=q.get('isDeveloped',[''])[0]=='true'
         if path=='/timeline/buckets':return self.send([b|{'count':15} for b in BUCKETS] if developed else BUCKETS)
-        if path=='/timeline/bucket':return self.send(bucket(q.get('timeBucket',['2026-12-01'])[0][:10], developed))
+        if path=='/timeline/bucket':
+            date=q.get('timeBucket',['2026-12-01'])[0][:10]
+            value=bucket(date, developed)
+            if self.server.viewer_video_scenarios and date == '2026-12-01' and not developed:
+                value=with_viewer_video_scenarios(value, date)
+            return self.send(value)
         if path.endswith('/video/playback'):
+            identifier=path.split('/')[2]
+            scenario=self.server.viewer_video_scenarios and identifier in VIEWER_VIDEO_ASSETS
+            if scenario and identifier == VIEWER_LOADING_ID:
+                import time
+                time.sleep(4)
+            if scenario and identifier == VIEWER_RETRY_ID:
+                if not self.server.retry_video_ready:
+                    self.send_immich_error(503,'Temporary fixture playback failure')
+                    return
             data=test_clip()
             if data is None: self.send_response(404);self.end_headers();return
             # AVPlayer asks for byte ranges.
@@ -402,6 +464,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path.endswith('/ocr'):return self.send([])
             if path.endswith('/edit'):return self.send({'assetId':path.split('/')[2],'actions':[],'baseDimensions':{'width':600,'height':400}})
             identifier=path.split('/')[2]
+            if self.server.viewer_video_scenarios and identifier in VIEWER_VIDEO_ASSETS:
+                return self.send(VIEWER_VIDEO_ASSETS[identifier])
             if identifier==VIDEO_ID: return self.send(asset(5))
             value=asset(1);value['id']=identifier;return self.send(value)
         if path=='/albums':return self.send([ALBUM, HARBOR])
@@ -434,9 +498,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         developed=q.get('isDeveloped',[''])[0]=='true'
         with library.lock:
             if path=='/timeline/buckets': self.send(mutable_buckets(library,q,developed)); return True
-            if path=='/timeline/bucket': self.send(mutable_bucket(library,q.get('timeBucket',['2026-12-01'])[0][:10],q,developed)); return True
+            if path=='/timeline/bucket': self.send(mutable_bucket(library,q.get('timeBucket',['2026-12-01'])[0][:10],q,developed,self.server.viewer_video_scenarios)); return True
             if path.startswith('/assets/') and path.count('/')==2:
-                value=mutable_asset(library,path.split('/')[2])
+                identifier=path.split('/')[2]
+                value=dict(VIEWER_VIDEO_ASSETS[identifier]) if self.server.viewer_video_scenarios and identifier in VIEWER_VIDEO_ASSETS else mutable_asset(library,identifier)
                 if value is None: self.send_immich_error(404,'Asset not found')
                 else: self.send(value)
                 return True
@@ -520,6 +585,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self.mutable_change(library,self.command,path,self.read_body()): self.send({})
     def do_POST(self):
         size=int(self.headers.get('Content-Length','0'));body=json.loads(self.rfile.read(size) or b'{}');path=urllib.parse.urlsplit(self.path).path.removeprefix('/api')
+        if self.server.viewer_video_scenarios and path in ('/test/viewer-video/retry-ready','/test/viewer-video/retry-fail'):
+            ready=path.endswith('retry-ready')
+            self.server.retry_video_ready=ready
+            return self.send({'ready':ready})
         if self.locked_post(path,body): return
         library=mutable_library(self.token())
         if library is not None and self.mutable_change(library,'POST',path,body): return
@@ -544,4 +613,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 if __name__=='__main__':
     # A port of its own, for trying a fixture change beside the shared server (--ui-testing-fixture-port).
     import sys
-    FixtureHTTPServer(('127.0.0.1',int(sys.argv[1]) if len(sys.argv)>1 else 18091),Handler).serve_forever()
+    port=18091
+    if len(sys.argv)>1 and not sys.argv[1].startswith('--'): port=int(sys.argv[1])
+    server=FixtureHTTPServer(('127.0.0.1',port),Handler)
+    server.viewer_video_scenarios='--viewer-video-scenarios' in sys.argv[1:]
+    server.retry_video_ready=False
+    server.serve_forever()

@@ -525,6 +525,14 @@ struct EngineBackend: TransferControlling {
         return stream
     }
 
+    func photoBackupStatus(localID: String, revision: AssetRevision?) async throws -> PhotoBackupStatus {
+        try await engine.photoBackupStatus(localID: localID, revision: revision)
+    }
+
+    func photoBackupStatuses(for requests: [PhotoBackupStatusRequest]) async throws -> [String: PhotoBackupStatus] {
+        try await engine.photoBackupStatuses(for: requests)
+    }
+
     func queuePage(lane: TransferLane, after seq: Int64?, limit: Int) async throws -> [TransferQueueItem] {
         try await store.listedQueuePage(lane: lane, after: seq, limit: limit)
     }

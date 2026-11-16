@@ -14,4 +14,10 @@ Reference: the user's Claude artifact, 14 artboards, inspected on 2026-10-18. Th
 - Use system typography and SF Symbols for native Dynamic Type and accessibility. Semantic foreground/background colors adapt to appearance. The reference's cyan selection accent is reserved for selected controls; the app's star identity is retained.
 - Use actual native Liquid Glass on iOS 27 and shared glass containers. No CSS-style imitation of refraction, no full-grid blur while a search runs. Press and gesture feedback remains interruptible.
 
+Viewer backup status refinement (16 November 2026, owner selected): every photo has a small status symbol at the bottom-left of its feed tile, leaving video duration and selection controls clear. Distinguish server presence, completed backup, unfinished transfer and items outside automatic backup; unknown state never implies a missing server copy. An opened photo has a compact status control below the top bar, with plain-language detail on tap. Completion refers to the saved backup record; server presence and video playback readiness remain separate. This supersedes the earlier exclusion of storage badges.
+
+Video loading keeps the cached feed preview until the player displays its first frame. Failure and retry retain the same preview with a compact explanation; a known unchanged local video can play without waiting for its server rendition. No placeholder implies that a file is backed up, and opening status never verifies old originals.
+
+The viewer and its thumbnail strip follow the same ordered, mixed sequence as the feed. Phone-only, uploading and server items remain adjacent; loading, failure or resolving a server copy changes only that page’s media. A completed upload keeps the selected photo in place and updates its source once a swipe settles. Local identifiers never become server asset identifiers, and only real server assets offer server actions.
+
 The downloaded HTML reference is evidence only, never embedded into the app. Its editor-only glow rule is excluded from the local design detector; native UI remains subject to visual review.

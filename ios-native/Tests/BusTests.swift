@@ -143,7 +143,7 @@ import XCTest
         favorite.isFavorite = true
         bus.post(.mutation(.applied(MutationResult(operation: OperationID(), request: .favorite(["photo"], true), succeeded: ["photo"],
                                                    failed: [:], fresh: ["photo": favorite]))))
-        try await until("The viewer did not show the change.") { model.current.isFavorite == true }
+        try await until("The viewer did not show the change.") { model.current?.isFavorite == true }
     }
 
     /// The shelves: a collection change applies in place, and a sync change to albums, people,

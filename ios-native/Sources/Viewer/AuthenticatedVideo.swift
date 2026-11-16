@@ -3,156 +3,302 @@ import IlyichPlatform
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// A transport or player item is not a displayed video frame.
+enum VideoPresentationState: Equatable, Sendable {
+    case loading, ready, failed(String)
+}
+
+/// Request identity also fences late layer observations and failures from a replaced player.
+struct VideoPresentationReadiness {
+    private(set) var requestID = UUID()
+    private(set) var state: VideoPresentationState = .loading
+
+    mutating func begin() -> UUID {
+        requestID = UUID(); state = .loading
+        return requestID
+    }
+
+    mutating func frameReady(_ ready: Bool, request: UUID) {
+        guard request == requestID else { return }
+        if case .failed = state { return }
+        state = ready ? .ready : .loading
+    }
+
+    mutating func fail(_ message: String, request: UUID) {
+        guard request == requestID else { return }
+        requestID = UUID()
+        state = .failed(message)
+    }
+}
+
+/// The exact account access under which playback began. Read-only changes leave reads alone;
+/// sign-out, lost asset access and Locked Folder relocking cannot revive a retained player.
+struct VideoPlaybackAccess {
+    private let authorization: AuthorizationState?
+    private let epoch: AuthorizationEpoch?
+    private let privateEpoch: UInt64?
+    private let locked: Bool
+
+    init(authorization: AuthorizationState?, locked: Bool) {
+        self.authorization = authorization
+        epoch = authorization?.snapshot.epoch
+        privateEpoch = authorization?.snapshot.privateEpoch
+        self.locked = locked
+    }
+
+    var permits: Bool {
+        guard let authorization else { return true }
+        let snapshot = authorization.snapshot
+        return authorization.permitsServiceUse && snapshot.allows(.read)
+            && epoch.map(authorization.isCurrent) == true
+            && (!locked || (snapshot.allows(.lockedMedia) && snapshot.privateEpoch == privateEpoch))
+    }
+}
+
+struct VideoMediaIdentity: Equatable {
+    let sourceID: String
+    let revision: String
+    let knownEditState: Bool
+    let edited: Bool
+    let developed: Bool
+    let visibility: AssetVisibility
+    let trashed: Bool
+    let animated: Bool
+
+    init(_ asset: Asset) {
+        sourceID = asset.id; revision = asset.cacheRevision
+        knownEditState = asset.hasKnownEditState; edited = asset.isEdited; developed = asset.isDeveloped
+        visibility = asset.visibility; trashed = asset.isTrashed; animated = asset.isAnimatedImage
+    }
+}
+
 @MainActor
 struct AuthenticatedVideo: View {
     let api: APIClient
     let assetID: String
     let active: Bool
     var onEnded: (() -> Void)? = nil
-    /// The remote still asset that owns this video (the still itself for a Live Photo's motion).
+    /// The still that owns Live Photo motion, or the regular video itself.
     var sourceAsset: Asset? = nil
     var matchedLocalPhoto: LocalPhoto? = nil
-    /// `assetID` is a Live Photo motion video rather than a regular video.
     var isLivePhotoMotion = false
-    /// The viewer's playback pill, which follows this page's player while the page is selected.
     var playback: VideoPlaybackState? = nil
+    var pipeline: MediaPipeline? = nil
+    var retryToken = 0
+    var onPresentationChanged: ((VideoPresentationState) -> Void)? = nil
     @State private var transport: AuthenticatedVideoTransport?
-    @State private var error: String?
     @State private var attempt = 0
     @State private var loadedKey: PlaybackRequest?
     @State private var localMedia = LocalPhotoMedia()
     @State private var localPhoto: LocalPhoto?
     @State private var usingLocal = false
     @State private var activeNow = false
+    @State private var readiness = VideoPresentationReadiness()
+    @State private var poster: UIImage?
+    @State private var posterKey: String?
+    @State private var localPlaybackFailed = false
+    @State private var loadWork: (id: UUID, task: Task<Void, Never>)?
     @AppStorage("viewerAutoPlayVideo") private var autoPlay = true
     @AppStorage("viewerLoopVideo") private var loop = true
     @AppStorage("viewerLoadOriginalVideo") private var original = false
     @AppStorage("viewerMuteVideo") private var muted = false
     @Environment(\.scenePhase) private var scenePhase
+
     private struct PlaybackRequest: Equatable {
+        let scope: String
         let assetID: String
-        let revision: String?
+        let source: VideoMediaIdentity?
         let attempt: Int
+        let retryToken: Int
         let original: Bool
         let localPhoto: LocalPhoto?
         let liveMotion: Bool
         let active: Bool
     }
     private var requestKey: PlaybackRequest {
-        PlaybackRequest(assetID: assetID, revision: sourceAsset?.cacheRevision, attempt: attempt,
+        PlaybackRequest(scope: api.cacheScope, assetID: assetID, source: sourceAsset.map(VideoMediaIdentity.init),
+                        attempt: attempt, retryToken: retryToken,
                         original: original, localPhoto: matchedLocalPhoto, liveMotion: isLivePhotoMotion, active: active)
     }
-    private var shouldPlayLocal: Bool { usingLocal && active && scenePhase == .active && (autoPlay || onEnded != nil) }
+    private var imageKey: String { api.cacheScope + "|" + (sourceAsset?.id ?? assetID) + "|" + (sourceAsset?.cacheRevision ?? "") }
+    private var cachedPoster: UIImage? {
+        guard let sourceAsset, sourceAsset.visibility != .locked, permitsMedia else { return nil }
+        return (pipeline?.latestImage(assetID: sourceAsset.id, size: .preview, revision: sourceAsset.cacheRevision)
+                ?? pipeline?.latestImage(assetID: sourceAsset.id, size: .thumbnail, revision: sourceAsset.cacheRevision))?.uiImage
+    }
+    private var shownPoster: UIImage? { posterKey == imageKey ? (poster ?? cachedPoster) : cachedPoster }
+    private var permitsMedia: Bool {
+        guard let authorization = api.authorization else { return true }
+        return authorization.permitsServiceUse && authorization.snapshot.allows(.read)
+            && (sourceAsset?.visibility != .locked || authorization.snapshot.allows(.lockedMedia))
+    }
     private var shownPlayer: AVPlayer? {
-        guard active, playback != nil else { return nil }
+        guard active else { return nil }
         return usingLocal ? localMedia.player : transport?.player
     }
+
     var body: some View {
+        let timeoutRequest = readiness.requestID
         ZStack {
             Color.black
-            if usingLocal {
-                if let player = localMedia.player { PlayerSurface(player: player) }
-                else if let live = localMedia.livePhoto {
-                    LocalLivePhoto(livePhoto: live, active: active && scenePhase == .active, autoplay: shouldPlayLocal, muted: muted, onEnded: {
-                        if usingLocal, active, scenePhase == .active { onEnded?() }
-                    })
-                }
-                else if localMedia.loading { ProgressView().tint(.white) }
-                else {
-                    ContentUnavailableView { Label("Video couldn’t load", systemImage: "video.slash") }
-                    description: { Text(localMedia.failure ?? error ?? "This item is unavailable.") }
-                    actions: { Button("Retry") { attempt += 1 } }
+            if let player = shownPlayer {
+                let request = readiness.requestID
+                PlayerSurface(player: player, onReadyForDisplay: { ready in
+                    readiness.frameReady(ready, request: request)
+                }, onFailure: { failure in
+                    guard request == readiness.requestID else { return }
+                    if usingLocal { localPlaybackFailed = true; invalidate(); attempt += 1 }
+                    else { fail(failure, request: request) }
+                })
+                    .accessibilityIdentifier(readiness.state == .ready ? "viewer.videoReady" : "viewer.videoPreparingSurface")
+            } else if usingLocal, let live = localMedia.livePhoto {
+                LocalLivePhoto(livePhoto: live, active: active && scenePhase == .active,
+                               autoplay: active && scenePhase == .active && (autoPlay || onEnded != nil), muted: muted,
+                               onEnded: { if active, scenePhase == .active { onEnded?() } })
+            }
+            if readiness.state != .ready, let image = shownPoster {
+                Image(uiImage: image).resizable().scaledToFit().allowsHitTesting(false)
+                    .accessibilityIdentifier("viewer.videoPoster")
+            }
+            if onPresentationChanged == nil {
+                switch readiness.state {
+                case .loading:
+                    ViewerMediaNotice(title: "Preparing video", isLoading: true)
+                case .failed(let message):
+                    ViewerMediaNotice(title: "Video couldn’t load", message: message, retry: { attempt += 1 })
+                case .ready: EmptyView()
                 }
             }
-            else if let transport { PlayerSurface(player: transport.player) }
-            else if let error {
-                ContentUnavailableView { Label("Video couldn’t load", systemImage: "video.slash") }
-                description: { Text(error) }
-                actions: { Button("Retry") { attempt += 1 } }
-            } else { ProgressView().tint(.white) }
         }
         .task(id: requestKey) {
-            guard active else { return }
-            VideoAudio.prepare(foreground: !muted && !isLivePhotoMotion)
-            stopLocal()
-            if let transport, loadedKey == requestKey {
-                if scenePhase == .active && (autoPlay || onEnded != nil) { transport.player.play() }
-                return
-            }
-            do {
-                let request = try await api.authorizedRequest(path: "assets/\(assetID)/" + (original ? "original" : "video/playback"))
-                try Task.checkCancellation()
-                let newTransport = try AuthenticatedVideoTransport(request: request, server: api.baseURL)
-                transport?.close(); transport = newTransport; loadedKey = requestKey
-                newTransport.onFailure = { [weak newTransport] failure in
-                    guard let newTransport, transport === newTransport else { return }
-                    self.error = failure.localizedDescription; transport?.close(); transport = nil
-                    startLocalFallback(after: failure)
-                }
-                newTransport.player.isMuted = muted
-                if scenePhase == .active && (autoPlay || onEnded != nil) { newTransport.player.play() }
-            } catch is CancellationError { } catch { self.error = error.localizedDescription }
+            let id = UUID()
+            let task = Task { await load() }
+            loadWork = (id, task)
+            await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+            if loadWork?.id == id { loadWork = nil }
         }
+        .modifier(VideoFirstFrameDeadline(request: readiness.requestID.uuidString,
+                                         waiting: active && scenePhase == .active && readiness.state == .loading,
+                                         onTimeout: {
+            guard timeoutRequest == readiness.requestID, readiness.state == .loading, active, scenePhase == .active else { return }
+            fail(APIError.invalidResponse("The video is taking longer to load. Try again."), request: timeoutRequest)
+        }))
+        .task(id: imageKey) {
+            let key = imageKey
+            localPlaybackFailed = false
+            posterKey = key; poster = cachedPoster
+            guard poster == nil, let sourceAsset, let pipeline, permitsMedia else { return }
+            let epoch = api.authorization?.snapshot.epoch
+            let stored = await pipeline.storedThumbnail(for: sourceAsset, pixelSize: 1_024)
+            guard !Task.isCancelled, key == imageKey, permitsMedia,
+                  epoch.map({ api.authorization?.isCurrent($0) == true }) ?? true else { return }
+            poster = stored?.uiImage
+        }
+        .task {
+            guard let authorization = api.authorization else { return }
+            let epoch = authorization.snapshot.epoch
+            let privateEpoch = authorization.snapshot.privateEpoch
+            for await snapshot in authorization.updates() {
+                guard !Task.isCancelled else { return }
+                if !authorization.isCurrent(epoch) || !permitsMedia
+                    || (sourceAsset?.visibility == .locked && snapshot.privateEpoch != privateEpoch) {
+                    invalidate(); poster = nil; posterKey = nil
+                    return
+                }
+            }
+            if !Task.isCancelled { invalidate(); poster = nil; posterKey = nil }
+        }
+        .onChange(of: readiness.state, initial: true) { _, state in onPresentationChanged?(state) }
         .onChange(of: active, initial: true) { wasActive, active in
             activeNow = active
-            if !active { transport?.player.pause(); stopLocal() }
+            if !active { _ = readiness.begin(); transport?.player.pause(); stopLocal() }
             if wasActive && !active { VideoAudio.finish() }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { transport?.player.pause(); localMedia.player?.pause() }
-            else if active && (autoPlay || onEnded != nil) {
-                if usingLocal { localMedia.player?.play() } else { transport?.player.play() }
-            }
+            if phase != .active { shownPlayer?.pause() }
+            else if active && (autoPlay || onEnded != nil) { shownPlayer?.play() }
         }
-        .onChange(of: localMedia.player) { _, _ in adoptLocal() }
-        .onChange(of: localMedia.livePhoto) { _, _ in adoptLocal() }
         .onChange(of: shownPlayer.map(ObjectIdentifier.init), initial: true) { _, _ in playback?.show(shownPlayer, for: assetID) }
-        .onDisappear {
-            playback?.release(assetID)
-            transport?.close(); transport = nil; loadedKey = nil; stopLocal(); if activeNow { VideoAudio.finish() }
-        }
+        .onDisappear { playback?.release(assetID); invalidate(); if activeNow { VideoAudio.finish() } }
         .onChange(of: muted) { _, value in
             transport?.player.isMuted = value; localMedia.player?.isMuted = value
             if active { VideoAudio.prepare(foreground: !value && !isLivePhotoMotion) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
-            guard active, scenePhase == .active, let item = notification.object as? AVPlayerItem else { return }
-            let player = usingLocal ? localMedia.player : transport?.player
-            guard let player, item === player.currentItem else { return }
+            guard active, scenePhase == .active, let item = notification.object as? AVPlayerItem,
+                  let player = shownPlayer, item === player.currentItem else { return }
             if let onEnded { onEnded() }
             else if loop { player.seek(to: .zero); player.play() }
         }
     }
 
-    private func startLocalFallback(after failure: Error) {
-        guard let sourceAsset else { return }
-        let request = requestKey
-        Task {
-            guard let photo = await LocalMediaFallback.photo(after: failure, asset: sourceAsset, matched: matchedLocalPhoto, active: activeNow,
-                                                             kind: isLivePhotoMotion ? .motion : .video),
-                  request == requestKey, activeNow, transport == nil else { return }
-            localPhoto = photo; usingLocal = true
-            localMedia.load(photo, network: false, motion: isLivePhotoMotion)
+    private func load() async {
+        guard active, permitsMedia else { return }
+        VideoAudio.prepare(foreground: !muted && !isLivePhotoMotion)
+        if let transport, loadedKey == requestKey {
+            if scenePhase == .active && (autoPlay || onEnded != nil) { transport.player.play() }
+            return
         }
+        let key = requestKey
+        invalidate(cancelLoad: false)
+        let requestID = readiness.requestID
+        let access = VideoPlaybackAccess(authorization: api.authorization, locked: sourceAsset?.visibility == .locked)
+        func current() -> Bool {
+            !Task.isCancelled && key == requestKey && requestID == readiness.requestID && permitsMedia
+                && access.permits
+        }
+        do {
+            // Admission precedes local substitution too: account refusal never grants fallback.
+            let request = try await api.authorizedRequest(path: "assets/\(assetID)/" + (original ? "original" : "video/playback"))
+            guard current() else { return }
+            if !localPlaybackFailed, let sourceAsset,
+               let photo = await LocalMediaFallback.matchedPhoto(asset: sourceAsset, matched: matchedLocalPhoto,
+                    active: active, kind: isLivePhotoMotion ? .motion : .video), current() {
+                let local = await MatchedVideoPlayback.load(photo: photo, motion: isLivePhotoMotion,
+                    unchanged: { await LocalMediaFallback.isUnchanged(photo) }, permits: { current() })
+                guard current() else { return }
+                if let local {
+                    localPhoto = photo; usingLocal = true; loadedKey = key
+                    switch local {
+                    case .player(let item):
+                        localMedia.player = AVPlayer(playerItem: item)
+                        localMedia.player?.isMuted = muted
+                        if scenePhase == .active && (autoPlay || onEnded != nil) { localMedia.player?.play() }
+                    case .livePhoto(let live):
+                        localMedia.livePhoto = live
+                        readiness.frameReady(true, request: requestID)
+                    }
+                    return
+                }
+            }
+            guard current() else { return }
+            let newTransport = try AuthenticatedVideoTransport(request: request, server: api.baseURL, permits: { access.permits })
+            transport = newTransport; loadedKey = key
+            newTransport.onFailure = { [weak newTransport] failure in
+                guard let newTransport, transport === newTransport else { return }
+                fail(failure, request: requestID)
+            }
+            newTransport.player.isMuted = muted
+            if scenePhase == .active && (autoPlay || onEnded != nil) { newTransport.player.play() }
+        } catch is CancellationError { }
+        catch { if current() { fail(error, request: requestID) } }
     }
 
-    /// A Photos edit during the asynchronous request invalidates the proven match.
-    private func adoptLocal() {
-        guard usingLocal, let photo = localPhoto else { return }
-        Task {
-            guard await LocalMediaFallback.isUnchanged(photo) else {
-                guard usingLocal, localPhoto == photo else { return }
-                stopLocal(); error = "The copy on this phone changed. Try again."; return
-            }
-            guard usingLocal, localPhoto == photo, let player = localMedia.player else { return }
-            player.isMuted = muted
-            if shouldPlayLocal { player.play() } else { player.pause() }
-        }
+    private func fail(_ failure: Error, request: UUID) {
+        guard request == readiness.requestID else { return }
+        readiness.fail(failure.localizedDescription, request: request)
+        loadWork?.task.cancel(); loadWork = nil
+        transport?.close(); transport = nil; loadedKey = nil; stopLocal()
+    }
+
+    private func invalidate(cancelLoad: Bool = true) {
+        if cancelLoad { loadWork?.task.cancel(); loadWork = nil }
+        _ = readiness.begin()
+        transport?.close(); transport = nil; loadedKey = nil; stopLocal()
     }
 
     private func stopLocal() {
-        guard usingLocal || localPhoto != nil else { return }
-        localMedia.cancel(); localPhoto = nil; usingLocal = false
+        localMedia.cancel(); localMedia.livePhoto = nil; localPhoto = nil; usingLocal = false
     }
 }
 
@@ -180,6 +326,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     let player: AVPlayer
     private let request: URLRequest
     private let server: URL
+    private let permits: () -> Bool
     private var session: URLSession!
     private var observation: NSKeyValueObservation?
     var onFailure: ((Error) -> Void)?
@@ -192,13 +339,14 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     /// Set by close(); the invalidated session raises on a new task.
     private var closed = false
 
-    init(request: URLRequest, server: URL) throws {
+    init(request: URLRequest, server: URL, permits: @escaping () -> Bool = { true }) throws {
         guard let originalURL = request.url,
               var parts = URLComponents(url: originalURL, resolvingAgainstBaseURL: false) else { throw APIError.invalidServerURL }
         parts.scheme = "ilyich-media"
         guard let proxyURL = parts.url else { throw APIError.invalidServerURL }
         self.request = request
         self.server = server
+        self.permits = permits
         let asset = AVURLAsset(url: proxyURL)
         player = AVPlayer()
         super.init()
@@ -227,6 +375,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
         // A request AVFoundation queued before close() still arrives after it.
         guard !closed else { return false }
+        guard permits() else { close(); return false }
         var rangeRequest = request
         if let data = loadingRequest.dataRequest {
             let start = max(data.requestedOffset, data.currentOffset)
@@ -249,7 +398,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        guard let origin = self.request.url, let target = request.url, SameOriginRedirectDelegate.sameOrigin(origin, target) else {
+        guard permits(), let origin = self.request.url, let target = request.url, SameOriginRedirectDelegate.sameOrigin(origin, target) else {
             completionHandler(nil); return
         }
         completionHandler(request)
@@ -262,6 +411,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
+        guard permits() else { close(); completionHandler(.cancel); return }
         guard var transfer = transfers[dataTask.taskIdentifier] else { completionHandler(.cancel); return }
         // The body has not arrived yet; Immich's correlation header still tells it from a proxy.
         do { try ServerFailure.check(response, body: nil) }
@@ -297,6 +447,7 @@ final class AuthenticatedVideoTransport: NSObject, @preconcurrency AVAssetResour
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard permits() else { close(); return }
         guard var transfer = transfers[dataTask.taskIdentifier], let requested = transfer.loading.dataRequest else { return }
         let wantedStart = max(requested.requestedOffset, requested.currentOffset)
         let chunkStart = transfer.receivedOffset

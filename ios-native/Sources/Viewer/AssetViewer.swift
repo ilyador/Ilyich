@@ -16,6 +16,7 @@ struct AssetViewer: View {
     @Environment(\.placeNaming) private var naming
     @State private var controls = true
     @State private var playingLive = false
+    @State private var localReload = 0
     /// Where the bars leave room for the LIVE badge and the video pill, kept while the bars are hidden.
     @State private var chromeInsets = EdgeInsets()
     @State private var playback = VideoPlaybackState()
@@ -48,7 +49,7 @@ struct AssetViewer: View {
     }
 
     private var api: APIClient { model.api }
-    private var current: Asset { model.current }
+    private var current: Asset? { model.current }
     /// What the photo on screen offers. Every button and menu item renders from it.
     private var capabilities: AssetCapabilities { model.capabilities }
 
@@ -86,7 +87,7 @@ struct AssetViewer: View {
         .onChange(of: model.selectedID, initial: true) {
             // Closing zooms back into the cell of the photo on screen, lined up with the photo.
             transition?.currentID = model.selectedID
-            transition?.aspectRatio = CGFloat(current.aspectRatio)
+            transition?.aspectRatio = CGFloat(model.currentEntry.aspectRatio)
         }
         // Scrubbing the strip passes many photos; only the one it stops on is refreshed.
         .task(id: model.refreshKey) { await model.refreshCurrentAsset() }
@@ -103,8 +104,8 @@ struct AssetViewer: View {
         GeometryReader { proxy in
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 0) {
-                    ForEach(Array(model.assets.enumerated()), id: \.element.id) { index, summary in
-                        page(index: index, asset: model.record(summary))
+                    ForEach(Array(model.entries.enumerated()), id: \.element.id) { index, summary in
+                        page(index: index, entry: model.entryRecord(summary))
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             .padding(.trailing, Self.pageGap)
                     }
@@ -119,8 +120,8 @@ struct AssetViewer: View {
             .onScrollGeometryChange(for: Int.self) { geometry in
                 Int((geometry.contentOffset.x / max(1, geometry.containerSize.width)).rounded())
             } action: { _, page in
-                guard pagerPhase != .idle, model.assets.indices.contains(page) else { return }
-                model.select(model.assets[page].id)
+                guard pagerPhase != .idle, model.entries.indices.contains(page) else { return }
+                model.select(model.entries[page].id)
             }
             .onScrollPhaseChange { _, phase in
                 pagerPhase = phase
@@ -136,26 +137,38 @@ struct AssetViewer: View {
         .ignoresSafeArea()
     }
 
-    @ViewBuilder private func page(index: Int, asset: Asset) -> some View {
-        let selectedID = model.selectedID
+    @ViewBuilder private func page(index: Int, entry: LibraryEntry) -> some View {
         if abs(index - model.index) <= 1 {
-            if asset.isVideo {
-                videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selectedID == asset.id && !model.stripScrubbing,
-                                             sourceAsset: asset, matchedLocalPhoto: model.localCopy(of: asset), playback: playback))
-            } else if playingLive, selectedID == asset.id, let videoID = asset.livePhotoVideoId {
-                videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: true, onEnded: { playingLive = false },
-                                             sourceAsset: asset, matchedLocalPhoto: model.localCopy(of: asset), isLivePhotoMotion: true))
-            } else {
-                ViewerPhoto(pipeline: pipeline, asset: asset, active: selectedID == asset.id, onTap: handlePhotoTap, onDismiss: { if transition == nil { close() } },
-                            matchedLocalPhoto: model.localCopy(of: asset), onSwipeUp: { model.sheet = .info }, settled: !model.stripScrubbing)
+            switch entry {
+            case .remote(let asset, _): remotePage(asset)
+            case .local(let photo):
+                ViewerLocalPage(photo: photo, active: model.selectedID == entry.id && !model.stripScrubbing,
+                                motion: playingLive && model.selectedID == entry.id, reload: localReload,
+                                pipeline: pipeline, sharedPlayback: playback, showsPlaybackControls: false,
+                                onDismiss: { if transition == nil { close() } }, onTap: handlePhotoTap, onSwipeUp: { model.sheet = .phoneCopy })
             }
         } else { Color.black }
     }
 
+    @ViewBuilder private func remotePage(_ asset: Asset) -> some View {
+        let selected = model.selectedID == asset.id
+        if asset.isVideo {
+            videoPage(AuthenticatedVideo(api: api, assetID: asset.id, active: selected && !model.stripScrubbing,
+                                         sourceAsset: asset, matchedLocalPhoto: model.localCopy(of: asset), playback: playback, pipeline: pipeline))
+        } else if playingLive, selected, let videoID = asset.livePhotoVideoId {
+            videoPage(AuthenticatedVideo(api: api, assetID: videoID, active: true, onEnded: { playingLive = false },
+                                         sourceAsset: asset, matchedLocalPhoto: model.localCopy(of: asset), isLivePhotoMotion: true, pipeline: pipeline))
+        } else {
+            ViewerPhoto(pipeline: pipeline, asset: asset, active: selected, onTap: handlePhotoTap,
+                        onDismiss: { if transition == nil { close() } }, matchedLocalPhoto: model.localCopy(of: asset),
+                        onSwipeUp: { model.sheet = .info }, settled: !model.stripScrubbing)
+        }
+    }
+
     private func showPage(_ index: Int) {
-        guard model.assets.indices.contains(index) else { return }
+        guard model.entries.indices.contains(index) else { return }
         withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.3)) {
-            model.pagePosition.scrollTo(id: model.assets[index].id, anchor: .leading)
+            model.pagePosition.scrollTo(id: model.entries[index].id, anchor: .leading)
         }
     }
 
@@ -163,10 +176,9 @@ struct AssetViewer: View {
     private func prefetchNeighbors() async {
         let pixels = Int(max(viewport.width, viewport.height) * displayScale)
         guard pixels > 0 else { return }
-        let assets = model.assets, index = model.index
+        let assets = model.entries, index = model.index
         for offset in [1, -1, 2] where assets.indices.contains(index + offset) {
-            let asset = model.record(assets[index + offset])
-            guard !asset.isVideo else { continue }
+            guard let asset = model.entryRecord(assets[index + offset]).remote, !asset.isVideo else { continue }
             _ = try? await pipeline.image(for: asset, size: .preview, pixelSize: pixels)
             if Task.isCancelled { return }
         }
@@ -204,8 +216,22 @@ struct AssetViewer: View {
     private var deletesPermanently: Bool { (model.confirmation ?? model.lastConfirmation)?.permanently ?? false }
 
     @ViewBuilder private func sheetContent(_ sheet: ViewerSheet) -> some View {
+        if case .phoneCopy = sheet, let photo = model.currentEntry.local {
+            NavigationStack {
+                LocalPhotoActionsView(photos: [photo]) { change in
+                    if case .removed(let ids) = change { model.localPhotosRemoved(ids) }
+                    else { localReload += 1 }
+                    model.sheet = nil
+                }
+            }
+        } else if let current {
+            remoteSheetContent(sheet, asset: current)
+        }
+    }
+
+    @ViewBuilder private func remoteSheetContent(_ sheet: ViewerSheet, asset current: Asset) -> some View {
         switch sheet {
-        case .info: infoSheet
+        case .info: infoSheet(current)
         case .location(let focus): ViewerPlaceSheet(api: api, pipeline: pipeline, focus: focus)
         case .addToAlbum: NavigationStack { ViewerAlbumPicker(api: api, asset: current) }
         case .sharedLink: NavigationStack { SharedLinkEditor(api: api, album: nil, assetIDs: [current.id]) }
@@ -230,14 +256,14 @@ struct AssetViewer: View {
     }
 
     @ViewBuilder private func coverContent(_ cover: ViewerCover) -> some View {
-        switch cover {
+        if let current { switch cover {
         case .editor: PhotoEditor(api: api, pipeline: pipeline, asset: current)
         case .selectText: OCRPhotoReader(api: api, pipeline: pipeline, asset: current)
         case .slideshow: SlideshowView(api: api, pipeline: pipeline, assets: model.records, initial: current)
-        }
+        } }
     }
 
-    private var infoSheet: some View {
+    private func infoSheet(_ current: Asset) -> some View {
         NavigationStack {
             AssetInfoView(api: api, pipeline: pipeline, asset: current, viewer: model)
                 .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { model.sheet = nil } } }
@@ -248,13 +274,23 @@ struct AssetViewer: View {
     /// a group of Favorite, Info and Edit, and Delete along the bottom. Glyphs only, in system glass.
     /// Favorite keeps its place for every photo, dimmed where it can't be used.
     @ToolbarContentBuilder private var viewerToolbar: some ToolbarContent {
-        let can = capabilities, busy = model.busy
         ToolbarItem(placement: .topBarLeading) {
             Button("Close", systemImage: "chevron.left") { close() }
         }
         ToolbarItem(placement: .principal) { titleCapsule }
             .sharedBackgroundVisibility(.hidden)
-        ToolbarItem(placement: .topBarTrailing) { actionsMenu(can) }
+        if let current {
+            remoteToolbar(current)
+        } else {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Photo actions", systemImage: "ellipsis") { model.sheet = .phoneCopy }
+            }
+        }
+    }
+
+    @ToolbarContentBuilder private func remoteToolbar(_ current: Asset) -> some ToolbarContent {
+        let can = capabilities, busy = model.busy
+        ToolbarItem(placement: .topBarTrailing) { actionsMenu(can, asset: current) }
         ToolbarItem(placement: .bottomBar) {
             Button("Share", systemImage: "square.and.arrow.up") { model.share(original: shareFileType != "preview") }
                 .disabled(busy || !can.offers(.share))
@@ -281,7 +317,7 @@ struct AssetViewer: View {
     }
 
     /// Every action that has no button of its own, in sections as in the Photos menu.
-    private func actionsMenu(_ can: AssetCapabilities) -> some View {
+    private func actionsMenu(_ can: AssetCapabilities, asset current: Asset) -> some View {
         Menu {
             if model.canShowInFeed {
                 Section {
@@ -360,6 +396,9 @@ struct AssetViewer: View {
 
     /// The place over the date and time, or, without a place, the date over the time.
     private var titleLines: (title: String, subtitle: String?)? {
+        guard let current else {
+            return model.currentEntry.local.map { ($0.title, nil) }
+        }
         let utc = TimeZone(secondsFromGMT: 0)!
         // A neighborhood with its city (L1): "Massarelos, Porto".
         let place = naming?.place(name: current.exifInfo?.city, country: current.exifInfo?.country)
@@ -374,21 +413,28 @@ struct AssetViewer: View {
     /// bottom bar a video's playback pill over the thumbnail strip.
     private var pageChrome: some View {
         VStack(spacing: 0) {
-            if current.livePhotoVideoId != nil {
+            if controls {
+                ViewerBackupStatus(asset: current, photo: model.currentEntry.local ?? current.flatMap { model.localCopy(of: $0) })
+                    .id(model.selectedID)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16).padding(.top, 6)
+                    .transition(.opacity)
+            }
+            if current?.livePhotoVideoId != nil || (current == nil && model.currentEntry.local?.live == true) {
                 liveBadge.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.top, 6)
             }
             Spacer(minLength: 0)
             VStack(spacing: 12) {
-                if current.isVideo {
+                if current?.isVideo == true || (current == nil && model.currentEntry.local?.video == true) {
                     ViewerVideoControls(playback: playback, visible: controls)
                         .frame(maxWidth: 520).padding(.horizontal, 24)
                 }
-                if model.assets.count > 1 {
+                if model.entries.count > 1 {
                     // The strip keeps its room while hidden, so nothing above it moves.
                     ZStack {
                         if controls {
                             ZStack {
-                                ViewerFilmstrip(pipeline: pipeline, assets: model.assets, replacements: model.replacements, selectedID: model.selectedID,
+                                ViewerFilmstrip(pipeline: pipeline, entries: model.entries, replacements: model.replacements, selectedID: model.selectedID,
                                                 onSelect: { model.jump(to: $0) }, onScrubbingChange: { model.setStripScrubbing($0) })
                                     // Laid out afresh around the photo on screen when a new window
                                     // moves it. A new strip draws its first frame before it has
@@ -452,7 +498,7 @@ struct AssetViewer: View {
     private func handlePhotoTap(_ horizontalFraction: Double) {
         let index = model.index
         if tapToNavigate && horizontalFraction < 0.33 && index > 0 { showPage(index - 1) }
-        else if tapToNavigate && horizontalFraction > 0.67 && index + 1 < model.assets.count { showPage(index + 1) }
+        else if tapToNavigate && horizontalFraction > 0.67 && index + 1 < model.entries.count { showPage(index + 1) }
         else { toggleControls() }
     }
     private static func exportLabel(_ request: ExportRequest) -> String {
@@ -516,7 +562,7 @@ private struct ViewerAlbumPicker: View {
 
 /// A tap on a video page, recognized alongside the swipes and the pager, as a UIKit recognizer:
 /// a SwiftUI tap does not reach through the player's surface.
-private struct ViewerTap: UIGestureRecognizerRepresentable {
+struct ViewerTap: UIGestureRecognizerRepresentable {
     let action: () -> Void
 
     func makeCoordinator(converter: CoordinateSpaceConverter) -> ViewerSwipe.Coordinator { ViewerSwipe.Coordinator() }
@@ -534,7 +580,7 @@ private struct ViewerTap: UIGestureRecognizerRepresentable {
 
 /// A quick swipe on a video page, recognized alongside the page's other gestures, so a video closes
 /// and shows its details with the same swipes as a photo.
-private struct ViewerSwipe: UIGestureRecognizerRepresentable {
+struct ViewerSwipe: UIGestureRecognizerRepresentable {
     let direction: UISwipeGestureRecognizer.Direction
     var enabled = true
     let action: () -> Void

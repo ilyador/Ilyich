@@ -36,12 +36,12 @@ import XCTest
         await model.loadFeatures()
 
         swipe(model, to: "b")
-        XCTAssertEqual(model.current.id, "b")
+        XCTAssertEqual(model.current?.id, "b")
         try await delete(model)
         XCTAssertEqual(try deletions(on: server), [["b"]], "The photo swiped to goes, not the one opened.")
         XCTAssertFalse(closed, "The viewer stays.")
         XCTAssertEqual(model.assets.map(\.id), ["a", "c"])
-        XCTAssertEqual(model.current.id, "c", "The photo after it comes on screen in its place.")
+        XCTAssertEqual(model.current?.id, "c", "The photo after it comes on screen in its place.")
         XCTAssertEqual(model.pagePosition.viewID(type: String.self), "c")
         XCTAssertEqual(model.windowShifts, 0, "The strip stays as it was, the next photo where the deleted one was.")
         try await until("The feed still shows the photo.") { store.availableAssets(around: "a").map(\.id) == ["a", "c"] }
@@ -52,7 +52,7 @@ import XCTest
         XCTAssertEqual(model.assets.map(\.id), ["a", "c"], "Nothing moves under a swipe on its way.")
         model.setPagerMoving(false)
         XCTAssertEqual(model.assets.map(\.id), ["a"])
-        XCTAssertEqual(model.current.id, "a", "The last photo gone, the one before it comes on screen.")
+        XCTAssertEqual(model.current?.id, "a", "The last photo gone, the one before it comes on screen.")
         XCTAssertEqual(model.pagePosition.viewID(type: String.self), "a")
         XCTAssertFalse(closed)
 
@@ -89,7 +89,7 @@ import XCTest
         model.setPagerMoving(false)
         XCTAssertEqual(model.assets.map(\.id), ["m0", "m1", "m2", "m3", "f1"], "At rest the viewer takes the photo that arrived.")
         XCTAssertEqual(model.selectedID, "m3")
-        XCTAssertEqual(model.current.id, "m3", "The photo on screen stays, though another came before it.")
+        XCTAssertEqual(model.current?.id, "m3", "The photo on screen stays, though another came before it.")
         XCTAssertEqual(model.index, 3)
         XCTAssertEqual(model.pagePosition.viewID(type: String.self), "m3", "The pages moved with the photos.")
         XCTAssertEqual(model.windowShifts, 1, "The strip is laid out afresh around the photo, now one further along.")
@@ -99,7 +99,7 @@ import XCTest
         await store.reload(preservingPosition: true)
         try await until("The viewer did not take the reload at rest.") { model.assets.contains { $0.id == "f2" } }
         XCTAssertEqual(model.assets.map(\.id), ["m0", "m1", "m2", "m3", "f1", "f2"], "The photo gone from the feed stays where it was on screen.")
-        XCTAssertEqual(model.current.id, "m3")
+        XCTAssertEqual(model.current?.id, "m3")
         XCTAssertEqual(model.pagePosition.viewID(type: String.self), "m3")
         XCTAssertEqual(model.windowShifts, 1, "A photo added after it leaves the strip where it was.")
     }
@@ -125,7 +125,7 @@ import XCTest
         XCTAssertEqual(model.assets.map(\.id), ["m1", "m2"], "Nothing moves while the viewer closes.")
         model.setClosing(false)
         XCTAssertEqual(model.assets.map(\.id), ["m0", "m1", "m2"], "Left open, the viewer takes the photo that arrived.")
-        XCTAssertEqual(model.current.id, "m2")
+        XCTAssertEqual(model.current?.id, "m2")
         XCTAssertEqual(model.pagePosition.viewID(type: String.self), "m2", "The pages moved with the photos.")
     }
 
@@ -154,7 +154,7 @@ import XCTest
         XCTAssertEqual(model.assets.map(\.id), ["april", "m1", "m2", "february"])
         model.setPagerMoving(false)
         XCTAssertEqual(model.assets.map(\.id), ["m1", "m2", "february", "january"])
-        XCTAssertEqual(model.current.id, "february")
+        XCTAssertEqual(model.current?.id, "february")
 
         // The strip scrubbed back holds the window as the pages do.
         model.setStripScrubbing(true)
@@ -204,13 +204,13 @@ import XCTest
 
         model.changeVisibility(.archive)
         try await until("The feed did not lose the photo.") { store.availableAssets(around: "a").map(\.id) == ["a", "c"] }
-        try await until("The viewer did not take the archived record.") { model.current.visibility == .archive }
+        try await until("The viewer did not take the archived record.") { model.current?.visibility == .archive }
         XCTAssertEqual(model.assets.map(\.id), ["a", "b", "c"], "The archived photo stays where it was on screen.")
-        XCTAssertEqual(model.current.id, "b")
+        XCTAssertEqual(model.current?.id, "b")
 
         swipe(model, to: "c")
         XCTAssertEqual(model.assets.map(\.id), ["a", "c"], "Once left, it is paged through no more.")
-        XCTAssertEqual(model.current.id, "c")
+        XCTAssertEqual(model.current?.id, "c")
         XCTAssertEqual(model.pagePosition.viewID(type: String.self), "c")
     }
 
@@ -257,7 +257,7 @@ import XCTest
         list.assets += [try photo("d", "2026-03-05")]
         try await until("The viewer did not take the photo the list found.") { model.assets.contains { $0.id == "d" } }
         XCTAssertEqual(model.assets.map(\.id), ["a", "c", "d"])
-        XCTAssertEqual(model.current.id, "c")
+        XCTAssertEqual(model.current?.id, "c")
     }
 
     // MARK: - Fresher records
@@ -283,7 +283,7 @@ import XCTest
         let revision = store.revision
 
         await model.refreshCurrentAsset()
-        XCTAssertEqual(model.current.exifInfo?.description, "Harbor", "The viewer shows the details.")
+        XCTAssertEqual(model.current?.exifInfo?.description, "Harbor", "The viewer shows the details.")
         XCTAssertNil(store.loaded[Self.march]?.first?.exifInfo, "The feed keeps its row.")
         XCTAssertEqual(store.revision, revision, "Nothing in the feed changed.")
 
@@ -291,7 +291,7 @@ import XCTest
         server.route("GET", "assets/a", try record(detailed))
         model.libraryChanged(accessChanged: false)
         await model.refreshCurrentAsset()
-        XCTAssertTrue(model.current.isFavorite)
+        XCTAssertTrue(model.current?.isFavorite == true)
         XCTAssertEqual(store.loaded[Self.march]?.first?.isFavorite, true, "A favorite made elsewhere reaches the feed.")
 
         detailed.mediaRevision = "r2"
@@ -339,6 +339,100 @@ import XCTest
                        "A photo listed twice shows once.")
     }
 
+    func testMixedWindowKeepsLocalPagesAndPromotesOnlyWhenSelectedAtRest() throws {
+        let localA = LocalPhoto(id: "phone-a", date: Date(timeIntervalSince1970: 3), width: 1200, height: 800)
+        let localB = LocalPhoto(id: "phone-b", date: Date(timeIntervalSince1970: 2), video: true)
+        let remote = Asset(id: "server-a", type: .image)
+        let localC = LocalPhoto(id: "phone-c", date: Date(timeIntervalSince1970: 1))
+        let shown: [LibraryEntry] = [.local(localA), .local(localB), .local(localC)]
+        let offered: [LibraryEntry] = [.remote(remote, local: localA), .local(localB), .local(localC)]
+        let merged = AssetWindow.merged(shown: shown, offered: offered, selected: "local:phone-b")
+        XCTAssertEqual(merged.map(\.id), ["server-a", "local:phone-b", "local:phone-c"])
+        XCTAssertEqual(AssetWindow.resolvedID(shown: shown, offered: offered, selected: "local:phone-a"), "server-a")
+        XCTAssertEqual(AssetWindow.resolvedID(shown: shown, offered: offered, selected: "local:phone-b"), "local:phone-b")
+        XCTAssertEqual(merged.first?.aspectRatio, 1.5)
+        XCTAssertTrue(merged[1].local?.video == true, "Videos remain local feed entries with their own dimensions and identity.")
+
+        let reverse = AssetWindow.merged(shown: shown, offered: [.local(localA), .remote(remote, local: localA)], selected: "local:phone-a")
+        XCTAssertEqual(reverse.map(\.id), ["server-a"], "A matched remote record wins regardless of offer order.")
+        XCTAssertEqual(AssetWindow.resolvedID(shown: shown, offered: [.local(localA), .remote(remote, local: localA)], selected: "local:phone-a"), "server-a")
+
+        let bridgedVariants: [[LibraryEntry]] = [
+            [.remote(remote), .local(localA), .remote(remote, local: localA)],
+            [.local(localA), .remote(remote), .remote(remote, local: localA)],
+            [.remote(remote, local: localA), .local(localA), .remote(remote)]
+        ]
+        for bridged in bridgedVariants {
+            let unique = AssetWindow.merged(shown: [], offered: bridged, selected: "missing")
+            XCTAssertEqual(unique.map(\.id), ["server-a"], "A late association must collapse both earlier identity slots.")
+            XCTAssertEqual(unique.first?.local?.id, "phone-a")
+        }
+    }
+
+    func testFeedViewerDefersLocalPromotionUntilRestAndRemovesSelectedLocalPage() async throws {
+        let library = ViewerLibrary([try photo("remote-a", "2026-03-20"), try photo("remote-b", "2026-03-01")])
+        let store = LibraryFeedStore(source: library, includesDevicePhotos: true)
+        await store.reload()
+        defer { store.stop() }
+        for section in store.sections.indices { store.requestBucket(section) }
+        try await until("March did not load.") { store.loaded[Self.march] != nil }
+
+        let dateA = try XCTUnwrap(APIDate.parse("2026-03-15T12:00:00Z"))
+        let dateB = try XCTUnwrap(APIDate.parse("2026-03-10T12:00:00Z"))
+        let localA = LocalPhoto(id: "phone-a", date: dateA)
+        let localB = LocalPhoto(id: "phone-b", date: dateB, video: true)
+        store.updateDeviceTimeline(MergedTimeline(photos: [localA, localB]))
+        try await until("The local feed entries did not arrive.") {
+            store.availableEntries(around: "local:phone-a").contains { $0.id == "local:phone-b" }
+        }
+
+        let server = makeStubServer()
+        let (api, _) = try makeAccount(server)
+        let model = ViewerModel(api: api, route: ViewerRoute(photo: localA, source: .feed), window: .feed(store), settleDelay: .zero)
+        model.start(mutations: nil, close: {})
+        XCTAssertEqual(model.selectedID, "local:phone-a")
+        XCTAssertEqual(model.entries.map(\.id), ["remote-a", "local:phone-a", "local:phone-b", "remote-b"])
+
+        model.setPagerMoving(true)
+        store.updateDeviceTimeline(MergedTimeline(photos: [localA, localB], associations: ["phone-a": "remote-a"]))
+        try await until("The feed did not publish the matched entry.") {
+            store.availableEntries(around: "local:phone-a").contains { $0.id == "remote-a" && $0.local?.id == "phone-a" }
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(model.selectedID, "local:phone-a", "A source update must not change the page under an active swipe.")
+        XCTAssertTrue(model.entries.contains { $0.id == "local:phone-a" })
+
+        model.setPagerMoving(false)
+        XCTAssertEqual(model.selectedID, "remote-a", "At rest, the matched server record takes over the selected local page.")
+        XCTAssertEqual(model.currentEntry.local?.id, "phone-a")
+        XCTAssertFalse(model.entries.contains { $0.id == "local:phone-a" })
+        XCTAssertEqual(model.entries.map(\.id), ["remote-a", "local:phone-b", "remote-b"])
+
+        model.jump(to: "local:phone-b")
+        model.localPhotosRemoved(["phone-b"])
+        XCTAssertEqual(model.selectedID, "remote-b", "Removing the selected local-only page selects the next entry.")
+        XCTAssertEqual(model.current?.id, "remote-b")
+        XCTAssertFalse(model.entries.contains { $0.id == "local:phone-b" })
+        XCTAssertTrue(server.requests.isEmpty, "Local promotion and removal must not call a server asset endpoint.")
+    }
+
+    func testLocalViewerDoesNotRequestServerAssetByPhotoKitIdentifier() async throws {
+        let date = try XCTUnwrap(APIDate.parse("2026-03-20T12:00:00Z"))
+        let local = LocalPhoto(id: "Photos/local-id", date: date)
+        let server = makeStubServer()
+        let (api, _) = try makeAccount(server)
+        let store = try await emptyStore()
+        defer { store.stop() }
+        let model = ViewerModel(api: api, route: ViewerRoute(photo: local, source: .feed), window: .feed(store))
+        XCTAssertNil(model.current)
+        XCTAssertEqual(model.currentEntry.local?.id, local.id)
+        do {
+            _ = try await model.readAsset(local.id)
+            XCTFail("A local PhotoKit identifier must not be read from the server.")
+        } catch { }
+        XCTAssertTrue(server.requests.isEmpty)
+    }
+
     // MARK: - Places
 
     /// Exploring a place from the library's viewer is an intent: from its details, the sheet goes
@@ -381,7 +475,13 @@ import XCTest
     }
 
     private func route(_ store: LibraryFeedStore, _ id: String) -> ViewerRoute {
-        ViewerRoute(asset: store.availableAssets(around: id).first { $0.id == id } ?? Asset(id: id), source: .feed, albumContext: nil)
+        ViewerRoute(entry: store.availableEntries(around: id).first { $0.id == id } ?? .remote(Asset(id: id)), source: .feed, albumContext: nil)
+    }
+
+    private func emptyStore() async throws -> LibraryFeedStore {
+        let store = LibraryFeedStore(source: ViewerLibrary([]))
+        await store.reload()
+        return store
     }
 
     /// The feed with `months` loaded.
@@ -421,7 +521,7 @@ import XCTest
     private func delete(_ model: ViewerModel, meanwhile: () -> Void = {}) async throws {
         model.requestDeletion()
         try await until("The viewer did not ask before deleting.") { model.confirmation != nil }
-        XCTAssertEqual(model.confirmation, .delete(model.current, permanently: false), "It asks about the photo on screen.")
+        XCTAssertEqual(model.confirmation, .delete(model.current!, permanently: false), "It asks about the photo on screen.")
         // The dialog goes as its button runs.
         model.confirmation = nil
         model.confirmDeletion()
