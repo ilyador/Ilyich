@@ -487,6 +487,9 @@ import UIKit
     func enqueue(_ requests: [TransferRequest]) async throws -> EnqueueResult { try await target().enqueue(requests) }
     func cancel(_ sources: [TransferSource]) async throws { try await target().cancel(sources) }
     func retry(_ sources: [TransferSource]?) async throws { try await target().retry(sources) }
+    func matchArchivedOriginals(after localID: String?, limit: Int) async throws -> SourceOriginalReconciliationReport {
+        try await target().matchArchivedOriginals(after: localID, limit: limit)
+    }
 
     func setPreferences(_ preferences: TransferPreferences) async throws {
         switch route {

@@ -52,6 +52,7 @@ final class LibraryJobExecutor: JobExecuting {
     private let conditionsPermit: @Sendable (_ requireCharging: Bool) async -> Bool
     private let preparation = BackupPreparationGate()
     private let knownBackupChecker: (any KnownBackupCopyChecking)?
+    private let sourceOriginalMatcher: SourceOriginalArchiveMatcher
     /// Stage folders of jobs that returned a result, removed once the engine commits it.
     private let finishedFolders = Mutex<[Int64: String]>([:])
 
@@ -63,6 +64,7 @@ final class LibraryJobExecutor: JobExecuting {
         self.store = store
         self.conditionsPermit = conditionsPermit
         self.knownBackupChecker = knownBackupChecker
+        sourceOriginalMatcher = SourceOriginalArchiveMatcher(account: account, store: store, staging: staging, server: server)
         self.staging = staging
         self.server = server
         self.uploader = uploader
@@ -118,6 +120,11 @@ final class LibraryJobExecutor: JobExecuting {
             stage = try await stagePhoto(id.rawValue, job: job, context: context, preferences: preferences)
         }
         pipeline.record(bytes: bytes(of: stage), for: stagingTurn)
+        let sourcePolicy = StagingPolicy(allowCloud: preferences.downloadCloudOriginals, cellularPhotos: preferences.cellularPhotos,
+                                         cellularVideos: preferences.cellularVideos)
+        _ = try await sourceOriginalMatcher.match(id.rawValue, revision: stage.revision, policy: sourcePolicy,
+                                                                      ensureOwned: { try await context.ensureOwned() })
+        try await context.ensureOwned()
         let run = Run(job: job, context: context, localID: id.rawValue, preferences: preferences)
 
         // A Live Photo's video first, hidden and without the mobile-app metadata.

@@ -136,11 +136,34 @@ final class TransferRuntime: Sendable {
         let (lifecycleStream, lifecycleEvents) = AsyncStream.makeStream(of: LifecycleEvent.self)
         self.lifecycleStream = lifecycleStream
         self.lifecycleEvents = lifecycleEvents
+        let matchingAccount = parts.account
+        let matchingStaging = parts.staging
+        let matchingServer = parts.server
         backend = EngineBackend(engine: engine, store: parts.store, discovery: discovery, preferencesChanged: {
             lifecycleEvents.yield(.preferencesChanged)
             // The backup albums are the device index's input too.
             receiptChanges.send()
-        }, followUp: { worker.wake($0) })
+        }, followUp: { worker.wake($0) }, matchOriginals: { after, limit in
+            guard await engine.runIntent == .paused else { throw BackupError.message("Pause backup before linking existing edits.") }
+            guard permits(), let started = authorization.current() else { throw APIError.signedOut }
+            let stillPermitted: @Sendable () -> Bool = { permits() && authorization.current() == started }
+            let sourceMatcher = SourceOriginalArchiveReconciler(account: matchingAccount, store: proofStore,
+                staging: matchingStaging, server: matchingServer, permits: stillPermitted)
+            if let proofChecker { try await proofChecker.reconcileConfirmations(in: proofStore) }
+            await engine.refresh()
+            receiptChanges.send()
+            let settings = try await engine.preferences() ?? TransferPreferences()
+            let report = try await sourceMatcher.reconcile(after: after, limit: limit,
+                policy: StagingPolicy(allowCloud: settings.downloadCloudOriginals, cellularPhotos: settings.cellularPhotos,
+                                      cellularVideos: settings.cellularVideos))
+            try Task.checkCancellation()
+            guard stillPermitted() else { throw APIError.signedOut }
+            if report.scheduled > 0 {
+                await worker.request(.committed(.library))
+                await worker.idle()
+            }
+            return report
+        })
     }
 
     // MARK: Lifecycle
@@ -379,6 +402,13 @@ struct EngineBackend: TransferControlling {
     let preferencesChanged: @Sendable () -> Void
     /// Wakes the post-upload work.
     var followUp: @Sendable (FollowUpTrigger) -> Void = { _ in }
+    var matchOriginals: @Sendable (String?, Int) async throws -> SourceOriginalReconciliationReport = { _, _ in
+        throw BackupError.message("Original matching is unavailable for this account.")
+    }
+
+    func matchArchivedOriginals(after localID: String?, limit: Int) async throws -> SourceOriginalReconciliationReport {
+        try await matchOriginals(localID, limit)
+    }
 
     func setIntent(_ intent: RunIntent) async throws {
         switch intent {

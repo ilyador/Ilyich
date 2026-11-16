@@ -14,6 +14,7 @@ final class FakeStaging: PhotoLibraryStaging {
         var isLive = false
         var sidecar = false
         var bytes = 64
+        var sourceChecksum: String? = nil
     }
 
     struct Staged: Sendable {
@@ -28,6 +29,9 @@ final class FakeStaging: PhotoLibraryStaging {
         var failures: [String: [@Sendable () -> any Error]] = [:]
         var gates: [String: TransferGate] = [:]
         var staged: [Staged] = []
+        var sourceReads = 0
+        var sourceFailures: [String: @Sendable () -> any Error] = [:]
+
         /// Discovery waits here after its first batch.
         var discoveryGate: TransferGate?
         var discoveryReachedGate = false
@@ -53,6 +57,7 @@ final class FakeStaging: PhotoLibraryStaging {
     func setAccess(_ status: PHAuthorizationStatus) { state.withLock { $0.access = status } }
     /// The next staging of the photo throws.
     func fail(_ id: String, _ error: @escaping @Sendable () -> any Error) { state.withLock { $0.failures[id, default: []].append(error) } }
+    func failSource(_ id: String, _ error: @escaping @Sendable () -> any Error) { state.withLock { $0.sourceFailures[id] = error } }
     /// Staging of the photo waits at the gate.
     func hold(_ id: String, at gate: TransferGate) { state.withLock { $0.gates[id] = gate } }
     func holdDiscovery(at gate: TransferGate) { state.withLock { $0.discoveryGate = gate } }
@@ -115,6 +120,28 @@ final class FakeStaging: PhotoLibraryStaging {
         fields["metadata"] = #"[{"key":"mobile-app","value":{"iCloudId":"cloud-\#(localID)"}}]"#
         return PreparedPhoto(localID: localID, modificationDate: photo.modified, original: original, motion: motion, sidecar: sidecar,
                              fields: fields, isVideo: photo.isVideo, stageID: stageID)
+    }
+
+    var sourceReads: Int { state.withLock { $0.sourceReads } }
+
+    func sourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint? {
+        try Task.checkCancellation()
+        return try state.withLock { state in
+            state.sourceReads += 1
+            if let failure = state.sourceFailures[localID] { throw failure() }
+            guard state.access == .authorized || state.access == .limited,
+                  let photo = state.photos[localID], AssetRevision(photo.modified) == revision,
+                  let checksum = photo.sourceChecksum else { return nil }
+            return .init(revision: revision, checksum: checksum)
+        }
+    }
+
+    func sourceOriginalIsCurrent(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> Bool {
+        try Task.checkCancellation()
+        return state.withLock { state in
+            guard state.access == .authorized || state.access == .limited, let photo = state.photos[localID] else { return false }
+            return AssetRevision(photo.modified) == fingerprint.revision && photo.sourceChecksum == fingerprint.checksum
+        }
     }
 
     func albumMembers(_ albumID: String, excluded: Set<String>, scope: PhotoSelectionScope = .selectedAlbums) async -> [String] {

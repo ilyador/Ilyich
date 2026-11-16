@@ -34,7 +34,7 @@ import SQLite3
 /// are declared without a type: a REAL column stores -0.0 as 0, and every date must come back
 /// bit for bit (BM2).
 actor TransferStore: ReceiptQuery {
-    static let schemaVersion = 1
+    static let schemaVersion = 2
 
     /// Who the records serve: `legacy` for a database the engine hasn't claimed (a new one, or a
     /// copy B1 made of an earlier build's state.json that no import handed over), or the transfer
@@ -178,11 +178,13 @@ actor TransferStore: ReceiptQuery {
                 """, [.text(completion.localID), .real(completion.revision.referenceSeconds), .date(completion.confirmedAt)])
             try db.run("INSERT OR REPLACE INTO confirmation_copies(local_id,asset_id) VALUES(?,?)", [.text(completion.localID), .text(completion.assetID)])
             if let receipt = completion.receipt {
-                var previous: String?
-                try db.run("SELECT original_id FROM receipts WHERE local_id=?", [.text(completion.localID)]) { previous = $0.text(0) }
-                if let previous, previous != receipt.original.id {
-                    try db.run("INSERT INTO stack_tasks(local_id,asset_id,previous_asset_id,state,attempts) VALUES(?,?,?,'pending',0)",
-                               [.text(completion.localID), .text(receipt.original.id), .text(previous)])
+                var previous: (id: String, checksum: String)?
+                try db.run("SELECT original_id,original_checksum FROM receipts WHERE local_id=?", [.text(completion.localID)]) { row in
+                    if let id = row.text(0), let checksum = row.text(1) { previous = (id, checksum) }
+                }
+                if let previous, previous.id != receipt.original.id {
+                    try Self.enqueueStack(db, localID: completion.localID, currentID: receipt.original.id, previousID: previous.id,
+                                          sourceChecksum: previous.checksum, currentChecksum: receipt.original.checksum)
                 }
                 try db.run("""
                     INSERT OR REPLACE INTO receipts(local_id,modification_date,original_id,original_checksum,original_bytes,motion_id,\
@@ -191,6 +193,9 @@ actor TransferStore: ReceiptQuery {
                           .text(receipt.original.checksum), .optionalInteger(receipt.original.byteCount), .optionalText(receipt.motion?.id),
                           .optionalText(receipt.motion?.checksum), .optionalInteger(receipt.motion?.byteCount),
                           .optionalDate(receipt.confirmedAt ?? completion.confirmedAt)])
+            }
+            if let receipt = completion.receipt {
+                try Self.enqueueSourceOriginalStack(db, receipt: receipt)
             }
             try db.run("UPDATE album_destinations SET remote_id=? WHERE local_id=? AND remote_id IS NULL",
                        [.text(completion.assetID), .text(completion.localID)])
@@ -321,7 +326,7 @@ actor TransferStore: ReceiptQuery {
         return opened
     }
 
-    /// Creates the tables of schema 1. A database a later build made is left as it is.
+    /// Applies additive migrations. A database a later build made is left as it is.
     private static func createSchema(_ db: TransferSQLite) throws {
         var version: Int64 = 0
         try db.run("PRAGMA user_version") { version = $0.integer(0) ?? 0 }
@@ -329,6 +334,14 @@ actor TransferStore: ReceiptQuery {
         try db.transaction {
             for statement in schema { try db.run(statement) }
             try db.run("INSERT OR IGNORE INTO meta(id,schema,engine) VALUES(1,?,?)", [.integer(Int64(schemaVersion)), .text(Engine.legacy.rawValue)])
+            // Version 1 shipped before confirmation_copies existed. Running additive CREATEs
+            // repairs that real shape as well as installing source-original association state.
+            var stackColumns = Set<String>()
+            try db.run("PRAGMA table_info(stack_tasks)") { if let name = $0.text(1) { stackColumns.insert(name) } }
+            for column in ["source_checksum", "current_checksum"] where !stackColumns.contains(column) {
+                try db.run("ALTER TABLE stack_tasks ADD COLUMN \(column) TEXT")
+            }
+            try db.run("UPDATE meta SET schema=? WHERE id=1 AND schema<?", [.integer(Int64(schemaVersion)), .integer(Int64(schemaVersion))])
             try db.run("PRAGMA user_version=\(schemaVersion)")
         }
     }
@@ -373,6 +386,11 @@ actor TransferStore: ReceiptQuery {
         CREATE TABLE IF NOT EXISTS stack_tasks(id INTEGER PRIMARY KEY,local_id TEXT NOT NULL,asset_id TEXT NOT NULL,\
         previous_asset_id TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,error TEXT)
         """,
+        """
+        CREATE TABLE IF NOT EXISTS source_originals(local_id TEXT NOT NULL,modification_date NOT NULL,checksum TEXT NOT NULL,\
+        remote_id TEXT,linked_asset_id TEXT,fingerprint_json TEXT,PRIMARY KEY(local_id,modification_date))
+        """,
+        "CREATE INDEX IF NOT EXISTS source_originals_remote ON source_originals(remote_id)",
         "CREATE TABLE IF NOT EXISTS linked_albums(device_album_id TEXT PRIMARY KEY,album_id TEXT NOT NULL)",
         """
         CREATE TABLE IF NOT EXISTS share_consumed(batch_id TEXT NOT NULL,attachment TEXT NOT NULL,remote_id TEXT,consumed_at NOT NULL,\

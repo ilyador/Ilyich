@@ -3,7 +3,7 @@ import Foundation
 import Photos
 
 /// One PhotoKit resource as the staging rules see it: its kind, its uniform type and its file name.
-struct StagingResource: Hashable, Sendable {
+struct StagingResource: Hashable, Sendable, Codable {
     let type: PHAssetResourceType
     /// The resource's uniform type identifier, such as public.heic.
     let contentType: String
@@ -11,6 +11,26 @@ struct StagingResource: Hashable, Sendable {
 
     init(type: PHAssetResourceType, contentType: String, filename: String) {
         self.type = type; self.contentType = contentType; self.filename = filename
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, contentType, filename }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let rawType = try values.decode(Int.self, forKey: .type)
+        guard let type = PHAssetResourceType(rawValue: rawType) else {
+            throw DecodingError.dataCorruptedError(forKey: .type, in: values, debugDescription: "Unknown Photos resource type")
+        }
+        self.type = type
+        contentType = try values.decode(String.self, forKey: .contentType)
+        filename = try values.decode(String.self, forKey: .filename)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(type.rawValue, forKey: .type)
+        try values.encode(contentType, forKey: .contentType)
+        try values.encode(filename, forKey: .filename)
     }
 }
 
@@ -44,6 +64,20 @@ enum StagingRules {
         if candidates.count == 1, let only = candidates.first { return .resource(only) }
         if !isVideo, candidates.count > 1 { return .byEditingInput(candidates) }
         return .unidentified
+    }
+
+    /// An edited asset's genuine unmodified source. Adjustment bases can be intermediate
+    /// renders, so they are never candidates. RAW+JPEG and duplicate originals remain unknown.
+    /// Live Photo paired videos do not affect the still's source identity.
+    static func sourceOriginal(_ resources: [StagingResource], isVideo: Bool) -> Int? {
+        let renderedType: PHAssetResourceType = isVideo ? .fullSizeVideo : .fullSizePhoto
+        guard resources.filter({ $0.type == renderedType }).count == 1 else { return nil }
+        let originals = resources.indices.filter {
+            resources[$0].type == .photo || resources[$0].type == .video || resources[$0].type == .alternatePhoto
+        }
+        guard originals.count == 1, let index = originals.first,
+              resources[index].type == (isVideo ? .video : .photo) else { return nil }
+        return index
     }
 
     /// The candidate whose type is the one Photos' editing input reports, if exactly one is.

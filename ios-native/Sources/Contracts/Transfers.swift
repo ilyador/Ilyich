@@ -237,6 +237,14 @@ protocol TransferControlling: Sendable {
     func failures(limit: Int) async throws -> [TransferQueueItem]
     /// Photos waiting for each server album, by album ID.
     func albumUploadCounts() async throws -> [String: AlbumUploadCount]
+    /// Checks only existing confirmed backups for original/edit relationships; never resumes uploads.
+    func matchArchivedOriginals(after localID: String?, limit: Int) async throws -> SourceOriginalReconciliationReport
+}
+
+extension TransferControlling {
+    func matchArchivedOriginals(after localID: String?, limit: Int) async throws -> SourceOriginalReconciliationReport {
+        throw BackupError.message("Original matching is unavailable for this account.")
+    }
 }
 
 // MARK: Receipts

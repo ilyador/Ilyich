@@ -263,7 +263,22 @@ actor PostUploadWorker {
             try await ensureAllowed()
             let outcome: FollowUpOutcome
             do {
-                try await server.createStack([task.assetID, task.previousAssetID])
+                if let sourceChecksum = task.sourceChecksum, let currentChecksum = task.currentChecksum {
+                    guard let ownerID = authorization.current()?.epoch.account.userID else { throw APIError.signedOut }
+                    for (id, checksum) in [(task.previousAssetID, sourceChecksum), (task.assetID, currentChecksum)] {
+                        let remote = try await server.remoteAsset(id: id)
+                        try await ensureAllowed()
+                        guard remote.id == id, remote.ownerId == ownerID, !remote.isTrashed, remote.isOffline != true,
+                              remote.visibility != "locked", remote.visibility != "hidden", remote.fileChecksum == checksum else {
+                            throw ServerFailure.http(400, "The original or edited copy changed. Their groups were left unchanged.")
+                        }
+                    }
+                }
+                var expected: [String: String] = [:]
+                if let source = task.sourceChecksum { expected[task.previousAssetID] = source }
+                if let current = task.currentChecksum { expected[task.assetID] = current }
+                try await server.createStack([task.assetID, task.previousAssetID], expectedChecksums: expected)
+                try await ensureAllowed()
                 outcome = .done
             } catch {
                 outcome = try decide(error, attempts: task.attempts, message: Self.stackMessage)

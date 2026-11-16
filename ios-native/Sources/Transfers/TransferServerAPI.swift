@@ -19,6 +19,7 @@ protocol TransferServerAPI: Sendable {
     func setLivePhotoVideo(assetID: String, motionID: String) async throws
     /// Stacks the assets, the first on top.
     func createStack(_ assetIDs: [String]) async throws
+    func createStack(_ assetIDs: [String], expectedChecksums: [String: String]) async throws
     func addToAlbum(_ albumID: String, assetIDs: [String]) async throws -> [BulkResult]
     /// The albums the user owns, strict.
     func ownedAlbums() async throws -> [Album]
@@ -27,6 +28,16 @@ protocol TransferServerAPI: Sendable {
 
 extension TransferServerAPI {
     func contentFingerprintStatus() async throws -> UploadCheckResponse.ContentFingerprintStatus? { nil }
+    func createStack(_ assetIDs: [String], expectedChecksums: [String: String]) async throws {
+        for (id, checksum) in expectedChecksums {
+            let remote = try await remoteAsset(id: id)
+            guard remote.id == id, !remote.isTrashed, remote.isOffline != true, remote.fileChecksum == checksum else {
+                throw ServerFailure.http(400, "A photo changed before its versions could be linked.")
+            }
+        }
+        try Task.checkCancellation()
+        try await createStack(assetIDs)
+    }
 }
 
 /// TransferServerAPI over the account's one client, AccountRuntime.api: its transport, its
@@ -66,8 +77,64 @@ struct APITransferServer: TransferServerAPI {
     }
 
     func createStack(_ assetIDs: [String]) async throws {
+        try await createStack(assetIDs, expectedChecksums: [:])
+    }
+
+    func createStack(_ assetIDs: [String], expectedChecksums: [String: String]) async throws {
         struct StackCreation: Encodable, Sendable { let assetIds: [String] }
-        let _: StackDetails = try await client.request(.post, path: "stacks", body: StackCreation(assetIds: assetIDs))
+        guard let ownerID = client.userID else { throw APIError.signedOut }
+        var assets: [BackupRemoteAsset] = []
+        for id in assetIDs {
+            try Task.checkCancellation()
+            let asset = try await remoteAsset(id: id)
+            guard asset.id == id else { throw APIError.invalidResponse("The server returned a different photo while linking versions.") }
+            assets.append(asset)
+        }
+        for asset in assets {
+            if let expected = expectedChecksums[asset.id], asset.fileChecksum != expected {
+                throw ServerFailure.http(400, "A photo changed before its versions could be linked.")
+            }
+        }
+        let existing: BackupStackSnapshot?
+        if let id = assets.compactMap({ $0.stack?.id }).first {
+            existing = try await client.request(.get, path: "stacks/\(id)")
+        } else { existing = nil }
+        guard let ids = try BackupStackPlan.assetIDs(for: assets, existing: existing, ownerID: ownerID) else { return }
+        // A slow stack read can outlive a user's grouping change. Revalidate every planned
+        // input, even history tasks without checksum proof, before using the earlier plan.
+        var refreshed: [BackupRemoteAsset] = []
+        for asset in assets {
+            let remote = try await remoteAsset(id: asset.id)
+            guard remote.id == asset.id, remote.ownerId == ownerID, !remote.isTrashed, remote.isOffline != true,
+                  remote.visibility != "locked", remote.visibility != "hidden",
+                  expectedChecksums[asset.id].map({ remote.fileChecksum == $0 }) ?? true else {
+                throw ServerFailure.http(400, "A photo changed before its versions could be linked.")
+            }
+            guard remote.stack?.id == asset.stack?.id else {
+                throw ServerFailure.http(400, "A photo's group changed before its versions could be linked. Try again.")
+            }
+            refreshed.append(remote)
+        }
+        let refreshedExisting: BackupStackSnapshot?
+        if let existing {
+            let current: BackupStackSnapshot = try await client.request(.get, path: "stacks/\(existing.id)")
+            guard current.id == existing.id, current.primaryAssetId == existing.primaryAssetId,
+                  Set(current.assets.map(\.id)) == Set(existing.assets.map(\.id)) else {
+                throw ServerFailure.http(400, "The photo group's cover or members changed. Their group was preserved.")
+            }
+            for asset in current.assets {
+                if let expected = expectedChecksums[asset.id], asset.fileChecksum != expected {
+                    throw ServerFailure.http(400, "A photo changed before its versions could be linked.")
+                }
+            }
+            refreshedExisting = current
+        } else { refreshedExisting = nil }
+        guard let refreshedIDs = try BackupStackPlan.assetIDs(for: refreshed, existing: refreshedExisting, ownerID: ownerID),
+              refreshedIDs.first == ids.first, Set(refreshedIDs) == Set(ids) else {
+            throw ServerFailure.http(400, "The photo group changed before its versions could be linked. Try again.")
+        }
+        try Task.checkCancellation()
+        let _: StackDetails = try await client.request(.post, path: "stacks", body: StackCreation(assetIds: ids))
     }
 
     func addToAlbum(_ albumID: String, assetIDs: [String]) async throws -> [BulkResult] {

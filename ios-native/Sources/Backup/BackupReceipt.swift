@@ -8,6 +8,7 @@ struct BackupRemoteAsset: Decodable, Sendable {
     let checksumAlgorithm: String?
     let contentChecksum: String?
     let isExternal: Bool?
+    let stack: AssetStack?
 
     /// Primary external checksums identify paths, never file bytes.
     var fileChecksum: String? {
@@ -24,13 +25,14 @@ struct BackupRemoteAsset: Decodable, Sendable {
 
     init(id: String, ownerId: String, checksum: String, isTrashed: Bool, livePhotoVideoId: String?, visibility: String? = nil,
          isOffline: Bool? = nil, knownByteCount: Int64? = nil, checksumAlgorithm: String? = "sha1",
-         contentChecksum: String? = nil, isExternal: Bool? = nil) {
+         contentChecksum: String? = nil, isExternal: Bool? = nil, stack: AssetStack? = nil) {
         self.id = id
         self.ownerId = ownerId
         self.checksum = checksum
         self.checksumAlgorithm = checksumAlgorithm
         self.contentChecksum = contentChecksum
         self.isExternal = isExternal
+        self.stack = stack
         self.isTrashed = isTrashed
         self.livePhotoVideoId = livePhotoVideoId
         self.visibility = visibility
@@ -43,7 +45,7 @@ struct BackupRemoteAsset: Decodable, Sendable {
         let fileSizeInByte: Int64?
     }
 
-    private enum CodingKeys: String, CodingKey { case id, ownerId, checksum, checksumAlgorithm, contentChecksum, isExternal, libraryId, isTrashed, livePhotoVideoId, visibility, isOffline, exifInfo }
+    private enum CodingKeys: String, CodingKey { case id, ownerId, checksum, checksumAlgorithm, contentChecksum, isExternal, libraryId, isTrashed, livePhotoVideoId, visibility, isOffline, exifInfo, stack }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -54,6 +56,7 @@ struct BackupRemoteAsset: Decodable, Sendable {
         if let explicit = try c.decodeIfPresent(Bool.self, forKey: .isExternal) { isExternal = explicit }
         else if c.contains(.libraryId) { isExternal = !(try c.decodeNil(forKey: .libraryId)) }
         else { isExternal = nil }
+        stack = try c.decodeIfPresent(AssetStack.self, forKey: .stack)
         isTrashed = try c.decode(Bool.self, forKey: .isTrashed)
         livePhotoVideoId = try c.decodeIfPresent(String.self, forKey: .livePhotoVideoId)
         visibility = try c.decodeIfPresent(String.self, forKey: .visibility)

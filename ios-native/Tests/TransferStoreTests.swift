@@ -21,12 +21,12 @@ import XCTest
         let folder = temporaryDirectory()
         let store = TransferStore(url: TransferStore.url(for: account, in: folder))
         let meta = try await store.meta()
-        XCTAssertEqual(meta, TransferMeta(schema: 1, engine: .legacy))
+        XCTAssertEqual(meta, TransferMeta(schema: TransferStore.schemaVersion, engine: .legacy))
         XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("\(account.digest).sqlite").path))
         XCTAssertEqual(try folder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true, "Kept out of iCloud backup.")
         let tables = try await store.dump().keys.sorted()
         XCTAssertEqual(tables, ["album_destinations", "attempts", "confirmation_copies", "confirmations", "engine_state", "jobs", "linked_albums", "meta",
-                                "notification_batches", "preferences", "receipts", "share_consumed", "stack_tasks", "stages"])
+                                "notification_batches", "preferences", "receipts", "share_consumed", "source_originals", "stack_tasks", "stages"])
         await store.close()
         do {
             _ = try await store.meta()

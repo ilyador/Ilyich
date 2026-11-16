@@ -85,11 +85,11 @@ extension TransferStore {
     private func stackTasks(where condition: String, limit: Int) throws -> [StackTaskRow] {
         var rows: [StackTaskRow] = []
         try database().run("""
-            SELECT id,local_id,asset_id,previous_asset_id,state,attempts,error FROM stack_tasks WHERE \(condition) ORDER BY id LIMIT ?
+            SELECT id,local_id,asset_id,previous_asset_id,state,attempts,error,source_checksum,current_checksum FROM stack_tasks WHERE \(condition) ORDER BY id LIMIT ?
             """, [.integer(Int64(min(max(limit, 1), Int(Int64.max))))]) { row in
             rows.append(StackTaskRow(id: row.integer(0) ?? 0, localID: row.text(1) ?? "", assetID: row.text(2) ?? "",
                                      previousAssetID: row.text(3) ?? "", state: row.text(4) ?? "", attempts: Int(row.integer(5) ?? 0),
-                                     error: row.text(6)))
+                                     error: row.text(6), sourceChecksum: row.text(7), currentChecksum: row.text(8)))
         }
         return rows
     }
@@ -242,6 +242,9 @@ struct StackTaskRow: Hashable, Sendable {
     let state: String
     let attempts: Int
     let error: String?
+    /// Freshly checked byte identities, independent of path-based server checksums.
+    var sourceChecksum: String? = nil
+    var currentChecksum: String? = nil
 }
 
 struct ConsumedShare: Hashable, Sendable {

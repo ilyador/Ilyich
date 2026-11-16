@@ -35,14 +35,28 @@ public final class PhotoResourceExport: @unchecked Sendable {
     /// Without a destination, the resource is only hashed.
     public init(destination: URL? = nil) { self.destination = destination }
 
-    /// The same streamed resource used by backup, with no temporary export or
-    /// iCloud network request. A cloud-only resource fails for the caller to skip.
-    public static func checksum(_ resource: PHAssetResource, isolation: isolated (any Actor)? = #isolation) async throws -> String {
-        let reader = PhotoResourceExport()
+    /// Hashes in bounded memory, trying local bytes first. Cloud access uses the same
+    /// cellular gate as file exports; by default a cloud-only resource fails without downloading.
+    public static func checksum(_ resource: PHAssetResource, allowCloud: Bool = false, allowCellular: Bool = false,
+                                isolation: isolated (any Actor)? = #isolation) async throws -> String {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = false
-        try await reader.write(resource, options: options)
-        return reader.lock.withLock { Data(reader.hash.finalize()).base64EncodedString() }
+        do {
+            let reader = PhotoResourceExport()
+            try await reader.write(resource, options: options)
+            return reader.lock.withLock { Data(reader.hash.finalize()).base64EncodedString() }
+        } catch {
+            let details = error as NSError
+            guard allowCloud, details.domain == PHPhotosErrorDomain,
+                  details.code == PHPhotosError.networkAccessRequired.rawValue else { throw error }
+            try Task.checkCancellation()
+            // A failed local request may have delivered partial bytes. A fresh reader hashes
+            // the cloud request from the beginning rather than retaining that partial digest.
+            let reader = PhotoResourceExport()
+            options.isNetworkAccessAllowed = true
+            try await reader.write(resource, options: options, allowCellular: allowCellular)
+            return reader.lock.withLock { Data(reader.hash.finalize()).base64EncodedString() }
+        }
     }
 
     /// Streams `resource`. The request starts on the caller's executor, the Photos adapter's own

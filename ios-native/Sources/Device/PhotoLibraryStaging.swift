@@ -25,6 +25,38 @@ struct StagingPolicy: Hashable, Sendable {
     var cellularVideos = false
 }
 
+/// The unmodified source of an edited asset, observed at this exact device revision.
+/// This identifies an archive original; it never confirms the current edited representation.
+struct SourceOriginalFingerprint: Hashable, Sendable, Codable {
+    let revision: AssetRevision
+    /// Base64-encoded SHA-1, in the same format as upload checksums.
+    let checksum: String
+    /// Allows PhotoKit to revalidate resource identity without streaming the original again.
+    let resourceSnapshot: [StagingResource]?
+
+    init(revision: AssetRevision, checksum: String, resourceSnapshot: [StagingResource]? = nil) {
+        self.revision = revision; self.checksum = checksum; self.resourceSnapshot = resourceSnapshot
+    }
+
+    private enum CodingKeys: String, CodingKey { case revisionBits, checksum, resourceSnapshot }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        // Preserve the exact revision fence, including Date's floating-point representation.
+        let bits = try values.decode(UInt64.self, forKey: .revisionBits)
+        revision = AssetRevision(referenceSeconds: Double(bitPattern: bits))
+        checksum = try values.decode(String.self, forKey: .checksum)
+        resourceSnapshot = try values.decodeIfPresent([StagingResource].self, forKey: .resourceSnapshot)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(revision.referenceSeconds.bitPattern, forKey: .revisionBits)
+        try values.encode(checksum, forKey: .checksum)
+        try values.encodeIfPresent(resourceSnapshot, forKey: .resourceSnapshot)
+    }
+}
+
 /// What backup asks of the Photos library (architecture section 2). PhotoKitAdapter implements it,
 /// on its own queue.
 protocol PhotoLibraryStaging: Sendable {
@@ -40,6 +72,20 @@ protocol PhotoLibraryStaging: Sendable {
     func albumMembers(_ albumID: String, excluded: Set<String>, scope: PhotoSelectionScope) async -> [String]
     /// Those of `localIDs` that Photos still has. With limited access, only those selected.
     func existing(_ localIDs: [String]) async throws -> Set<String>
+    /// Hashes a uniquely identified unmodified source, without staging it for upload.
+    /// Nil means no safe source identity is available for this revision.
+    func sourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint?
+    /// Revalidates source evidence after other asynchronous work, without downloading it again
+    /// when the adapter can establish that its source snapshot is still current.
+    func sourceOriginalIsCurrent(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> Bool
+}
+
+extension PhotoLibraryStaging {
+    /// Older adapters and test doubles provide no source-original evidence.
+    func sourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint? { nil }
+    func sourceOriginalIsCurrent(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> Bool {
+        try await sourceOriginal(localID, revision: fingerprint.revision, policy: policy) == fingerprint
+    }
 }
 
 /// The synchronous reads discovery makes, which tests fake. Safe on any thread; the adapter runs
@@ -176,6 +222,49 @@ extension PhotoKitAdapter: PhotoLibraryStaging {
     }
 
     // MARK: - Staging
+
+    /// Only an explicit original alongside a rendered edit can identify an archived source.
+    /// The stream is hashed in bounded memory and no original file enters the upload directory.
+    func sourceOriginal(_ localID: String, revision: AssetRevision, policy: StagingPolicy) async throws -> SourceOriginalFingerprint? {
+        try Task.checkCancellation()
+        let access = refreshAccess()
+        let generation = albumGeneration.withLock { $0 }
+        guard Self.canRead(access.status), let asset = Self.asset(localID),
+              asset.modificationDate.map(AssetRevision.init) == revision else { return nil }
+        let resources = PHAssetResource.assetResources(for: asset)
+        let snapshot = resources.map(Self.describe)
+        let isVideo = asset.mediaType == .video
+        guard let index = StagingRules.sourceOriginal(snapshot, isVideo: isVideo) else { return nil }
+        let checksum: String
+        do {
+            checksum = try await PhotoResourceExport.checksum(resources[index], allowCloud: policy.allowCloud,
+                                                              allowCellular: isVideo ? policy.cellularVideos : policy.cellularPhotos)
+        } catch PhotoResourceExport.Deferral.waitingForWiFi { throw BackupDeferral.waitingForWiFi }
+        try Task.checkCancellation()
+        // Refetch instead of trusting PHAsset's immutable snapshot. Access changes, edits,
+        // deletion, limited-library changes or a changed resource set invalidate this evidence.
+        guard refreshAccess() == access, Self.canRead(authorization),
+              let current = Self.asset(localID), current.mediaType == asset.mediaType,
+              current.modificationDate.map(AssetRevision.init) == revision,
+              PHAssetResource.assetResources(for: current).map(Self.describe) == snapshot,
+              albumGeneration.withLock({ $0 }) == generation else { return nil }
+        return SourceOriginalFingerprint(revision: revision, checksum: checksum, resourceSnapshot: snapshot)
+    }
+
+    /// PHAsset revisions fence content changes, and the resource signature also fences a
+    /// changed source selection. The caller separately fences its account and access epoch.
+    func sourceOriginalIsCurrent(_ localID: String, fingerprint: SourceOriginalFingerprint, policy: StagingPolicy) async throws -> Bool {
+        try Task.checkCancellation()
+        let access = refreshAccess()
+        let generation = albumGeneration.withLock { $0 }
+        guard Self.canRead(access.status), let expected = fingerprint.resourceSnapshot,
+              let asset = Self.asset(localID),
+              asset.modificationDate.map(AssetRevision.init) == fingerprint.revision else { return false }
+        let current = PHAssetResource.assetResources(for: asset).map(Self.describe)
+        guard current == expected, StagingRules.sourceOriginal(current, isVideo: asset.mediaType == .video) != nil else { return false }
+        try Task.checkCancellation()
+        return refreshAccess() == access && Self.canRead(authorization) && albumGeneration.withLock({ $0 }) == generation
+    }
 
     func stage(_ localID: String, into directory: URL, stageID: String = UUID().uuidString, policy: StagingPolicy,
                progress: @escaping @Sendable (Double) -> Void) async throws -> PreparedPhoto {

@@ -141,6 +141,11 @@ private struct BackupStatusSection: View {
         if let progress = backup.statistics.currentTransfer, progress.expectedBytes != nil || progress.sentBytes > 0 { BackupTransferDetail(progress: progress) }
         if backup.remaining > 0 { NavigationLink("View pending items") { BackupQueueView() } }
         if backup.confirmed > 0 { NavigationLink("View verified backups") { BackupQueueView(showCompleted: true) } }
+        if backup.confirmed > 0 {
+            NavigationLink("Link archived originals") { ArchiveOriginalMatchingView() }
+                .accessibilityIdentifier("backup.originalMatching")
+                .requiresWriteAccess()
+        }
         if let issue = backup.snapshot.backgroundIssue {
             Label(issue.title, systemImage: "exclamationmark.triangle")
                 .font(.subheadline)

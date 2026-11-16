@@ -299,6 +299,8 @@ final class PostUploadTests: XCTestCase {
         try await store.savePreferences(LibraryJobHarness.preferences())
         let server = FakeFollowUpServer()
         server.failStacks { ServerFailure.http(400, "Not an asset of yours") }
+        server.uploads.remote(BackupRemoteAsset(id: "old-p1", ownerId: "owner", checksum: "old", isTrashed: false, livePhotoVideoId: nil))
+        server.uploads.remote(BackupRemoteAsset(id: "asset-p1", ownerId: "owner", checksum: "sum-p1", isTrashed: false, livePhotoVideoId: nil))
         let authorization = FakeTransferAuthorization()
         let worker = PostUploadWorker(store: store, server: server, photos: FakeStaging(), authorization: authorization)
         let clock = TestClock()
