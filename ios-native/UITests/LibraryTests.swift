@@ -1741,6 +1741,34 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(app.textFields["library.search"].waitForExistence(timeout: 5))
         XCTAssertTrue(waitFor { window.frame.width < window.frame.height }, "Closing the viewer turns the app back upright.")
     }
+    /// Turning the phone back and forth, however often, leaves the viewer on its photo, centered
+    /// on the screen at once, and still answering a swipe.
+    @MainActor func testTurningBackAndForthKeepsThePhotoCenteredAndTheViewerResponsive() {
+        let app = launch()
+        let grid = app.collectionViews["library.grid"]
+        XCTAssertTrue(grid.cells.element(boundBy: 9).waitForExistence(timeout: 15))
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+        let window = app.windows.firstMatch
+        tapPhoto(grid.cells.element(boundBy: 9))
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 10))
+        guard let shown = onScreenPhoto(app) else { return XCTFail("A photo shows.") }
+        let strip = app.otherElements["viewer.strip"]
+        let position = strip.value as? String
+        let photo = app.descendants(matching: .any)[shown]
+        for turn in 1...10 {
+            let landscape = turn % 2 == 1
+            let started = Date()
+            XCUIDevice.shared.orientation = landscape ? .landscapeLeft : .portrait
+            XCTAssertTrue(waitFor { (window.frame.width > window.frame.height) == landscape }, "Turn \(turn): the viewer turns.")
+            let centered = waitFor(within: 3) { photo.isHittable && abs(photo.frame.midX - window.frame.midX) < 2 }
+            print("ROTATION turn \(turn) landscape=\(landscape) centered=\(centered) after \(Date().timeIntervalSince(started))s photo=\(photo.frame) window=\(window.frame) strip=\(strip.value ?? "nil")")
+            XCTAssertTrue(centered, "Turn \(turn): the photo sits in the middle of the screen.")
+            XCTAssertEqual(strip.value as? String, position, "Turn \(turn): the photo on screen stays the same.")
+        }
+        capture(app, "Viewer — after turning back and forth")
+        app.swipeLeft()
+        XCTAssertNotNil(onScreenPhoto(app, where: { $0 != shown }), "Swiping still pages after the turns.")
+    }
     /// The photo filling the viewer, by its asset: file names repeat across the fixture's months.
     /// It is found by its identifier whatever it shows, the grid's thumbnail enlarged until its
     /// preview loads or the zoomable photo after, and once it takes touches: nothing in the viewer

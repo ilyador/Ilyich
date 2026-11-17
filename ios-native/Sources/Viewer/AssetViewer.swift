@@ -127,11 +127,17 @@ struct AssetViewer: View {
                 pagerPhase = phase
                 model.setPagerMoving(phase != .idle)
             }
+            .onScrollGeometryChange(for: PagerGeometry.self) { geometry in
+                PagerGeometry(offset: geometry.contentOffset.x, page: geometry.containerSize.width, content: geometry.contentSize.width)
+            } action: { _, geometry in
+                restOnSelectedPage(geometry)
+            }
             // Turning the phone resizes every page while the offset stays, which would land on a
             // photo far away; the strip comes back to the selected photo instead.
             .onChange(of: proxy.size, initial: true) { _, size in
                 viewport = size
-                model.pagePosition.scrollTo(id: model.selectedID, anchor: .leading)
+                guard size.width > 0 else { return }
+                model.pagePosition.scrollTo(x: CGFloat(model.index) * (size.width + Self.pageGap))
             }
         }
         .ignoresSafeArea()
@@ -163,6 +169,25 @@ struct AssetViewer: View {
                         onDismiss: { if transition == nil { close() } }, matchedLocalPhoto: model.localCopy(of: asset),
                         onSwipeUp: { model.sheet = .info }, settled: !model.stripScrubbing)
         }
+    }
+
+    /// Where the strip rests, in points: its offset, one page (a photo and its gap) and all pages.
+    private struct PagerGeometry: Equatable {
+        let offset: CGFloat
+        let page: CGFloat
+        let content: CGFloat
+    }
+
+    /// At rest the strip shows the selected photo, whole. A scroll to a photo by its identity is
+    /// worked out from where the pages lie, and just after the phone turns they may still lie at
+    /// their old size: the scroll then finds the strip already there and stays, between two photos
+    /// far from the selected one. So each time the strip comes to rest anywhere else, it goes back
+    /// to the selected photo by its place among the photos.
+    private func restOnSelectedPage(_ geometry: PagerGeometry) {
+        guard pagerPhase == .idle, geometry.page > Self.pageGap, model.entries.indices.contains(model.index) else { return }
+        let target = CGFloat(model.index) * geometry.page
+        guard abs(geometry.offset - target) > 0.5 else { return }
+        model.pagePosition.scrollTo(x: target)
     }
 
     private func showPage(_ index: Int) {
