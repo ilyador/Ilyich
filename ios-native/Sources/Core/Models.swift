@@ -133,6 +133,8 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
     var stack: AssetStack?
     var type: AssetKind
     var originalFileName: String
+    /// The original's path on the server, present in detailed records when metadata is shared.
+    var originalPath: String?
     var fileCreatedAt: Date?
     var localDateTime: Date?
     var createdAt: Date?
@@ -177,7 +179,7 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, ownerId, owner, tags, stack, type, originalFileName, fileCreatedAt, localDateTime, createdAt, width, height, duration
+        case id, ownerId, owner, tags, stack, type, originalFileName, originalPath, fileCreatedAt, localDateTime, createdAt, width, height, duration
         case isFavorite, isTrashed, isEdited, isDeveloped, hasKnownEditState, visibility, mediaRevision, thumbhash, livePhotoVideoId, exifInfo, people, timelineRatio
     }
 
@@ -190,6 +192,7 @@ struct Asset: Codable, Hashable, Identifiable, Sendable {
         stack = try c.decodeIfPresent(AssetStack.self, forKey: .stack)
         type = try c.decode(AssetKind.self, forKey: .type)
         originalFileName = try c.decodeIfPresent(String.self, forKey: .originalFileName) ?? ""
+        originalPath = try c.decodeIfPresent(String.self, forKey: .originalPath)
         fileCreatedAt = try c.decodeIfPresent(Date.self, forKey: .fileCreatedAt)
         localDateTime = try c.decodeIfPresent(Date.self, forKey: .localDateTime)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt)

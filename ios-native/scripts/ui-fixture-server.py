@@ -53,8 +53,10 @@ def is_video(index, date):
 
 def asset(index, date='2026-12-01'):
     video = is_video(index, date)
+    filename = f'Test clip {index}.mp4' if video else f'Test landscape {index}.jpg'
     return {'id': str(uuid.uuid5(uuid.NAMESPACE_URL, date + str(index))), 'ownerId': OWNER,
-            'type': 'VIDEO' if video else 'IMAGE', 'originalFileName': f'Test clip {index}.mp4' if video else f'Test landscape {index}.jpg',
+            'type': 'VIDEO' if video else 'IMAGE', 'originalFileName': filename,
+            'originalPath': f'/archive/Photos/{date[:4]}/Viagem a Lisboa e Costa Atlântica/{filename}',
             'fileCreatedAt': date+'T12:00:00Z', 'localDateTime': date+'T12:00:00Z',
             'width': 600, 'height': 400, 'isFavorite': False, 'isTrashed': False,
             'isEdited': False, 'isDeveloped': index % 7 == 0, 'visibility': 'timeline',

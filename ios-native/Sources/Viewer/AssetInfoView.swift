@@ -101,6 +101,10 @@ struct AssetInfoView: View {
             }
             Section {
                 Text(asset.originalFileName).font(.headline).textSelection(.enabled)
+                if let ownerID = asset.ownerId, ownerID == api.userID,
+                   let path = asset.originalPath, !path.isEmpty {
+                    ServerFilePathRow(path: path)
+                }
                 if let name = asset.owner?.name { LabeledContent("Owner", value: name) }
                 if let width = asset.width, let height = asset.height {
                     Text("\((Double(width) * Double(height) / 1_000_000).formatted(.number.precision(.fractionLength(1)))) MP · \(width) × \(height)")
@@ -218,6 +222,36 @@ struct AssetInfoView: View {
         switch await assetResult { case .success(let asset): update(asset); case .failure(let failure): error = failure.localizedDescription }
         switch await albumsResult { case .success(let albums): self.albums = albums; case .failure(let failure): error = failure.localizedDescription }
         switch await textResult { case .success(let text): self.text = text; case .failure(let failure): error = failure.localizedDescription }
+    }
+}
+
+private struct ServerFilePathRow: View {
+    let path: String
+    @State private var copiedPath: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Server file path").font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                Button {
+                    UIPasteboard.general.string = path
+                    copiedPath = path
+                } label: {
+                    Image(systemName: copiedPath == path ? "checkmark" : "doc.on.doc")
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel(copiedPath == path ? "Path copied" : "Copy path")
+            }
+            Text(verbatim: path)
+                .font(.footnote.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("viewer.originalPath")
+        }
     }
 }
 

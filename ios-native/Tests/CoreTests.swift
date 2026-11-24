@@ -129,6 +129,17 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(asset.cacheRevision, "xmp-7")
     }
 
+    func testAssetPreservesTheServerFilePathAndAcceptsRecordsWithoutIt() throws {
+        let detail = Data(#"{"id":"photo","type":"IMAGE","originalFileName":"DSC 0632.NEF","originalPath":"/archive/Photos/Viagem a Lisboa/DSC 0632.NEF"}"#.utf8)
+        let asset = try APIJSON.decoder().decode(Asset.self, from: detail)
+        XCTAssertEqual(asset.originalPath, "/archive/Photos/Viagem a Lisboa/DSC 0632.NEF")
+        let encoded = try APIJSON.encoder().encode(asset)
+        XCTAssertEqual(try APIJSON.decoder().decode(Asset.self, from: encoded).originalPath, asset.originalPath)
+
+        let summary = Data(#"{"id":"photo","type":"IMAGE"}"#.utf8)
+        XCTAssertNil(try APIJSON.decoder().decode(Asset.self, from: summary).originalPath)
+    }
+
     func testEditorUsesPublishedDevelopedDimensionsAndClampsRoundedEdges() throws {
         let edits = try APIJSON.decoder().decode(AssetEdits.self, from: Data(#"{"assetId":"photo","edits":[],"baseDimensions":{"width":4103,"height":2701}}"#.utf8))
         let base = try XCTUnwrap(edits.baseDimensions)

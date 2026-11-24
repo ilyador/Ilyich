@@ -1189,6 +1189,25 @@ final class LibraryTests: XCTestCase {
         return false
     }
 
+    @MainActor func testPhotoInfoShowsCopyableServerFilePath() {
+        let app = launch(appearance: "dark")
+        let photo = app.collectionViews["library.grid"].cells["library.photo.1be12c5b-6570-5e6b-9a86-1fd1a668dbac"]
+        requireHittable(photo, in: app)
+        tapPhoto(photo)
+        let info = app.buttons["Info"]
+        requireHittable(info, in: app); info.tap()
+
+        let path = app.staticTexts["viewer.originalPath"]
+        for _ in 0..<8 where !path.isHittable { app.swipeUp() }
+        requireHittable(path, in: app)
+        XCTAssertEqual(path.label, "/archive/Photos/2026/Viagem a Lisboa e Costa Atlântica/Test landscape 1.jpg")
+        let copy = app.buttons["Copy path"]
+        requireHittable(copy, in: app)
+        capture(app, "Photo Info — server file path")
+        copy.tap()
+        XCTAssertTrue(app.buttons["Path copied"].waitForExistence(timeout: 3))
+    }
+
     @MainActor func testPhotoInfoLocationOpensFocusedInteractiveEarth() {
         let app = launch()
         tapPhoto(app.collectionViews["library.grid"].cells.element(boundBy: 0))
