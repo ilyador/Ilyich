@@ -26,8 +26,8 @@ struct PlaceNarrowing: Equatable, Sendable {
 /// people and albums in the stacked feed's photos, each with how many it holds, and the photos the
 /// Earth keeps of its places, all counted by the offline index off the main actor. With no filter,
 /// or without a readable index, nothing narrows. Only the newest stack's counts are kept; a sync's
-/// change marks them stale, and they are counted again the next time the shelves open or the Earth
-/// rises, so a backup's stream of changes counts nothing until the counts are wanted.
+/// change refreshes them while the shelves are open. With the shelves closed it marks the counts
+/// stale for the next open.
 @MainActor @Observable final class ShelfNarrowing {
     /// The counts for `key`'s stack.
     private(set) var facets: (key: String, value: ShelfFacets)?
@@ -38,6 +38,7 @@ struct PlaceNarrowing: Equatable, Sendable {
     @ObservationIgnored private var counting: Task<Void, Never>?
     @ObservationIgnored private var placing: Task<Void, Never>?
     @ObservationIgnored private var stale = false
+    @ObservationIgnored private var shelvesVisible = false
     @ObservationIgnored private var earthWanted = false
     /// The Earth's count, which a count that found other photos moves.
     @ObservationIgnored private var placeRevision = 0
@@ -51,10 +52,12 @@ struct PlaceNarrowing: Equatable, Sendable {
         return facets.value
     }
 
-    /// Follows the account's bus: a sync's change makes the counts stale.
+    /// Follows the account's bus so counts reflect the current index when the shelves are visible.
     func follow(_ bus: LibraryBus?) {
         follower.follow(bus) { [weak self] event in
-            if case .changed = event { self?.stale = true }
+            guard case .changed = event, let self else { return }
+            self.stale = true
+            if self.shelvesVisible { self.refreshStaleCounts() }
         }
     }
 
@@ -67,8 +70,12 @@ struct PlaceNarrowing: Equatable, Sendable {
         if earthWanted { place() }
     }
 
-    /// The shelves open: counts made stale by a sync since are read again.
-    func shelvesOpened() {
+    func shelvesShown(_ shown: Bool) {
+        shelvesVisible = shown
+        if shown { refreshStaleCounts() }
+    }
+
+    private func refreshStaleCounts() {
         guard stale else { return }
         stale = false
         count()

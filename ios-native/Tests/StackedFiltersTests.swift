@@ -264,9 +264,8 @@ import XCTest
         XCTAssertNil(narrowing.facets(for: favorites))
     }
 
-    /// A sync's change makes the counts stale; they are read again the next time the shelves open,
-    /// never on each change.
-    func testASyncChangeIsCountedAgainOnlyWhenTheShelvesOpen() async throws {
+    /// A sync while the shelves are closed defers counting until they open.
+    func testAClosedShelfRecountsOnItsNextOpen() async throws {
         let source = FacetSource()
         let narrowing = ShelfNarrowing(source: source)
         let bus = LibraryBus()
@@ -276,10 +275,11 @@ import XCTest
         narrowing.show(stack)
         try await until("The stack was not counted.") { narrowing.facets(for: stack) != nil }
         let counted = await source.facetCalls
-        narrowing.shelvesOpened()
+        narrowing.shelvesShown(true)
         try await Task.sleep(for: .milliseconds(50))
         let unchanged = await source.facetCalls
         XCTAssertEqual(unchanged, counted, "Nothing changed: the counts stand.")
+        narrowing.shelvesShown(false)
         let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "me")
         let change = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1), indexRevision: 1, origin: .sync)
         bus.post(.changed(change, accessChanged: false))
@@ -287,8 +287,31 @@ import XCTest
         try await Task.sleep(for: .milliseconds(100))
         let afterChanges = await source.facetCalls
         XCTAssertEqual(afterChanges, counted, "A change alone counts nothing.")
-        narrowing.shelvesOpened()
+        narrowing.shelvesShown(true)
         try await until("Opening the shelves did not count again.") { await source.facetCalls == counted + 1 }
+    }
+
+    func testAnOpenPeopleShelfRefreshesWithAPlaceSelected() async throws {
+        let source = FacetSource()
+        await source.setPlacePeople([:])
+        let narrowing = ShelfNarrowing(source: source)
+        let bus = LibraryBus()
+        defer { bus.close() }
+        narrowing.follow(bus)
+        let stack = FilterStack([.place(lisbon, title: "Lisbon")])
+        narrowing.show(stack)
+        try await until("The initial count did not finish.") { narrowing.facets(for: stack)?.people == [:] }
+        narrowing.shelvesShown(true)
+
+        await source.setPlacePeople(["maya": 2])
+        let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "me")
+        let change = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1),
+                                   indexRevision: 1, origin: .sync, people: ["maya"])
+        bus.post(.changed(change, accessChanged: false))
+
+        try await until("People stayed empty after the face memberships synced.") {
+            narrowing.facets(for: stack)?.people == ["maya": 2]
+        }
     }
 
     /// The Earth narrows to the stack without its place, so another place stays to choose.
@@ -326,10 +349,11 @@ import XCTest
         let account = AccountID(server: URL(string: "https://photos.example/api")!, userID: "me")
         let change = LibraryChange(account: account, authorization: AuthorizationEpoch(account: account, value: 1), indexRevision: 1, origin: .sync)
         func countAgainAfterASync() async throws {
+            narrowing.shelvesShown(false)
             let asked = await source.feedQueries.count
             bus.post(.changed(change, accessChanged: false))
             try await until("Opening the shelves did not count the Earth again.") {
-                narrowing.shelvesOpened()
+                narrowing.shelvesShown(true)
                 return await source.feedQueries.count == asked + 1
             }
         }
@@ -443,6 +467,7 @@ private actor FacetSource: ShelfFacetSource {
     /// Holds the counts of a stack with a person until it opens, cancelled or not.
     private var gate: StubServer.Gate?
     private var mayaIDs: Set<String> = ["lm1", "lm2", "m3"]
+    private var placePeople = ["maya": 2]
     var facetCalls = 0
     /// Counts held at the gate that have come back.
     var heldReturned = 0
@@ -450,6 +475,7 @@ private actor FacetSource: ShelfFacetSource {
     func hold(_ gate: StubServer.Gate?) { self.gate = gate }
     func setReadable(_ readable: Bool) { self.readable = readable }
     func setMayaIDs(_ ids: Set<String>) { mayaIDs = ids }
+    func setPlacePeople(_ people: [String: Int]) { placePeople = people }
     func isReadable() async throws -> Bool { readable }
     func facets(_ query: LibraryQuery) async throws -> ShelfFacets {
         facetCalls += 1
@@ -457,7 +483,7 @@ private actor FacetSource: ShelfFacetSource {
             await gate.wait()
             heldReturned += 1
         }
-        return ShelfFacets(people: ["maya": query.predicates.people.isEmpty ? 2 : 3], albums: [:])
+        return ShelfFacets(people: query.predicates.people.isEmpty ? placePeople : ["maya": 3])
     }
     func feedIDs(_ query: LibraryQuery) async throws -> Set<String> {
         feedQueries.append(query)

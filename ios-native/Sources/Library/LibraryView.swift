@@ -50,8 +50,8 @@ struct LibraryView: View {
     @State private var handedOffPill: String?
     /// What narrows the shelves and the Earth under the filters stacked (N6).
     @State private var narrowing: ShelfNarrowing
-    /// The narrowing the shelves show, and whether they offer Clear: taken as they open and as each
-    /// group opens, never while a level is under the finger, so no row moves beneath it.
+    /// The stack and counts the shelves opened with. New counts can reach a resting shelf.
+    @State private var shelfStack = FilterStack()
     @State private var shelfFacets: ShelfFacets?
     @State private var shelfClearable = false
     /// A newer open or close makes a pending close stale.
@@ -206,6 +206,10 @@ struct LibraryView: View {
                                 handleShelfEvent(.back, items: shelfItems,
                                                  at: edgeInteraction.shelfFinger ?? CGPoint(x: 0, y: librarySize.height * 0.45))
                             }
+                            .onChange(of: canRefreshShelfFacets ? narrowing.facets(for: shelfStack) : shelfFacets,
+                                      initial: true) { _, facets in
+                                refreshShelfFacets(facets)
+                            }
                     } else {
                         Image(systemName: "line.3.horizontal").font(.system(size: 12, weight: .medium))
                             .frame(width: 28, height: 42).glassEffect(.clear.tint(.black.opacity(0.18)))
@@ -276,7 +280,10 @@ struct LibraryView: View {
         .task {
             model.refreshSharedFiles()
             guard !store.started else { return }; store.started = true
-            await store.reload(); await collections.load()
+            let feed = store
+            async let feedLoad: Void = feed.reload()
+            await collections.load()
+            await feedLoad
         }
         .onAppear {
             connectNavigator()
@@ -308,6 +315,7 @@ struct LibraryView: View {
         .onChange(of: showPlaces) { _, shown in Haptics.earth(rising: shown) }
         // The shelves and the Earth narrow to the filters stacked (N6).
         .onChange(of: store.stack, initial: true) { _, stack in narrowing.show(stack) }
+        .onChange(of: shelves, initial: true) { _, shown in narrowing.shelvesShown(shown) }
         .onChange(of: showPlaces, initial: true) { _, shown in narrowing.earthShown(shown) }
         .onAppear { PerfScenarioDriver.shared?.attach(store: store, session: session, viewport: viewport, rail: rail) }
         // Everything presented has closed, so shared files that arrived meanwhile can show.
@@ -780,7 +788,6 @@ struct LibraryView: View {
         landingPill = nil
         edgeInteraction.morphingID = nil; edgeInteraction.morphSize = nil; edgeInteraction.morphX = nil
         edgeInteraction.endStroke()
-        narrowing.shelvesOpened()
         takeShelfNarrowing()
         shelf = value
         placeShelf(at: point, anchorID: anchorID)
@@ -794,11 +801,25 @@ struct LibraryView: View {
         Haptics.menuOpened()
     }
 
-    /// The shelves narrow to the filters stacked as they open and as each group opens, from the
-    /// counts in by then; a level under the finger never changes its rows.
     private func takeShelfNarrowing() {
-        shelfFacets = narrowing.facets(for: store.stack)
+        shelfStack = store.stack
+        shelfFacets = narrowing.facets(for: shelfStack)
         shelfClearable = store.isFiltered
+    }
+
+    private var canRefreshShelfFacets: Bool {
+        shelves && shelfStack == store.stack && edgeInteraction.shelfReveal == 1
+            && !edgeInteraction.isShelfDragging && !edgeInteraction.isRearranging
+    }
+
+    /// A count that arrived after the shelf opened can change its rows once the shelf is at rest.
+    private func refreshShelfFacets(_ facets: ShelfFacets?) {
+        guard canRefreshShelfFacets, shelfFacets != facets else { return }
+        let previousRows = shelfItems.map(\.id)
+        shelfFacets = facets
+        if previousRows != shelfItems.map(\.id) {
+            placeShelf(at: edgeInteraction.shelfFinger ?? CGPoint(x: 0, y: librarySize.height * 0.45))
+        }
     }
 
     /// Puts the current choice, the shelf just left, or the first row under the finger.
